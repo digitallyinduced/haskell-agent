@@ -444,6 +444,7 @@ memoryConfig = McpServerConfig
     , mcpServerSamplingEnabled = False
     , mcpServerLogLevel = Nothing
     , mcpServerExcludedTools = []
+    , mcpServerConnection = Nothing
     }
 
 echoTool :: AppTool

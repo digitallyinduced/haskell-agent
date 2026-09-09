@@ -11,6 +11,7 @@ import qualified Agent.CLI.MacOS.RepositoryWorkersSpec as RepositoryWorkersSpec
 import qualified Agent.CLI.MacOS.RepositoryInputSpec as RepositoryInputSpec
 import qualified Agent.CLI.MacOS.TaskSchedulerSpec as TaskSchedulerSpec
 import qualified Agent.CLI.McpAdminSpec as McpAdminSpec
+import qualified Agent.CLI.McpConnectionSpec as McpConnectionSpec
 import qualified Agent.CLI.ResourceAdminSpec as ResourceAdminSpec
 #ifdef darwin_HOST_OS
 import qualified Agent.CLI.MacOS.AccountConnectionSpec as AccountConnectionSpec
@@ -20,6 +21,9 @@ import qualified Agent.CLI.MacOS.BridgeSpec as BridgeSpec
 import qualified Agent.CLI.MacOS.BrowserBridgeFFISpec as BrowserBridgeFFISpec
 import qualified Agent.CLI.MacOS.ComputerBridgeSpec as ComputerBridgeSpec
 import qualified Agent.CLI.MacOS.SessionObservationBridgeSpec as SessionObservationBridgeSpec
+import qualified Agent.CLI.MacOS.McpConnectionBridgeSpec as McpConnectionBridgeSpec
+import qualified Agent.CLI.MacOS.McpConnectionOperationSpec as McpConnectionOperationSpec
+import qualified Agent.CLI.MacOS.McpKeychainSpec as McpKeychainSpec
 #endif
 
 main :: IO ()
@@ -27,6 +31,7 @@ main = hspec do
     BrowserToolsSpec.spec
     EngineMailboxSpec.spec
     McpAdminSpec.spec
+    McpConnectionSpec.spec
     NativeLoopEventSpec.spec
     ResourceAdminSpec.spec
     TaskSchedulerSpec.spec
@@ -40,4 +45,7 @@ main = hspec do
     BridgeSpec.spec
     ComputerBridgeSpec.spec
     SessionObservationBridgeSpec.spec
+    McpConnectionBridgeSpec.spec
+    McpConnectionOperationSpec.spec
+    McpKeychainSpec.spec
 #endif

@@ -43,6 +43,7 @@ import Agent.CLI.MacOS.EngineSubmission ()
 import Agent.CLI.MacOS.GatewayBridge (invokeGatewayCallbackOnce)
 import Agent.CLI.MacOS.InteractionState
 import Agent.CLI.MacOS.LearnedSkillsBridge ()
+import Agent.CLI.MacOS.McpConnectionBridge ()
 import Agent.CLI.MacOS.EngineSubmission
     (integrationABISynchronousValidationSmoke)
 import Agent.CLI.MacOS.NativeGatewayBoundary

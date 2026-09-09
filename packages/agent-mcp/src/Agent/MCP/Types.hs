@@ -198,8 +198,17 @@ encodeMcpSamplingResult result =
                 (\reason -> ["stopReason" .= reason])
                 result.samplingResultStopReason
 
+-- | Host-owned identity captured when constructing a client. The generation
+-- changes on lifecycle/authorization replacement, independently of its label.
+data McpConnectionIdentity = McpConnectionIdentity
+    { mcpConnectionIdentifier :: !Text
+    , mcpConnectionGeneration :: !(Maybe Text)
+    , mcpConnectionLabel :: !(Maybe Text)
+    } deriving (Eq, Show)
+
 data McpServerConfig = McpServerConfig
     { mcpServerName :: !Text
+    , mcpServerConnection :: !(Maybe McpConnectionIdentity)
     , mcpServerUrl :: !(Maybe Text)
     , mcpServerCommand :: !FilePath
     , mcpServerArgs :: ![String]
@@ -241,6 +250,15 @@ instance Show McpServerConfig where
             <> ", mcpServerExcludedTools = " <> show config.mcpServerExcludedTools
             <> " }"
 
+-- | Connection-scoped credentials supplied by the host. A provider is
+-- authoritative even when no access token is present: the transport must not
+-- fall back to environment variables or URL-indexed token files. Hosts own
+-- protected storage, expiry checks, refresh serialization and revocation.
+data McpCredentialProvider = McpCredentialProvider
+    { mcpCredentialAccessToken :: !(IO (Either Text (Maybe Text)))
+    , mcpCredentialRefreshAccessToken :: !(IO (Either Text Text))
+    }
+
 -- | Host-provided integration points shared by every server in a fleet.
 data McpHostHooks = McpHostHooks
     { mcpHostElicit :: !(IO (Maybe (McpElicitRequest -> IO McpElicitResult)))
@@ -260,6 +278,8 @@ data McpHostHooks = McpHostHooks
     , mcpHostArtifactDirectory :: !(Maybe FilePath)
     -- ^ Caller-owned private process directory. Nothing disables automatic
     -- materialization of explicitly tagged MCP artifact resources.
+    , mcpHostCredentials :: !(McpServerConfig -> IO (Maybe McpCredentialProvider))
+    -- ^ Resolve by immutable server identity, never by URL alone.
     }
 
 defaultMcpHostHooks :: McpHostHooks
@@ -270,6 +290,7 @@ defaultMcpHostHooks = McpHostHooks
     , mcpHostClientName = "haskell-agent"
     , mcpHostClientVersion = "0.1.0"
     , mcpHostArtifactDirectory = Nothing
+    , mcpHostCredentials = const (pure Nothing)
     }
 
 -- | A server's request for user input, delivered either as a legacy

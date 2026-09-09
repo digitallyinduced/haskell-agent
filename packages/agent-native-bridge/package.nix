@@ -3,8 +3,9 @@
 , agent-openrouter, agent-repository, agent-responses-types
 , agent-runtime-daemon, agent-store, agent-xai, async, base
 , base64-bytestring, bytestring, containers, directory, filelock
-, filepath, hspec, JuicyPixels, lib, network-uri, safe-exceptions
-, stm, text, time, transformers, unix
+, filepath, hspec, http-client, http-client-tls, JuicyPixels, lib
+, network-uri, safe-exceptions, stm, text, time, transformers, unix
+, uuid
 }:
 mkDerivation {
   pname = "agent-native-bridge";
@@ -12,7 +13,8 @@ mkDerivation {
   src = ./.;
   libraryHaskellDepends = [
     agent-cli agent-core agent-json agent-mcp agent-store base
-    bytestring containers filepath network-uri text time transformers
+    bytestring containers filepath http-client http-client-tls
+    network-uri safe-exceptions text time transformers uuid
   ];
   testHaskellDepends = [
     aeson agent-cli agent-cli-runtime agent-core agent-integration-api

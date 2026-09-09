@@ -79,6 +79,7 @@ import Agent.Runtime.Request
 import Agent.TUI.Motion (MotionMode(..))
 import Agent.Tools.Types (defaultToolEnv)
 import qualified Agent.MCP as MCP
+import Agent.CLI.McpConnectionRuntime (mcpConnectionCredentials, registerMcpConnectionRuntime)
 import Control.Exception.Safe (finally, mask, onException)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -92,6 +93,7 @@ data NativeProcessRuntime = NativeProcessRuntime
     { nativeProcessCore :: !NativeProcess.NativeProcessRuntime
     , nativeIntegrationSupervisor :: !IntegrationSupervisor
     , nativeLocalIntegrationSupervisor :: !IntegrationSupervisor
+    , nativeUnregisterMcpConnections :: !(IO ())
     }
 
 newNativeProcessRuntime :: OsPath -> IO NativeProcessRuntime
@@ -120,18 +122,24 @@ newNativeProcessRuntimeWithOrganizationIntegrations provider organizationProvide
             borrowedLocalProvider organizationProvider integrationToolEnv)
             `onException` closeIntegrationSupervisor localIntegrations
     core <- restore (NativeProcess.newNativeProcessRuntimeWithMcpHooks
-        MCP.defaultMcpHostHooks
+        MCP.defaultMcpHostHooks { MCP.mcpHostCredentials = mcpConnectionCredentials }
         root) `onException` (closeIntegrationSupervisor integrations
+            `finally` closeIntegrationSupervisor localIntegrations)
+    unregister <- registerMcpConnectionRuntime (NativeProcess.restartNativeMcpRuntime core)
+        `onException` (NativeProcess.closeNativeProcessRuntime core
+            `finally` closeIntegrationSupervisor integrations
             `finally` closeIntegrationSupervisor localIntegrations)
     pure NativeProcessRuntime
         { nativeProcessCore = core
         , nativeIntegrationSupervisor = integrations
         , nativeLocalIntegrationSupervisor = localIntegrations
+        , nativeUnregisterMcpConnections = unregister
         }
 
 closeNativeProcessRuntime :: NativeProcessRuntime -> IO ()
 closeNativeProcessRuntime runtime =
-    NativeProcess.closeNativeProcessRuntime runtime.nativeProcessCore
+    runtime.nativeUnregisterMcpConnections
+        `finally` NativeProcess.closeNativeProcessRuntime runtime.nativeProcessCore
         `finally`
             closeIntegrationSupervisor runtime.nativeIntegrationSupervisor
                 `finally` closeIntegrationSupervisor runtime.nativeLocalIntegrationSupervisor

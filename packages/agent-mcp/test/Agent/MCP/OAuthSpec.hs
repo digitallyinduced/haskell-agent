@@ -32,6 +32,20 @@ spec = describe "Agent.MCP.OAuth" do
             mapM_ (\fragment -> page `shouldSatisfy` (not . Text.isInfixOf fragment))
                 ["<script", "<link", "src=", "href=", "url(", "<form"]
 
+    describe "endpoint URL validation" do
+        it "accepts case-insensitive schemes, query components and loopback development URLs" do
+            mapM_ (\url -> validateOAuthEndpoint url `shouldBe` Right ())
+                ["HTTPS://EXAMPLE.TEST:443/mcp?tenant=one"
+                , "http://localhost:1234/mcp", "http://127.0.0.1/mcp", "http://[::1]:1234/mcp"]
+        it "rejects fragments, userinfo, malformed ports, and insecure client metadata URLs" do
+            mapM_ (\url -> validateClientIdMetadataUrl url `shouldSatisfy` isLeft)
+                [ "https://example.test/client.json#fragment"
+                , "https://user:secret@example.test/client.json"
+                , "https://example.test:99999/client.json"
+                , "http://example.test/client.json"
+                ]
+            validateClientIdMetadataUrl "https://example.test/client.json" `shouldBe` Right ()
+
     describe "parseWwwAuthenticate" do
         it "parses quoted parameters" do
             parseWwwAuthenticate

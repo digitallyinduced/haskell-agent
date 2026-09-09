@@ -15,6 +15,9 @@ module Agent.CLI.McpOAuth
     , loginMcpWith
     , loginMcpWithHost
     , loginMcpWithResult
+    , McpOAuthHost(..)
+    , authorizeMcpWith
+    , validateMcpOAuthCallback
     , logoutMcp
     , lookupServerOAuthConfig
     , mcpOAuthCallbackTimeoutMicros
@@ -36,7 +39,7 @@ import Control.Concurrent.MVar
     , tryPutMVar
     )
 import Network.URI (parseURI, uriAuthority, uriRegName, uriScheme, uriUserInfo, uriQuery)
-import Control.Exception.Safe (bracket, bracketOnError, finally, throwIO, tryAny)
+import Control.Exception.Safe (bracket, bracketOnError, finally, fromException, throwIO, tryAny)
 import Control.Monad (forM_, unless, void, when)
 import Crypto.Hash (Digest, SHA256, hash)
 import Data.Char (isAsciiLower, isDigit)
@@ -55,6 +58,7 @@ import Network.HTTP.Types
     , hContentType
     , methodGet
     , status200
+    , status400
     , status404
     , status405
     )
@@ -69,6 +73,7 @@ import qualified Network.Wai.Handler.Warp as Warp
 import qualified System.Directory.OsPath as Dir
 import qualified System.Entropy
 import System.OsPath (OsPath)
+import System.IO.Error (ioeGetErrorString, isUserError)
 import System.Timeout (timeout)
 
 data LoginOptions = LoginOptions
@@ -116,6 +121,190 @@ defaultMcpLoginHost =
                     "Could not launch a browser automatically; open the URL above."
             Right <$> timeout mcpOAuthCallbackTimeoutMicros wait
         }
+
+-- | Host-owned presentation and credential loading. The host must resolve the
+-- previous record by immutable connection identity, never by endpoint alone.
+-- Authorization returns the new record without persisting it: the owner must
+-- verify that the connection and authorization generation are still current
+-- before committing credentials to protected storage.
+data McpOAuthHost = McpOAuthHost
+    { oauthLoadPrevious :: IO (Either Text (Maybe (OAuth.OAuthTokenFile, OAuth.OAuthTokenFileExtra)))
+    , oauthOpenBrowser :: Text -> IO (Either Text ())
+    -- ^ Schedule browser presentation and return promptly. Do not wait for
+    -- completion: the runtime receives and validates the loopback response.
+    }
+
+-- | Runs synchronously on the caller's worker. Cancellation propagates and
+-- closes the loopback listener. No credentials or authorization URLs are
+-- logged or written to disk. The callback URL is passed only to presentation.
+authorizeMcpWith
+    :: McpOAuthHost
+    -> LoginOptions
+    -> Maybe McpOAuthConfig
+    -> Text
+    -> IO (Either Text (OAuth.OAuthTokenFile, OAuth.OAuthTokenFileExtra))
+authorizeMcpWith host options oauthConfig serverUrl = do
+    result <- tryAny $
+        timeout mcpOAuthCallbackTimeoutMicros (authorizeMcp host options oauthConfig serverUrl)
+    pure case result of
+        Right (Just record) -> Right record
+        Right Nothing -> Left "Timed out waiting for MCP authorization."
+        Left exception -> Left case fromException exception of
+            Just ioErr | isUserError ioErr -> Text.pack (ioeGetErrorString ioErr)
+            _ -> "MCP authorization could not be completed. Check the connection and try again."
+
+authorizeMcp
+    :: McpOAuthHost
+    -> LoginOptions
+    -> Maybe McpOAuthConfig
+    -> Text
+    -> IO (OAuth.OAuthTokenFile, OAuth.OAuthTokenFileExtra)
+authorizeMcp host options oauthConfig serverUrl = do
+    either (const (failText "MCP authorization requires an HTTPS endpoint without embedded credentials or a fragment."))
+        pure (OAuth.validateOAuthEndpoint serverUrl)
+    let resourceUri = OAuth.canonicalResourceUri serverUrl
+    manager <- newTlsManager
+    challenge <- OAuth.probeAuthorizationChallenge manager serverUrl >>= \case
+        Left _ -> pure Nothing
+        Right probe -> pure probe.probeChallenge
+    resource <- OAuth.discoverProtectedResourceMetadata manager serverUrl
+        (challenge >>= (.challengeResourceMetadata))
+            >>= either (const (failText "MCP authorization metadata could not be discovered or validated.")) pure
+    stored <- host.oauthLoadPrevious >>= \case
+        Left _ -> failText "MCP credentials could not be read from protected storage."
+        Right record -> pure record
+    let storedIssuer = stored >>= (.extraIssuer) . snd
+    issuer <- case resource.authorizationServers of
+        [] -> failText "MCP protected resource metadata did not advertise an authorization server"
+        first : _ -> pure case storedIssuer of
+            Just previous | previous `elem` resource.authorizationServers -> previous
+            _ -> first
+    metadata <- OAuth.discoverAuthorizationServerMetadata manager issuer
+        >>= either (const (failText "OAuth authorization server metadata could not be discovered or validated.")) pure
+    forM_ [metadata.authorizationEndpoint, metadata.tokenEndpoint] \endpoint ->
+        either (const (failText "OAuth metadata contains an unsafe authorization or token endpoint."))
+            pure (OAuth.validateOAuthEndpoint endpoint)
+    either (const (failText "The authorization server must support S256 PKCE.")) pure (OAuth.checkPkceSupport metadata)
+    let recordedIssuer = fromMaybe issuer metadata.issuer
+        sameIssuer = storedIssuer == Just recordedIssuer
+            && maybe True ((== Just resourceUri) . (.extraResource) . snd) stored
+        previous = if sameIssuer then stored else Nothing
+    let preferredPort = previous >>= (.extraRedirectUri) . snd >>= OAuth.loopbackRedirectPort
+    bracket (openCallbackSocket preferredPort) close $ \listener -> do
+        port <- callbackPort listener
+        let redirect = "http://127.0.0.1:" <> Text.pack (show port) <> "/callback"
+            scopes = OAuth.planScopes OAuth.ScopePlan
+                { scopeSources = OAuth.ScopeSources
+                    { scopeChallenge = maybe [] OAuth.challengeScopes challenge
+                    , scopeResourceMetadata = resource.scopesSupported
+                    , scopeConfigured = maybe [] (.mcpOAuthScopes) oauthConfig
+                    }
+                , scopePreviouslyGranted = maybe [] Text.words (previous >>= (.extraScope) . snd)
+                , scopeAdditional = options.loginAdditionalScopes
+                , scopeAuthorizationServerSupported = metadata.scopesSupportedByServer
+                }
+            registrationOptions = OAuth.RegistrationOptions
+                { registrationPreRegistered = oauthConfig >>= \config ->
+                    (\clientId -> OAuth.PreRegisteredClient clientId config.mcpOAuthClientSecret)
+                        <$> config.mcpOAuthClientId
+                , registrationClientIdMetadataUrl = oauthConfig >>= (.mcpOAuthClientIdMetadataUrl)
+                , registrationStored = previous >>= \(file, extra) ->
+                    OAuth.StoredClient
+                        <$> extra.extraIssuer
+                        <*> pure file.tokenClientId
+                        <*> extra.extraClientIdSource
+                        <*> pure extra.extraRedirectUri
+                , registrationRedirectUri = redirect
+                }
+        plan <- either
+            (const (failText "The authorization server requires a registered OAuth client. Configure a client ID or client metadata URL."))
+            pure (OAuth.selectClientRegistration registrationOptions metadata)
+        client <- case plan of
+            OAuth.UsePreRegisteredClient pre ->
+                pure ResolvedClient
+                    { resolvedClientId = pre.preRegisteredClientId
+                    , resolvedClientSecret = pre.preRegisteredClientSecret
+                    , resolvedSource = OAuth.ClientIdPreRegistered
+                    , resolvedMetadataUrl = Nothing
+                    }
+            OAuth.UseClientIdMetadataDocument url ->
+                pure ResolvedClient
+                    { resolvedClientId = url
+                    , resolvedClientSecret = Nothing
+                    , resolvedSource = OAuth.ClientIdMetadataDocument
+                    , resolvedMetadataUrl = Just url
+                    }
+            OAuth.ReuseDynamicRegistration clientId ->
+                pure ResolvedClient
+                    { resolvedClientId = clientId
+                    , resolvedClientSecret = previous >>= (.extraClientSecret) . snd
+                    , resolvedSource = OAuth.ClientIdDynamicRegistration
+                    , resolvedMetadataUrl = Nothing
+                    }
+            OAuth.UseDynamicRegistration endpoint -> do
+                registration <- OAuth.registerClientWith manager endpoint OAuth.ClientRegistrationRequest
+                    { registrationClientName = "Haskell Agent"
+                    , registrationRedirectUris = [redirect]
+                    , registrationScopes = scopes
+                    } >>= either (const (failText "OAuth client registration failed.")) pure
+                pure ResolvedClient
+                    { resolvedClientId = registration.clientId
+                    , resolvedClientSecret = registration.clientSecret
+                    , resolvedSource = OAuth.ClientIdDynamicRegistration
+                    , resolvedMetadataUrl = Nothing
+                    }
+        verifier <- randomUrlBytes 32
+        state <- randomUrlBytes 24
+        let codeChallenge = Base64.encodeUnpadded (BA.convert (hash (Encoding.encodeUtf8 verifier) :: Digest SHA256))
+            scopeText = Text.unwords scopes
+            separator = if "?" `Text.isInfixOf` metadata.authorizationEndpoint then "&" else "?"
+            authUrl = metadata.authorizationEndpoint <> separator
+                <> "response_type=code&client_id=" <> encode client.resolvedClientId
+                <> "&redirect_uri=" <> encode redirect
+                <> "&code_challenge=" <> Encoding.decodeUtf8 codeChallenge
+                <> "&code_challenge_method=S256&state=" <> encode state
+                <> (if Text.null scopeText then "" else "&scope=" <> encode scopeText)
+                <> "&resource=" <> encode resourceUri
+        callback <-
+            withListeningCallback listener
+                metadata.authorizationResponseIssParameterSupported recordedIssuer state
+                \awaitCallback -> do
+                    host.oauthOpenBrowser authUrl
+                        >>= either (const (failText "The authorization browser could not be opened.")) pure
+                    awaitCallback
+        either (const (failText "MCP OAuth callback issuer mismatch.")) pure $ OAuth.validateAuthorizationResponseIssuer
+            metadata.authorizationResponseIssParameterSupported recordedIssuer callback.callbackIss
+        when (callback.callbackState /= Just state) (failText "MCP OAuth callback state mismatch")
+        forM_ callback.callbackError \_ ->
+            failText "MCP authorization was not granted."
+        code <- maybe (failText "MCP OAuth callback did not contain an authorization code") pure callback.callbackCode
+        OAuth.exchangeAuthorizationCodeWith manager OAuth.TokenExchange
+            { exchangeEndpoint = metadata.tokenEndpoint
+            , exchangeClientId = client.resolvedClientId
+            , exchangeClientSecret = client.resolvedClientSecret
+            , exchangeCode = code
+            , exchangeRedirectUri = redirect
+            , exchangeCodeVerifier = verifier
+            , exchangeResource = Just resourceUri
+            } >>= \case
+                OAuth.OAuthTokenFailure _ -> failText "OAuth token exchange failed."
+                OAuth.OAuthTokenSuccess tokens -> do
+                    now :: Int <- round <$> getPOSIXTime
+                    let tokenFile = OAuth.OAuthTokenFile
+                            client.resolvedClientId metadata.tokenEndpoint tokens.accessToken
+                            (fromMaybe "" tokens.refreshToken)
+                            (fmap (now +) tokens.expiresIn)
+                        granted = fromMaybe scopeText tokens.scope
+                        extra = OAuth.OAuthTokenFileExtra
+                            { extraIssuer = Just recordedIssuer
+                            , extraScope = if Text.null (Text.strip granted) then Nothing else Just granted
+                            , extraResource = Just resourceUri
+                            , extraClientIdSource = Just client.resolvedSource
+                            , extraClientIdMetadataUrl = client.resolvedMetadataUrl
+                            , extraClientSecret = client.resolvedClientSecret
+                            , extraRedirectUri = Just redirect
+                            }
+                    pure (tokenFile, extra)
 
 loginMcp :: Text -> IO ()
 loginMcp = loginMcpWith defaultLoginOptions
@@ -276,12 +465,14 @@ loginMcpWithHostThrow host options serverUrl = do
                 <> "&resource=" <> encode resourceUri
         host.mcpLoginSay ("Opening browser for MCP authorization: " <> authUrl)
         callback <-
-            withListeningCallback listener \awaitCallback ->
-                host.mcpLoginAuthorize authUrl awaitCallback >>= \case
-                    Left err -> failText err
-                    Right Nothing ->
-                        failText "Timed out waiting for MCP OAuth callback"
-                    Right (Just received) -> pure received
+            withListeningCallback listener
+                metadata.authorizationResponseIssParameterSupported recordedIssuer state
+                \awaitCallback ->
+                    host.mcpLoginAuthorize authUrl awaitCallback >>= \case
+                        Left err -> failText err
+                        Right Nothing ->
+                            failText "Timed out waiting for MCP OAuth callback"
+                        Right (Just received) -> pure received
         -- RFC 9207: validate the issuer before acting on any other parameter,
         -- including error responses.
         either failText pure $ OAuth.validateAuthorizationResponseIssuer
@@ -371,6 +562,9 @@ authorizedMcpServerRegistration serverUrl config = do
                     server = McpServerConfig
                         { mcpEnabled = True
                         , mcpUrl = Just serverUrl
+                        , mcpConnectionId = Nothing
+                        , mcpConnectionGeneration = Nothing
+                        , mcpDisplayName = Nothing
                         , mcpCommand = ""
                         , mcpArgs = []
                         , mcpCwd = Nothing
@@ -455,19 +649,22 @@ callbackPort sock = do
 
 -- | Run the loopback HTTP server and invoke the action only after Warp is
 -- accepting connections, so the browser redirect cannot lose the race.
-withListeningCallback :: Socket -> (IO Callback -> IO a) -> IO a
-withListeningCallback listener action = do
+-- Invalid callbacks are rejected without completing the pending authorization.
+withListeningCallback
+    :: Socket -> Bool -> Text -> Text -> (IO Callback -> IO a) -> IO a
+withListeningCallback listener issuerRequired issuer expectedState action = do
     readyVar <- newEmptyMVar
-    withAsync (receiveCallback listener readyVar) \callbackAsync -> do
-        race (waitCatch callbackAsync) (readMVar readyVar) >>= \case
-            Left (Left err) -> throwIO err
-            Left (Right _) ->
-                failText
-                    "MCP OAuth callback server exited before accepting connections"
-            Right () -> action (wait callbackAsync)
+    withAsync (receiveCallback listener readyVar issuerRequired issuer expectedState)
+        \callbackAsync -> do
+            race (waitCatch callbackAsync) (readMVar readyVar) >>= \case
+                Left (Left err) -> throwIO err
+                Left (Right _) ->
+                    failText
+                        "MCP OAuth callback server exited before accepting connections"
+                Right () -> action (wait callbackAsync)
 
-receiveCallback :: Socket -> MVar () -> IO Callback
-receiveCallback listener readyVar = do
+receiveCallback :: Socket -> MVar () -> Bool -> Text -> Text -> IO Callback
+receiveCallback listener readyVar issuerRequired issuer expectedState = do
     resultVar <- newEmptyMVar
     shutdownVar <- newEmptyMVar
     let settings =
@@ -481,6 +678,9 @@ receiveCallback listener readyVar = do
                 respond (plainResponse status405 "Method Not Allowed")
             | Wai.rawPathInfo request /= "/callback" =
                 respond (plainResponse status404 "Not Found")
+            | Left _ <- validateMcpOAuthCallback issuerRequired issuer expectedState
+                (Wai.queryString request) =
+                respond (plainResponse status400 "Invalid authorization response")
             | otherwise = do
                 let callback = callbackFromQuery (Wai.queryString request)
                     finish = do
@@ -506,6 +706,29 @@ receiveCallback listener readyVar = do
             , (hConnection, "close")
             ]
             body
+
+-- | Validate untrusted callbacks before consuming the pending authorization.
+-- Duplicate security parameters are rejected rather than interpreted using
+-- first-value semantics. Error responses still require issuer and state.
+validateMcpOAuthCallback :: Bool -> Text -> Text -> Query -> Either Text ()
+validateMcpOAuthCallback issuerRequired issuer expectedState query = do
+    forM_ ["code", "state", "iss", "error", "error_description"] \name -> do
+        when (length (filter ((== name) . fst) query) > 1)
+            (Left "Duplicate OAuth callback parameter")
+        forM_ (filter ((== name) . fst) query) \(_, value) ->
+            case value of
+                Nothing -> Left "Missing OAuth callback parameter value"
+                Just bytes -> either (const (Left "Invalid OAuth callback encoding")) (const (Right ()))
+                    (Encoding.decodeUtf8' bytes)
+    let callback = callbackFromQuery query
+    either (const (Left "MCP OAuth callback issuer mismatch")) Right $
+        OAuth.validateAuthorizationResponseIssuer issuerRequired issuer callback.callbackIss
+    when (callback.callbackState /= Just expectedState)
+        (Left "MCP OAuth callback state mismatch")
+    when (isJust callback.callbackCode == isJust callback.callbackError)
+        (Left "OAuth callback must contain exactly one code or error")
+    when (callback.callbackCode == Just "" || callback.callbackError == Just "")
+        (Left "OAuth callback contains an empty result")
 
 callbackFromQuery :: Query -> Callback
 callbackFromQuery query = Callback

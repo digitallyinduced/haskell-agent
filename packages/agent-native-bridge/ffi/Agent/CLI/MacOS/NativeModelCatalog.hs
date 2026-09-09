@@ -24,6 +24,7 @@ import Agent.CLI.Models
     )
 import Agent.CLI.Project
     ( ProjectModel(..)
+    , ProjectSettings(..)
     , inheritProjectLastModel
     , loadProjectSettings
     , resolveProjectRoot

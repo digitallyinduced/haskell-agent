@@ -43,9 +43,10 @@ import Agent.MCP.Types
       McpElicitResult(McpElicitCancel),
       McpElicitMode(McpElicitForm, McpElicitUrl),
       McpElicitRequest(..),
-      McpHostHooks(mcpHostElicit, mcpHostRoots, mcpHostSample, mcpHostClientName,
+      McpCredentialProvider(..),
+      McpHostHooks(mcpHostCredentials, mcpHostElicit, mcpHostRoots, mcpHostSample, mcpHostClientName,
                    mcpHostClientVersion),
-      McpServerConfig(mcpServerEnv, mcpServerName,
+      McpServerConfig(mcpServerEnv, mcpServerName, mcpServerConnection,
                       mcpServerRequestTimeoutSeconds, mcpServerRootsEnabled,
                       mcpServerSamplingEnabled, mcpServerLogLevel),
       mcpSamplingRequestDecoder,
@@ -1329,7 +1330,10 @@ httpExchange client transport era request pending message = do
     baseRequest <- parseRequest (Text.unpack transport.httpUrl)
     session <- readIORef transport.httpSession
     negotiated <- readTVarIO client.clientServerInfo
-    tokenResult <- configuredAccessToken client
+    credentialProvider <- configuredCredentialProvider client
+    tokenResult <- case credentialProvider of
+        Just provider -> provider.mcpCredentialAccessToken
+        Nothing -> legacyAccessToken client
     let body = AesonEncodingInternal.encodingToLazyByteString message
         protocolHeader = case era of
             Just McpEraModern -> [("MCP-Protocol-Version", TextEncoding.encodeUtf8 modernProtocolVersion)]
@@ -1443,13 +1447,14 @@ httpExchange client transport era request pending message = do
                 outcome@(Right (HttpUnauthorized 401 _)) ->
                     retryUnauthorizedOnce
                         request.requestAllowReissue
-                        (lookup "MCP_OAUTH_TOKEN_FILE"
-                            client.clientConfig.mcpServerEnv)
-                        (\path ->
-                            fmap
-                                (fmap accessToken)
-                                (OAuth.refreshOAuthTokenFile
-                                    mcpHttpManager path))
+                        (case credentialProvider of
+                            Just provider -> Just provider.mcpCredentialRefreshAccessToken
+                            Nothing -> fmap
+                                (\path -> fmap (fmap accessToken)
+                                    (OAuth.refreshOAuthTokenFile mcpHttpManager path))
+                                (lookup "MCP_OAUTH_TOKEN_FILE"
+                                    client.clientConfig.mcpServerEnv))
+                        id
                         (perform . Just)
                         >>= \case
                             Left err ->
@@ -1694,6 +1699,25 @@ splitLines buffer =
 
 configuredAccessToken :: McpClient -> IO (Either Text (Maybe Text))
 configuredAccessToken client =
+    configuredCredentialProvider client >>= \case
+        Just provider -> provider.mcpCredentialAccessToken
+        Nothing -> legacyAccessToken client
+
+configuredCredentialProvider :: McpClient -> IO (Maybe McpCredentialProvider)
+configuredCredentialProvider client =
+    client.clientHooks.mcpHostCredentials client.clientConfig >>= \case
+        Just provider -> pure (Just provider)
+        Nothing -> pure $ case client.clientConfig.mcpServerConnection of
+            Nothing -> Nothing
+            Just _ -> Just McpCredentialProvider
+                { mcpCredentialAccessToken = pure (Left unavailable)
+                , mcpCredentialRefreshAccessToken = pure (Left unavailable)
+                }
+  where
+    unavailable = "MCP connection credential provider is unavailable"
+
+legacyAccessToken :: McpClient -> IO (Either Text (Maybe Text))
+legacyAccessToken client =
     case lookup "MCP_OAUTH_TOKEN_FILE" client.clientConfig.mcpServerEnv of
         Nothing -> pure (Right envToken)
         Just path -> OAuth.loadOAuthTokenFile path >>= \case

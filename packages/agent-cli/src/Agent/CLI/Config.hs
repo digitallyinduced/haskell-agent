@@ -14,6 +14,7 @@ module Agent.CLI.Config
     , loadHarnessConfig
     , loadHarnessConfigSnapshot
     , modifyHarnessConfig
+    , modifyHarnessConfigEffect
     , saveHarnessConfig
     , updateHarnessConfig
     , withHarnessConfigSnapshot
@@ -86,6 +87,11 @@ defaultLspShutdownTimeoutMilliseconds = 5000
 data McpServerConfig = McpServerConfig
     { mcpEnabled :: !Bool
     , mcpUrl :: !(Maybe Text)
+    , mcpConnectionId :: !(Maybe Text)
+    -- ^ Immutable identity for independently authorized remote connections.
+    , mcpConnectionGeneration :: !(Maybe Text)
+    -- ^ Persisted lifecycle nonce; changes invalidate captured credentials.
+    , mcpDisplayName :: !(Maybe Text)
     , mcpCommand :: !Text
     , mcpArgs :: ![Text]
     , mcpCwd :: !(Maybe Text)
@@ -295,6 +301,9 @@ instance Aeson.ToJSON McpServerConfig where
         Aeson.object
             [ "enabled" Aeson..= server.mcpEnabled
             , "url" Aeson..= server.mcpUrl
+            , "connectionId" Aeson..= server.mcpConnectionId
+            , "connectionGeneration" Aeson..= server.mcpConnectionGeneration
+            , "displayName" Aeson..= server.mcpDisplayName
             , "command" Aeson..= server.mcpCommand
             , "args" Aeson..= server.mcpArgs
             , "cwd" Aeson..= server.mcpCwd
@@ -408,6 +417,9 @@ mcpServerConfigDecoder =
         McpServerConfig
             <$> defaultKey True "enabled" Hermes.bool
             <*> optionalKey "url" Hermes.text
+            <*> optionalKey "connectionId" Hermes.text
+            <*> optionalKey "connectionGeneration" Hermes.text
+            <*> optionalKey "displayName" Hermes.text
             <*> defaultKey "" "command" Hermes.text
             <*> defaultKey [] "args" (Hermes.list Hermes.text)
             <*> optionalKey "cwd" Hermes.text
@@ -598,7 +610,7 @@ withHarnessConfigSnapshot
 withHarnessConfigSnapshot home action =
     withPrivateFileLock (harnessConfigLockPath home) do
         loadHarnessConfigUnlocked home >>= \case
-            Left err -> pure (Left err)
+            Left _ -> pure (Left "Unable to read the machine configuration")
             Right (revision, config) ->
                 Right <$> action revision config
 
@@ -649,11 +661,20 @@ modifyHarnessConfig
     -> (Word64 -> HarnessConfig -> Either Text (HarnessConfig, a))
     -> IO (Either Text (Word64, HarnessConfig, a))
 modifyHarnessConfig home change =
+    modifyHarnessConfigEffect home \revision config -> pure (change revision config)
+
+-- | Like 'modifyHarnessConfig', with a short host-side effect under the
+-- catalog lock. Effects must not acquire another catalog lock or do network IO.
+modifyHarnessConfigEffect
+    :: OsPath
+    -> (Word64 -> HarnessConfig -> IO (Either Text (HarnessConfig, a)))
+    -> IO (Either Text (Word64, HarnessConfig, a))
+modifyHarnessConfigEffect home change =
     withPrivateFileLock (harnessConfigLockPath home) do
         loadHarnessConfigUnlocked home >>= \case
-            Left err -> pure (Left err)
+            Left _ -> pure (Left "Unable to read the machine configuration")
             Right (revision, config) ->
-                case change revision config of
+                change revision config >>= \case
                     Left err -> pure (Left err)
                     Right (updated, value) ->
                         writeHarnessConfigUnlocked home updated >>= \case
@@ -855,6 +876,15 @@ validateHarnessConfig config = do
             hasCommand = not (Text.null (Text.strip server.mcpCommand))
         when (hasUrl == hasCommand) $
             Left ("MCP server " <> quote label <> " must configure exactly one of url or command")
+        forM_ server.mcpConnectionId \connectionId -> do
+            unless (hasUrl && label == "connection_" <> connectionId
+                    && not (Text.null connectionId)
+                    && Text.all (\character -> character >= 'a' && character <= 'z'
+                        || character >= '0' && character <= '9' || character == '-') connectionId) $
+                Left "MCP connection identity must match its immutable remote server key"
+        forM_ server.mcpDisplayName \displayName ->
+            when (Text.null (Text.strip displayName)) $
+                Left "MCP connection display name must not be empty"
         when (server.mcpStartupTimeoutSeconds < 1) $
             Left
                 ( "MCP server "

@@ -21,7 +21,7 @@ module Agent.MCP.OAuth
     , WwwAuthenticateChallenge(..), parseWwwAuthenticate, challengeScopes
     , AuthorizationProbe(..), probeAuthorizationChallenge
       -- * Canonical resource URIs
-    , canonicalResourceUri, resourceOrigin, loopbackRedirectPort
+    , canonicalResourceUri, resourceOrigin, loopbackRedirectPort, validateOAuthEndpoint
       -- * Protected resource metadata discovery
     , protectedResourceMetadataUrls, discoverProtectedResourceMetadata
     , validateResourceMetadata, discoverProtectedResource
@@ -364,7 +364,7 @@ data AuthorizationProbe = AuthorizationProbe
 probeAuthorizationChallenge :: Manager -> Text -> IO (Either Text AuthorizationProbe)
 probeAuthorizationChallenge manager endpoint = do
     result <- tryAny $ do
-        request <- parseRequest (Text.unpack endpoint)
+        request <- secureOAuthRequest endpoint
         let payload = Aeson.encode $ Aeson.object
                 [ "jsonrpc" Aeson..= ("2.0" :: Text)
                 , "id" Aeson..= (0 :: Int)
@@ -382,7 +382,7 @@ probeAuthorizationChallenge manager endpoint = do
                 }
         httpLbs request' manager
     pure $ case result of
-        Left exception -> Left ("MCP authorization probe failed: " <> Text.pack (show exception))
+        Left _ -> Left "MCP authorization probe failed"
         Right response ->
             let challenges = [value | (name, value) <- HC.responseHeaders response, name == "WWW-Authenticate"]
             in Right AuthorizationProbe
@@ -461,14 +461,22 @@ loopbackRedirectPort url = do
 -- | Authorization server endpoints and metadata must be HTTPS; plain HTTP is
 -- tolerated only for loopback development servers.
 checkSecureUrl :: Text -> Text -> Either Text ()
-checkSecureUrl label url = case parseUrlParts url of
-    Nothing -> Left (label <> " is not an absolute URL: " <> url)
-    Just parts
-        | parts.urlScheme == "https" -> Right ()
-        | parts.urlScheme == "http" && isLoopback parts.urlHost -> Right ()
-        | otherwise -> Left (label <> " must use https: " <> url)
+checkSecureUrl label url
+    | Text.any (== '#') url = Left (label <> " must not contain a fragment")
+    | otherwise = case parseUrlParts url of
+        Nothing -> Left (label <> " is not a valid absolute URL")
+        Just parts
+            | parts.urlScheme == "https" -> Right ()
+            | parts.urlScheme == "http" && isLoopback parts.urlHost -> Right ()
+            | otherwise -> Left (label <> " must use https")
   where
     isLoopback host = host `elem` ["localhost", "127.0.0.1", "[::1]"]
+
+-- | Shared validation for browser and HTTP endpoints. Query components are
+-- retained; credentials, fragments, malformed ports and non-loopback HTTP
+-- are rejected before any authorization side effects.
+validateOAuthEndpoint :: Text -> Either Text ()
+validateOAuthEndpoint = checkSecureUrl "OAuth endpoint"
 
 -- ---------------------------------------------------------------------------
 -- Protected resource metadata (RFC 9728)
@@ -692,7 +700,7 @@ selectClientRegistration options metadata
 
 -- | A Client ID Metadata Document URL must use https and carry a path.
 validateClientIdMetadataUrl :: Text -> Either Text ()
-validateClientIdMetadataUrl url = case parseUrlParts url of
+validateClientIdMetadataUrl url = checkSecureUrl "Client ID metadata URL" url >> case parseUrlParts url of
     Just parts | parts.urlScheme == "https", not (Text.null parts.urlPath) -> Right ()
     _ -> Left ("oauth.clientIdMetadataUrl must be an https URL with a path component: " <> url)
 
@@ -716,7 +724,7 @@ clientRegistrationPayload request = Aeson.object $
 registerClientWith :: Manager -> Text -> ClientRegistrationRequest -> IO (Either Text ClientRegistration)
 registerClientWith manager registrationUrl registration = do
     result <- tryAny $ do
-        request <- parseRequest (Text.unpack registrationUrl)
+        request <- secureOAuthRequest registrationUrl
         let request' = request
                 { HC.method = "POST"
                 , HC.requestBody = RequestBodyLBS (Aeson.encode (clientRegistrationPayload registration))
@@ -724,12 +732,11 @@ registerClientWith manager registrationUrl registration = do
                 }
         httpLbs request' manager
     case result of
-        Left exception -> pure (Left ("OAuth client registration failed: " <> Text.pack (show exception)))
+        Left _ -> pure (Left "OAuth client registration request failed")
         Right response
             | not (isSuccess response) -> pure (Left
                 ("OAuth client registration failed with HTTP "
-                    <> Text.pack (show (statusCode (responseStatus response)))
-                    <> ": " <> responseBodyText response))
+                    <> Text.pack (show (statusCode (responseStatus response)))))
             | otherwise -> decodeBody response
 
 -- | Compatibility wrapper using the default client name.
@@ -885,20 +892,29 @@ optionalParam name = maybe [] (\value -> [(name, Encoding.encodeUtf8 value)])
 tokenRequest :: Manager -> Text -> Text -> [(BS.ByteString, BS.ByteString)] -> IO OAuthTokenResponse
 tokenRequest manager failure endpoint parameters = do
     result <- tryAny $ do
-        request <- parseRequest (Text.unpack endpoint)
+        request <- secureOAuthRequest endpoint
         let request' = urlEncodedBody parameters request { HC.method = "POST" }
         httpLbs request' { HC.requestHeaders = ("Accept", "application/json") : HC.requestHeaders request' } manager
     case result of
-        Left e -> pure (OAuthTokenFailure (failure <> ": " <> Text.pack (show e)))
+        Left _ -> pure (OAuthTokenFailure (failure <> ": request failed"))
         Right response
             | not (isSuccess response) -> pure $ OAuthTokenFailure
                 (failure <> " with HTTP " <> Text.pack (show (statusCode (responseStatus response)))
-                    <> ": " <> responseBodyText response)
-            | otherwise -> pure $ either (OAuthTokenFailure . Text.pack) OAuthTokenSuccess
+                    <> ": response rejected")
+            | otherwise -> pure $ either (const (OAuthTokenFailure (failure <> ": invalid response"))) OAuthTokenSuccess
                 (Aeson.eitherDecode (responseBody response))
 
 -- ---------------------------------------------------------------------------
 -- HTTP helpers
+
+-- Never let redirects replay codes, client secrets, or refresh tokens to a
+-- different endpoint. Discovery redirects are also rejected rather than
+-- bypassing transport validation. Callers must configure the final URL.
+secureOAuthRequest :: Text -> IO HC.Request
+secureOAuthRequest url = do
+    either (ioError . userError . Text.unpack) pure (checkSecureUrl "OAuth endpoint" url)
+    request <- parseRequest (Text.unpack url)
+    pure request { HC.redirectCount = 0 }
 
 tryCandidates :: Text -> (Text -> IO (Either Text a)) -> [Text] -> IO (Either Text a)
 tryCandidates failure fetch = go []
@@ -911,16 +927,16 @@ tryCandidates failure fetch = go []
 getJson :: Aeson.FromJSON value => Manager -> Text -> IO (Either Text value)
 getJson manager url = do
     result <- tryAny $ do
-        request <- parseRequest (Text.unpack url)
+        request <- secureOAuthRequest url
         httpLbs request { HC.requestHeaders = [("Accept", "application/json")] } manager
     case result of
-        Left exception -> pure (Left (Text.pack (show exception)))
+        Left _ -> pure (Left "OAuth metadata request failed")
         Right response
             | not (isSuccess response) -> pure (Left ("HTTP " <> Text.pack (show (statusCode (responseStatus response)))))
             | otherwise -> decodeBody response
 
 decodeBody :: Aeson.FromJSON value => HC.Response LBS.ByteString -> IO (Either Text value)
-decodeBody response = pure $ either (Left . Text.pack) Right (Aeson.eitherDecode (responseBody response))
+decodeBody response = pure $ either (const (Left "Invalid OAuth JSON response")) Right (Aeson.eitherDecode (responseBody response))
 
 isSuccess :: HC.Response body -> Bool
 isSuccess response =

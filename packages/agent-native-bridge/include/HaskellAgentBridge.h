@@ -42,6 +42,87 @@ typedef void (*ha_event_callback)(
 );
 
 /*
+ * Remote MCP connections have immutable IDs independent of display names and
+ * endpoint URLs. Identical endpoints may have independently authorized accounts.
+ * No credentials are exposed by this interface.
+ *
+ * Each accepted operation returns an owned nonnull handle in out_operation.
+ * Return values: 0 accepted; 1 missing callback/output; 2 invalid UTF-8/input;
+ * 3 could not start. Rejected calls leave out_operation null and never callback.
+ * Inputs are copied before return, limited to 1 MiB per text field, nonempty,
+ * and must not contain NUL. All callbacks run on a background runtime thread.
+ * Callback text is UTF-8, callback-scoped, not NUL-terminated; copy before
+ * returning. Null text pointers occur only with length zero. context may be null.
+ *
+ * A connection callback has status 0 for a row, 1 for terminal success,
+ * -1 for terminal failure, -2 for terminal cancellation. List emits zero or more
+ * rows; create/rename/set_enabled/authorize emit one row on success; remove emits
+ * no row. Every accepted operation emits exactly one terminal callback, after
+ * which no further callbacks occur. Terminal rows have empty identity fields.
+ * revision is an optimistic-concurrency token; pass the most recently observed
+ * revision to mutations. On conflict failure it contains the current revision.
+ * state: 0 configured (not probed), 1 connecting, 2 authorization required,
+ * 3 ready (initialization/tool discovery verified), 4 failed. enabled is 0 or 1.
+ *
+ * authorize probes the connection, performs OAuth only when required, and emits
+ * browser URLs through authorization_callback. URLs contain transient security
+ * values: open them, but do not log or persist them. The callback must return
+ * promptly; the runtime owns the loopback callback listener and timeout.
+ *
+ * cancel is nonblocking and idempotent while the handle is alive. Cancellation
+ * does not roll back an already committed catalog mutation; reload the catalog.
+ * destroy requests cancellation, joins the worker, then frees the handle. Call
+ * destroy exactly once, off the UI thread and never from any callback belonging
+ * to that operation. Serialize destroy against other uses of the handle. Context
+ * and callback pointers must remain valid until terminal callback return.
+ * A callback may arrive before the starting function returns.
+ */
+typedef void (*ha_mcp_connection_callback)(
+    void *context, int32_t status, uint64_t revision,
+    const uint8_t *connection_id, size_t connection_id_length,
+    const uint8_t *display_name, size_t display_name_length,
+    const uint8_t *endpoint, size_t endpoint_length,
+    int32_t enabled, int32_t state,
+    const uint8_t *error, size_t error_length
+);
+typedef void (*ha_mcp_connection_authorization_callback)(
+    void *context, const uint8_t *url, size_t url_length
+);
+int32_t ha_mcp_connections_list(
+    ha_mcp_connection_callback callback, void *context, void **out_operation
+);
+int32_t ha_mcp_connection_create(
+    uint64_t expected_revision,
+    const uint8_t *display_name, size_t display_name_length,
+    const uint8_t *endpoint, size_t endpoint_length,
+    ha_mcp_connection_callback callback, void *context, void **out_operation
+);
+int32_t ha_mcp_connection_rename(
+    uint64_t expected_revision,
+    const uint8_t *connection_id, size_t connection_id_length,
+    const uint8_t *display_name, size_t display_name_length,
+    ha_mcp_connection_callback callback, void *context, void **out_operation
+);
+int32_t ha_mcp_connection_set_enabled(
+    uint64_t expected_revision,
+    const uint8_t *connection_id, size_t connection_id_length, int32_t enabled,
+    ha_mcp_connection_callback callback, void *context, void **out_operation
+);
+int32_t ha_mcp_connection_remove(
+    uint64_t expected_revision,
+    const uint8_t *connection_id, size_t connection_id_length,
+    ha_mcp_connection_callback callback, void *context, void **out_operation
+);
+int32_t ha_mcp_connection_authorize(
+    uint64_t expected_revision,
+    const uint8_t *connection_id, size_t connection_id_length,
+    ha_mcp_connection_authorization_callback authorization_callback,
+    ha_mcp_connection_callback callback, void *context, void **out_operation
+);
+void ha_mcp_connection_operation_cancel(void *operation);
+void ha_mcp_connection_operation_destroy(void *operation);
+
+/*
  * Read-only observation of a session owned by a separate agent-cli process.
  * This never acquires the execution lock or permits steering/approval.
  *
