@@ -39,7 +39,7 @@ import Agent.CLI.TUI.Types
       FullscreenRuntime(runtimeWaveTrough, runtimeMotionMode,
                         runtimeNativeImagePreviews, runtimeColor),
       activeTheme,
-      Name(ConversationBodyCache, CodeBlockCache, ConversationBlock,
+      Name(ConversationBodyCache, CodeBlockCache, MarkdownProseCache, ConversationBlock,
            ConversationBlockCache, ConversationImage, CodeCopy,
            MarkdownLink) )
 import Agent.CLI.Terminal ()
@@ -50,6 +50,7 @@ import Agent.TUI.Markdown
     ( codeWidgetWithSyntaxHighlighting,
       diffWidgetWithSyntaxHighlighting,
       markdownWidgetWithLinks,
+      markdownWidgetWithStreamingCache,
       markdownWidgetWithSyntaxHighlightingAndLinks )
 import Agent.TUI.Model
     ( blockCodeLanguage,
@@ -201,6 +202,23 @@ drawBlock state target ui block =
         waveElapsed = accentWaveElapsed state target block
         marker =
             txt (if highlighted then "❯ " else "  ")
+        -- Completed/history blocks already have a whole-block cache. Avoid
+        -- paying for cold prose-section cache entries when no appends remain.
+        assistantMarkdown =
+            if block.blockState == BlockStreaming
+                then markdownWidgetWithStreamingCache
+                    state.appSyntaxHighlighter
+                    MarkdownLink
+                    (\chunkIndex sectionIndex ->
+                        cached
+                            (MarkdownProseCache
+                                target
+                                block.blockId
+                                chunkIndex
+                                sectionIndex))
+                else markdownWidgetWithSyntaxHighlightingAndLinks
+                    state.appSyntaxHighlighter
+                    MarkdownLink
         content = case block.blockKind of
             BlockUser ->
                 withAttr Theme.userAttr $
@@ -221,9 +239,7 @@ drawBlock state target ui block =
                     padRight (Pad 1) $
                         timestampedMessage Theme.mutedAttr block.blockTimestamp $
                             withAttr Theme.assistantAttr
-                                (markdownWidgetWithSyntaxHighlightingAndLinks
-                                    state.appSyntaxHighlighter
-                                    MarkdownLink
+                                (assistantMarkdown
                                     (\codeIndex ->
                                         cached
                                             (CodeBlockCache
