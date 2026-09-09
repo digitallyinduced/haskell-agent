@@ -2971,6 +2971,83 @@ spec = do
             timeout 2_000_000 evictedPreviewKeys
                 `shouldReturn` Just []
 
+    describe "transcript typing focus recovery" do
+        it "inserts the first printable character at the existing draft cursor" do
+            forM_ [('a', []), ('G', [V.MShift]), ('g', []), ('y', []),
+                    (' ', []), ('!', [V.MShift]), ('λ', [])] $
+                \(character, modifiers) -> do
+                    state <- runTranscriptFocusInput []
+                        [V.EvKey (V.KChar character) modifiers]
+                    state.appUi.uiDraft
+                        `shouldBe` "be" <> Text.singleton character <> "fore"
+                    state.appUi.uiCursor `shouldBe` 3
+                    state.appUi.uiFocus `shouldBe` FocusComposer
+                    state.appHistorySelectedBlock `shouldBe` Nothing
+
+        it "preserves the whole typed prompt after returning to a terminal tab" do
+            state <- runTranscriptFocusInput []
+                ([V.EvLostFocus, V.EvGainedFocus]
+                    <> map (\character -> V.EvKey (V.KChar character) [])
+                        "guidance")
+            state.appUi.uiDraft `shouldBe` "beguidancefore"
+            state.appUi.uiFocus `shouldBe` FocusComposer
+
+        it "recovers while running even without a focus-gained event" do
+            state <- runTranscriptFocusInput [UiLoop TurnStarted]
+                [V.EvLostFocus, V.EvKey (V.KChar 'x') []]
+            state.appUi.uiDraft `shouldBe` "bexfore"
+            state.appUi.uiFocus `shouldBe` FocusComposer
+
+        it "keeps Tab and Escape as focus-only commands" do
+            forM_ [V.KChar '\t', V.KEsc] $ \key -> do
+                state <- runTranscriptFocusInput [] [V.EvKey key []]
+                state.appUi.uiDraft `shouldBe` "before"
+                state.appUi.uiFocus `shouldBe` FocusComposer
+
+        it "does not insert navigation keys or modified character shortcuts" do
+            forM_
+                [ V.EvKey V.KUp []
+                , V.EvKey V.KDown []
+                , V.EvKey V.KLeft []
+                , V.EvKey V.KRight []
+                , V.EvKey V.KEnter []
+                , V.EvKey (V.KChar 'j') [V.MCtrl]
+                , V.EvKey (V.KChar 'x') [V.MAlt]
+                , V.EvKey (V.KChar 'x') [V.MMeta]
+                ] $ \event -> do
+                    state <- runTranscriptFocusInput [] [event]
+                    state.appUi.uiDraft `shouldBe` "before"
+                    state.appUi.uiFocus `shouldBe` FocusScrollback
+
+        forM_ [V.EvKey (V.KChar 'y') [V.MCtrl], V.EvKey (V.KChar '\EM') []] $ \copyEvent ->
+          it ("copies the selected transcript block without editing the draft: " <> show copyEvent) do
+            copied <- newIORef Nothing
+            initialState <- cachedHistoryState
+                [markerBlock (BlockId (-1)) "selected transcript text"]
+            let runtime = initialState.appRuntime
+                state = initialState
+                    { appRuntime = runtime
+                        { runtimeCopy = \body ->
+                            writeIORef copied (Just body) >> pure True
+                        }
+                    , appHistorySelectedBlock = Just (BlockId (-1))
+                    }
+            (_, finalState) <- runFullscreenScriptWithState state
+                [ FullscreenScriptVty copyEvent
+                , FullscreenScriptHalt
+                ]
+            readIORef copied `shouldReturn` Just "selected transcript text"
+            finalState.appUi.uiDraft `shouldBe` ""
+            finalState.appUi.uiFocus `shouldBe` FocusScrollback
+
+        it "does not redirect typing out of an approval overlay" do
+            state <- runTranscriptFocusInput
+                [UiPermissionShown "Approve a test operation"]
+                [V.EvKey (V.KChar 'x') []]
+            state.appUi.uiDraft `shouldBe` "before"
+            state.appUi.uiFocus `shouldBe` FocusPermission
+            state.appUi.uiPermission `shouldSatisfy` isJust
+
     describe "unfocused terminal recovery" do
         it "treats paste input as proof that focus returned" do
             timeout 2_000_000 unfocusedPasteRendersDraft
@@ -3405,6 +3482,19 @@ historyPlacement preview =
         , nativePreviewRows = 1
         , nativePreviewAttachment = preview.previewKittyAttachment
         }
+
+runTranscriptFocusInput :: [UiEvent] -> [V.Event] -> IO AppState
+runTranscriptFocusInput setup events = do
+    let ui = foldl (flip reduceUi) initialUiState
+            ([UiSetDraft "before" 2, UiFocusChanged FocusScrollback] <> setup)
+    runtime <- newScriptRuntime ui
+    let initialState =
+            (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                { appUi = ui
+                , appHistorySelectedBlock = Just (BlockId (-1))
+                }
+    snd <$> runFullscreenScriptWithState initialState
+        (map FullscreenScriptVty events <> [FullscreenScriptHalt])
 
 unfocusedPasteRendersDraft :: IO Bool
 unfocusedPasteRendersDraft = do

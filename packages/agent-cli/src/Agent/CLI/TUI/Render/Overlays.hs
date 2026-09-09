@@ -289,7 +289,7 @@ drawFooter state =
                     FocusPermission ->
                         "↑↓ select  │  Enter choose  │  Esc deny"
                     FocusScrollback ->
-                        "↑↓ blocks  │  Ctrl+J/K lines  │  PgUp/PgDn pages  │  wheel scroll  │  Tab/Space prompt  │  ⌘K meta"
+                        "↑↓ blocks  │  Ctrl+J/K lines  │  PgUp/PgDn pages  │  Ctrl+Y copy  │  Tab/Esc or type to prompt  │  ⌘K meta"
                     FocusComposer
                         | not state.appUi.uiAwaitingInput ->
                             "Enter steer  │  Ctrl+R dictate  │  Ctrl+Enter/Ctrl+O send now  │  Esc/Ctrl+C cancel  │  Tab scrollback  │  ⌘K meta"
