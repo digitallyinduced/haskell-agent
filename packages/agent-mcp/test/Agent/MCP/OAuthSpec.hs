@@ -3,12 +3,35 @@ module Agent.MCP.OAuthSpec (spec) where
 import Agent.MCP.OAuth
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Lazy as LBS
 import Data.Either (isLeft, isRight)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Encoding
 import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.MCP.OAuth" do
+    describe "oauthCallbackSuccessPage" do
+        let page = Encoding.decodeUtf8 (LBS.toStrict oauthCallbackSuccessPage)
+        it "acknowledges receipt without claiming the connection succeeded" do
+            page `shouldSatisfy` Text.isInfixOf "Your authorization response was received."
+            page `shouldSatisfy` Text.isInfixOf "Return to the app to check the connection status."
+            page `shouldSatisfy` Text.isInfixOf "You can safely close this tab."
+            page `shouldSatisfy` (not . Text.isInfixOf "MCP connected")
+            page `shouldSatisfy` (not . Text.isInfixOf "Authorization completed successfully")
+
+        it "renders the branded responsive card with light and dark appearances" do
+            page `shouldSatisfy` Text.isInfixOf "aria-hidden=\"true\">λ</span>"
+            page `shouldSatisfy` Text.isInfixOf "aria-labelledby=\"confirmation-title\""
+            page `shouldSatisfy` Text.isInfixOf "width=device-width, initial-scale=1"
+            page `shouldSatisfy` Text.isInfixOf "color-scheme:light dark"
+            page `shouldSatisfy` Text.isInfixOf "@media(prefers-color-scheme:dark)"
+            page `shouldSatisfy` Text.isInfixOf "@media(max-width:380px)"
+
+        it "requires no scripts, external assets, or navigation" do
+            mapM_ (\fragment -> page `shouldSatisfy` (not . Text.isInfixOf fragment))
+                ["<script", "<link", "src=", "href=", "url(", "<form"]
+
     describe "parseWwwAuthenticate" do
         it "parses quoted parameters" do
             parseWwwAuthenticate
