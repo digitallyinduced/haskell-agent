@@ -72,7 +72,7 @@ data TurnControl = TurnControl
     , turnControlCancelled :: !(TVar Bool)
     , turnControlCancel :: !(TVar (IO ()))
     , turnControlApprovals
-        :: !(TVar (Map Text (TMVar PermissionChoice)))
+        :: !(TVar (Map Text (Bool, TMVar PermissionChoice)))
     , turnControlApprovalCounter :: !(TVar Int)
     , turnControlInteractionCounter :: !(TVar Int)
     , turnControlAllowedTools :: !(TVar (Set.Set Text))
@@ -152,7 +152,7 @@ cancelTurn control = do
         writeTVar control.turnControlApprovals Map.empty
         pure (Map.elems current)
     atomically $
-        forM_ waiters \waiter ->
+        forM_ waiters \(_, waiter) ->
             void (tryPutTMVar waiter PermissionDeny)
     interactionWaiters <- atomically do
         current <- readTVar

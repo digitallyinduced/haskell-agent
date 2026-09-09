@@ -1331,6 +1331,7 @@ nativeHooks environment control sessionId cwd dialect = NativeRunHooks
         control.turnControlSetAgents
             (projectAgentEntries <$> snapshot)
     , nativeRequestApproval = requestToolApproval control
+    , nativeRequestFreshApproval = const (pure Nothing)
     , nativeRequestRootAccess =
         case environment.environmentSandbox of
             Just _ -> const (pure False)

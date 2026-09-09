@@ -131,6 +131,8 @@ data NativeRunHooks = NativeRunHooks
     , nativeRegisterCancel :: !(IO () -> IO ())
     , nativeRegisterAgentSnapshot :: !(IO [AgentEntry] -> IO ())
     , nativeRequestApproval :: !(ToolCall -> IO (Maybe PermissionChoice))
+    -- | A fresh decision for this exact invocation, without remembered grants.
+    , nativeRequestFreshApproval :: !(ToolCall -> IO (Maybe PermissionChoice))
     , nativeRequestRootAccess :: !(OsPath -> IO Bool)
     , nativeToolGroups :: ![AppToolGroup]
     -- | Compose the final model-visible tool surface once, before the generic

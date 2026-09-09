@@ -11,7 +11,8 @@ import Agent.CLI.MacOS.EngineMailbox (EngineMailbox, acceptEngineCommand)
 import Agent.CLI.MacOS.EngineState (EngineCommand(..))
 import Agent.CLI.MacOS.InteractionState (InteractionRuntime)
 import Agent.CLI.MacOS.NativeInteraction
-    ( nativePlanModeHooks, requestApproval, requestRootAccessFromClient )
+    ( nativePlanModeHooks, requestApproval, requestFreshApproval
+    , requestRootAccessFromClient )
 import Agent.CLI.MacOS.NativeLoopEvent (encodeNativeLoopEventWithChartCalls)
 import Agent.CLI.MacOS.NativeRequest (TurnStart(..))
 import Agent.CLI.MacOS.TurnEvents (nativeLoopEvent)
@@ -119,6 +120,8 @@ runNativeTurn
                 atomically . writeTVar control.turnControlAgentSnapshot
             , nativeRequestApproval =
                 requestApproval callback context control
+            , nativeRequestFreshApproval =
+                requestFreshApproval callback context control
             , nativeRequestRootAccess =
                 requestRootAccessFromClient callback context control
             , nativeToolGroups = [HostToolGroup nativeHostTools]

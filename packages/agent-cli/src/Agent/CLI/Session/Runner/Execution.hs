@@ -973,7 +973,7 @@ buildSessionApprovalRuntime host controls SessionRequest{..} =
         -- their generic permission dialog.
         requestFreshApproval requested =
             case startup.startupNativeHooks of
-                Just _ -> pure Nothing
+                Just hooks -> hooks.nativeRequestFreshApproval requested
                 Nothing -> case promptRequest of
                     Just _ -> pure Nothing
                     Nothing -> case host.hostFullscreen of

@@ -17,21 +17,33 @@ import Agent.CLI.MacOS.Bridge
     , turnStartCleanupId
     )
 import Agent.CLI.MacOS.RepositoryWorkers (withRepositoryCallbackThread)
+import Agent.CLI.MacOS.EngineEvents (EventCallback)
+import Agent.CLI.MacOS.InteractionState (InteractionRuntime(..))
+import Agent.CLI.MacOS.NativeInteraction (requestFreshApproval, resolveApproval)
+import Agent.CLI.MacOS.NativeRequest (BridgeRequest(..))
+import Agent.CLI.MacOS.TurnState (TurnControl(..), newTurnControl)
+import Agent.CLI.Permission (PermissionChoice(..))
+import Agent.ToolDispatch (ToolCall(..), ToolCallKind(..))
 import Control.Concurrent.Async (concurrently, withAsync)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, readMVar)
+import Control.Concurrent.MVar (newEmptyMVar, newMVar, putMVar, readMVar)
 import Control.Concurrent.STM
     ( atomically
     , newEmptyTMVarIO
     , newTVarIO
     , readTMVar
     , readTVarIO
+    , writeTVar
     )
 import Control.Exception.Safe (bracket, finally, tryAny)
 import Data.Either (isRight)
-import Data.IORef (newIORef)
+import Data.IORef (newIORef, modifyIORef', readIORef, writeIORef)
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
-import Foreign.C.Types (CInt(..))
+import qualified Data.Set as Set
+import Foreign.Ptr (FunPtr, castPtr, freeHaskellFunPtr, nullPtr)
+import Foreign.C.Types (CInt(..), CSize(..))
 import Foreign.StablePtr (castStablePtrToPtr, newStablePtr)
 import System.Directory
     ( createDirectory
@@ -41,6 +53,7 @@ import System.Directory
     )
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.IO (hClose, openTempFile)
+import System.Timeout (timeout)
 import Test.Hspec
     ( Spec
     , describe
@@ -67,12 +80,85 @@ foreign import ccall "ha_native_turn_options_stage_smoke"
 
 foreign import ccall "ha_turn_staging_discard_smoke"
     turnStagingDiscardSmoke :: IO CInt
+
+foreign import ccall "wrapper"
+    makeApprovalEventCallback :: EventCallback -> IO (FunPtr EventCallback)
+
+withinApprovalDeadline :: IO () -> IO ()
+withinApprovalDeadline action =
+    timeout 5000000 action `shouldReturn` Just ()
 #else
 import Test.Hspec (Spec, describe, it, pendingWith, shouldReturn)
 #endif
 
 spec :: Spec
 spec = describe "native bridge FFI" do
+#ifdef darwin_HOST_OS
+    it "requests fresh approvals despite remembered tool grants and rejects broad decisions" $ withinApprovalDeadline do
+        interactions <- InteractionRuntime
+            <$> newTVarIO Nothing <*> newMVar () <*> newTVarIO Map.empty
+        control <- newTurnControl "fresh-approval-test" Nothing Nothing interactions
+        atomically $
+            writeTVar control.turnControlAllowedTools (Set.singleton "shell_command")
+        events <- newIORef []
+        resolutions <- newIORef []
+        decision <- newIORef "allow_once"
+        let call = ToolCall
+                { callId = "fresh-call"
+                , name = "shell_command"
+                , arguments = "{\"command\":\"pwd\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Inspect directory\"}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+            callback _ pointer length = do
+                bytes <- BS.packCStringLen (castPtr pointer, fromIntegral length)
+                case Aeson.decodeStrict' bytes of
+                    Just event@(Aeson.Object object)
+                        | Just (Aeson.Object approval) <- KeyMap.lookup "approval" object
+                        , Just identifier <- KeyMap.lookup "id" approval -> do
+                            modifyIORef' events (<> [event])
+                            let resolution selectedDecision marker = BridgeRequest
+                                    "resolve" "approval.resolve"
+                                    (Aeson.object
+                                        ([ "approvalId" Aeson..= identifier
+                                         , "decision" Aeson..= (selectedDecision :: String)
+                                         ] <> maybe [] (\value -> ["onceOnly" Aeson..= (value :: Bool)]) marker))
+                            broad <- resolveApproval control (resolution "allow_tool" (Just True))
+                            legacy <- resolveApproval control (resolution "allow_once" Nothing)
+                            unsupported <- resolveApproval control (resolution "allow_once" (Just False))
+                            selected <- readIORef decision
+                            exact <- resolveApproval control
+                                (resolution selected (if selected == "deny" then Nothing else Just True))
+                            stale <- resolveApproval control (resolution "allow_once" (Just True))
+                            modifyIORef' resolutions (<> [broad, legacy, unsupported, exact, stale])
+                    _ -> pure ()
+        bracket (makeApprovalEventCallback callback) freeHaskellFunPtr \handler -> do
+            requestFreshApproval handler nullPtr control call
+                `shouldReturn` Just PermissionAllowOnce
+            requestFreshApproval handler nullPtr control call
+                `shouldReturn` Just PermissionAllowOnce
+            writeIORef decision "deny"
+            requestFreshApproval handler nullPtr control call
+                `shouldReturn` Just PermissionDeny
+        recorded <- readIORef events
+        length recorded `shouldBe` 3
+        let approvalField key (Aeson.Object object)
+                | Just (Aeson.Object approval) <- KeyMap.lookup "approval" object =
+                    KeyMap.lookup key approval
+            approvalField _ _ = Nothing
+        map (approvalField "onceOnly") recorded `shouldBe` replicate 3 (Just (Aeson.Bool True))
+        map (approvalField "arguments") recorded `shouldBe` replicate 3 (Just (Aeson.String call.arguments))
+        results <- readIORef resolutions
+        let resultEvent (Aeson.Object object) = KeyMap.lookup "ok" object
+            resultEvent _ = Nothing
+        map resultEvent results `shouldBe`
+            concat (replicate 3
+                [Just (Aeson.Bool False), Just (Aeson.Bool False), Just (Aeson.Bool False)
+                , Just (Aeson.Bool True), Just (Aeson.Bool False)])
+        readTVarIO control.turnControlAllowedTools
+            `shouldReturn` Set.singleton "shell_command"
+        Map.null <$> readTVarIO control.turnControlApprovals `shouldReturn` True
+#endif
     it "stages copied images and completes restart before destroy returns" do
 #ifdef darwin_HOST_OS
         imageAttachmentStageSmoke `shouldReturn` 0

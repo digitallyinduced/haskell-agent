@@ -136,8 +136,8 @@ resolveApprovalPrompt :: ToolCall -> Maybe PermissionChoice -> ApprovalPlan
 resolveApprovalPrompt = resolveApprovalPromptWith False
 
 -- | Resolve an interactive decision. Sensitive calls accept only a one-call
--- approval: broader choices are treated as approval for this invocation
--- without changing global or session policy.
+-- approval. An unavailable prompt or unsupported broad choice is not a user
+-- denial, and must never authorize execution or change approval policy.
 resolveApprovalPromptWith
     :: Bool
     -> ToolCall
@@ -146,9 +146,14 @@ resolveApprovalPromptWith
 resolveApprovalPromptWith requiresExplicitApproval call choice
     | requiresExplicitApproval =
         case choice of
-            Nothing -> denied
+            Nothing -> CompleteApproval
+                (Left "Fresh approval was not obtained: the approval prompt was unavailable or closed without a decision. The tool was not run.")
+                []
             Just PermissionDeny -> denied
-            Just _ -> approved
+            Just PermissionAllowOnce -> approved
+            Just _ -> CompleteApproval
+                (Left "This tool requires fresh approval for this invocation; a remembered or blanket approval cannot authorize it. The tool was not run.")
+                []
     | isComputerToolCallKind call.callKind =
         case choice of
             Nothing -> denied
