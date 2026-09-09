@@ -8,17 +8,22 @@
 -- RFC 9207 issuer validation of the authorization response.
 module Agent.CLI.McpOAuth
     ( LoginOptions(..)
+    , McpLoginHost(..)
     , defaultLoginOptions
+    , defaultMcpLoginHost
     , loginMcp
     , loginMcpWith
+    , loginMcpWithHost
     , loginMcpWithResult
     , logoutMcp
     , lookupServerOAuthConfig
+    , mcpOAuthCallbackTimeoutMicros
     , registerAuthorizedMcpServer
     ) where
 
 import Agent.CLI.Config (HarnessConfig(..), McpOAuthConfig(..), McpServerConfig(..), loadHarnessConfig, modifyHarnessConfig)
 import Agent.CLI.Error (formatException)
+import Agent.CLI.Login.Internal.Browser (openBrowser)
 import Agent.CLI.McpOAuthStore (loadMcpOAuthRecord, mcpOAuthStorePath, saveMcpOAuthRecord)
 import Agent.MCP (McpProtocolPreference(..))
 import qualified Agent.MCP.OAuth as OAuth
@@ -30,7 +35,7 @@ import Control.Concurrent.MVar
     )
 import Network.URI (parseURI, uriAuthority, uriRegName, uriScheme, uriUserInfo, uriQuery)
 import Control.Exception.Safe (bracket, bracketOnError, finally, tryAny)
-import Control.Monad (forM_, void, when)
+import Control.Monad (forM_, unless, void, when)
 import Crypto.Hash (Digest, SHA256, hash)
 import Data.Char (isAsciiLower, isDigit)
 import qualified Data.ByteArray as BA
@@ -61,9 +66,7 @@ import qualified Network.Wai as Wai
 import qualified Network.Wai.Handler.Warp as Warp
 import qualified System.Directory.OsPath as Dir
 import qualified System.Entropy
-import System.Exit (ExitCode(..))
 import System.OsPath (OsPath)
-import System.Process (rawSystem)
 import System.Timeout (timeout)
 
 data LoginOptions = LoginOptions
@@ -76,16 +79,61 @@ data LoginOptions = LoginOptions
 defaultLoginOptions :: LoginOptions
 defaultLoginOptions = LoginOptions { loginAdditionalScopes = [] }
 
+data Callback = Callback
+    { callbackCode :: Maybe Text
+    , callbackState :: Maybe Text
+    , callbackIss :: Maybe Text
+    , callbackError :: Maybe Text
+    , callbackErrorDescription :: Maybe Text
+    }
+
+-- | Host-owned presentation for MCP OAuth. The CLI prints to stdout; the
+-- fullscreen manager shows notices and the authorization URL in overlays.
+data McpLoginHost = McpLoginHost
+    { mcpLoginSay :: !(Text -> IO ())
+    , mcpLoginPresentAuthorization :: !(Text -> IO (Either Text ()))
+    , mcpLoginAwaitCallback :: !(IO Callback -> IO (Maybe Callback))
+    }
+
+mcpOAuthCallbackTimeoutMicros :: Int
+mcpOAuthCallbackTimeoutMicros = 5 * 60 * 1_000_000
+
+defaultMcpLoginHost :: McpLoginHost
+defaultMcpLoginHost =
+    McpLoginHost
+        { mcpLoginSay = putStrLn . Text.unpack
+        , mcpLoginPresentAuthorization = \url -> do
+            opened <- openBrowser url
+            unless opened $
+                putStrLn
+                    "Could not launch a browser automatically; open the URL above."
+            pure (Right ())
+        , mcpLoginAwaitCallback =
+            timeout mcpOAuthCallbackTimeoutMicros
+        }
+
 loginMcp :: Text -> IO ()
 loginMcp = loginMcpWith defaultLoginOptions
+
+loginMcpWith :: LoginOptions -> Text -> IO ()
+loginMcpWith options serverUrl =
+    loginMcpWithHost defaultMcpLoginHost options serverUrl
+        >>= either failText (const (pure ()))
 
 -- | Same flow as 'loginMcpWith', returning the success message instead of
 -- throwing. Used by the TUI so authorization can stay inside the overlay.
 loginMcpWithResult :: LoginOptions -> Text -> IO (Either Text Text)
-loginMcpWithResult options serverUrl =
-    tryAny (loginMcpWith options serverUrl) >>= \case
+loginMcpWithResult = loginMcpWithHost defaultMcpLoginHost
+
+loginMcpWithHost
+    :: McpLoginHost
+    -> LoginOptions
+    -> Text
+    -> IO (Either Text Text)
+loginMcpWithHost host options serverUrl =
+    tryAny (loginMcpWithHostThrow host options serverUrl) >>= \case
         Left err -> pure (Left (formatException err))
-        Right () -> pure (Right "MCP authorization saved.")
+        Right message -> pure (Right message)
 
 -- | The @client_id@ chosen for this login and how it was obtained.
 data ResolvedClient = ResolvedClient
@@ -95,8 +143,12 @@ data ResolvedClient = ResolvedClient
     , resolvedMetadataUrl :: Maybe Text
     }
 
-loginMcpWith :: LoginOptions -> Text -> IO ()
-loginMcpWith options serverUrl = do
+loginMcpWithHostThrow
+    :: McpLoginHost
+    -> LoginOptions
+    -> Text
+    -> IO Text
+loginMcpWithHostThrow host options serverUrl = do
     home <- Dir.getHomeDirectory
     harness <- loadHarnessConfig home >>= either failText pure
     let oauthConfig = lookupServerOAuthConfig serverUrl harness
@@ -104,18 +156,22 @@ loginMcpWith options serverUrl = do
     manager <- newTlsManager
     challenge <- OAuth.probeAuthorizationChallenge manager serverUrl >>= \case
         Left err -> do
-            putStrLn ("Warning: " <> Text.unpack err <> "; falling back to well-known discovery.")
+            host.mcpLoginSay
+                ("Warning: " <> err <> "; falling back to well-known discovery.")
             pure Nothing
         Right probe -> do
             when (probe.probeStatus /= 401 && probe.probeStatus /= 403) $
-                putStrLn ("Note: the MCP server answered the unauthenticated probe with HTTP "
-                    <> show probe.probeStatus <> "; continuing with discovery.")
+                host.mcpLoginSay
+                    ("Note: the MCP server answered the unauthenticated probe with HTTP "
+                        <> Text.pack (show probe.probeStatus)
+                        <> "; continuing with discovery.")
             pure probe.probeChallenge
     resource <- OAuth.discoverProtectedResourceMetadata manager serverUrl
         (challenge >>= (.challengeResourceMetadata)) >>= either failText pure
     stored <- loadMcpOAuthRecord serverUrl >>= \case
         Left err -> do
-            putStrLn ("Warning: ignoring unreadable MCP OAuth record: " <> Text.unpack err)
+            host.mcpLoginSay
+                ("Warning: ignoring unreadable MCP OAuth record: " <> err)
             pure Nothing
         Right record -> pure record
     let storedIssuer = stored >>= (.extraIssuer) . snd
@@ -130,8 +186,9 @@ loginMcpWith options serverUrl = do
         sameIssuer = storedIssuer == Just recordedIssuer
         previous = if sameIssuer then stored else Nothing
     when (isJust stored && not sameIssuer) $
-        putStrLn ("Note: the authorization server changed to " <> Text.unpack recordedIssuer
-            <> "; the previous client registration and granted scopes will not be reused.")
+        host.mcpLoginSay
+            ("Note: the authorization server changed to " <> recordedIssuer
+                <> "; the previous client registration and granted scopes will not be reused.")
     let preferredPort = previous >>= (.extraRedirectUri) . snd >>= OAuth.loopbackRedirectPort
     bracket (openCallbackSocket preferredPort) close $ \listener -> do
         port <- callbackPort listener
@@ -162,7 +219,8 @@ loginMcpWith options serverUrl = do
         plan <- either failText pure (OAuth.selectClientRegistration registrationOptions metadata)
         client <- case plan of
             OAuth.UsePreRegisteredClient pre -> do
-                putStrLn "Using the pre-registered OAuth client from ~/.haskell-agent/config.json."
+                host.mcpLoginSay
+                    "Using the pre-registered OAuth client from ~/.haskell-agent/config.json."
                 pure ResolvedClient
                     { resolvedClientId = pre.preRegisteredClientId
                     , resolvedClientSecret = pre.preRegisteredClientSecret
@@ -170,7 +228,8 @@ loginMcpWith options serverUrl = do
                     , resolvedMetadataUrl = Nothing
                     }
             OAuth.UseClientIdMetadataDocument url -> do
-                putStrLn ("Using the Client ID Metadata Document " <> Text.unpack url <> " as client_id.")
+                host.mcpLoginSay
+                    ("Using the Client ID Metadata Document " <> url <> " as client_id.")
                 pure ResolvedClient
                     { resolvedClientId = url
                     , resolvedClientSecret = Nothing
@@ -178,7 +237,8 @@ loginMcpWith options serverUrl = do
                     , resolvedMetadataUrl = Just url
                     }
             OAuth.ReuseDynamicRegistration clientId -> do
-                putStrLn "Reusing the dynamic client registration from the previous login."
+                host.mcpLoginSay
+                    "Reusing the dynamic client registration from the previous login."
                 pure ResolvedClient
                     { resolvedClientId = clientId
                     , resolvedClientSecret = Nothing
@@ -209,10 +269,11 @@ loginMcpWith options serverUrl = do
                 <> "&code_challenge_method=S256&state=" <> encode state
                 <> (if Text.null scopeText then "" else "&scope=" <> encode scopeText)
                 <> "&resource=" <> encode resourceUri
-        putStrLn ("Opening browser for MCP authorization: " <> Text.unpack authUrl)
-        _ <- openBrowser authUrl
-        callback <- timeout (5 * 60 * 1000000) (receiveCallback listener)
-            >>= maybe (failText "Timed out waiting for MCP OAuth callback") pure
+        host.mcpLoginSay ("Opening browser for MCP authorization: " <> authUrl)
+        host.mcpLoginPresentAuthorization authUrl >>= either failText (const (pure ()))
+        callback <-
+            host.mcpLoginAwaitCallback (receiveCallback listener)
+                >>= maybe (failText "Timed out waiting for MCP OAuth callback") pure
         -- RFC 9207: validate the issuer before acting on any other parameter,
         -- including error responses.
         either failText pure $ OAuth.validateAuthorizationResponseIssuer
@@ -249,19 +310,27 @@ loginMcpWith options serverUrl = do
                             , extraRedirectUri = Just redirect
                             }
                     when (Text.null tokenFile.tokenRefreshToken) $
-                        putStrLn "Warning: MCP provider returned no refresh token; reauthorization may be required."
+                        host.mcpLoginSay
+                            "Warning: MCP provider returned no refresh token; reauthorization may be required."
                     saveMcpOAuthRecord serverUrl tokenFile extra
                         >>= either failText pure
-                    putStrLn "MCP authorization saved."
                     registerAuthorizedMcpServer home serverUrl >>= \case
                         Left err -> failText
                             ("MCP authorization was saved, but server registration failed: " <> err)
                         Right (name, enabled) -> do
-                            putStrLn ("MCP server configured: " <> Text.unpack name)
-                            if enabled
-                                then putStrLn "Start a new session to connect this server."
-                                else putStrLn ("This server remains disabled. Enable it with: agent-cli mcp enable "
-                                    <> Text.unpack (shellQuote name))
+                            let followUp =
+                                    if enabled
+                                        then "Start a new session to connect this server."
+                                        else
+                                            "This server remains disabled. Enable it with: agent-cli mcp enable "
+                                                <> shellQuote name
+                                message =
+                                    "MCP authorization saved. MCP server configured: "
+                                        <> name
+                                        <> ". "
+                                        <> followUp
+                            host.mcpLoginSay message
+                            pure message
 
 -- | Register only after the token record has been persisted successfully.
 -- Re-read under the configuration lock so browser-time edits are preserved.
@@ -352,14 +421,6 @@ sameMcpEndpoint left right =
                 && uriQuery leftUri == uriQuery rightUri
         _ -> False
 
-data Callback = Callback
-    { callbackCode :: Maybe Text
-    , callbackState :: Maybe Text
-    , callbackIss :: Maybe Text
-    , callbackError :: Maybe Text
-    , callbackErrorDescription :: Maybe Text
-    }
-
 -- | Listen on the loopback interface, preferring the port used by the
 -- previous login so a stored dynamic registration's redirect URI can be
 -- reproduced exactly.
@@ -443,15 +504,6 @@ randomUrlBytes n = do
 
 encode :: Text -> Text
 encode = Encoding.decodeUtf8 . urlEncode True . Encoding.encodeUtf8
-
-openBrowser :: Text -> IO Bool
-openBrowser url = do
-    result <- tryAny (rawSystem "open" [Text.unpack url])
-    case result of
-        Right ExitSuccess -> pure True
-        _ -> do
-            result' <- tryAny (rawSystem "xdg-open" [Text.unpack url])
-            pure (case result' of Right ExitSuccess -> True; _ -> False)
 
 failText :: Text -> IO a
 failText = ioError . userError . Text.unpack

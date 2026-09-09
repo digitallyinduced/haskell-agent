@@ -228,6 +228,13 @@ spec = describe "Agent.CLI.McpManager" do
                             ]
                 [] -> expectationFailure "expected a configured HTTP server"
 
+        it "renders the authorization URL in the overlay when the browser cannot open" do
+            let url = "https://auth.example.test/authorize?client_id=mcp"
+                body = mcpAuthorizationBody False url
+            body `shouldSatisfy` Text.isInfixOf url
+            body `shouldSatisfy`
+                Text.isInfixOf "could not be opened automatically"
+
 server :: Bool -> Text.Text -> McpServerConfig
 server enabled command =
     defaultMcpServerConfig

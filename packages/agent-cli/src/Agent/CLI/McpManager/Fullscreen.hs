@@ -5,6 +5,7 @@ module Agent.CLI.McpManager.Fullscreen
     ( McpDashboardAction(..)
     , McpNotice(..)
     , McpServerMenuAction(..)
+    , mcpAuthorizationBody
     , mcpDashboardBody
     , mcpDashboardEntries
     , mcpServerMenuBody
@@ -32,9 +33,12 @@ import Agent.CLI.McpManager
     , initialMcpManagerState
     , mcpEntryTransport
     )
+import Agent.CLI.Login.Internal.Browser (openBrowser)
 import Agent.CLI.McpOAuth
-    ( defaultLoginOptions
-    , loginMcpWithResult
+    ( McpLoginHost(..)
+    , defaultLoginOptions
+    , loginMcpWithHost
+    , mcpOAuthCallbackTimeoutMicros
     )
 import Agent.CLI.TUI.App
     ( FullscreenRuntime
@@ -45,6 +49,7 @@ import Agent.CLI.TUI.App
 import Agent.MCP (McpToolRegistration)
 import Agent.TUI.Model (UiEvent(UiSetNotice), progressNotice)
 import Control.Exception.Safe (bracket_)
+import System.Timeout (timeout)
 import Data.Char (isControl)
 import Data.Maybe (catMaybes)
 import qualified Data.Map.Strict as Map
@@ -262,10 +267,10 @@ runFullscreenMcpManager runtime home registrations warnings =
                             snapshot
                             entry
                     Just url ->
-                        withLoginProgress
-                            runtime
-                            ("Authorizing " <> entry.mcpEntryName <> "…")
-                            (loginMcpWithResult defaultLoginOptions url)
+                        loginMcpWithHost
+                            (fullscreenMcpLoginHost runtime)
+                            defaultLoginOptions
+                            url
                             >>= \case
                                 Left err ->
                                     serverMenu
@@ -514,6 +519,52 @@ truncateText :: Int -> Text -> Text
 truncateText limit value
     | Text.length value <= limit = value
     | otherwise = Text.take (max 0 (limit - 1)) value <> "…"
+
+fullscreenMcpLoginHost :: FullscreenRuntime -> McpLoginHost
+fullscreenMcpLoginHost runtime =
+    McpLoginHost
+        { mcpLoginSay =
+            \message ->
+                emitUiEvent runtime
+                    (UiSetNotice (Just (progressNotice message)))
+        , mcpLoginPresentAuthorization =
+            presentMcpAuthorizationFullscreen runtime
+        , mcpLoginAwaitCallback = \wait ->
+            withLoginProgress runtime "Waiting for MCP authorization…" $
+                timeout mcpOAuthCallbackTimeoutMicros wait
+        }
+
+presentMcpAuthorizationFullscreen
+    :: FullscreenRuntime
+    -> Text
+    -> IO (Either Text ())
+presentMcpAuthorizationFullscreen runtime url = do
+    opened <- openBrowser url
+    choice <-
+        requestFullscreenChoiceWithBody
+            runtime
+            "Authorize MCP server"
+            (mcpAuthorizationBody opened url)
+            0
+            [ ( "Continue"
+              , "Finish browser authorization and continue"
+              )
+            , ("Cancel", "Stop without saving credentials")
+            ]
+    pure $ case choice of
+        Just 0 -> Right ()
+        _ -> Left "MCP authorization was cancelled."
+
+mcpAuthorizationBody :: Bool -> Text -> Text
+mcpAuthorizationBody opened url =
+    Text.intercalate "\n\n"
+        [ "[Open the authorization page](" <> url <> ")."
+        , if opened
+            then
+                "A browser window was opened automatically. Complete the sign-in, then return here."
+            else
+                "The browser could not be opened automatically. Use the link above, then return here."
+        ]
 
 withLoginProgress :: FullscreenRuntime -> Text -> IO a -> IO a
 withLoginProgress runtime message =
