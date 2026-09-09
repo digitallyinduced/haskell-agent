@@ -109,6 +109,7 @@ instance Aeson.FromJSON TurnReference where
 data ApprovalResolution = ApprovalResolution
     { approvalResolutionId :: !Text
     , approvalResolutionDecision :: !Text
+    , approvalResolutionOnceOnly :: !Bool
     }
 
 instance Aeson.FromJSON ApprovalResolution where
@@ -116,6 +117,7 @@ instance Aeson.FromJSON ApprovalResolution where
         ApprovalResolution
             <$> object .: "approvalId"
             <*> object .: "decision"
+            <*> (object .:? "onceOnly" Aeson..!= False)
 
 data SessionPageRequest = SessionPageRequest
     { sessionPageId :: !Text

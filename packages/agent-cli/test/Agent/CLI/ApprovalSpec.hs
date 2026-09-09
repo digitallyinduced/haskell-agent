@@ -258,13 +258,27 @@ spec = do
                             "✓ always allow run_terminal_command this session")
                     ]
 
-        it "never persists broader approval for an explicit-confirmation call" do
+        it "distinguishes unavailable fresh approval from an explicit denial" do
+            resolveApprovalPromptWith True mutatingCall Nothing
+                `shouldBe` CompleteApproval
+                    (Left "Fresh approval was not obtained: the approval prompt was unavailable or closed without a decision. The tool was not run.")
+                    []
+            resolveApprovalPromptWith True mutatingCall (Just PermissionDeny)
+                `shouldBe` CompleteApproval (Right False) []
+            resolveApprovalPromptWith True mutatingCall (Just PermissionAllowOnce)
+                `shouldBe` CompleteApproval (Right True) []
+
+        it "rejects broader approval for an explicit-confirmation call" do
             resolveApprovalPromptWith True mutatingCall
                 (Just PermissionAllowAll)
-                `shouldBe` CompleteApproval (Right True) []
+                `shouldBe` CompleteApproval
+                    (Left "This tool requires fresh approval for this invocation; a remembered or blanket approval cannot authorize it. The tool was not run.")
+                    []
             resolveApprovalPromptWith True mutatingCall
                 (Just PermissionAllowTool)
-                `shouldBe` CompleteApproval (Right True) []
+                `shouldBe` CompleteApproval
+                    (Left "This tool requires fresh approval for this invocation; a remembered or blanket approval cannot authorize it. The tool was not run.")
+                    []
         it "preserves project-wide approval semantics for a computer workflow" do
             let call = ToolCall
                     { callId = "computer-1"
@@ -481,7 +495,7 @@ spec = do
             permissionRequests <- newIORef (0 :: Int)
             let request _ = do
                     modifyIORef' permissionRequests (+ 1)
-                    pure (Just PermissionAllowAll)
+                    pure (Just PermissionAllowOnce)
                 sensitiveTool = tool "sensitive" AlwaysConfirm
                 sensitiveCall =
                     functionToolCall "call-sensitive" "sensitive" "{}"
@@ -502,7 +516,7 @@ spec = do
             permissionRequests <- newIORef (0 :: Int)
             let request _ = do
                     modifyIORef' permissionRequests (+ 1)
-                    pure (Just PermissionAllowAll)
+                    pure (Just PermissionAllowOnce)
                 approve call = approveToolDecisionWithReporter
                     request (\_ -> pure ()) policy allowed
                     (registry [callSensitiveTool]) plan call
@@ -534,7 +548,7 @@ spec = do
                 approve = approveToolDecisionWithReporterAndPersistenceClassified
                     (const (pure (Just True)))
                     (\_ -> modifyIORef' permissionRequests (+ 1)
-                        >> pure (Just PermissionAllowAll))
+                        >> pure (Just PermissionAllowOnce))
                     (\_ -> pure ())
                     (pure ())
                     policy allowed tools plan

@@ -3,6 +3,7 @@
 module Agent.CLI.MacOS.NativeInteraction
     ( nativePlanModeHooks
     , requestApproval
+    , requestFreshApproval
     , requestApprovalFromClient
     , boundedApprovalArguments
     , requestRootAccessFromClient
@@ -233,7 +234,25 @@ requestApprovalFromClient
     -> TurnControl
     -> ToolCall
     -> IO (Maybe PermissionChoice)
-requestApprovalFromClient callback context control call = do
+requestApprovalFromClient = requestApprovalWithScope False
+
+-- | Never consult or populate the per-tool allowance for a fresh request.
+requestFreshApproval
+    :: FunPtr EventCallback
+    -> Ptr ()
+    -> TurnControl
+    -> ToolCall
+    -> IO (Maybe PermissionChoice)
+requestFreshApproval = requestApprovalWithScope True
+
+requestApprovalWithScope
+    :: Bool
+    -> FunPtr EventCallback
+    -> Ptr ()
+    -> TurnControl
+    -> ToolCall
+    -> IO (Maybe PermissionChoice)
+requestApprovalWithScope onceOnly callback context control call = do
     waiter <- newEmptyTMVarIO
     approvalId <- atomically do
         current <- readTVar control.turnControlApprovalCounter
@@ -245,7 +264,7 @@ requestApprovalFromClient callback context control call = do
         writeTVar control.turnControlApprovalCounter next
         modifyTVar'
             control.turnControlApprovals
-            (Map.insert approvalId waiter)
+            (Map.insert approvalId (onceOnly, waiter))
         pure approvalId
     let (arguments, truncated) = boundedApprovalArguments call
     sendEvent callback context $
@@ -261,6 +280,7 @@ requestApprovalFromClient callback context control call = do
                 , "argumentsEncrypted" Aeson..= call.argumentsEncrypted
                 , "async" Aeson..= (toolCallMode call == AsyncToolCall)
                 , "truncated" Aeson..= truncated
+                , "onceOnly" Aeson..= onceOnly
                 ]
             ]
     choice <- atomically (takeTMVar waiter)
@@ -270,7 +290,7 @@ requestApprovalFromClient callback context control call = do
             (Map.delete approvalId)
     case choice of
         PermissionAllowTool
-            | not (isComputerToolCallKind call.callKind) ->
+            | not onceOnly && not (isComputerToolCallKind call.callKind) ->
             atomically $
                 modifyTVar'
                     control.turnControlAllowedTools
@@ -339,8 +359,16 @@ resolveApproval control request =
                         case Map.lookup
                             resolution.approvalResolutionId
                             current of
-                                Nothing -> pure False
-                                Just waiter -> do
+                                Nothing ->
+                                    pure (Left "approval request is no longer active")
+                                Just (onceOnly, _)
+                                    | onceOnly && choice /= PermissionAllowOnce
+                                        && choice /= PermissionDeny ->
+                                            pure (Left "this approval accepts only allow_once or deny")
+                                    | onceOnly && choice == PermissionAllowOnce
+                                        && not resolution.approvalResolutionOnceOnly ->
+                                            pure (Left "the client must confirm onceOnly support for this approval")
+                                Just (_, waiter) -> do
                                     published <- tryPutTMVar waiter choice
                                     if published
                                         then writeTVar
@@ -349,13 +377,12 @@ resolveApproval control request =
                                                 resolution.approvalResolutionId
                                                 current)
                                         else pure ()
-                                    pure published
-                    pure $
-                        if accepted
-                            then successEvent request.requestId True
-                            else failureEvent
-                                request.requestId
-                                "approval request is no longer active"
+                                    pure $
+                                        if published then Right ()
+                                        else Left "approval request is no longer active"
+                    pure $ case accepted of
+                        Right () -> successEvent request.requestId True
+                        Left message -> failureEvent request.requestId message
 
 permissionChoice :: Text -> Maybe PermissionChoice
 permissionChoice = \case

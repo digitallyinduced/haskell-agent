@@ -4,6 +4,7 @@ module Agent.Server.Runtime
     , openServerRuntime
     , closeServerRuntime
     , serverRuntimeBackend
+    , requestFreshToolApproval
     ) where
 
 import Agent.CLI.GatewayBoundary
@@ -1331,6 +1332,8 @@ nativeHooks environment control sessionId cwd dialect = NativeRunHooks
         control.turnControlSetAgents
             (projectAgentEntries <$> snapshot)
     , nativeRequestApproval = requestToolApproval control
+    , nativeRequestFreshApproval =
+        requestFreshToolApproval control.turnControlRequestInput
     , nativeRequestRootAccess =
         case environment.environmentSandbox of
             Just _ -> const (pure False)
@@ -1406,10 +1409,26 @@ requestToolApproval
     -> ToolCall
     -> IO (Maybe PermissionChoice)
 requestToolApproval control call =
-    control.turnControlRequestInput HumanRequestSpec
+    requestToolApprovalWithScope False control.turnControlRequestInput call
+
+-- | Ask for this exact invocation, even when ordinary approvals are remembered.
+-- Never offer or accept a reusable grant on this path.
+requestFreshToolApproval
+    :: (HumanRequestSpec -> IO (Either Text HumanResponse))
+    -> ToolCall
+    -> IO (Maybe PermissionChoice)
+requestFreshToolApproval = requestToolApprovalWithScope True
+
+requestToolApprovalWithScope
+    :: Bool
+    -> (HumanRequestSpec -> IO (Either Text HumanResponse))
+    -> ToolCall
+    -> IO (Maybe PermissionChoice)
+requestToolApprovalWithScope onceOnly requestInput call =
+    requestInput HumanRequestSpec
         { humanRequestSpecKind = ToolApprovalRequest
         , humanRequestSpecPrompt =
-            "Allow mutating tool "
+            (if onceOnly then "Allow this invocation only of tool " else "Allow mutating tool ")
                 <> call.name
                 <> " (call "
                 <> call.callId
@@ -1418,16 +1437,15 @@ requestToolApproval control call =
                     then "<encrypted>"
                     else call.arguments
         , humanRequestSpecOptions =
-            [ "allow_once"
-            , "allow_tool"
-            , "deny"
-            ]
+            if onceOnly
+                then ["allow_once", "deny"]
+                else ["allow_once", "allow_tool", "deny"]
         } >>= \case
             Left _ -> pure Nothing
             Right response ->
                 pure case response.humanResponseDecision of
                     "allow_once" -> Just PermissionAllowOnce
-                    "allow_tool" -> Just PermissionAllowTool
+                    "allow_tool" | not onceOnly -> Just PermissionAllowTool
                     "deny" -> Just PermissionDeny
                     _ -> Nothing
 

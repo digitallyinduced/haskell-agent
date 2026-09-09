@@ -131,6 +131,7 @@ test-suite agent-server-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.Server.ApplicationSpec
+                    , Agent.Server.ApprovalSpec
                     , Agent.Server.AuthSpec
                     , Agent.Server.ConfigSpec
                     , Agent.Server.EventSpec
@@ -141,6 +142,7 @@ test-suite agent-server-test
     ghc-options:      -threaded
     build-depends:    agent-server
                     , agent-core
+                    , agent-cli-runtime
                     , aeson
                     , async
                     , base >= 4.17 && < 5

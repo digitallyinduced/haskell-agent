@@ -2,6 +2,7 @@ module Main (main) where
 
 import Test.Hspec (hspec)
 import Agent.Server.ApplicationSpec qualified
+import Agent.Server.ApprovalSpec qualified
 import Agent.Server.AuthSpec qualified
 import Agent.Server.ConfigSpec qualified
 import Agent.Server.EventSpec qualified
@@ -19,6 +20,7 @@ main = do
             Agent.Server.SandboxSpec.fakeSandboxRunner arguments
         _ ->
             hspec do
+                Agent.Server.ApprovalSpec.spec
                 Agent.Server.AuthSpec.spec
                 Agent.Server.ConfigSpec.spec
                 Agent.Server.EventSpec.spec
