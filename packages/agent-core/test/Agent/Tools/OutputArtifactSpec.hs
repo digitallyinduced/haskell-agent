@@ -11,6 +11,10 @@ import Agent.Tools.OutputArtifact
     ( OutputArtifact(..)
     , artifactTools
     , boundedPreview
+    , openOutputArtifact
+    , appendOutputArtifact
+    , finishOutputArtifact
+    , renderOutputArtifactNotice
     , finalizeToolOutput
     , OutputArtifactMetadata(..)
     , outputArtifactMetadata
@@ -36,6 +40,7 @@ import System.Directory
     ( createDirectory
     , getTemporaryDirectory
     , removeDirectoryRecursive
+    , removeFile
     )
 import System.FilePath ((</>))
 import System.OsPath (unsafeEncodeUtf)
@@ -132,6 +137,37 @@ spec = describe "Agent.Tools.OutputArtifact" do
                                 `shouldBe` Right 200010000
                     instruction `shouldSatisfy` Text.isInfixOf "untrusted data"
                     instruction `shouldSatisfy` Text.isInfixOf "Sum the values."
+
+    it "verifies stored bytes and retains failure across repeated finishes" do
+        withTempEnv \env ->
+            openOutputArtifact env >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right writer -> do
+                    appendOutputArtifact writer "hello" `shouldReturn` Right ()
+                    complete <- finishOutputArtifact writer
+                    complete.artifactTruncated `shouldBe` False
+                    ByteString.writeFile complete.artifactPath "hi"
+                    partial <- finishOutputArtifact writer
+                    partial.artifactStoredBytes `shouldBe` 2
+                    partial.artifactTruncated `shouldBe` True
+                    let notice = renderOutputArtifactNotice "test" partial
+                    notice `shouldSatisfy` Text.isInfixOf "stored file is incomplete"
+                    notice `shouldSatisfy` (not . Text.isInfixOf "complete tool response stored")
+                    ByteString.writeFile complete.artifactPath "hello"
+                    retried <- finishOutputArtifact writer
+                    retried.artifactTruncated `shouldBe` True
+
+    it "does not claim completeness when the finalized file cannot be inspected" do
+        withTempEnv \env ->
+            openOutputArtifact env >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right writer -> do
+                    appendOutputArtifact writer "hello" `shouldReturn` Right ()
+                    complete <- finishOutputArtifact writer
+                    removeFile complete.artifactPath
+                    missing <- finishOutputArtifact writer
+                    missing.artifactStoredBytes `shouldBe` 0
+                    missing.artifactTruncated `shouldBe` True
 
     it "allocates unique handles concurrently" do
         withTempEnv \env -> do

@@ -59,6 +59,7 @@ import System.Directory
     ( createDirectoryIfMissing
     , doesFileExist
     , doesDirectoryExist
+    , getFileSize
     , pathIsSymbolicLink
     , removeFile
     )
@@ -556,22 +557,34 @@ appendOutputArtifact writer bytes =
 finishOutputArtifact :: OutputArtifactWriter -> IO OutputArtifact
 finishOutputArtifact writer =
     modifyMVar writer.outputWriterState \state -> do
-        case state.writerHandle of
-            Nothing -> pure ()
+        closeResult <- case state.writerHandle of
+            Nothing -> pure (Right ())
             Just handle -> do
-                _ <- tryAny (hClose handle)
+                result <- tryAny (hClose handle)
                 _ <- tryAny (setFileMode writer.outputWriterPath 0o600)
-                pure ()
+                pure result
+        -- A successful hPut may only have filled a userspace buffer.  Verify
+        -- the file after closing, and retain failures across repeated finishes.
+        sizeResult <- tryAny (getFileSize writer.outputWriterPath)
+        let failure = case (state.writerFailure, closeResult, sizeResult) of
+                (Just err, _, _) -> Just err
+                (_, Left exception, _) -> Just (exceptionText exception)
+                (_, _, Left exception) -> Just (exceptionText exception)
+                (_, _, Right size)
+                    | size /= fromIntegral state.writerStored ->
+                        Just "tool-output artifact size differs from written bytes"
+                _ -> Nothing
+            stored = either (const 0) fromIntegral sizeResult
         let artifact = OutputArtifact
                 { artifactHandle = writer.outputWriterName
                 , artifactPath = writer.outputWriterPath
                 , artifactObservedBytes = state.writerObserved
-                , artifactStoredBytes = state.writerStored
+                , artifactStoredBytes = stored
                 , artifactTruncated =
-                    state.writerObserved > state.writerStored
-                        || maybe False (const True) state.writerFailure
+                    state.writerObserved /= stored
+                        || maybe False (const True) failure
                 }
-        pure (state { writerHandle = Nothing }, artifact)
+        pure (state { writerHandle = Nothing, writerFailure = failure }, artifact)
 
 abortOutputArtifact :: OutputArtifactWriter -> IO ()
 abortOutputArtifact writer = do
