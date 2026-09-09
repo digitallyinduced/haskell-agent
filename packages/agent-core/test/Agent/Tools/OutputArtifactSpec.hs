@@ -11,6 +11,10 @@ import Agent.Tools.OutputArtifact
     ( OutputArtifact(..)
     , artifactTools
     , boundedPreview
+    , openOutputArtifact
+    , appendOutputArtifact
+    , finishOutputArtifact
+    , renderOutputArtifactNotice
     , finalizeToolOutput
     , OutputArtifactMetadata(..)
     , outputArtifactMetadata
@@ -25,13 +29,20 @@ import Agent.Tools.Types
     , setToolSessionTmp
     )
 import Control.Concurrent.Async (mapConcurrently)
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Lazy as LazyByteString
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (find, nub)
+import Data.Maybe (fromJust)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Encoding
 import System.Directory
     ( createDirectory
     , getTemporaryDirectory
     , removeDirectoryRecursive
+    , removeFile
     )
 import System.FilePath ((</>))
 import System.OsPath (unsafeEncodeUtf)
@@ -85,6 +96,8 @@ spec = describe "Agent.Tools.OutputArtifact" do
                 call = functionToolCall "c" "shell" ""
             rendered <- finalizeToolOutput env call (Text.replicate 100 "x")
             rendered `shouldSatisfy` Text.isInfixOf "storage cap reached"
+            rendered `shouldSatisfy` Text.isInfixOf "stored output is incomplete"
+            rendered `shouldSatisfy` (not . Text.isInfixOf "complete tool response stored")
             handles <- listArtifactHandles rendered
             case handles of
                 [] -> expectationFailure "artifact handle missing from marker"
@@ -92,6 +105,72 @@ spec = describe "Agent.Tools.OutputArtifact" do
                     readOutputArtifact env handle >>= \case
                         Left err -> expectationFailure (Text.unpack err)
                         Right stored -> Text.length stored `shouldBe` 16
+
+    it "exports complete single-line JSON explicitly for programmatic aggregation" do
+        withTempEnv \env -> do
+            let values = [1 .. 20000] :: [Int]
+                bytes = LazyByteString.toStrict (Aeson.encode values)
+            rendered <- finalizeToolOutput env
+                (functionToolCall "response" "mcp_call" "{}")
+                (Encoding.decodeUtf8 bytes)
+            handles <- listArtifactHandles rendered
+            case handles of
+                [] -> expectationFailure "artifact handle missing"
+                handle : _ -> do
+                    captured <- newIORef ""
+                    let analysis _ _ instruction =
+                            writeIORef captured instruction >> pure (Right "spawned")
+                    _ <- runArtifactToolWithAnalysis env (Just analysis)
+                        "analyze_tool_output" $
+                        functionToolCall "analysis" "analyze_tool_output"
+                            ("{\"handle\":\"" <> handle <> "\",\"instruction\":\"Sum the values.\"}")
+                    instruction <- readIORef captured
+                    exported <- runArtifactTool env "export_tool_output" $
+                        functionToolCall "export" "export_tool_output"
+                            ("{\"handle\":\"" <> handle <> "\"}")
+                    case exported >>= decodeObject of
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right result -> case KeyMap.lookup "path" result of
+                            Just (Aeson.String path) -> do
+                                stored <- ByteString.readFile (Text.unpack path)
+                                stored `shouldBe` bytes
+                                (sum <$> (Aeson.eitherDecodeStrict stored :: Either String [Int]))
+                                    `shouldBe` Right 200010000
+                            _ -> expectationFailure "export path missing"
+                    instruction `shouldSatisfy` Text.isInfixOf "export_tool_output"
+                    instruction `shouldSatisfy` Text.isInfixOf "untrusted data"
+                    instruction `shouldSatisfy` Text.isInfixOf "Sum the values."
+
+    it "verifies stored bytes and retains failure across repeated finishes" do
+        withTempEnv \env ->
+            openOutputArtifact env >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right writer -> do
+                    appendOutputArtifact writer "hello" `shouldReturn` Right ()
+                    complete <- finishOutputArtifact writer
+                    complete.artifactTruncated `shouldBe` False
+                    ByteString.writeFile (fromJust complete.artifactPath) "hi"
+                    partial <- finishOutputArtifact writer
+                    partial.artifactStoredBytes `shouldBe` 2
+                    partial.artifactTruncated `shouldBe` True
+                    let notice = renderOutputArtifactNotice "test" partial
+                    notice `shouldSatisfy` Text.isInfixOf "stored output is incomplete"
+                    notice `shouldSatisfy` (not . Text.isInfixOf "complete tool response stored")
+                    ByteString.writeFile (fromJust complete.artifactPath) "hello"
+                    retried <- finishOutputArtifact writer
+                    retried.artifactTruncated `shouldBe` True
+
+    it "does not claim completeness when the finalized file cannot be inspected" do
+        withTempEnv \env ->
+            openOutputArtifact env >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right writer -> do
+                    appendOutputArtifact writer "hello" `shouldReturn` Right ()
+                    complete <- finishOutputArtifact writer
+                    removeFile (fromJust complete.artifactPath)
+                    missing <- finishOutputArtifact writer
+                    missing.artifactStoredBytes `shouldBe` 0
+                    missing.artifactTruncated `shouldBe` True
 
     it "allocates unique handles concurrently" do
         withTempEnv \env -> do
@@ -106,6 +185,18 @@ spec = describe "Agent.Tools.OutputArtifact" do
         withTempEnv \env ->
             readOutputArtifact env "../output-secret"
                 `shouldReturn` Left "invalid tool-output artifact handle"
+
+    it "does not delegate invalid or missing artifact paths" do
+        withTempEnv \env -> do
+            called <- newIORef False
+            let analysis _ _ _ = writeIORef called True >> pure (Right "spawned")
+            mapM_ (\handle -> do
+                _ <- runArtifactToolWithAnalysis env (Just analysis)
+                    "analyze_tool_output" $
+                    functionToolCall "analysis" "analyze_tool_output"
+                        ("{\"handle\":\"" <> handle <> "\",\"instruction\":\"Inspect.\"}")
+                readIORef called `shouldReturn` False)
+                ["../output-secret", "output-missing"]
 
     it "reports on-disk bytes for invalid UTF-8 artifacts" do
         withTempEnv \env -> do
@@ -137,6 +228,42 @@ spec = describe "Agent.Tools.OutputArtifact" do
                             Text.length value < 50 * 1024
                                 && Text.isInfixOf "line omitted" value
 
+    it "reconstructs the full minified JSON through native character pages" do
+        withTempEnv \env -> do
+            let values = [1 .. 20000] :: [Int]
+                original = Encoding.decodeUtf8 (LazyByteString.toStrict (Aeson.encode values))
+            writeOutputArtifact env original >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right handle -> do
+                    reconstructed <- collectPages env handle 0 []
+                    reconstructed `shouldBe` original
+                    (sum <$> (Aeson.eitherDecodeStrict (Encoding.encodeUtf8 reconstructed)
+                        :: Either String [Int])) `shouldBe` Right 200010000
+
+    it "returns a late matching value rather than the beginning of its JSON line" do
+        withTempEnv \env -> do
+            let original = "{\"padding\":\"" <> Text.replicate 100000 "x"
+                    <> "\",\"amount\":19900,\"currency\":\"eur\"}"
+            writeOutputArtifact env original >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right handle -> do
+                    result <- runArtifactTool env "search_tool_output" $
+                        functionToolCall "search" "search_tool_output"
+                            ("{\"handle\":\"" <> handle
+                                <> "\",\"pattern\":\"amount\",\"context_chars\":30}")
+                    result `shouldSatisfy` \case
+                        Right value -> Text.isInfixOf "19900" value && Text.length value < 1000
+                        Left _ -> False
+
+    it "rejects mixed line and character pagination arguments" do
+        withTempEnv \env -> do
+            result <- runArtifactTool env "read_tool_output" $
+                functionToolCall "read" "read_tool_output"
+                    "{\"handle\":\"output-missing\",\"cursor\":0,\"offset\":1}"
+            result `shouldSatisfy` \case
+                Right value -> Text.isInfixOf "cannot be combined" value
+                Left _ -> False
+
     it "searches giant lines while returning a bounded preview" do
         withTempEnv \env -> do
             let bytes =
@@ -156,7 +283,7 @@ spec = describe "Agent.Tools.OutputArtifact" do
                         Left _ -> False
                         Right value ->
                             Text.length value < 50 * 1024
-                                && Text.isInfixOf "1:" value
+                                && Text.isInfixOf "\"start\":0" value
                                 && Text.isInfixOf "needle" value
 
     it "finds a literal split across streaming input chunks" do
@@ -176,7 +303,7 @@ spec = describe "Agent.Tools.OutputArtifact" do
                                 <> "\",\"pattern\":\"needle\"}" )
                     result `shouldSatisfy` \case
                         Left _ -> False
-                        Right value -> Text.isInfixOf "1:" value
+                        Right value -> Text.isInfixOf "needle" value
 
     it "stops after proving that the match cap was exceeded" do
         withTempEnv \env -> do
@@ -192,10 +319,7 @@ spec = describe "Agent.Tools.OutputArtifact" do
                     result `shouldSatisfy` \case
                         Left _ -> False
                         Right value ->
-                            Text.isInfixOf
-                                "[search truncated after 5 matches]"
-                                value
-                                && not (Text.isInfixOf "6:needle" value)
+                            Text.isInfixOf "\"next_cursor\":34" value
 
     it "preserves Unicode case-insensitive artifact search" do
         withTempEnv \env -> do
@@ -209,7 +333,7 @@ spec = describe "Agent.Tools.OutputArtifact" do
                                 <> "\"case_insensitive\":true}" )
                     result `shouldSatisfy` \case
                         Left _ -> False
-                        Right value -> Text.isInfixOf "1:Straße" value
+                        Right value -> Text.isInfixOf "Straße" value
 
     it "exposes delegated analysis only when a spawner is available" do
         withTempEnv \env -> do
@@ -219,10 +343,11 @@ spec = describe "Agent.Tools.OutputArtifact" do
                     (Just (\_ _ _ -> pure (Right "spawned")))
                 rootNames = names rootTools
             childNames `shouldBe`
-                ["read_tool_output", "search_tool_output"]
+                ["read_tool_output", "search_tool_output", "export_tool_output"]
             rootNames `shouldBe`
                 [ "read_tool_output"
                 , "search_tool_output"
+                , "export_tool_output"
                 , "analyze_tool_output"
                 ]
             let analysisDescriptions =
@@ -234,6 +359,31 @@ spec = describe "Agent.Tools.OutputArtifact" do
                 [ "Spawn a tracked child agent to analyze an oversized tool-output artifact. \
                 \Use wait_agent for its report."
                 ]
+
+decodeObject :: Text.Text -> Either Text.Text Aeson.Object
+decodeObject value =
+    case Aeson.eitherDecodeStrict (Encoding.encodeUtf8 value) of
+        Left err -> Left (Text.pack err)
+        Right (Aeson.Object object) -> Right object
+        Right _ -> Left "expected JSON object"
+
+collectPages :: ToolEnv -> Text.Text -> Int -> [Text.Text] -> IO Text.Text
+collectPages env handle cursor pages = do
+    result <- runArtifactTool env "read_tool_output" $
+        functionToolCall "read" "read_tool_output"
+            ("{\"handle\":\"" <> handle <> "\",\"cursor\":"
+                <> Text.pack (show cursor) <> "}")
+    case result >>= decodeObject of
+        Left err -> expectationFailure (Text.unpack err) >> pure ""
+        Right page -> case (KeyMap.lookup "text" page, KeyMap.lookup "next_cursor" page) of
+            (Just (Aeson.String text), Just Aeson.Null) ->
+                pure (Text.concat (reverse (text : pages)))
+            (Just (Aeson.String text), Just nextValue) -> case Aeson.fromJSON nextValue of
+                Aeson.Success next -> do
+                    next `shouldSatisfy` (> cursor)
+                    collectPages env handle next (text : pages)
+                Aeson.Error err -> expectationFailure err >> pure ""
+            _ -> expectationFailure "invalid character page" >> pure ""
 
 listArtifactHandles :: Text.Text -> IO [Text.Text]
 listArtifactHandles rendered =
@@ -252,7 +402,16 @@ runArtifactTool
     -> ToolCall
     -> IO (Either Text.Text Text.Text)
 runArtifactTool env toolName call = do
-    let tool = find ((== toolName) . (.appToolName)) (artifactTools env Nothing)
+    runArtifactToolWithAnalysis env Nothing toolName call
+
+runArtifactToolWithAnalysis
+    :: ToolEnv
+    -> Maybe (ToolCall -> Text.Text -> Text.Text -> IO (Either Text.Text Text.Text))
+    -> Text.Text
+    -> ToolCall
+    -> IO (Either Text.Text Text.Text)
+runArtifactToolWithAnalysis env analysis toolName call = do
+    let tool = find ((== toolName) . (.appToolName)) (artifactTools env analysis)
         config = ToolDispatchConfig
             { toolDispatchUnknownTool = ("unknown tool: " <>)
             , toolDispatchFormatResult = either id id

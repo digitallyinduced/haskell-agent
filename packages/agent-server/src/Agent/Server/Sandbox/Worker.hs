@@ -46,9 +46,14 @@ import Agent.Tools.Types
     , mkToolRegistry
     , setToolSessionTmp
     , ToolRegistry
+    , ToolEnv
     )
+import Agent.Tools.OutputArtifact
+    ( OutputArtifact(..), openOutputArtifact, appendOutputArtifact
+    , finishOutputArtifact, abortOutputArtifact )
 import Control.Exception.Safe
-    ( finally
+    ( bracketOnError
+    , finally
     , onException
     , tryAny
     )
@@ -74,6 +79,7 @@ import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Aeson.Types qualified as AesonTypes
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
+import Data.ByteString.Base64 qualified as Base64
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.IORef
     ( IORef
@@ -87,6 +93,7 @@ import Data.Map.Strict qualified as Map
 import Data.Ord (comparing)
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Text.Encoding qualified as Encoding
 import Options.Applicative
     ( Parser
     , auto
@@ -160,6 +167,7 @@ data WorkerRequest = WorkerRequest
     , requestCwd :: !FilePath
     , requestDialect :: !Text
     , requestCall :: !ToolCall
+    , requestUpload :: !Bool
     }
 
 data WorkerSession = WorkerSession
@@ -167,6 +175,7 @@ data WorkerSession = WorkerSession
     , sessionCwd :: !FilePath
     , sessionCoding :: !CodingTools
     , sessionRegistry :: !ToolRegistry
+    , sessionToolEnv :: !ToolEnv
     , sessionLastUsed :: !Integer
     }
 
@@ -248,6 +257,8 @@ requestLoop
                                         workspace
                                         stateRoot
                                         sessions
+                                        inputBuffer
+                                        input
                                         output
                                         request
                                         dialect >>= \case
@@ -268,11 +279,13 @@ processRequest
     -> FilePath
     -> FilePath
     -> IORef WorkerState
+    -> IORef ByteString
+    -> Handle
     -> Handle
     -> WorkerRequest
     -> DialectId
     -> IO (Either Text ())
-processRequest config workspace stateRoot sessions output request dialect = do
+processRequest config workspace stateRoot sessions inputBuffer input output request dialect = do
     resolvedCwd <- tryAny (canonicalizePath request.requestCwd)
     case resolvedCwd of
         Left _ ->
@@ -295,6 +308,8 @@ processRequest config workspace stateRoot sessions output request dialect = do
                         writeFailure output request
                             "sandbox session initialization failed"
                     Right (Left err) -> writeFailure output request err
+                    Right (Right workerSession) | request.requestUpload ->
+                        receiveArtifactUpload workerSession.sessionToolEnv inputBuffer input output request
                     Right (Right workerSession) -> do
                         streamed <- newIORef (0 :: Int)
                         let dispatchConfig = workerDispatchConfig
@@ -307,6 +322,73 @@ processRequest config workspace stateRoot sessions output request dialect = do
                                 workerSession.sessionRegistry
                                 request.requestCall
                         writeOutcome output request outcome
+
+-- Uploads are a transport operation, not a model-addressable tool. Each frame
+-- is bounded and the writer is discarded on malformed/truncated input.
+receiveArtifactUpload
+    :: ToolEnv -> IORef ByteString -> Handle -> Handle -> WorkerRequest
+    -> IO (Either Text ())
+receiveArtifactUpload env buffer input output request =
+    case eitherDecodeStrict' (Encoding.encodeUtf8 request.requestCall.arguments)
+        >>= AesonTypes.parseEither (withObject "upload" (\o -> do
+            rejectUnknownFields "upload" ["size"] o
+            o .: "size")) of
+        Left _ -> pure (Left "invalid artifact upload size")
+        Right expected
+            | expected < 0 || expected > (64 * 1024 * 1024 :: Int) ->
+                pure (Left "artifact upload exceeds storage limit")
+            | otherwise ->
+                bracketOnError (openOutputArtifact env)
+                    (either (const (pure ())) abortOutputArtifact) \case
+                        Left err -> pure (Left err)
+                        Right writer -> do
+                            result <- receive writer expected 0
+                            case result of
+                                Left err -> abortOutputArtifact writer >> pure (Left err)
+                                Right () -> do
+                                    artifact <- finishOutputArtifact writer
+                                    if artifact.artifactTruncated
+                                        || artifact.artifactStoredBytes /= expected
+                                        then abortOutputArtifact writer >>
+                                            pure (Left "artifact upload write failed")
+                                        else do
+                                            delivered <- writeProtocolValue output (object $
+                                                responseBase "result" request <>
+                                                    [ "ok" .= True
+                                                    , "output" .= Encoding.decodeUtf8
+                                                        (LazyByteString.toStrict (encode artifact.artifactPath))
+                                                    , "images" .= ([] :: [Value])
+                                                    ])
+                                            case delivered of
+                                                Left err -> abortOutputArtifact writer >> pure (Left err)
+                                                Right () -> pure (Right ())
+  where
+    receive writer expected offset =
+        readBoundedLine input buffer (48 * 1024) >>= \case
+            Left err -> pure (Left err)
+            Right Nothing -> pure (Left "artifact upload ended before completion")
+            Right (Just bytes) ->
+                case eitherDecodeStrict' bytes >>= AesonTypes.parseEither parseFrame of
+                    Left _ -> pure (Left "invalid artifact upload frame")
+                    Right (frameRequest, frameOffset, encoded)
+                        | frameRequest /= request.requestId || frameOffset /= offset ->
+                            pure (Left "artifact upload frame sequence mismatch")
+                        | otherwise -> case Base64.decode (Encoding.encodeUtf8 encoded) of
+                            Left _ -> pure (Left "invalid artifact upload encoding")
+                            Right chunk
+                                | ByteString.length chunk > 32768
+                                    || offset + ByteString.length chunk > expected ->
+                                        pure (Left "artifact upload exceeds declared size")
+                                | ByteString.null chunk ->
+                                    pure $ if offset == expected then Right ()
+                                        else Left "artifact upload is incomplete"
+                                | otherwise ->
+                                    appendOutputArtifact writer chunk >>= \case
+                                        Left err -> pure (Left err)
+                                        Right () -> receive writer expected (offset + ByteString.length chunk)
+    parseFrame = withObject "upload frame" \o -> do
+        rejectUnknownFields "upload frame" ["requestId", "offset", "data"] o
+        (,,) <$> o .: "requestId" <*> o .: "offset" <*> o .: "data"
 
 acquireWorkerSession
     :: SandboxWorkerConfig
@@ -370,6 +452,7 @@ acquireWorkerSession config stateRoot stateRef sessionId cwd dialect = do
                             , sessionCwd = cwd
                             , sessionCoding = coding
                             , sessionRegistry = registry
+                            , sessionToolEnv = env
                             , sessionLastUsed = clock
                             }
                         updated = stateWithCapacity
@@ -503,7 +586,7 @@ instance FromJSON WorkerRequest where
             ]
             payload
         messageType <- payload .: "type"
-        unless ((messageType :: Text) == "tool")
+        unless ((messageType :: Text) `elem` ["tool", "artifact_upload"])
             (fail "unsupported sandbox request type")
         version <- payload .: "version"
         unless ((version :: Int) == protocolVersion)
@@ -516,6 +599,7 @@ instance FromJSON WorkerRequest where
             <*> payload .: "cwd"
             <*> payload .: "dialect"
             <*> (payload .: "call" >>= parseToolCall)
+            <*> pure (messageType == "artifact_upload")
 
 parseToolCall :: Value -> AesonTypes.Parser ToolCall
 parseToolCall = withObject "ToolCall" \payload -> do

@@ -82,17 +82,10 @@ main = do
             compareOutputs "read"
                 (legacyRead env artifact.artifactHandle)
                 (streamingRead env artifact.artifactHandle)
-            compareOutputs "search"
-                (legacySearch env artifact.artifactHandle)
-                (streamingSearch env artifact.artifactHandle)
             benchmark "legacy-read" samples $
                 legacyRead env artifact.artifactHandle
             benchmark "streaming-read" samples $
                 streamingRead env artifact.artifactHandle
-            benchmark "legacy-search" samples $
-                legacySearch env artifact.artifactHandle
-            benchmark "streaming-search" samples $
-                streamingSearch env artifact.artifactHandle
             benchmark "streaming-metadata" samples $
                 outputArtifactMetadata env artifact.artifactHandle
                     >>= either (die . Text.unpack) (pure . Text.pack . show)
@@ -158,7 +151,8 @@ legacyRead env handle = do
     let selected = take 200 (drop 0 (Text.lines content))
         end = length selected
     pure ("artifact " <> handle <> " lines 1-" <> Text.pack (show end)
-        <> ":\n" <> Text.intercalate "\n" selected)
+        <> " (line previews may omit content; use cursor:0 for complete character pagination):\n"
+        <> Text.intercalate "\n" selected)
 
 streamingRead :: ToolEnv -> Text.Text -> IO Text.Text
 streamingRead env handle =
@@ -166,27 +160,8 @@ streamingRead env handle =
         functionToolCall "read" "read_tool_output"
             ( "{\"handle\":\"" <> handle <> "\",\"offset\":1,\"limit\":200}" )
 
-legacySearch :: ToolEnv -> Text.Text -> IO Text.Text
-legacySearch env handle = do
-    content <- readOutputArtifact env handle >>= either (die . Text.unpack) pure
-    let matches =
-            [ Text.pack (show n) <> ":" <> line
-            | (n, line) <- zip [1 :: Int ..] (Text.lines content)
-            , "needle" `Text.isInfixOf` line
-            ]
-        shown = take 5 matches
-        suffix
-            | length matches > 5 =
-                "\n[search truncated after 5 matches]"
-            | otherwise = ""
-    pure (Text.intercalate "\n" shown <> suffix)
-
-streamingSearch :: ToolEnv -> Text.Text -> IO Text.Text
-streamingSearch env handle =
-    runArtifactTool env $
-        functionToolCall "search" "search_tool_output"
-            ( "{\"handle\":\"" <> handle
-                <> "\",\"pattern\":\"needle\",\"head_limit\":5}" )
+-- Search now returns occurrences rather than line prefixes. Its historical
+-- baseline and result validation live in ArtifactRetrieval.hs.
 
 runArtifactTool :: ToolEnv -> ToolCall -> IO Text.Text
 runArtifactTool env call = do

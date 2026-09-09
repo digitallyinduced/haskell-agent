@@ -13,6 +13,11 @@ module Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , ToolRegistry
     , ToolEnv(..)
+    , OutputArtifactMemoryStore
+    , MemoryOutputArtifact(..)
+    , insertMemoryOutputArtifact
+    , lookupMemoryOutputArtifact
+    , clearMemoryOutputArtifacts
     , addToolAllowedRoot
     , defaultToolEnv
     , setToolHumanInputWaitHooks
@@ -69,6 +74,7 @@ import Agent.ToolDispatch
     )
 import Agent.Tools.ResourceArbiter
     ( ToolResourceArbiter, newToolResourceArbiter, withToolResources )
+import Agent.Tools.OutputArtifact.Memory
 import Agent.Tools.Scheduling
     ( ToolAccess(..)
     , ToolResource(..)
@@ -240,6 +246,8 @@ data ToolEnv = ToolEnv
     , toolOutputInlineCap :: !Int
     , toolOutputPreviewCap :: !Int
     , toolOutputArtifactCap :: !Int
+    , toolOutputMemoryStore :: !OutputArtifactMemoryStore
+    , toolOutputMemoryCap :: !Int
     , toolStdoutCap :: !Int
       -- | Session-local delivery hooks for managed background commands.
       -- Stored behind an IORef because the CLI runner is installed after the
@@ -258,6 +266,7 @@ defaultToolEnv cwd = do
     humanInputWaitHooks <- newIORef (pure (), pure ())
     skillRoots <- newIORef []
     sessionTmp <- newIORef Nothing
+    outputMemory <- newOutputArtifactMemoryStore
     backgroundTaskHooks <- newIORef noBackgroundTaskHooks
     pure ToolEnv
         { toolCwd = dropTrailingPathSeparator cwd
@@ -270,6 +279,8 @@ defaultToolEnv cwd = do
         , toolOutputInlineCap = 50 * 1024
         , toolOutputPreviewCap = 8 * 1024
         , toolOutputArtifactCap = 64 * 1024 * 1024
+        , toolOutputMemoryStore = outputMemory
+        , toolOutputMemoryCap = 16 * 1024 * 1024
         , toolStdoutCap = 16 * 1024
         , toolBackgroundTaskHooks = backgroundTaskHooks
         , toolCancel = cancel
@@ -310,7 +321,12 @@ setToolSkillRoots env = writeIORef env.toolSkillRoots
 -- target of the system-temp aliases directly, so changing it cannot get out of
 -- sync with a separately maintained roots list.
 setToolSessionTmp :: ToolEnv -> Maybe OsPath -> IO ()
-setToolSessionTmp env = writeIORef env.toolSessionTmp
+setToolSessionTmp env directory = do
+    previous <- readIORef env.toolSessionTmp
+    if previous == directory
+        then pure ()
+        else clearMemoryOutputArtifacts env.toolOutputMemoryStore
+    writeIORef env.toolSessionTmp directory
 
 -- | Construct a JSON tool whose approval is selected from a simple read-only
 -- flag. This is the common convenience shape used by provider tool surfaces.

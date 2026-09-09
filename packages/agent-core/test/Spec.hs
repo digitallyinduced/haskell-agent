@@ -34,6 +34,8 @@ import qualified Agent.Tools.GhciSpec as GhciSpec
 import qualified Agent.Tools.IOSpec as IOSpec
 import qualified Agent.Tools.MultiAgentsSpec as MultiAgentsSpec
 import qualified Agent.Tools.OutputArtifactSpec as OutputArtifactSpec
+import qualified Agent.Tools.OutputArtifactMemorySpec as OutputArtifactMemorySpec
+import qualified Agent.Tools.OutputArtifact.RetrievalSpec as OutputArtifactRetrievalSpec
 import qualified Agent.Tools.PlanModeSpec as PlanModeSpec
 import qualified Agent.Tools.TaskPlanSpec as TaskPlanSpec
 import qualified Agent.Tools.SecretSpec as SecretSpec
@@ -77,6 +79,8 @@ main = hspec do
     IOSpec.spec
     MultiAgentsSpec.spec
     OutputArtifactSpec.spec
+    OutputArtifactMemorySpec.spec
+    OutputArtifactRetrievalSpec.spec
     PlanModeSpec.spec
     TaskPlanSpec.spec
     SecretSpec.spec

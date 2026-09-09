@@ -25,7 +25,7 @@ import Agent.Tools.MultiAgents
     , SubagentWorktree
     )
 import Agent.Tools.PlanMode (PlanModeHooks)
-import Agent.Tools.Types (AppTool, ToolEnv)
+import Agent.Tools.Types (AppTool, ToolEnv, OutputArtifactMemoryStore)
 import Agent.Tools.ResourceArbiter (ToolResourceArbiter)
 import Agent.Dialect (DialectId)
 import Control.Concurrent.MVar (MVar)
@@ -70,6 +70,8 @@ data SubagentRuntime = SubagentRuntime
     , subagentToolResourceArbiter :: !ToolResourceArbiter
     , subagentRootAccessRequest :: !(IORef (Maybe (OsPath -> IO Bool)))
     , subagentSessionTmp :: !(IORef (Maybe OsPath))
+    , subagentOutputMemoryStore :: !OutputArtifactMemoryStore
+    , subagentOutputMemoryCap :: !Int
     , subagentMcpTools :: ![AppTool]
     , subagentParams :: !(SessionRequestState)
     , subagentRegistry :: !SubagentRegistry
