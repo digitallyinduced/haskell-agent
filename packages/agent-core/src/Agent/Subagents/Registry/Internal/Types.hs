@@ -30,12 +30,20 @@ data SubagentRecord = SubagentRecord
     , recordPhase :: !(TVar SubagentPhase)
     , recordCancel :: !CancelFlag
     , recordMailbox :: !(TQueue SubagentWork)
-    , recordAsync :: !(TVar (Maybe (Async ())))
+    , recordAsync :: !(TVar (Maybe OwnedSubagentSupervisor))
       -- | Last successful response id for conversation continuity.
     , recordPreviousResponseId :: !(TVar (Maybe Text))
     , recordLastUpdate :: !(TVar (Maybe (Int, SubagentStatus)))
     , recordTaskPath :: !TaskPath
     , recordCwd :: !OsPath
+    }
+
+-- | The cancellation request remains owned alongside the supervisor until both
+-- have completed. An interrupted closer can therefore resume the same shutdown
+-- without delivering another exception into resource cleanup.
+data OwnedSubagentSupervisor = OwnedSubagentSupervisor
+    { supervisorAsync :: !(Async ())
+    , supervisorCancellation :: !(MVar (Maybe (Async ())))
     }
 
 data SubagentWork = SubagentWork

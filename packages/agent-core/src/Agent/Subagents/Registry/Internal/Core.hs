@@ -27,8 +27,12 @@ import Agent.Subagents.Types
     , SubagentSpawnEnv(..)
     , SubagentStatus(..)
     )
-import Control.Concurrent.Async (Async, async, cancel, race, waitCatch)
-import Control.Concurrent.MVar (newMVar, withMVar)
+import Control.Concurrent (throwTo)
+import Control.Concurrent.Async
+    ( AsyncCancelled(..), async, asyncThreadId, asyncWithUnmask
+    , poll, race, wait, waitCatch
+    )
+import Control.Concurrent.MVar (modifyMVar, newMVar, withMVar)
 import Control.Concurrent.STM
 import Control.Exception.Safe
     ( SomeException
@@ -490,14 +494,26 @@ taskNameForAgentId agentId =
     "a" <> Text.filter (/= '-') agentId.unSubagentId
 
 rollbackAdmission :: SubagentRegistry -> SubagentRecord -> IO ()
-rollbackAdmission registry record = do
+rollbackAdmission registry record =
+    withMVar registry.registryLifecycle \_ ->
+        rollbackAdmissionLocked registry record
+
+rollbackAdmissionLocked :: SubagentRegistry -> SubagentRecord -> IO ()
+rollbackAdmissionLocked registry record = do
     atomically do
-        modifyTVar' registry.registryAgents (Map.delete record.recordId)
-        modifyTVar' registry.registryPaths $
-            deleteOwnedPath record.recordTaskPath record.recordId
         releaseSlotSTM registry record
         writeTVar record.recordPhase AgentClosed
+    -- Keep the record discoverable by registry shutdown if rollback is
+    -- interrupted while its supervisor is releasing resources.
     stopRecordSupervisor record
+    atomically do
+        agents <- readTVar registry.registryAgents
+        case Map.lookup record.recordId agents of
+            Just current | current.recordAsync == record.recordAsync -> do
+                writeTVar registry.registryAgents (Map.delete record.recordId agents)
+                modifyTVar' registry.registryPaths $
+                    deleteOwnedPath record.recordTaskPath record.recordId
+            _ -> pure ()
 
 deleteOwnedPath :: TaskPath -> SubagentId -> Map TaskPath SubagentId -> Map TaskPath SubagentId
 deleteOwnedPath key expected mappings =
@@ -679,6 +695,7 @@ startRecordSupervisor registry record lease =
                 pure (Left "Subagent closed before its supervisor started.")
             else do
                 ready <- newEmptyTMVarIO
+                cancellation <- newMVar Nothing
                 started <- tryAny $ async $
                     supervisorAction ready
                 case started of
@@ -686,7 +703,8 @@ startRecordSupervisor registry record lease =
                         releaseSubagentLease lease
                         pure (Left ("Failed to start subagent: " <> Text.pack (show exception)))
                     Right supervisor -> do
-                        atomically $ writeTVar record.recordAsync (Just supervisor)
+                        atomically $ writeTVar record.recordAsync $
+                            Just (OwnedSubagentSupervisor supervisor cancellation)
                         ownership <- restore (atomically (takeTMVar ready))
                             `onException` stopRecordSupervisor record
                         case ownership of
@@ -701,7 +719,12 @@ startRecordSupervisor registry record lease =
                 case lease of
                     SubagentLease acquire -> void (allocateAcquire acquire)
                 liftIO $ atomically $ putTMVar ready (Right ())
-                liftIO $ restoreSupervisor (runSupervisor registry record))
+                -- A closed phase stops accepting work, but only the owner's
+                -- cancellation ends this scope. Otherwise cooperative shutdown
+                -- could begin lease cleanup before that exception is delivered.
+                liftIO $ restoreSupervisor do
+                    runSupervisor registry record
+                    atomically retry)
             `catchAny` \exception -> do
                 atomically $ void $ tryPutTMVar ready $ Left $
                     "Failed to start subagent: " <> Text.pack (show exception)
@@ -711,23 +734,35 @@ releaseSubagentLease :: SubagentLease -> IO ()
 releaseSubagentLease (SubagentLease acquire) =
     withAcquire acquire (const (pure ()))
 
-stopAsync :: Async () -> IO ()
-stopAsync supervisor = do
-    cancel supervisor
-    _ <- waitCatch supervisor
-    pure ()
-
-takeRecordSupervisor :: SubagentRecord -> IO (Maybe (Async ()))
-takeRecordSupervisor record =
-    atomically do
-        current <- readTVar record.recordAsync
-        writeTVar record.recordAsync Nothing
-        pure current
-
 stopRecordSupervisor :: SubagentRecord -> IO ()
-stopRecordSupervisor record = do
-    supervisor <- takeRecordSupervisor record
-    mapM_ stopAsync supervisor
+stopRecordSupervisor record =
+    -- Mask only the ownership transitions. Blocking delivery and joining run
+    -- outside those transitions, with both handles retained for another closer.
+    mask \restore -> do
+        current <- readTVarIO record.recordAsync
+        mapM_ (\supervisor -> do
+            cancellation <- modifyMVar supervisor.supervisorCancellation \case
+                Just sender -> pure (Just sender, Just sender)
+                Nothing -> poll supervisor.supervisorAsync >>= \case
+                    Just _ -> pure (Nothing, Nothing)
+                    Nothing -> do
+                        -- throwTo can block. A tracked sender makes cancellation
+                        -- exactly-once even when the waiting closer is interrupted.
+                        sender <- asyncWithUnmask \unmask ->
+                            unmask $
+                                throwTo (asyncThreadId supervisor.supervisorAsync)
+                                    AsyncCancelled
+                        pure (Just sender, Just sender)
+            restore do
+                mapM_ wait cancellation
+                void (waitCatch supervisor.supervisorAsync)
+            atomically do
+                latest <- readTVar record.recordAsync
+                case latest of
+                    Just owned
+                        | owned.supervisorAsync == supervisor.supervisorAsync ->
+                            writeTVar record.recordAsync Nothing
+                    _ -> pure ()) current
 
 data SupervisorStep
     = SupervisorStop

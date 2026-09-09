@@ -16,7 +16,7 @@ import qualified Control.Concurrent.Async as Async
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Exception.Safe (finally)
-import Control.Monad (unless)
+import Control.Monad (unless, void)
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import qualified Data.Map.Strict as Map
@@ -25,6 +25,53 @@ import qualified Data.Text as Text
 import qualified Data.Text.Read as TextRead
 import System.Timeout (timeout)
 import Test.Hspec
+
+-- The release gate makes the interruption occur during owned resource cleanup,
+-- rather than relying on the supervisor's scheduling or normal completion.
+interruptedSupervisorShutdown :: Bool -> IO ()
+interruptedSupervisorShutdown resetAfterInterruption = do
+    cleanupStarted <- newEmptyMVar
+    cleanupRelease <- newEmptyMVar
+    cleanupFinished <- newEmptyMVar
+    workerStarted <- newEmptyMVar
+    retryStarted <- newEmptyMVar
+    releases <- newIORef (0 :: Int)
+    registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath ".")
+        (\_ _ _ _ -> putMVar workerStarted () >> atomically retry)
+        (\_ _ -> pure ())
+    let releaseGate = void (tryPutMVar cleanupRelease ())
+        cleanup = do
+            atomicModifyIORef' releases \n -> (n + 1, ())
+            putMVar cleanupStarted ()
+            readMVar cleanupRelease
+            putMVar cleanupFinished ()
+    (do
+        Right agentId <- spawnSubagentWithCwdPrepared registry (fromFilePath ".")
+            (\_ -> pure (subagentLease cleanup))
+            Nothing 0 "owned" Nothing
+        timeout 5000000 (readMVar workerStarted) `shouldReturn` Just ()
+        Async.withAsync (closeSubagent registry agentId) \closer ->
+            (do
+                timeout 5000000 (readMVar cleanupStarted) `shouldReturn` Just ()
+                timeout 5000000 (Async.cancel closer) `shouldReturn` Just ()
+                let retryShutdown =
+                        if resetAfterInterruption
+                            then resetSubagentRegistry registry
+                            else void (closeSubagent registry agentId)
+                Async.withAsync (putMVar retryStarted () >> retryShutdown) \retryCloser ->
+                    (do
+                        timeout 5000000 (readMVar retryStarted) `shouldReturn` Just ()
+                        -- Waiting times out without cancelling the closer.
+                        timeout 100000 (Async.wait retryCloser) `shouldReturn` Nothing
+                        readIORef releases `shouldReturn` 1
+                        releaseGate
+                        timeout 5000000 (Async.wait retryCloser) `shouldReturn` Just ()
+                        timeout 5000000 (readMVar cleanupFinished) `shouldReturn` Just ()
+                        getStatus registry agentId `shouldReturn`
+                            (if resetAfterInterruption then NotFound else Closed)
+                    ) `finally` releaseGate
+            ) `finally` releaseGate
+        ) `finally` (releaseGate >> closeSubagentRegistry registry)
 
 messagePayload :: InterAgentMessage -> Text
 messagePayload message = case message.messageContent of
@@ -813,6 +860,12 @@ spec = describe "Agent.Subagents" do
             Nothing 0 "first" Nothing
         closeSubagentRegistry registry
         readIORef released `shouldReturn` True
+
+    it "retains supervisor ownership after an interrupted close" do
+        interruptedSupervisorShutdown False
+
+    it "waits for retained supervisor cleanup before resetting the registry" do
+        interruptedSupervisorShutdown True
 
     it "releases composed subagent leases in reverse acquisition order" do
         released <- newIORef ([] :: [Int])

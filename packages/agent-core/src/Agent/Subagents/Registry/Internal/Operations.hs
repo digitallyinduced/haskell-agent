@@ -546,7 +546,7 @@ restoreSubagentResolvedWithCwd
                     _ -> pure ()
                 startRecordSupervisor registry record mempty >>= \case
                     Left err -> do
-                        rollbackAdmission registry record
+                        rollbackAdmissionLocked registry record
                         pure (Left err)
                     Right () -> pure (Right agentId)
 
