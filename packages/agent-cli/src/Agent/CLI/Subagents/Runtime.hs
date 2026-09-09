@@ -1247,7 +1247,11 @@ prepareChild
     nestedForkSource <- newIORef
         (Just ((.backendItems) <$> readIORef session.subSessionTranscript))
     let sessionDialect = dialectForId session.subSessionDialect
-        childToolEnv = childEnv { toolCancel = env.subCancel }
+        childToolEnv = childEnv
+            { toolCancel = env.subCancel
+            , toolOutputMemoryStore = runtime.subagentOutputMemoryStore
+            , toolOutputMemoryCap = runtime.subagentOutputMemoryCap
+            }
         childCtx = MultiAgentContext
             { multiRegistry = runtime.subagentRegistry
             , multiCwd = env.subCwd

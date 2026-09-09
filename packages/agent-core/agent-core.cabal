@@ -13,6 +13,8 @@ copyright:          (c) 2026 digitally induced GmbH
 category:           Development
 build-type:         Simple
 extra-source-files: README.md
+                  , benchmark/ArtifactRetrieval.md
+                  , benchmark/ArtifactStorage.md
 data-files:         data/code-mode/worker.mjs
                   , data/computer-use/protocol-v1.json
 
@@ -90,6 +92,8 @@ library
                     , Agent.Tools.IO
                     , Agent.Tools.MultiAgents
                     , Agent.Tools.OutputArtifact
+                    , Agent.Tools.OutputArtifact.Memory
+                    , Agent.Tools.OutputArtifact.Retrieval
                     , Agent.Tools.PlanMode
                     , Agent.Tools.TaskPlan
                     , Agent.Tools.Secret
@@ -130,6 +134,7 @@ library
                     , containers
                     , crypton-connection
                     , directory
+                    , entropy
                     , filepath
                     , JuicyPixels
                     , process
@@ -177,6 +182,7 @@ benchmark output-artifact-bench
                     , bytestring
                     , directory
                     , filepath
+                    , safe-exceptions
                     , text
 
 benchmark streaming-text-bench
@@ -189,6 +195,20 @@ benchmark streaming-text-bench
                     , base >= 4.14 && < 5
                     , text
                     , text-builder >= 1.0 && < 1.1
+
+benchmark artifact-storage-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          ArtifactStorage.hs
+    ghc-options:      -O2 -rtsopts
+    build-depends:    agent-core
+                    , base >= 4.14 && < 5
+                    , bytestring
+                    , directory
+                    , filepath
+                    , safe-exceptions
+                    , text
 
 benchmark read-file-streaming-bench
     import:           common-opts
@@ -278,6 +298,19 @@ benchmark code-mode-pool-bench
                     , text
                     , time
 
+benchmark artifact-retrieval-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark src
+    main-is:          ArtifactRetrieval.hs
+    other-modules:    Agent.Tools.OutputArtifact.Retrieval
+    ghc-options:      -O2 -rtsopts
+    build-depends:    base >= 4.14 && < 5
+                    , aeson
+                    , bytestring
+                    , directory
+                    , text
+
 test-suite agent-core-test
     import:           common-opts
     type:             exitcode-stdio-1.0
@@ -319,6 +352,8 @@ test-suite agent-core-test
                     , Agent.Tools.IOSpec
                     , Agent.Tools.MultiAgentsSpec
                     , Agent.Tools.OutputArtifactSpec
+                    , Agent.Tools.OutputArtifactMemorySpec
+                    , Agent.Tools.OutputArtifact.RetrievalSpec
                     , Agent.Tools.PlanModeSpec
                     , Agent.Tools.TaskPlanSpec
                     , Agent.Tools.SecretSpec

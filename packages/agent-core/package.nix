@@ -1,7 +1,7 @@
 { mkDerivation, aeson, agent-json, agent-process
 , agent-responses-types, async, base, base64-bytestring, bytestring
-, containers, crypton-connection, directory, filepath, hspec
-, JuicyPixels, lib, process, QuickCheck, resourcet, retry
+, containers, crypton-connection, directory, entropy, filepath
+, hspec, JuicyPixels, lib, process, QuickCheck, resourcet, retry
 , safe-exceptions, scientific, stm, template-haskell, text
 , text-builder, time, tls, transformers, unix, vector, websockets
 , yaml, zlib
@@ -14,7 +14,7 @@ mkDerivation {
   libraryHaskellDepends = [
     aeson agent-json agent-process agent-responses-types async base
     base64-bytestring bytestring containers crypton-connection
-    directory filepath JuicyPixels process resourcet retry
+    directory entropy filepath JuicyPixels process resourcet retry
     safe-exceptions scientific stm template-haskell text time tls
     transformers unix vector websockets yaml zlib
   ];

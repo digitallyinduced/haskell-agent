@@ -36,10 +36,15 @@ import Agent.Tools.Types
     , toolAutoApproves
     , jsonAppTool
     , withAsyncToolCalls
+    , defaultToolEnv
+    , setToolSessionTmp
+    , ToolEnv(..)
     )
+import Agent.Tools.OutputArtifact (OutputArtifact(..), artifactTools, writeOutputArtifact, writeOutputArtifactDetailed)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
-    ( async
+    ( Async
+    , async
     , cancel
     , wait
     , waitCatch
@@ -54,6 +59,7 @@ import Control.Monad
     ( forever
     , unless
     , void
+    , forM_
     )
 import Data.Aeson
     ( FromJSON(..)
@@ -67,8 +73,10 @@ import Data.Aeson
     )
 import Data.Aeson.Types qualified as AesonTypes
 import Data.Aeson.Key qualified as Key
+import Data.ByteString.Base64 qualified as Base64
 import Data.ByteString.Char8 qualified as ByteString8
 import Data.ByteString.Lazy qualified as LazyByteString
+import Data.List (isPrefixOf)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
@@ -79,9 +87,11 @@ import GHC.IO.Handle
 import System.Directory
     ( createDirectory
     , doesFileExist
+    , listDirectory
     )
 import System.Environment (getExecutablePath)
 import System.FilePath ((</>))
+import System.OsPath (unsafeEncodeUtf)
 import System.IO
     ( BufferMode(NoBuffering)
     , Handle
@@ -114,6 +124,125 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "tenant sandbox protocol" do
+    it "reads host-resident artifacts without starting the sandbox" do
+        env <- defaultToolEnv (unsafeEncodeUtf ".")
+        handle <- writeOutputArtifact env "{\"amount\":19900}" >>= either (fail . Text.unpack) pure
+        let tools = composeSandboxTools (error "native reads must not start sandbox")
+                validSessionId "/workspace" CodexDialect [ExecutionToolGroup (artifactTools env Nothing)]
+        forM_ [("read_tool_output", ""), ("search_tool_output", ",\"pattern\":\"amount\"")] \(name, extra) -> do
+            outcome <- dispatchToolCallDetailed testDispatchConfig (map (.appToolHandler) tools)
+                (functionToolCall "read" name ("{\"handle\":\"" <> handle <> "\"" <> extra <> "}"))
+            outcome.toolDispatchSucceeded `shouldBe` True
+            outcome.toolDispatchResult.output `shouldSatisfy` Text.isInfixOf "19900"
+
+    it "does not forward invalid artifact handles into the sandbox" do
+        env <- defaultToolEnv (unsafeEncodeUtf ".")
+        let tools = composeSandboxTools (error "invalid handles must not start sandbox")
+                validSessionId "/workspace" CodexDialect [ExecutionToolGroup (artifactTools env Nothing)]
+        forM_ ["read_tool_output", "export_tool_output"] \name -> do
+            outcome <- dispatchToolCallDetailed testDispatchConfig (map (.appToolHandler) tools)
+                (functionToolCall "invalid" name "{\"handle\":\"../secret\"}")
+            outcome.toolDispatchSucceeded `shouldBe` False
+
+    it "reads host disk fallback without forwarding to the guest" $
+        withSystemTempDirectory "artifact-host-routing" \directory -> do
+            base <- defaultToolEnv (unsafeEncodeUtf directory)
+            setToolSessionTmp base (Just (unsafeEncodeUtf directory))
+            let env = base { toolOutputMemoryCap = 0 }
+            handle <- writeOutputArtifact env "host disk output" >>= either (fail . Text.unpack) pure
+            let tools = composeSandboxTools (error "host disk must not start sandbox")
+                    validSessionId "/workspace" CodexDialect [ExecutionToolGroup (artifactTools env Nothing)]
+            outcome <- dispatchToolCallDetailed testDispatchConfig (map (.appToolHandler) tools)
+                (functionToolCall "read" "read_tool_output" ("{\"handle\":\"" <> handle <> "\"}"))
+            outcome.toolDispatchSucceeded `shouldBe` True
+            outcome.toolDispatchResult.output `shouldSatisfy` Text.isInfixOf "host disk output"
+
+    it "receives exact binary export bytes in a private guest file" $
+        withUploadWorker \workspace stateRoot generation requestOutput responseInput worker -> do
+            let bytes = ByteString8.pack ['\NUL', '\255', '\195', '\169'] <> ByteString8.replicate 50000 'x'
+            writeJsonLine requestOutput (uploadRequest workspace generation (ByteString8.length bytes))
+            writeUploadChunk requestOutput 0 (ByteString8.take 32768 bytes)
+            writeUploadChunk requestOutput 32768 (ByteString8.drop 32768 bytes)
+            writeUploadChunk requestOutput (ByteString8.length bytes) ""
+            response <- within "upload result" (readJsonLine responseInput)
+            parseField "ok" response `shouldReturn` True
+            encodedPath <- parseField "output" response
+            path <- maybe (fail "upload path missing") pure
+                (decodeStrict' (TextEncoding.encodeUtf8 encodedPath) :: Maybe FilePath)
+            path `shouldSatisfy` ((stateRoot <> "/sessions/") `isPrefixOf`)
+            ByteString8.readFile path `shouldReturn` bytes
+            hClose requestOutput
+            within "upload shutdown" (wait worker) `shouldReturn` Right ()
+
+    it "uploads host exports through the broker and rewrites only the guest path" $
+        withFakeSandbox "upload" \tenant sandbox _ -> do
+            env <- defaultToolEnv (unsafeEncodeUtf tenant.resolvedTenantWorkspaceRoot)
+            setToolSessionTmp env (Just (unsafeEncodeUtf tenant.resolvedTenantHome))
+            let bytes = ByteString8.pack ['\NUL', '\255', '\195', '\169']
+                    <> ByteString8.replicate 50000 'x'
+            forM_ [(60000, True), (40001, False)] \(cap, complete) -> do
+                let limited = env { toolOutputArtifactCap = cap }
+                artifact <- writeOutputArtifactDetailed limited bytes >>= either (fail . Text.unpack) pure
+                let handle = artifact.artifactHandle
+                let tools = composeSandboxTools sandbox validSessionId
+                        tenant.resolvedTenantWorkspaceRoot CodexDialect
+                        [ExecutionToolGroup (artifactTools limited Nothing)]
+                outcome <- within "broker export" $
+                    dispatchToolCallDetailed testDispatchConfig (map (.appToolHandler) tools)
+                        (functionToolCall "export" "export_tool_output"
+                            ("{\"handle\":\"" <> handle <> "\"}"))
+                outcome.toolDispatchSucceeded `shouldBe` True
+                metadata <- maybe (fail "export metadata missing") pure
+                    (decodeStrict' (TextEncoding.encodeUtf8 outcome.toolDispatchResult.output) :: Maybe Value)
+                (parseField "path" metadata :: IO Text) `shouldReturn` "/state/exported-output"
+                (parseField "complete" metadata :: IO Bool) `shouldReturn` complete
+                (parseField "stored_bytes" metadata :: IO Int)
+                    `shouldReturn` min cap (ByteString8.length bytes)
+                ByteString8.readFile (tenant.resolvedTenantStateDirectory </> "captured-upload")
+                    `shouldReturn` ByteString8.take cap bytes
+
+    it "forwards missing host artifact handles to the guest broker" $
+        withFakeSandbox "normal" \tenant sandbox _ -> do
+            env <- defaultToolEnv (unsafeEncodeUtf tenant.resolvedTenantWorkspaceRoot)
+            setToolSessionTmp env (Just (unsafeEncodeUtf tenant.resolvedTenantHome))
+            let tools = composeSandboxTools sandbox validSessionId
+                    tenant.resolvedTenantWorkspaceRoot CodexDialect
+                    [ExecutionToolGroup (artifactTools env Nothing)]
+            forM_ [("read_tool_output", ""), ("search_tool_output", ",\"pattern\":\"amount\""),
+                    ("export_tool_output", "")] \(name, extra) -> do
+                let arguments = "{\"handle\":\"output-guest-only\"" <> extra <> "}"
+                outcome <- within "guest artifact fallback" $
+                    dispatchToolCallDetailed testDispatchConfig (map (.appToolHandler) tools)
+                        (functionToolCall "guest-artifact" name arguments)
+                outcome.toolDispatchSucceeded `shouldBe` True
+                outcome.toolDispatchResult.output `shouldBe` arguments
+
+    it "discards an upload whose terminal size is incomplete" $
+        withUploadWorker \workspace stateRoot generation requestOutput _ worker -> do
+            writeJsonLine requestOutput (uploadRequest workspace generation 6)
+            writeUploadChunk requestOutput 0 "abc"
+            writeUploadChunk requestOutput 3 ""
+            within "rejected upload" (wait worker)
+                `shouldReturn` Left "artifact upload is incomplete"
+            listDirectory (stateRoot </> "sessions" </> Text.unpack validSessionId
+                </> "tmp" </> "tool-output-artifacts") `shouldReturn` []
+
+    it "rejects out-of-sequence upload frames and removes their partial files" $
+        withUploadWorker \workspace stateRoot generation requestOutput _ worker -> do
+            writeJsonLine requestOutput (uploadRequest workspace generation 6)
+            writeUploadChunk requestOutput 0 "abc"
+            writeUploadChunk requestOutput 1 "def"
+            within "rejected sequence" (wait worker)
+                `shouldReturn` Left "artifact upload frame sequence mismatch"
+            listDirectory (stateRoot </> "sessions" </> Text.unpack validSessionId
+                </> "tmp" </> "tool-output-artifacts") `shouldReturn` []
+
+    it "rejects uploads above the total storage cap" $
+        withUploadWorker \workspace _ generation requestOutput _ worker -> do
+            writeJsonLine requestOutput (uploadRequest workspace generation (64 * 1024 * 1024 + 1))
+            within "rejected size" (wait worker)
+                `shouldReturn` Left "artifact upload exceeds storage limit"
+
     it "auto-approves only sandbox execution tools without reclassifying mutations" do
         let execution = testSandboxTool { appToolApproval = AlwaysPrompt }
             host = testHostServiceTool { appToolApproval = AlwaysPrompt }
@@ -339,6 +468,49 @@ spec = describe "tenant sandbox protocol" do
                         hClose requestOutput
                         within "sandbox worker shutdown" (wait worker)
                             `shouldReturn` Right ()
+uploadRequest :: FilePath -> Text -> Int -> Value
+uploadRequest workspace generation size = object
+    [ "type" .= ("artifact_upload" :: Text)
+    , "version" .= (1 :: Int)
+    , "tenantId" .= validTenantId
+    , "generation" .= generation
+    , "requestId" .= validRequestId
+    , "sessionId" .= validSessionId
+    , "cwd" .= workspace
+    , "dialect" .= ("codex" :: Text)
+    , "call" .= object
+        [ "id" .= ("upload" :: Text), "name" .= ("export_tool_output" :: Text)
+        , "arguments" .= TextEncoding.decodeUtf8 (LazyByteString.toStrict (encode (object ["size" .= size])))
+        , "kind" .= ("function" :: Text), "argumentsEncrypted" .= False
+        ]
+    ]
+
+writeUploadChunk :: Handle -> Int -> ByteString8.ByteString -> IO ()
+writeUploadChunk output offset bytes = writeJsonLine output (object
+    [ "requestId" .= validRequestId
+    , "offset" .= offset
+    , "data" .= TextEncoding.decodeUtf8 (Base64.encode bytes)
+    ])
+
+withUploadWorker
+    :: (FilePath -> FilePath -> Text -> Handle -> Handle -> Async (Either Text ()) -> IO a)
+    -> IO a
+withUploadWorker action =
+    withSystemTempDirectory "agent-artifact-upload" \root -> do
+        let workspace = root </> "workspace"
+            stateRoot = root </> "state"
+        createDirectory workspace
+        createDirectory stateRoot
+        tenantId <- either (fail . Text.unpack) pure (parseTenantId validTenantId)
+        (workerInput, requestOutput) <- pipeHandles
+        (responseInput, workerOutput) <- pipeHandles
+        let config = SandboxWorkerConfig 1 tenantId workspace stateRoot 4
+        withAsync (runSandboxWorker config workerInput workerOutput) \worker ->
+            (`finally` closeHandles [requestOutput, workerInput, responseInput, workerOutput]) do
+                ready <- within "upload worker readiness" (readJsonLine responseInput)
+                generation <- parseField "generation" ready
+                action workspace stateRoot generation requestOutput responseInput worker
+
 dispatchSandbox
     :: ResolvedTenant
     -> TenantSandbox
@@ -493,10 +665,10 @@ fakeSandboxRunner arguments = do
                     , "workspace" .= ("/workspace" :: Text)
                     , "state" .= ("/state" :: Text)
                     ]
-            unless (mode == "bad-ready") (fakeLoop mode)
+            unless (mode == "bad-ready") (fakeLoop mode stateRoot)
 
-fakeLoop :: Text -> IO ()
-fakeLoop mode = do
+fakeLoop :: Text -> FilePath -> IO ()
+fakeLoop mode stateRoot = do
     eof <- hIsEOF stdin
     unless eof do
         line <- ByteString8.hGetLine stdin
@@ -505,7 +677,13 @@ fakeLoop mode = do
             Just request ->
                 if mode == "hang"
                     then forever (threadDelay 1000000)
-                    else
+                    else do
+                        resultOutput <- if mode == "upload"
+                            then do
+                                bytes <- receiveFakeUpload request 0
+                                ByteString8.writeFile (stateRoot </> "captured-upload") bytes
+                                pure "\"/state/exported-output\""
+                            else pure request.fakeArguments
                         writeJsonLine stdout $
                             object
                                 [ "type" .= ("result" :: Text)
@@ -517,7 +695,7 @@ fakeLoop mode = do
                                         else request.fakeGeneration
                                 , "requestId" .= request.fakeRequestId
                                 , "ok" .= True
-                                , "output" .= request.fakeArguments
+                                , "output" .= resultOutput
                                 , "images" .=
                                     if mode == "svg"
                                         then
@@ -531,7 +709,23 @@ fakeLoop mode = do
                                             ]
                                         else ([] :: [Value])
                                 ]
-        fakeLoop mode
+        fakeLoop mode stateRoot
+
+receiveFakeUpload :: FakeRequest -> Int -> IO ByteString8.ByteString
+receiveFakeUpload request offset = do
+    frame <- readJsonLine stdin
+    (parseField "requestId" frame :: IO Text) `shouldReturn` request.fakeRequestId
+    (parseField "offset" frame :: IO Int) `shouldReturn` offset
+    encoded <- parseField "data" frame
+    bytes <- either fail pure (Base64.decode (TextEncoding.encodeUtf8 encoded))
+    ByteString8.length bytes `shouldSatisfy` (<= 32768)
+    if ByteString8.null bytes
+        then do
+            metadata <- maybe (fail "upload size missing") pure
+                (decodeStrict' (TextEncoding.encodeUtf8 request.fakeArguments) :: Maybe Value)
+            (parseField "size" metadata :: IO Int) `shouldReturn` offset
+            pure ""
+        else (bytes <>) <$> receiveFakeUpload request (offset + ByteString8.length bytes)
 
 requiredOption :: String -> [String] -> String
 requiredOption name arguments =

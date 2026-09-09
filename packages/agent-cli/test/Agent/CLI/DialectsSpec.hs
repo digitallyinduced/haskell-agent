@@ -228,7 +228,7 @@ spec = describe "Agent.CLI.Dialects" do
                 coding <- codingToolsFor dialect env Nothing Nothing Nothing Nothing
                 let names = map (.appToolName) coding.codingAppTools
                 names `shouldContain`
-                    ["read_tool_output", "search_tool_output"]
+                    ["read_tool_output", "search_tool_output", "export_tool_output"]
                 names `shouldNotContain` ["analyze_tool_output"]
                 coding.codingClose
 
@@ -262,6 +262,7 @@ spec = describe "Agent.CLI.Dialects" do
                                 , shellName
                                 , "read_tool_output"
                                 , "search_tool_output"
+                                , "export_tool_output"
                                 ]
                                 \name ->
                                     executionNames `shouldContain` [name]

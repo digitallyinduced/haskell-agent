@@ -25,6 +25,7 @@ import Agent.ToolDispatch
     , ToolHandlerResult(..)
     , ToolResultImage(..)
     , passthroughTool
+    , wrapToolHandler
     )
 import Agent.Tools.Types
     ( ApprovalRule(..)
@@ -73,6 +74,7 @@ import Data.Aeson.Types (Parser)
 import Data.Aeson.Types qualified as AesonTypes
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
+import Data.ByteString.Base64 qualified as Base64
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.IORef
     ( IORef
@@ -103,6 +105,8 @@ import System.IO
     , hFlush
     , hSetBinaryMode
     , hSetBuffering
+    , IOMode(ReadMode)
+    , withBinaryFile
     , stderr
     )
 import System.Posix.Files (setFileMode)
@@ -216,7 +220,18 @@ composeSandboxTools sandbox sessionId cwd dialect =
   where
     composeGroup = \case
         HostToolGroup tools -> tools
-        ExecutionToolGroup tools -> map proxy tools
+        ExecutionToolGroup tools -> map route tools
+    route tool
+        | tool.appToolName `elem` ["read_tool_output", "search_tool_output", "export_tool_output"] =
+            tool
+                { appToolHandler = wrapToolHandler (\call local -> local >>= \case
+                    Left "tool-output artifact was not found" ->
+                        invokeTenantTool sandbox sessionId cwd dialect (const (pure ())) call
+                    Right result | tool.appToolName == "export_tool_output" ->
+                        uploadExport sandbox sessionId cwd dialect call result
+                    result -> pure result) tool.appToolHandler
+                }
+        | otherwise = proxy tool
     proxy tool =
         tool
             { appToolHandler =
@@ -239,6 +254,36 @@ invokeTenantTool
     -> ToolCall
     -> IO (Either Text ToolHandlerResult)
 invokeTenantTool sandbox sessionId cwd dialect emit call =
+    invokeTenantOperation sandbox sessionId cwd dialect emit call Nothing
+
+-- Only the host export handler supplies this path; it is never decoded from
+-- guest responses or model arguments.
+uploadExport :: TenantSandbox -> Text -> FilePath -> DialectId -> ToolCall
+    -> ToolHandlerResult -> IO (Either Text ToolHandlerResult)
+uploadExport sandbox sessionId cwd dialect call exported =
+    case eitherDecodeStrict' (TextEncoding.encodeUtf8 exported.resultText) of
+        Right (Object metadata)
+            | Just (String path) <- KeyMap.lookup "path" metadata
+            , Just (Number size) <- KeyMap.lookup "stored_bytes" metadata
+            , size >= 0 && size <= 64 * 1024 * 1024 ->
+                invokeTenantOperation sandbox sessionId cwd dialect (const (pure ()))
+                    call { arguments = TextEncoding.decodeUtf8 (LazyByteString.toStrict
+                        (encode (object ["size" .= size]))) }
+                    (Just (Text.unpack path)) >>= \case
+                        Left err -> pure (Left err)
+                        Right uploaded ->
+                            case eitherDecodeStrict' (TextEncoding.encodeUtf8 uploaded.resultText) of
+                                Right (String guestPath) -> pure (Right exported
+                                    { resultText = TextEncoding.decodeUtf8 (LazyByteString.toStrict
+                                        (encode (Object (KeyMap.insert "path" (String guestPath) metadata))))
+                                    })
+                                _ -> pure (Left "sandbox export did not return a file path")
+        _ -> pure (Left "local export metadata is invalid")
+
+invokeTenantOperation
+    :: TenantSandbox -> Text -> FilePath -> DialectId -> (Text -> IO ())
+    -> ToolCall -> Maybe FilePath -> IO (Either Text ToolHandlerResult)
+invokeTenantOperation sandbox sessionId cwd dialect emit call uploadPath =
     withMVar sandbox.sandboxLock \_ -> mask \restore -> do
         closed <- readMVar sandbox.sandboxClosed
         if closed
@@ -256,7 +301,7 @@ invokeTenantTool sandbox sessionId cwd dialect emit call =
                                         (Left
                                             "encrypted tool arguments cannot cross the sandbox protocol")
                             Right mappedCwd -> do
-                                let request =
+                                let toolRequest =
                                         encodeToolRequest
                                             sandbox
                                             running
@@ -265,6 +310,12 @@ invokeTenantTool sandbox sessionId cwd dialect emit call =
                                             mappedCwd
                                             dialect
                                             call
+                                    request = case uploadPath of
+                                        Nothing -> toolRequest
+                                        Just _ -> case eitherDecodeStrict' (LazyByteString.toStrict toolRequest) of
+                                            Right (Object fields) ->
+                                                encode (Object (KeyMap.insert "type" (String "artifact_upload") fields))
+                                            _ -> toolRequest
                                 if LazyByteString.length request
                                     > fromIntegral maximumRequestBytes
                                     then
@@ -282,7 +333,8 @@ invokeTenantTool sandbox sessionId cwd dialect emit call =
                                                             running
                                                             requestId
                                                             emit
-                                                            request)))
+                                                            request
+                                                            uploadPath)))
                                                 `onException`
                                                     invalidateSandbox
                                                         sandbox
@@ -431,13 +483,29 @@ exchange
     -> Text
     -> (Text -> IO ())
     -> LazyByteString.ByteString
+    -> Maybe FilePath
     -> IO (Either Text (Either Text ToolHandlerResult))
-exchange sandbox running requestId emit request = do
+exchange sandbox running requestId emit request uploadPath = do
     LazyByteString.hPut running.runningInput request
     LazyByteString.hPut running.runningInput "\n"
     hFlush running.runningInput
+    case uploadPath of
+        Nothing -> pure ()
+        Just path -> withBinaryFile path ReadMode (sendChunks 0)
     readResponses 0
   where
+    sendChunks offset source = do
+        chunk <- ByteString.hGetSome source 32768
+        when (offset + ByteString.length chunk > 64 * 1024 * 1024) $
+            ioError (userError "artifact export exceeds protocol cap")
+        LazyByteString.hPut running.runningInput (encode (object
+            [ "requestId" .= requestId
+            , "offset" .= offset
+            , "data" .= TextEncoding.decodeUtf8 (Base64.encode chunk)
+            ]))
+        LazyByteString.hPut running.runningInput "\n"
+        hFlush running.runningInput
+        unless (ByteString.null chunk) (sendChunks (offset + ByteString.length chunk) source)
     expectedTenant =
         renderTenantId sandbox.sandboxTenant.resolvedTenantId
     expectedGeneration = running.runningGeneration

@@ -41,7 +41,8 @@ import Agent.OsPath (unsafeToFilePath)
 import Agent.ResourceScope (allocateResource, closeResourceScope, newResourceScope)
 import Agent.Store.Postgres (trustedPool)
 import Agent.Tools.TaskPlan (TaskPlanEnv, newTaskPlanEnv)
-import Agent.Tools.Types (AppTool, setToolSessionTmp)
+import Agent.Tools.Types
+    ( AppTool, ToolEnv(toolOutputMemoryStore), setToolSessionTmp, clearMemoryOutputArtifacts )
 import Control.Concurrent.Async (concurrently)
 import Control.Exception.Safe (SomeException, bracketOnError, try)
 import Control.Monad (forM_)
@@ -141,6 +142,9 @@ prepareScratchRuntime AgentToolsRequest
                             pure ())
                 pure tempDir
     setToolSessionTmp baseToolEnv (Just scratchSessionTmp)
+    _ <- allocateResource scratchScope
+        (pure ())
+        (\() -> clearMemoryOutputArtifacts baseToolEnv.toolOutputMemoryStore)
     scratchImageGenerationHistory <- newImageGenerationHistory
     forM_ resumed \(_, turns) ->
         recordImageGenerationResponseItems

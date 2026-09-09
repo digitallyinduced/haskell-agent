@@ -183,6 +183,7 @@ import Agent.CLI.Subagents.Runtime
                       subagentSessions, subagentStoreRoot, subagentTypes,
                       subagentLegacyTarget, subagentConnection, subagentMapModel,
                       subagentCreateWorktree, subagentSessionTmp,
+                      subagentOutputMemoryStore, subagentOutputMemoryCap,
                       subagentSpawnModelGuidance, subagentAllowedChildModels,
                       subagentResolveChildModel, subagentChildModelAllowed) )
 import Agent.CLI.Subagents.Runtime.Types
@@ -238,7 +239,7 @@ import Agent.ToolDispatch (canonicalToolName, ToolDispatchConfig(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ToolSchema(..)
-    , ToolEnv(toolAllowedRoots, toolRootAccessRequest, toolSkillRoots, toolSessionTmp, toolResourceArbiter)
+    , ToolEnv(toolAllowedRoots, toolRootAccessRequest, toolSkillRoots, toolSessionTmp, toolResourceArbiter, toolOutputMemoryStore, toolOutputMemoryCap)
     )
 import Control.Applicative ( (<|>) )
 import Control.Concurrent.Async ( waitSTM, withAsync )
@@ -755,6 +756,8 @@ buildSessionSubagentRuntime AgentSessionRequest
         , subagentMapModel = transportModel
         , subagentCreateWorktree = Just createSubagentWorktree
         , subagentSessionTmp = toolEnv.toolSessionTmp
+        , subagentOutputMemoryStore = toolEnv.toolOutputMemoryStore
+        , subagentOutputMemoryCap = toolEnv.toolOutputMemoryCap
         , subagentSpawnModelGuidance =
             if inferredTarget.targetConnectionId == organizationGatewayConnectionId
                 || (provider == OpenAIProvider && isJust allowedChildModels)

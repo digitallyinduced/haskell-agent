@@ -635,6 +635,7 @@ buildSkillContextRuntime
         clearSteeringInputs steeringInputs
         installBackgroundTaskSteering toolEnv steeringInputs
         readIORef toolEnv.toolSessionTmp >>= mapM_ resetToolSessionTemp
+        clearMemoryOutputArtifacts toolEnv.toolOutputMemoryStore
         reloadGeneratedContext
     refreshSkills queueContext = do
         refreshed <- loadAvailableSkills
