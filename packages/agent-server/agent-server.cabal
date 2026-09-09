@@ -144,6 +144,7 @@ test-suite agent-server-test
                     , aeson
                     , async
                     , base >= 4.17 && < 5
+                    , base64-bytestring
                     , bytestring
                     , containers
                     , directory
