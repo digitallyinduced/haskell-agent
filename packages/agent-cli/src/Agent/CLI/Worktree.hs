@@ -81,6 +81,7 @@ import qualified System.Directory as Directory
 import qualified System.FilePath as FilePath
 import System.Timeout (timeout)
 import System.Exit (ExitCode(..))
+import System.Environment (getEnvironment)
 import qualified System.FileLock as FileLock
 import System.OsPath
     ( OsPath
@@ -796,7 +797,7 @@ withGitWorktreeLockAt commonDir action =
         FileLock.Exclusive
         (const action)
 
--- | Fetch and return the commit at the selected remote's advertised default
+-- | Fetch and return the commit at the selected remote's cached default
 -- branch, or use the local @HEAD@ when the repository has no remotes. The
 -- current branch's configured remote wins, followed by conventional @upstream@
 -- and @origin@ names, then a sole remaining remote.
@@ -808,15 +809,57 @@ fetchLatestUpstream report repo = do
     selectUpstreamRemote repo >>= \case
         Nothing -> pure Nothing
         Just remote -> do
-            lift (report (WorktreeCheckingRemote remote))
-            remoteHead <- remoteDefaultBranch repo remote
-            lift (report (WorktreeFetchingRemote remote remoteHead))
-            localRef <- lift freshFetchRef
-            commit <-
-                ExceptT $
-                    runExceptT (fetchIntoRef repo remote remoteHead localRef)
-                        `finally` cleanupFetchRef repo localRef
+            cached <- lift (cachedRemoteDefaultBranch repo remote)
+            commit <- case cached of
+                Nothing -> discoverAndFetch remote
+                Just remoteHead -> do
+                    result <- lift (runExceptT (fetchBranch remote remoteHead))
+                    case result of
+                        Right commit -> pure commit
+                        Left err
+                            | any (== "fatal: couldn't find remote ref " <> remoteHead)
+                                (map Text.strip (Text.lines err))
+                                || (": fatal: couldn't find remote ref " <> remoteHead)
+                                    `Text.isSuffixOf` Text.strip err ->
+                                discoverAndFetch remote
+                            | otherwise -> throwE err
             pure (Just commit)
+  where
+    fetchBranch remote remoteHead = do
+        lift (report (WorktreeFetchingRemote remote remoteHead))
+        localRef <- lift freshFetchRef
+        ExceptT $
+            runExceptT (fetchIntoRef repo remote remoteHead localRef)
+                `finally` cleanupFetchRef repo localRef
+    discoverAndFetch remote = do
+        lift (report (WorktreeCheckingRemote remote))
+        remoteHead <- remoteDefaultBranch repo remote
+        commit <- fetchBranch remote remoteHead
+        -- Cache only successful discoveries. Cache contention must not fail
+        -- worktree creation; the next invocation can discover again.
+        lift $ unless (remoteHead == "refs/heads/HEAD") $ void $ tryAny $ git repo
+            [ "symbolic-ref"
+            , Text.unpack ("refs/remotes/" <> remote <> "/HEAD")
+            , Text.unpack ("refs/remotes/" <> remote <> "/"
+                <> Text.drop (Text.length "refs/heads/") remoteHead)
+            ]
+        pure commit
+
+-- Git shares this symbolic reference across linked worktrees. Its target need
+-- not exist locally: our isolated fetch deliberately leaves tracking refs alone.
+-- A default-branch change that retains the old branch requires an explicit
+-- fetch into the new remote-tracking ref before
+-- `git remote set-head <remote> --auto` (see README).
+cachedRemoteDefaultBranch :: OsPath -> Text -> IO (Maybe Text)
+cachedRemoteDefaultBranch repo remote = do
+    let prefix = "refs/remotes/" <> remote <> "/"
+    result <- git repo ["symbolic-ref", "--quiet", "--no-recurse", Text.unpack (prefix <> "HEAD")]
+    pure $ case result of
+        Right output
+            | Just branch <- Text.stripPrefix prefix (Text.strip output)
+            , not (Text.null branch)
+            , branch /= "HEAD" -> Just ("refs/heads/" <> branch)
+        _ -> Nothing
 
 fetchIntoRef :: OsPath -> Text -> Text -> Text -> ExceptT Text IO Text
 fetchIntoRef repo remote remoteHead localRef = do
@@ -940,9 +983,16 @@ quote value = "'" <> value <> "'"
 
 git :: OsPath -> [String] -> IO (Either Text Text)
 git dir args = do
+    -- Only fetch diagnostics are parsed for missing-ref recovery.
+    environment <- if listToMaybe args == Just "fetch"
+        then Just . (("LC_ALL", "C") :) . filter ((/= "LC_ALL") . fst) <$> getEnvironment
+        else pure Nothing
     (code, out, err) <-
         readCreateProcessWithExitCode
-            (proc "git" args) { cwd = Just (unsafeToFilePath dir) }
+            (proc "git" args)
+                { cwd = Just (unsafeToFilePath dir)
+                , env = environment
+                }
             ""
     case code of
         ExitSuccess -> pure (Right (Text.pack out))
