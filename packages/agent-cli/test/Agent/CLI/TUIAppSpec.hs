@@ -3524,7 +3524,13 @@ withPastedImageFixtures action =
             secondPath = directory </> "second.png"
         writePng firstPath (generateImage (\_ _ -> PixelRGB8 255 0 0) 4 3)
         writePng secondPath (generateImage (\_ _ -> PixelRGB8 0 255 0) 4 3)
-        action firstPath secondPath
+        -- Submitting a draft persists REPL history; keep it inside the fixture.
+        bracket
+            (lookupEnv "HOME")
+            (\previous -> maybe (unsetEnv "HOME") (setEnv "HOME") previous)
+            \_ -> do
+                setEnv "HOME" directory
+                action firstPath secondPath
 
 newScriptRuntime :: UiState -> IO FullscreenRuntime
 newScriptRuntime ui = do
