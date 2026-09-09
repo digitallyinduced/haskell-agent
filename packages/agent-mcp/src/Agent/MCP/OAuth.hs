@@ -934,6 +934,53 @@ responseBodyText response =
     let body = Text.strip (decodeLenient (LBS.toStrict (LBS.take 2048 (responseBody response))))
     in if Text.null body then "(empty response body)" else body
 
--- | UTF-8 success page served by the interactive OAuth callback listener.
+-- | UTF-8 receipt page served by the interactive OAuth callback listener.
+-- Receipt does not imply permission was granted or the token exchange succeeded.
+-- Render fixed application copy only, never callback parameters.
 oauthCallbackSuccessPage :: LBS.ByteString
-oauthCallbackSuccessPage = "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>Connected</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0b1020;color:#e8ecf5;font:16px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif}.card{max-width:430px;margin:24px;padding:36px;border:1px solid #28324a;border-radius:20px;background:#131a2d;box-shadow:0 24px 70px #0008;text-align:center}.check{display:grid;place-items:center;width:56px;height:56px;margin:0 auto 20px;border-radius:50%;background:#173d31;color:#6ee7b7;font-size:30px}h1{margin:0 0 10px;font-size:24px}p{margin:0;color:#aab4ca;line-height:1.55}</style></head><body><main class=\"card\"><div class=\"check\">&#10003;</div><h1>MCP connected</h1><p>Authorization completed successfully. You can close this tab and return to Haskell Agent.</p></main></body></html>"
+oauthCallbackSuccessPage = LBS.fromStrict $ Encoding.encodeUtf8 $ Text.concat
+    [ "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+    , "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+    , "<meta name=\"color-scheme\" content=\"light dark\">"
+    , "<title>Authorization response received · Haskell Agent</title><style>"
+    , ":root{color-scheme:light dark;--background:#f5f7fb;--surface:#fff;"
+    , "--text:#192231;--secondary:#606b7c;--border:#e5e9f0;"
+    , "--status-background:#edf3ff;--status-color:#2460dc}"
+    , "*{box-sizing:border-box}body{margin:0;min-height:100vh;min-height:100svh;"
+    , "display:grid;place-items:center;padding:32px 20px;"
+    , "font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;"
+    , "-webkit-font-smoothing:antialiased;color:var(--text);background:var(--background);"
+    , "background-image:radial-gradient(ellipse at 50% 0%,rgba(77,133,255,.09),transparent 65%)}"
+    , ".confirmation{width:100%;max-width:460px;text-align:center}"
+    , ".brand{display:flex;align-items:center;justify-content:center;gap:10px;"
+    , "margin-bottom:28px;font-size:15px;font-weight:600;letter-spacing:-.2px}"
+    , ".brand-mark{display:grid;place-items:center;width:32px;height:32px;border-radius:9px;"
+    , "background:linear-gradient(145deg,#619bff,#2460dc);color:white;"
+    , "font-size:25px;font-weight:500;box-shadow:0 2px 5px #2563eb26}"
+    , ".card{padding:40px 32px 32px;background:var(--surface);border:1px solid var(--border);"
+    , "border-radius:24px;box-shadow:0 12px 48px #172b4d08,0 2px 6px #172b4d03}"
+    , ".status{display:grid;place-items:center;width:64px;height:64px;margin:0 auto 24px;"
+    , "border-radius:50%;background:var(--status-background);color:var(--status-color)}"
+    , ".status svg{width:30px;height:30px}"
+    , "h1{margin:0 0 14px;font-size:27px;line-height:1.2;letter-spacing:-.8px;font-weight:650;"
+    , "text-wrap:balance}p{margin:0;color:var(--secondary);font-size:15px;line-height:1.65;"
+    , "text-wrap:pretty}.next-step{margin-top:28px;padding-top:24px;border-top:1px solid var(--border)}"
+    , ".next-step strong{display:block;margin-bottom:5px;font-size:14px;font-weight:600}"
+    , ".next-step p{font-size:13px}.footer{margin-top:24px;font-size:12px}"
+    , "@media(max-width:380px){.card{padding:32px 22px}h1{font-size:24px}}"
+    , "@media(prefers-color-scheme:dark){:root{--background:#11151c;--surface:#1b212b;"
+    , "--text:#edf1f8;--secondary:#a4afc0;--border:#303947;"
+    , "--status-background:#243653;--status-color:#9bbfff}}"
+    , "</style></head><body><main class=\"confirmation\">"
+    , "<header class=\"brand\"><span class=\"brand-mark\" aria-hidden=\"true\">λ</span>"
+    , "Haskell Agent</header><section class=\"card\" aria-labelledby=\"confirmation-title\">"
+    , "<div class=\"status\" aria-hidden=\"true\">"
+    , "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\""
+    , " stroke-linecap=\"round\" stroke-linejoin=\"round\">"
+    , "<path d=\"M9 10 4 15l5 5M4 15h10a6 6 0 0 0 0-12\"/></svg></div>"
+    , "<h1 id=\"confirmation-title\">Return to Haskell Agent</h1>"
+    , "<p>Your authorization response was received.</p>"
+    , "<div class=\"next-step\"><strong>Continue in the app</strong>"
+    , "<p>Return to the app to check the connection status.</p></div></section>"
+    , "<p class=\"footer\">You can safely close this tab.</p></main></body></html>"
+    ]
