@@ -107,6 +107,7 @@ module Agent.CLI.TUI.App
     , wrapMarkdownLinkCursorVty
     , withTrackedVtyBuilder
     , setFullscreenImagePreviews
+    , refreshFullscreenImagePreviews
     , setFullscreenWindowTitle
     , showFullscreenToolImage
     , toolImageBlockId

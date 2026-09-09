@@ -197,6 +197,7 @@ data AppEvent
     | AppSetTheme !ThemeKind
       -- ^ Apply a theme to the retained fullscreen UI.
     | AppSetImagePreviews ![(ImageAttachment, TuiImagePreview)]
+    | AppRefreshImagePreviews ![(ImageAttachment, TuiImagePreview)]
     | AppCommitImagePreviews ![(ImageAttachment, TuiImagePreview)]
     | AppToolImage !Text !TuiImagePreview
       -- ^ An image the agent displayed through @show_image@, keyed by the
@@ -526,6 +527,9 @@ data AppState = AppState
     , appDictation :: !(Maybe DictationSession)
     , appSlashCatalog :: !SlashCatalog
     , appImagePreviews :: ![TuiImagePreview]
+    -- | Active-turn pastes are previewed and cleared by the composer rather
+    -- than by delayed REPL attachment/commit events.
+    , appComposerOwnsImagePreviews :: !Bool
       -- | Previews attached to conversation blocks: images the user
       -- submitted with a prompt and images the agent displayed from a tool
       -- call. Native placements are synchronized from this map after each

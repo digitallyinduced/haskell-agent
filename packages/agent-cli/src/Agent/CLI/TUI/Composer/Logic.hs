@@ -25,7 +25,7 @@ import Agent.CLI.Command
     )
 import Agent.CLI.Input (ReplLine(..))
 import Agent.CLI.TUI.Types (AppState(..))
-import Agent.TUI.Model (UiEvent(..), UiState(..))
+import Agent.TUI.Model (PromptState(..), UiEvent(..), UiState(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Graphics.Vty as V
@@ -96,6 +96,14 @@ applyComposerUiEvent uiEvent state =
             if isDraft then Nothing else state.appHistoryIndex
         , appHistoryDraft =
             if isDraft then draftText else state.appHistoryDraft
+        , appUi =
+            case uiEvent of
+                UiSetPrompt _ | state.appComposerOwnsImagePreviews ->
+                    let ui = state.appUi
+                        prompt = ui.uiPrompt
+                    in ui { uiPrompt =
+                        prompt { promptAttachments = length state.appImagePreviews } }
+                _ -> state.appUi
         }
   where
     isDraft = case uiEvent of

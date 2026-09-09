@@ -149,6 +149,7 @@ import Brick
     , vLimit
     )
 import Brick.BChan (newBChan, writeBChan)
+import Codec.Picture (PixelRGB8(..), generateImage, writePng)
 import qualified Brick.Types as B
 import Agent.Subagents (SubagentId(..))
 import Agent.ToolDispatch
@@ -204,12 +205,83 @@ import Graphics.Vty.PictureToSpans (displayOpsForPic)
 import Graphics.Vty.Span (SpanOp(..))
 import qualified Agent.CLI.TUI.Composer as Composer
 import System.Timeout (timeout)
+import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 import qualified Agent.CLI.TUI.App as History
 import Agent.Tools.RenderChart (renderChartResult)
 
 spec :: Spec
 spec = do
+    describe "active-turn image paste" do
+        it "shows a bracketed image paste before the REPL consumes it and survives delayed refreshes" $
+            withPastedImageFixtures \path _ -> do
+                let running = reduceUi (UiSetDraft "unfinished draft" 4) $
+                        reduceUi (UiLoop TurnStarted) initialUiState
+                runtime <- newScriptRuntime running
+                let initial = initialFullscreenAppState runtime [] AgentRoot [] 0
+                (_, pasted) <- runFullscreenScriptWithState initial
+                    [ FullscreenScriptVty (V.EvPaste (encoded (Text.pack path)))
+                    , FullscreenScriptHalt
+                    ]
+                length pasted.appImagePreviews `shouldBe` 1
+                pasted.appUi.uiPrompt.promptAttachments `shouldBe` 1
+                pasted.appUi.uiDraft `shouldBe` "unfinished draft"
+                pasted.appUi.uiCursor `shouldBe` 4
+                prepared <- readIORef runtime.runtimeImagePreviews
+                map snd prepared == pasted.appImagePreviews `shouldBe` True
+                -- No REPL consumer is started: the captured image remains queued.
+                queued <- atomically (Composer.readFullscreenInputs runtime.runtimeInput)
+                map (.fullscreenInputLine) (toList queued)
+                    `shouldBe` [ReplClipboardPasteCaptured (map fst prepared)]
+                map (.fullscreenInputQueued) (toList queued) `shouldBe` [True]
+                forM_
+                    [ AppRefreshImagePreviews []
+                    , AppCommitImagePreviews []
+                    , AppUi (UiSetPrompt running.uiPrompt)
+                    ] \event -> do
+                        (_, refreshed) <- runFullscreenScriptWithState pasted
+                            [FullscreenScriptApp event, FullscreenScriptHalt]
+                        refreshed.appImagePreviews == pasted.appImagePreviews
+                            `shouldBe` True
+                        refreshed.appUi.uiPrompt.promptAttachments `shouldBe` 1
+                        refreshed.appUi.uiDraft `shouldBe` "unfinished draft"
+                        refreshed.appUi.uiCursor `shouldBe` 4
+
+        it "leaves existing previews and the draft untouched when the input queue is full" $
+            withPastedImageFixtures \firstPath secondPath -> do
+                let running = reduceUi (UiSetDraft "unfinished draft" 4) $
+                        reduceUi (UiLoop TurnStarted) initialUiState
+                runtime <- newScriptRuntime running
+                (_, pasted) <- runFullscreenScriptWithState
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    [ FullscreenScriptVty (V.EvPaste (encoded (Text.pack firstPath)))
+                    , FullscreenScriptHalt
+                    ]
+                length pasted.appImagePreviews `shouldBe` 1
+                before <- readIORef runtime.runtimeImagePreviews
+                revision <- readIORef runtime.runtimeImagePreviewRevision
+                replicateM_ (Composer.fullscreenInputCountLimit - 1) do
+                    atomically (Composer.appendFullscreenInput runtime.runtimeInput
+                        (FullscreenInput ReplEof True Nothing))
+                        `shouldReturn` Right ()
+                (_, rejected) <- runFullscreenScriptWithState pasted
+                    [ FullscreenScriptVty (V.EvPaste (encoded (Text.pack secondPath)))
+                    , FullscreenScriptHalt
+                    ]
+                rejected.appImagePreviews == pasted.appImagePreviews `shouldBe` True
+                rejected.appUi.uiPrompt.promptAttachments `shouldBe` 1
+                rejected.appUi.uiDraft `shouldBe` "unfinished draft"
+                rejected.appUi.uiCursor `shouldBe` 4
+                after <- readIORef runtime.runtimeImagePreviews
+                after == before `shouldBe` True
+                readIORef runtime.runtimeImagePreviewRevision `shouldReturn` revision
+                (.noticeText) <$> rejected.appUi.uiNotice
+                    `shouldBe` Just
+                        "Prompt queue is full; wait for a queued prompt to be consumed."
+                queued <- atomically (Composer.readFullscreenInputs runtime.runtimeInput)
+                Seq.length queued `shouldBe` Composer.fullscreenInputCountLimit
+
     describe "dynamic model choice" do
         it "preserves filter, selected identity, and effort across reordered rows" do
             runtime <- newScriptRuntime initialUiState
@@ -3274,6 +3346,15 @@ unfocusedStreamingRefreshesOnMotionTick = do
             ]
     rendered <- runFullscreenScript initialState script
     pure $ encoded marker `ByteString.isInfixOf` rendered
+
+withPastedImageFixtures :: (FilePath -> FilePath -> IO a) -> IO a
+withPastedImageFixtures action =
+    withSystemTempDirectory "agent-tui-image-paste" \directory -> do
+        let firstPath = directory </> "first.png"
+            secondPath = directory </> "second.png"
+        writePng firstPath (generateImage (\_ _ -> PixelRGB8 255 0 0) 4 3)
+        writePng secondPath (generateImage (\_ _ -> PixelRGB8 0 255 0) 4 3)
+        action firstPath secondPath
 
 newScriptRuntime :: UiState -> IO FullscreenRuntime
 newScriptRuntime ui = do

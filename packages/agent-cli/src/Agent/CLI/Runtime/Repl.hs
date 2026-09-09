@@ -79,7 +79,7 @@ import Agent.CLI.TUI.App
     ( FullscreenRuntime
     , emitUiEvent,
       readFullscreenLineOrWithCatalog,
-      setFullscreenImagePreviews )
+      refreshFullscreenImagePreviews )
 import Agent.CLI.Terminal
     ( emitTerminalSequence,
       osc133PromptEnd,
@@ -213,7 +213,7 @@ replWithDraft env@SessionEnv
     mlineResult <- case fullscreen of
         Just runtime -> do
             syncFullscreenContext env
-            setFullscreenImagePreviews runtime pendingAttachments
+            refreshFullscreenImagePreviews runtime pendingAttachments
             let promptState =
                     buildPromptState
                         (dialectId dialect)

@@ -136,6 +136,7 @@ isPromptPrelude :: FullscreenInput -> Bool
 isPromptPrelude input =
     case input.fullscreenInputLine of
         ReplClipboardPaste _ _ -> True
+        ReplClipboardPasteCaptured _ -> True
         ReplClipboardPasteOrText _ _ _ -> True
         _ -> False
 

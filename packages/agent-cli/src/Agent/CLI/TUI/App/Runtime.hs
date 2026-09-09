@@ -639,13 +639,29 @@ setFullscreenImagePreviews
     :: FullscreenRuntime
     -> [ImageAttachment]
     -> IO ()
-setFullscreenImagePreviews runtime images = do
+setFullscreenImagePreviews =
+    publishFullscreenImagePreviews AppSetImagePreviews
+
+-- | Refresh session state without overwriting a draft edited during a turn.
+refreshFullscreenImagePreviews
+    :: FullscreenRuntime
+    -> [ImageAttachment]
+    -> IO ()
+refreshFullscreenImagePreviews =
+    publishFullscreenImagePreviews AppRefreshImagePreviews
+
+publishFullscreenImagePreviews
+    :: ([(ImageAttachment, TuiImagePreview)] -> AppEvent)
+    -> FullscreenRuntime
+    -> [ImageAttachment]
+    -> IO ()
+publishFullscreenImagePreviews event runtime images = do
     previous <- readIORef runtime.runtimeImagePreviews
     prepared <-
         if map fst previous == images
             then pure previous
             else prepareFullscreenImagePreviews runtime images
-    enqueueAppEvent runtime (AppSetImagePreviews prepared)
+    enqueueAppEvent runtime (event prepared)
 
 -- | Move pending composer previews into the next submitted user message.
 commitFullscreenImagePreviews

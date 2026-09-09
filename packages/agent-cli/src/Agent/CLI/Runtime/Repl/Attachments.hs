@@ -44,6 +44,7 @@ import qualified Data.Text.IO as Text ( hPutStrLn, putStrLn )
 -- | Clipboard operations after the REPL input has been classified.
 data ClipboardInput
     = ClipboardPaste !Text !(Maybe [ImageAttachment])
+    | ClipboardPasteCaptured ![ImageAttachment]
     | ClipboardPasteOrText !Text !Text !Text
 
 handleClipboardInput
@@ -60,6 +61,12 @@ handleClipboardInput
             }
         continueWith
         stdoutColor = \case
+    ClipboardPasteCaptured images -> do
+        -- The composer already rendered this snapshot. Consume it in input
+        -- order without restoring an old draft or replacing newer previews.
+        _ <- queueAttachedImages
+            conversationRef previewIdRef stdoutColor (isNothing fullscreen) images
+        continueWith ""
     ClipboardPaste keptDraft clipboardPasteImages -> do
         case clipboardPasteImages of
             Just images@(_:_) -> do
