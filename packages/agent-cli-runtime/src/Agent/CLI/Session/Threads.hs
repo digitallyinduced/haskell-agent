@@ -11,7 +11,11 @@ module Agent.CLI.Session.Threads
 
 import Agent.CLI.Error (formatException)
 import Agent.CLI.SessionLock
-    ( sessionLockIsActive, sessionLockPath, sessionActivitySnapshot )
+    ( SessionWaitSnapshot(..)
+    , sessionLockIsActive
+    , sessionLockPath
+    , sessionWaitSnapshot
+    )
 import Agent.Runtime.SessionOwner
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (tryAny)
@@ -78,17 +82,35 @@ prepareSessionThreadWait manager sessionId = do
     case captured of
         Just (SessionRunning, wait) -> pure (outcomeText <$> wait)
         _ -> do
-            (generation, active) <- sessionActivitySnapshot sessionDir
-            if active
-                then pure (waitExternal generation)
-                else pure $ maybe (pure "idle") (fmap outcomeText . snd) captured
+            snapshot <- sessionWaitSnapshot sessionDir
+            locked <- sessionLockIsActive (sessionLockPath sessionDir)
+            if snapshot.waitActivityActive
+                then pure (waitActivityThenInbox snapshot.waitActivityGeneration)
+                else if snapshot.waitInboxPending > 0 && locked
+                    then pure waitUntilQuiet
+                    else pure $ maybe (pure "idle") (fmap outcomeText . snd) captured
   where
     sessionDir = sessionDirectory manager sessionId
-    waitExternal generation = do
-        (current, active) <- sessionActivitySnapshot sessionDir
-        if active && (generation == current || generation == Nothing)
-            then threadDelay 100000 >> waitExternal current
+    waitActivityThenInbox generation = do
+        _ <- waitExternal generation
+        snapshot <- sessionWaitSnapshot sessionDir
+        locked <- sessionLockIsActive (sessionLockPath sessionDir)
+        if snapshot.waitInboxPending > 0 && locked
+            then waitUntilQuiet
             else pure "idle"
+    waitExternal generation = do
+        snapshot <- sessionWaitSnapshot sessionDir
+        if snapshot.waitActivityActive
+            && (generation == snapshot.waitActivityGeneration || generation == Nothing)
+            then threadDelay 100000 >> waitExternal snapshot.waitActivityGeneration
+            else pure ("idle" :: Text)
+    waitUntilQuiet = do
+        snapshot <- sessionWaitSnapshot sessionDir
+        locked <- sessionLockIsActive (sessionLockPath sessionDir)
+        if snapshot.waitActivityActive
+                || (snapshot.waitInboxPending > 0 && locked)
+            then threadDelay 100000 >> waitUntilQuiet
+            else pure ("idle" :: Text)
 
 sessionDirectory :: SessionThreadManager -> Text -> OsPath
 sessionDirectory manager sessionId =

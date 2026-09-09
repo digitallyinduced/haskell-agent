@@ -59,6 +59,10 @@ import Agent.CLI.Session
     , sessionTempDirForId
     , sessionTitleFromPrompt
     )
+import Agent.CLI.SessionLock
+    ( sessionLockIsActive
+    , sessionLockPath
+    )
 import Agent.Store.Postgres.Connection (StorePool)
 import Agent.CLI.Models
     ( ModelOption(..)
@@ -105,6 +109,9 @@ data AgentSessionToolsEnv = AgentSessionToolsEnv
     , toolsSessionStatus :: !(Text -> IO Text)
     -- | Capture the current run now, then wait without following later runs.
     , toolsPrepareSessionWait :: !(Text -> IO (IO Text))
+    -- | Deliver to the process that already owns the session. 'Nothing'
+    -- means no owner inbox is listening; 'Just' is that owner's reply.
+    , toolsDeliverToOwner :: !(Text -> Text -> IO (Maybe (Either Text ())))
     }
 
 formatSessionCompletionNotice :: Text -> Text -> Text
@@ -133,7 +140,7 @@ data WaitAgentSessionArgs = WaitAgentSessionArgs
 waitAgentSessionTool :: AgentSessionToolsEnv -> AppTool
 waitAgentSessionTool env = jsonTool
     "wait_agent_session"
-    "Wait for another persisted session's current turn, not the lifetime of its conversation. Returns status and latest saved output, or timed_out. Already idle sessions return immediately. Locally managed turns report completed, failed, or cancelled; external turns report idle when their activity ends (the exit reason is unknown). Recent output may include a later resume. Use this instead of polling read_agent_session. Cancelling or timing out this wait does not cancel the target."
+    "Wait for another persisted session's current turn, not the lifetime of its conversation. Returns status and latest saved output, or timed_out. Already idle sessions return immediately unless they have accepted inbox messages that have not started yet. Locally managed turns report completed, failed, or cancelled; external turns report idle when their activity ends (the exit reason is unknown). Recent output may include a later resume. Use this instead of polling read_agent_session. Cancelling or timing out this wait does not cancel the target."
     [ PropertySchema "session_id" PropertyString True $ Just
         "Persisted target session id. Self-waits and circular waits are rejected."
     , PropertySchema "timeout_ms" PropertyInteger False $ Just
@@ -408,7 +415,7 @@ sendAgentSessionMessageArgsDecoder = Hermes.object $
 sendAgentSessionMessageTool :: AgentSessionToolsEnv -> AppTool
 sendAgentSessionMessageTool env = jsonTool
     "send_agent_session_message"
-    "Send a message to a persisted agent session by starting a resumed background turn. Use for explicitly requested independent/background work or continuation of that separate session, not to transfer responsibility for the current task. Returns the session id and status as readable text, not a completed result; fails if that session is already running. The interactive parent session is notified when this turn finishes."
+    "Send a message to a persisted agent session. If that session is already open, deliver the message to its owner: an idle session starts a new turn, and a session in the middle of a turn queues the message for after the current turn or receives it at a message boundary. If nobody owns the session, start a resumed background turn. Use for explicitly requested independent/background work or continuation of that separate session, not to transfer responsibility for the current task. Returns the session id and status as readable text, not a completed result. The interactive parent session is notified when a launched turn finishes."
     [ PropertySchema "session_id" PropertyString True $ Just
         "Persisted target session id."
     , PropertySchema "message" PropertyString True $ Just
@@ -436,11 +443,26 @@ runSendAgentSessionMessage env args
                 Right meta ->
                     case validateToolSessionBoundary env meta of
                         Left err -> pure (Left err)
-                        Right () ->
-                            launchToolSessionTurn
-                                env
-                                (sessionHandle env.toolsPool env.toolsRoot meta)
-                                args.message
+                        Right () -> do
+                            let handle =
+                                    sessionHandle
+                                        env.toolsPool env.toolsRoot meta
+                            env.toolsDeliverToOwner
+                                args.sessionId args.message >>= \case
+                                Just (Right ()) -> do
+                                    status <- env.toolsSessionStatus args.sessionId
+                                    pure $ Right $ renderSessionLaunch
+                                        args.sessionId
+                                        (if status == "idle" then "queued" else status)
+                                Just (Left err) -> pure (Left err)
+                                Nothing -> do
+                                    locked <- sessionLockIsActive
+                                        (sessionLockPath handle.sessionDir)
+                                    if locked
+                                        then pure $ Left $
+                                            "session " <> args.sessionId
+                                                <> " is already running"
+                                        else launchToolSessionTurn env handle args.message
 
 validateToolSessionBoundary
     :: AgentSessionToolsEnv

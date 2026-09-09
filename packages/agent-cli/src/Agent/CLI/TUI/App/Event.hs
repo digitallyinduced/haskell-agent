@@ -1450,6 +1450,7 @@ handleCommandPaletteSelection = \case
                     , fullscreenInputQueued = queued
                     , fullscreenInputDisplay =
                         if queued then Just command else Nothing
+                    , fullscreenInputFromInbox = False
                     }
         case result of
             Left message ->

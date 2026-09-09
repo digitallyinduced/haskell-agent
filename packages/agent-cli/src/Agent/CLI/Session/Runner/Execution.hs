@@ -79,6 +79,12 @@ import Agent.CLI.Session
 import Agent.CLI.Session.History
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import qualified Agent.CLI.Session.Observation as Observation
+import Agent.CLI.Session.Inbox
+    ( newSessionInbox
+    , releaseInboxPending
+    , takeInboxMessage
+    , withOptionalSessionInboxServer
+    )
 import Agent.CLI.SessionEnv
 import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.CLI.SessionLock
@@ -102,7 +108,9 @@ import Agent.CLI.Error
 import Agent.CLI.Dialects
 import Agent.CLI.Dictation (dictationTargetForSession)
 import Agent.CLI.TUI.App
-import Agent.CLI.TUI.Types (FullscreenRuntime(..))
+import Agent.CLI.TUI.Composer (appendFullscreenInput)
+import Agent.CLI.TUI.Types (FullscreenInput(..), FullscreenRuntime(..))
+import Agent.CLI.Input (ReplLine(ReplText))
 import Agent.TUI.Model
 import Agent.TUI.Motion
 import Agent.CLI.WindowTitle
@@ -122,17 +130,20 @@ import Agent.Tools.MultiAgents
 import Agent.Tools.PlanMode
 import Agent.Tools.Types
 import Agent.OsPath
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (Async, withAsync)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
-import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, withMVar)
-import Control.Concurrent.STM (STM)
+import Control.Concurrent.MVar
+    ( MVar, modifyMVar_, newEmptyMVar, newMVar, takeMVar, tryPutMVar, withMVar )
+import Control.Concurrent.STM
+    ( STM, atomically, newEmptyTMVarIO, putTMVar )
 import Control.Exception.Safe
     ( catchAny
     , mask_
     , onException
     , uninterruptibleMask_
     )
-import Control.Monad (forM_, unless, void, when)
+import Control.Monad (forM_, forever, unless, void, when)
 import Data.IORef
 import Data.Foldable (toList)
 import qualified Data.Map.Strict as Map
@@ -184,6 +195,7 @@ data SessionHostRuntime = SessionHostRuntime
     , hostApprovalLock :: !(MVar ())
     , hostObservationPublisher
         :: !(IORef (Maybe Observation.SessionObservationPublisher))
+    , hostInboxRuntime :: !SessionInboxRuntime
     , hostNativeCapabilities :: !NativeRunCapabilities
     , hostLoadsWorkspaceContext :: !Bool
     , hostPreparedWorkspaceEnvironment
@@ -209,6 +221,12 @@ newSessionHostRuntime SessionRequest{..} = do
     approvalLock <- newMVar ()
     observationPublisher <- newIORef Nothing
     observationInputWaitCount <- newMVar (0 :: Int)
+    inboxRuntime <- SessionInboxRuntime
+        <$> newSessionInbox
+        <*> newEmptyMVar
+        <*> newIORef False
+        <*> newIORef False
+        <*> newEmptyTMVarIO
     let fullscreen = startup.startupFullscreen
         nativeCapabilities =
             maybe
@@ -344,6 +362,7 @@ newSessionHostRuntime SessionRequest{..} = do
         , hostIoLock = ioLock
         , hostApprovalLock = approvalLock
         , hostObservationPublisher = observationPublisher
+        , hostInboxRuntime = inboxRuntime
         , hostNativeCapabilities = nativeCapabilities
         , hostLoadsWorkspaceContext = loadsHostWorkspaceContext
         , hostPreparedWorkspaceEnvironment = preparedWorkspaceEnvironment
@@ -1411,10 +1430,12 @@ newSessionPersistenceRuntime
                 either (const Nothing) Just <$>
                     acquireSessionActivityLock
                         handle.sessionDir handle.sessionMeta.metaId
-        endTurnActivity =
+        endTurnActivity = do
             Activity.endTurnActivity turnActivity releaseSessionLock
+            writeIORef host.hostInboxRuntime.inboxTurnActive False
         beginTurnActivity = mask_ $
             (do
+                writeIORef host.hostInboxRuntime.inboxTurnActive True
                 Activity.beginTurnActivity turnActivity
                 case persist of
                     PersistenceDisabled -> pure ()
@@ -1422,7 +1443,12 @@ newSessionPersistenceRuntime
                         readIORef slotRef >>= \case
                             PersistencePending{} -> pure ()
                             PersistenceActive handle ->
-                                void (acquireTurnActivity handle))
+                                void (acquireTurnActivity handle)
+                fromInbox <- atomicModifyIORef'
+                    host.hostInboxRuntime.inboxTurn
+                    (\active -> (False, active))
+                when fromInbox $
+                    releaseInboxPending host.hostInboxRuntime.inboxMessages)
                 `onException` endTurnActivity
         notifyNativeSessionId sessionId = do
             shouldNotify <-
@@ -1443,6 +1469,7 @@ newSessionPersistenceRuntime
             -- Preserve the established lock order: own the session before
             -- attempting its best-effort activity marker.
             onPersisted handle
+            void (tryPutMVar host.hostInboxRuntime.inboxReady handle)
             acquired <- acquireTurnActivity handle
             notifyNativeSessionId handle.sessionMeta.metaId
                 `onException`
@@ -1565,6 +1592,7 @@ buildSessionEnv
         , sessionPersist = persist
         , sessionObservationPublisher = host.hostObservationPublisher
         , sessionObservationEnabled = isNothing startup.startupNativeHooks
+        , sessionInboxRuntime = host.hostInboxRuntime
         , sessionDatabasePool =
             trustedPool startup.startupDatabaseStore
         , sessionTitleManager = titleManager
@@ -1883,17 +1911,67 @@ runSessionWorkers
                 MCP.mcpFleetWaitForSkillRegistrations fleet previous
             env.sessionRefreshSkills True
             waitForChange fleet current
-    result <- withAsync host.hostWindowTitle.windowTitleWorker \_ ->
-        withMcpSkillWatcher $
-            case host.hostFullscreen of
-                Just _ ->
-                    withAsync btwWorker \_ ->
+    result <- withAsync (runSessionInboxOwner env) \_ ->
+        withAsync host.hostWindowTitle.windowTitleWorker \_ ->
+            withMcpSkillWatcher $
+                case host.hostFullscreen of
+                    Just _ ->
+                        withAsync btwWorker \_ ->
+                            withAsync recapWorker (const sessionAction)
+                    Nothing ->
                         withAsync recapWorker (const sessionAction)
-                Nothing ->
-                    withAsync recapWorker (const sessionAction)
     _ <- waitForSessionTitleResults 5000000 titleManager
     applyPendingSessionTitles env
     pure result
+
+runSessionInboxOwner :: SessionEnv -> IO ()
+runSessionInboxOwner env =
+    case env.sessionPersist of
+        PersistenceDisabled -> forever (threadDelay 100000000)
+        PersistenceEnabled slotRef -> do
+            readIORef slotRef >>= \case
+                PersistenceActive handle ->
+                    void (tryPutMVar env.sessionInboxRuntime.inboxReady handle)
+                PersistencePending{} -> pure ()
+            handle <- takeMVar env.sessionInboxRuntime.inboxReady
+            withOptionalSessionInboxServer
+                env.sessionInboxRuntime.inboxMessages
+                handle.sessionMeta.metaId
+                handle.sessionDir
+                (forwardInboxMessages env)
+
+forwardInboxMessages :: SessionEnv -> IO ()
+forwardInboxMessages env = forever do
+    message <- atomically (takeInboxMessage env.sessionInboxRuntime.inboxMessages)
+    injected <- injectInboxMessage env message
+    unless injected $
+        releaseInboxPending env.sessionInboxRuntime.inboxMessages
+
+injectInboxMessage :: SessionEnv -> Text.Text -> IO Bool
+injectInboxMessage env message = do
+    active <- readIORef env.sessionInboxRuntime.inboxTurnActive
+    case env.sessionFullscreen of
+        Just runtime -> do
+            result <- atomically $
+                appendFullscreenInput runtime.runtimeInput FullscreenInput
+                    { fullscreenInputLine = ReplText message
+                    , fullscreenInputQueued = True
+                    , fullscreenInputDisplay = Just message
+                    , fullscreenInputFromInbox = True
+                    }
+            pure $ either (const False) (const True) result
+        Nothing
+            | active ->
+                enqueueSteeringInputs
+                    env.sessionSteeringInputs
+                    [UserMessage message] >>= \case
+                    Left _ -> pure False
+                    Right () -> do
+                        releaseInboxPending env.sessionInboxRuntime.inboxMessages
+                        pure True
+            | otherwise -> do
+                atomically (putTMVar env.sessionInboxRuntime.inboxInline message)
+                pure True
 
 runSession
     :: SessionRunnerContinuation

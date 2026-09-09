@@ -251,6 +251,7 @@ data FullscreenInput = FullscreenInput
     { fullscreenInputLine :: !ReplLine
     , fullscreenInputQueued :: !Bool
     , fullscreenInputDisplay :: !(Maybe Text)
+    , fullscreenInputFromInbox :: !Bool
     }
 
 -- | Runtime ownership of the syntax grammar cache. Keeping the active bit and

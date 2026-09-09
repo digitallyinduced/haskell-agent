@@ -196,6 +196,7 @@ handlePromptControlClick applyUiEvent choice = do
                     { fullscreenInputLine = choice ui.uiDraft
                     , fullscreenInputQueued = False
                     , fullscreenInputDisplay = Nothing
+                    , fullscreenInputFromInbox = False
                     }
             case queued of
                 Left message ->
@@ -239,6 +240,7 @@ handleImageRemoveClick applyUiEvent index = do
                             { fullscreenInputLine = ReplRemoveCapturedImage image
                             , fullscreenInputQueued = True
                             , fullscreenInputDisplay = Nothing
+                            , fullscreenInputFromInbox = False
                             }
                     case queued of
                         Left message ->
@@ -684,6 +686,7 @@ queueComposerImages applyUiEvent images = do
                         { fullscreenInputLine = ReplClipboardPasteCaptured added
                         , fullscreenInputQueued = True
                         , fullscreenInputDisplay = Nothing
+                        , fullscreenInputFromInbox = False
                         }
                 case queued of
                     Left message -> pure (Left message)
@@ -844,6 +847,7 @@ sendNow applyUiEvent = do
                                     else ReplText draft
                             , fullscreenInputQueued = True
                             , fullscreenInputDisplay = Just draft
+                            , fullscreenInputFromInbox = False
                             }
                 case promoted of
                     Left message ->
@@ -903,6 +907,7 @@ enqueueInput applyUiEvent state replLine display clearDraft = do
             { fullscreenInputLine = replLine
             , fullscreenInputQueued = queued
             , fullscreenInputDisplay = display
+            , fullscreenInputFromInbox = False
             }
     case result of
         Left message -> do

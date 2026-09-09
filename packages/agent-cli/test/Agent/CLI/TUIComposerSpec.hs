@@ -607,11 +607,13 @@ spec = describe "fullscreen composer" do
                 { fullscreenInputLine = ReplText "active"
                 , fullscreenInputQueued = False
                 , fullscreenInputDisplay = Just "active"
+                , fullscreenInputFromInbox = False
                 }
             appendFullscreenInput buffer FullscreenInput
                 { fullscreenInputLine = ReplText "queued"
                 , fullscreenInputQueued = True
                 , fullscreenInputDisplay = Just "queued"
+                , fullscreenInputFromInbox = False
                 }
         queuedFullscreenInputDisplays buffer
             `shouldReturn` Seq.singleton "queued"
@@ -634,6 +636,7 @@ spec = describe "fullscreen composer" do
                     ReplText (Text.pack (show index))
                 , fullscreenInputQueued = True
                 , fullscreenInputDisplay = Nothing
+                , fullscreenInputFromInbox = False
                 }
         accepted <- atomically $
             mapM (appendFullscreenInput buffer . prompt)
@@ -689,6 +692,7 @@ spec = describe "fullscreen composer" do
         { fullscreenInputLine = replLine
         , fullscreenInputQueued = True
         , fullscreenInputDisplay = Nothing
+        , fullscreenInputFromInbox = False
         }
 
 wrapDraftProperty :: DraftCase -> Property

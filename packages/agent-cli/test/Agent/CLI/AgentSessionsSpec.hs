@@ -406,6 +406,34 @@ spec = describe "Agent.CLI.AgentSessions" do
             selfResult `shouldSatisfy`
                 Text.isInfixOf "cannot message the current agent session"
 
+    it "delivers to an open session owner instead of starting a competing turn" $
+        withTempEnv \env launched -> do
+            handle <- createSession (testCreate env.toolsPool env.toolsRoot)
+            let target = handle.sessionMeta.metaId
+                ownerEnv = env
+                    { toolsDeliverToOwner = \_ _ -> pure (Just (Right ()))
+                    , toolsSessionStatus = const (pure "running")
+                    }
+            result <- runTool ownerEnv "send_agent_session_message" $
+                "{\"session_id\":\"" <> target <> "\",\"message\":\"continue\"}"
+            result `shouldSatisfy` Text.isInfixOf "Status: running"
+            launchedNow <- readIORef launched
+            length launchedNow `shouldBe` 0
+
+    it "does not start a competing turn when the target session is already open" $
+        withTempEnv \env launched -> do
+            handle <- createSession (testCreate env.toolsPool env.toolsRoot)
+            Right lock <- acquireSessionLock
+                handle.sessionDir handle.sessionMeta.metaId
+            flip finally (releaseSessionLock lock) do
+                result <- runTool env "send_agent_session_message" $
+                    "{\"session_id\":\""
+                        <> handle.sessionMeta.metaId
+                        <> "\",\"message\":\"continue\"}"
+                result `shouldSatisfy` Text.isInfixOf "already running"
+                launchedNow <- readIORef launched
+                length launchedNow `shouldBe` 0
+
     it "keeps persisted gateway sessions portable across direct and gateway modes" $
         withTempEnv \env launched -> do
             let gatewayCreate =
@@ -1018,6 +1046,7 @@ withTempEnv action =
                 , toolsLaunchTurn = launch
                 , toolsSessionStatus = const (pure "running")
                 , toolsPrepareSessionWait = const (pure (pure "idle"))
+                , toolsDeliverToOwner = \_ _ -> pure Nothing
                 }
         action env launched
 

@@ -30,7 +30,7 @@ import Agent.CLI.GatewayClient
     , gatewayModelIds
     )
 import Agent.CLI.Input
-    ( ReplLine
+    ( ReplLine(ReplText)
     , readReplLineWithCatalogForProvider
     , readReplLineWithCatalogForTarget
     )
@@ -63,7 +63,7 @@ import Agent.CLI.Session.Interaction
     , syncFullscreenContext
     )
 import Agent.CLI.Session.Lifecycle ( SessionContinuation(..) )
-import Agent.CLI.SessionEnv ( SessionEnv(..) )
+import Agent.CLI.SessionEnv ( SessionEnv(..), SessionInboxRuntime(..) )
 import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.CLI.Skills ( skillInvocationCommand )
 import Agent.CLI.Status ( formatReplStatusLine )
@@ -110,11 +110,12 @@ import Agent.TUI.Model
 import Agent.Tools.PlanMode
     ( PlanModeEnv(planStateRef),
       PlanModeState(PlanPending, PlanActive) )
-import Control.Concurrent.Async ( withAsync )
+import Agent.CLI.Session.Inbox (releaseInboxPending)
+import Control.Concurrent.Async ( race, withAsync )
 import Control.Concurrent.MVar ( withMVar )
-import Control.Concurrent.STM (orElse, retry)
+import Control.Concurrent.STM (atomically, orElse, retry, takeTMVar, tryTakeTMVar)
 import Control.Monad ( when, forM_ )
-import Data.IORef ( readIORef, writeIORef )
+import Data.IORef ( atomicModifyIORef', readIORef, writeIORef )
 import Data.Maybe ( fromMaybe, isJust )
 import Data.Text ( Text )
 import System.Console.ANSI ( getTerminalSize )
@@ -233,6 +234,7 @@ replWithDraft env@SessionEnv
                 gatewayAccess
                 (currentModel params)
         Nothing -> Right <$> withMVar render.renderLock \_ -> do
+            let inbox = env.sessionInboxRuntime.inboxInline
             -- The inline editor redraws its ANSI frame with several writes.
             -- Keep the renderer out for the complete prompt lifetime so a
             -- late tool event cannot be spliced into the composer row.
@@ -283,24 +285,35 @@ replWithDraft env@SessionEnv
                         <> if stdoutColor
                             then Text.pack clearFromCursorToLineEndCode
                             else mempty
-            result <- case gatewayAccess of
-                Just gateway ->
-                    readReplLineWithCatalogForTarget
-                        (dictationTargetForSession
-                            env.sessionProvider
-                            (Just gateway))
-                        slashCatalog
-                        interrupt chromePrompt draft
-                Nothing ->
-                    readReplLineWithCatalogForProvider
-                        provider
-                        slashCatalog
-                        interrupt chromePrompt draft
-            when terminal.terminalSemanticPrompts $
-                emitTerminalSequence terminal stdout osc133PromptEnd
-            Text.putStr (endBackground stdoutColor)
-            hFlush stdout
-            pure result
+            let finishChrome = do
+                    when terminal.terminalSemanticPrompts $
+                        emitTerminalSequence terminal stdout osc133PromptEnd
+                    Text.putStr (endBackground stdoutColor)
+                    hFlush stdout
+                readLine = case gatewayAccess of
+                    Just gateway ->
+                        readReplLineWithCatalogForTarget
+                            (dictationTargetForSession
+                                env.sessionProvider
+                                (Just gateway))
+                            slashCatalog
+                            interrupt chromePrompt draft
+                    Nothing ->
+                        readReplLineWithCatalogForProvider
+                            provider
+                            slashCatalog
+                            interrupt chromePrompt draft
+            queued <- atomically (tryTakeTMVar inbox)
+            case queued of
+                Just text -> do
+                    finishChrome
+                    pure (ReplText text, True)
+                Nothing -> do
+                    outcome <- race (atomically (takeTMVar inbox)) readLine
+                    finishChrome
+                    pure $ case outcome of
+                        Left text -> (ReplText text, True)
+                        Right line -> (line, False)
     case mlineResult of
         Left BackgroundCompletionWake -> do
             pending <-
@@ -326,22 +339,35 @@ replWithDraft env@SessionEnv
                 Nothing -> do
                     reportProviderUnavailable fullscreen apiError
                     replWithDraft env ""
-        Right mline -> do
+        Right (mline, fromInbox) -> do
             -- Any user action wins the startup race. In particular, a prompt
             -- already submitted while the preflight was running proceeds on
             -- the selected provider and leaves request-time fallback in charge.
             writeIORef startupUnavailableRef Nothing
-            handleReplLine
-                env
-                (replWithDraft env)
-                (finishTurn env)
-                (SessionLifecycle.retryFailedTurn sessionContinuation env)
-                slashCatalog
-                skillInvocations
-                stdoutColor
-                planState
-                policy
-                mline
+            submitReplLine env fromInbox $
+                handleReplLine
+                    env
+                    (replWithDraft env)
+                    (finishTurn env)
+                    (SessionLifecycle.retryFailedTurn sessionContinuation env)
+                    slashCatalog
+                    skillInvocations
+                    stdoutColor
+                    planState
+                    policy
+                    mline
+
+submitReplLine :: SessionEnv -> Bool -> IO RunResult -> IO RunResult
+submitReplLine env fromInbox action = do
+    when fromInbox $
+        writeIORef env.sessionInboxRuntime.inboxTurn True
+    result <- action
+    leftover <- atomicModifyIORef'
+        env.sessionInboxRuntime.inboxTurn
+        (\active -> (False, active))
+    when leftover $
+        releaseInboxPending env.sessionInboxRuntime.inboxMessages
+    pure result
 
 readFullscreenPrompt
     :: SessionEnv
@@ -351,7 +377,7 @@ readFullscreenPrompt
     -> Text
     -> Maybe GatewayModelAccess
     -> Text
-    -> IO (Either ReplWake ReplLine)
+    -> IO (Either ReplWake (ReplLine, Bool))
 readFullscreenPrompt
     env
     runtime

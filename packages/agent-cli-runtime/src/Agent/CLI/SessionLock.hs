@@ -4,15 +4,19 @@
 -- the advisory lock when the owning process exits, including after a crash.
 module Agent.CLI.SessionLock
     ( SessionLock
+    , SessionWaitSnapshot(..)
     , acquireSessionLock
     , acquireSessionActivityLock
+    , adjustSessionInboxPending
     , releaseSessionLock
     , sessionActivityLockPath
     , sessionActivityGeneration
     , sessionActivitySnapshot
+    , sessionInboxPending
     , sessionLockFilePath
     , sessionLockIsActive
     , sessionLockPath
+    , sessionWaitSnapshot
     ) where
 
 import Agent.CLI.Error (formatException)
@@ -32,6 +36,14 @@ import Text.Read (readMaybe)
 data SessionLock = SessionLock
     { lockFilePath :: !FilePath
     , sessionLockHandle :: !FileLock.FileLock
+    }
+
+-- | Cross-process view of work that waiters must drain: the current turn, if
+-- any, plus accepted inbox messages that have not yet started as a turn.
+data SessionWaitSnapshot = SessionWaitSnapshot
+    { waitActivityGeneration :: !(Maybe Integer)
+    , waitActivityActive :: !Bool
+    , waitInboxPending :: !Integer
     }
 
 sessionLockFilePath :: SessionLock -> FilePath
@@ -78,11 +90,53 @@ acquireSessionActivityLock sessionDir sessionId = do
 -- needs no gate: it cannot change the generation, and any following acquisition
 -- must wait until this snapshot has completed.
 sessionActivitySnapshot :: OsPath -> IO (Maybe Integer, Bool)
-sessionActivitySnapshot sessionDir =
+sessionActivitySnapshot sessionDir = do
+    snapshot <- sessionWaitSnapshot sessionDir
+    pure (snapshot.waitActivityGeneration, snapshot.waitActivityActive)
+
+sessionWaitSnapshot :: OsPath -> IO SessionWaitSnapshot
+sessionWaitSnapshot sessionDir =
     withPrivateFileLock (activityAdmissionPath sessionDir) $ do
         generation <- sessionActivityGeneration sessionDir
         active <- sessionLockIsActive (sessionActivityLockPath sessionDir)
-        pure (generation, active)
+        pending <- readSessionInboxPending sessionDir
+        pure SessionWaitSnapshot
+            { waitActivityGeneration = generation
+            , waitActivityActive = active
+            , waitInboxPending = pending
+            }
+
+-- | Accepted owner-inbox messages that have not yet started as a turn.
+sessionInboxPending :: OsPath -> IO Integer
+sessionInboxPending sessionDir =
+    withPrivateFileLock (activityAdmissionPath sessionDir) $
+        readSessionInboxPending sessionDir
+
+adjustSessionInboxPending :: OsPath -> Integer -> IO Integer
+adjustSessionInboxPending sessionDir delta =
+    withPrivateFileLock (activityAdmissionPath sessionDir) $ do
+        current <- readSessionInboxPending sessionDir
+        let next = max 0 (current + delta)
+        writeLazyFileAtomically
+            (sessionInboxPendingPath sessionDir)
+            0o600
+            (LBS.pack (show next))
+        pure next
+
+readSessionInboxPending :: OsPath -> IO Integer
+readSessionInboxPending sessionDir =
+    (do
+        bytes <- BS.readFile
+            (unsafeToFilePath (sessionInboxPendingPath sessionDir))
+        case readMaybe (BS.unpack bytes) of
+            Just value | value >= 0 -> pure value
+            _ -> ioError (userError "invalid session inbox pending count"))
+        `catchIOError` \err ->
+            if isDoesNotExistError err then pure 0 else ioError err
+
+sessionInboxPendingPath :: OsPath -> OsPath
+sessionInboxPendingPath sessionDir =
+    sessionDir </> unsafeEncodeUtf ".agent-inbox-pending"
 
 -- A monotonically increasing generation distinguishes rapid consecutive turns
 -- even if a cross-process waiter never observes the unlocked interval. The

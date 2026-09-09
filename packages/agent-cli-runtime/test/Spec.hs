@@ -2,6 +2,7 @@ module Main (main) where
 
 import qualified Agent.CLI.SessionActivitySpec as SessionActivitySpec
 import qualified Agent.CLI.SessionObservationSpec as SessionObservationSpec
+import qualified Agent.CLI.SessionInboxSpec as SessionInboxSpec
 import qualified Agent.CLI.SessionRequestSpec as SessionRequestSpec
 import qualified Agent.CLI.TurnRecordSpec as TurnRecordSpec
 import qualified Agent.CLI.SessionThreadsSpec as SessionThreadsSpec
@@ -33,6 +34,7 @@ main :: IO ()
 main = hspec do
     SessionActivitySpec.spec
     SessionObservationSpec.spec
+    SessionInboxSpec.spec
     SessionRequestSpec.spec
     TurnRecordSpec.spec
     SessionThreadsSpec.spec

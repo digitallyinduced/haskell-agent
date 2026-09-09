@@ -20,7 +20,8 @@ import Agent.CLI.AgentSessions
                            toolsTransportModel, toolsDialect, toolsAllowedModels,
                            toolsResolveModelOption,
                            toolsGatewayIdentity, toolsCwd, toolsEffort,
-                           toolsCurrentSessionId, toolsLaunchTurn, toolsPrepareSessionWait) )
+                           toolsCurrentSessionId, toolsLaunchTurn, toolsPrepareSessionWait,
+                           toolsDeliverToOwner) )
 import Agent.CLI.Auth (isGatewayLoadedAuth)
 import qualified Agent.CLI.ComputerUse as ComputerUse
 import Agent.CLI.Config (HarnessConfig(..))
@@ -88,6 +89,10 @@ import Agent.CLI.Session.Runtime.Types
     , StartupRuntime(startupDatabaseStore, startupNativeHooks, startupStdinTty) )
 import Agent.CLI.Session.Selection
     ( currentSessionId, reservedSessionId )
+import Agent.CLI.Session.Inbox
+    ( deliverSessionInboxMessage
+    , inboxUnavailableError
+    )
 import Agent.CLI.SessionLock
     ( acquireSessionLock,
       releaseSessionLock,
@@ -593,6 +598,11 @@ newSessionControlRuntime AgentToolsRequest
                 sessionThreadStatus processRuntime.processSessionThreads
             , toolsPrepareSessionWait =
                 prepareSessionThreadWait processRuntime.processSessionThreads
+            , toolsDeliverToOwner = \sessionId message ->
+                deliverSessionInboxMessage sessionId message >>= \case
+                    Left err | err == inboxUnavailableError ->
+                        pure Nothing
+                    other -> pure (Just other)
             }
         -- Persisted agent-session tools recursively start another native
         -- runtime, so they require an explicit collaboration capability from

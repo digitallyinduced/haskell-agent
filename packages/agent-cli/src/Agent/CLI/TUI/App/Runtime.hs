@@ -749,7 +749,7 @@ readFullscreenLine runtime skills prompt initial = do
         runtime skills [] prompt initial retry
     case result of
         Left impossible -> pure impossible
-        Right line -> pure line
+        Right (line, _) -> pure line
 
 readFullscreenLineWithCatalog
     :: FullscreenRuntime
@@ -762,7 +762,7 @@ readFullscreenLineWithCatalog runtime catalog prompt initial = do
         runtime catalog prompt initial retry
     case result of
         Left impossible -> pure impossible
-        Right line -> pure line
+        Right (line, _) -> pure line
 
 readFullscreenLineWithModels
     :: FullscreenRuntime
@@ -776,7 +776,7 @@ readFullscreenLineWithModels runtime skills modelIds prompt initial = do
         runtime skills modelIds prompt initial retry
     case result of
         Left impossible -> pure impossible
-        Right line -> pure line
+        Right (line, _) -> pure line
 
 -- | Wait for either user input or a session-level wakeup. The input branch is
 -- deliberately left-biased: once Enter has queued a prompt, provider startup
@@ -788,7 +788,7 @@ readFullscreenLineOr
     -> PromptState
     -> Text
     -> STM wake
-    -> IO (Either wake ReplLine)
+    -> IO (Either wake (ReplLine, Bool))
 readFullscreenLineOr runtime skills prompt initial wake = do
     readFullscreenLineOrWithModels runtime skills [] prompt initial wake
 
@@ -799,7 +799,7 @@ readFullscreenLineOrWithModels
     -> PromptState
     -> Text
     -> STM wake
-    -> IO (Either wake ReplLine)
+    -> IO (Either wake (ReplLine, Bool))
 readFullscreenLineOrWithModels
         runtime skills modelIds prompt initial wake = do
     readFullscreenLineOrWithCatalog
@@ -817,7 +817,7 @@ readFullscreenLineOrWithCatalog
     -> PromptState
     -> Text
     -> STM wake
-    -> IO (Either wake ReplLine)
+    -> IO (Either wake (ReplLine, Bool))
 readFullscreenLineOrWithCatalog
         runtime catalog prompt initial wake = do
     enqueueAppEvent runtime (AppSetSlashCatalog catalog)
@@ -838,7 +838,7 @@ readFullscreenLineOrWithCatalog
                     case input.fullscreenInputDisplay of
                         Just _ -> UiQueuedInputStarted
                         Nothing -> UiSetAwaitingInput False
-            pure (Right input.fullscreenInputLine)
+            pure (Right (input.fullscreenInputLine, input.fullscreenInputFromInbox))
 
 -- | Fullscreen Vty configuration, including legacy terminal overrides.
 -- 'Agent.CLI.TUI.Keyboard' decodes CSI-u before this compatibility table,

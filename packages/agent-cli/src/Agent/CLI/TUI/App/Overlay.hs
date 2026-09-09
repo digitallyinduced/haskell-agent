@@ -1133,6 +1133,7 @@ submitMetaConsole = do
                             { fullscreenInputLine = ReplMeta request
                             , fullscreenInputQueued = queued
                             , fullscreenInputDisplay = Nothing
+                            , fullscreenInputFromInbox = False
                             }
                 case result of
                     Left message ->

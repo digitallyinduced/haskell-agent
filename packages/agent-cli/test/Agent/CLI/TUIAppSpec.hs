@@ -304,7 +304,7 @@ spec = do
                 revision <- readIORef runtime.runtimeImagePreviewRevision
                 replicateM_ (Composer.fullscreenInputCountLimit - 1) do
                     atomically (Composer.appendFullscreenInput runtime.runtimeInput
-                        (FullscreenInput ReplEof True Nothing))
+                        (FullscreenInput ReplEof True Nothing False))
                         `shouldReturn` Right ()
                 (_, rejected) <- runFullscreenScriptWithState pasted
                     [ FullscreenScriptVty (V.EvPaste (encoded (Text.pack secondPath)))
@@ -425,7 +425,7 @@ spec = do
                 revision <- readIORef runtime.runtimeImagePreviewRevision
                 replicateM_ (Composer.fullscreenInputCountLimit - 1) do
                     atomically (Composer.appendFullscreenInput runtime.runtimeInput
-                        (FullscreenInput ReplEof True Nothing))
+                        (FullscreenInput ReplEof True Nothing False))
                         `shouldReturn` Right ()
                 (_, rejected) <- runFullscreenScriptWithState pasted
                     [ FullscreenScriptMouseDown (ComposerImageRemove 0) V.BLeft (B.Location (0, 0))
@@ -693,6 +693,7 @@ spec = do
                     { fullscreenInputLine = ReplText "queued prompt"
                     , fullscreenInputQueued = True
                     , fullscreenInputDisplay = Just "queued prompt"
+                    , fullscreenInputFromInbox = False
                     }
             atomically (Composer.appendFullscreenInput runtime.runtimeInput input)
                 `shouldReturn` Right ()
@@ -1544,6 +1545,7 @@ spec = do
                             { fullscreenInputLine = ReplEof
                             , fullscreenInputQueued = True
                             , fullscreenInputDisplay = Nothing
+                            , fullscreenInputFromInbox = False
                             }
                     case result of
                         Left message -> error (Text.unpack message)
