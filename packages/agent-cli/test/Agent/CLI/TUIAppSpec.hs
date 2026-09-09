@@ -369,9 +369,47 @@ spec = do
                 map (.fullscreenInputLine) (toList queued)
                     `shouldBe` map (.fullscreenInputLine) (toList earlierQueue)
                         <> map (ReplClipboardPasteCaptured . pure . fst) before
-                        <> [ ReplRemoveCapturedImage 0
-                           , ReplText "next draft"
-                           ]
+                        <> map (ReplRemoveCapturedImage . fst) (take 1 before)
+                        <> [ReplText "next draft"]
+
+        it "captures the selected image identity after an earlier slash command submission" $
+            withPastedImageFixtures \firstPath secondPath -> do
+                let running = reduceUi (UiLoop TurnStarted) initialUiState
+                runtime <- newScriptRuntime running
+                (_, firstPaste) <- runFullscreenScriptWithState
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    [ FullscreenScriptVty (V.EvPaste (encoded (Text.pack firstPath)))
+                    , FullscreenScriptHalt
+                    ]
+                earlierImages <- map fst <$> readIORef runtime.runtimeImagePreviews
+                (_, commandQueued) <- runFullscreenScriptWithState
+                    firstPaste
+                        { appSlashDismissed = True
+                        , appUi = reduceUi (UiSetDraft "/help" 5) firstPaste.appUi
+                        }
+                    [ FullscreenScriptVty (V.EvKey V.KEnter [])
+                    , FullscreenScriptHalt
+                    ]
+                null commandQueued.appImagePreviews `shouldBe` True
+                (_, secondPaste) <- runFullscreenScriptWithState commandQueued
+                    [ FullscreenScriptVty (V.EvPaste (encoded (Text.pack secondPath)))
+                    , FullscreenScriptHalt
+                    ]
+                selectedImages <- map fst <$> readIORef runtime.runtimeImagePreviews
+                selectedImages `shouldNotBe` earlierImages
+                (_, removed) <- runFullscreenScriptWithState secondPaste
+                    [ FullscreenScriptMouseDown (ComposerImageRemove 0) V.BLeft (B.Location (0, 0))
+                    , FullscreenScriptMouseUp (ComposerImageRemove 0) (B.Location (0, 0))
+                    , FullscreenScriptHalt
+                    ]
+                null removed.appImagePreviews `shouldBe` True
+                queued <- atomically (Composer.readFullscreenInputs runtime.runtimeInput)
+                map (.fullscreenInputLine) (toList queued)
+                    `shouldBe`
+                        [ ReplClipboardPasteCaptured earlierImages
+                        , ReplText "/help"
+                        , ReplClipboardPasteCaptured selectedImages
+                        ] <> map ReplRemoveCapturedImage selectedImages
 
         it "retains an active-turn image when its removal cannot be queued" $
             withPastedImageFixtures \path _ -> do

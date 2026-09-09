@@ -16,7 +16,7 @@ import Agent.CLI.Render ( resetRenderPrintedText )
 import Agent.CLI.Runtime.Types ( RunResult )
 import Agent.CLI.Session.Attachments
     ( putImagePreview, queueAttachedImages, queueClipboardImages )
-import Agent.CLI.SessionState (removeImageAttachmentAt)
+import Agent.CLI.SessionState (removeImageAttachment, removeImageAttachmentAt)
 import Agent.CLI.Session.History
     ( modifyLiveAttachments )
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
@@ -45,7 +45,7 @@ import qualified Data.Text.IO as Text ( hPutStrLn, putStrLn )
 data ClipboardInput
     = ClipboardPaste !Text !(Maybe [ImageAttachment])
     | ClipboardPasteCaptured ![ImageAttachment]
-    | ClipboardRemoveCaptured !Int
+    | ClipboardRemoveCaptured !ImageAttachment
     | ClipboardPasteOrText !Text !Text !Text
 
 handleClipboardInput
@@ -68,10 +68,10 @@ handleClipboardInput
         _ <- queueAttachedImages
             conversationRef previewIdRef stdoutColor (isNothing fullscreen) images
         continueWith ""
-    ClipboardRemoveCaptured index -> do
+    ClipboardRemoveCaptured image -> do
         -- Apply the composer edit in queue order without replacing its newer
         -- draft or previews when the REPL catches up.
-        _ <- modifyLiveAttachments conversationRef (removeImageAttachmentAt index)
+        _ <- modifyLiveAttachments conversationRef (removeImageAttachment image)
         continueWith ""
     ClipboardPaste keptDraft clipboardPasteImages -> do
         case clipboardPasteImages of

@@ -300,9 +300,9 @@ handleReplLine
             finishTurn
             (continueWith keptDraft)
             (ReplRemoveAttachment index)
-    ReplRemoveCapturedImage index ->
+    ReplRemoveCapturedImage image ->
         handleClipboardInput env continueWith stdoutColor
-            (ClipboardRemoveCaptured index)
+            (ClipboardRemoveCaptured image)
     ReplPasted pasted ->
         submit (continueWith "") True pasted
     ReplText line ->

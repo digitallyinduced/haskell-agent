@@ -229,12 +229,14 @@ handleImageRemoveClick applyUiEvent index = do
     if state.appComposerOwnsImagePreviews && not overlayOpen
         then do
             previous <- liftIO (readIORef state.appRuntime.runtimeImagePreviews)
-            if index < 0 || index >= length previous
+            if index < 0
                 then pure ()
-                else do
+                else case splitAt index previous of
+                  (_, []) -> pure ()
+                  (before, (image, _) : after) -> do
                     queued <- liftIO $ atomically $
                         appendFullscreenInput state.appRuntime.runtimeInput FullscreenInput
-                            { fullscreenInputLine = ReplRemoveCapturedImage index
+                            { fullscreenInputLine = ReplRemoveCapturedImage image
                             , fullscreenInputQueued = True
                             , fullscreenInputDisplay = Nothing
                             }
@@ -242,7 +244,7 @@ handleImageRemoveClick applyUiEvent index = do
                         Left message ->
                             applyUiEvent (UiSetNotice (Just (warningNotice message))) id
                         Right () -> do
-                            let pending = take index previous <> drop (index + 1) previous
+                            let pending = before <> after
                             liftIO do
                                 writeIORef state.appRuntime.runtimeImagePreviews pending
                                 modifyIORef' state.appRuntime.runtimeImagePreviewRevision (+ 1)
