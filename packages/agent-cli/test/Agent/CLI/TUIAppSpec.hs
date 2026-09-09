@@ -3019,7 +3019,8 @@ spec = do
                     state.appUi.uiDraft `shouldBe` "before"
                     state.appUi.uiFocus `shouldBe` FocusScrollback
 
-        it "copies the selected transcript block with Ctrl-Y without editing the draft" do
+        forM_ [V.EvKey (V.KChar 'y') [V.MCtrl], V.EvKey (V.KChar '\EM') []] $ \copyEvent ->
+          it ("copies the selected transcript block without editing the draft: " <> show copyEvent) do
             copied <- newIORef Nothing
             initialState <- cachedHistoryState
                 [markerBlock (BlockId (-1)) "selected transcript text"]
@@ -3032,7 +3033,7 @@ spec = do
                     , appHistorySelectedBlock = Just (BlockId (-1))
                     }
             (_, finalState) <- runFullscreenScriptWithState state
-                [ FullscreenScriptVty (V.EvKey (V.KChar 'y') [V.MCtrl])
+                [ FullscreenScriptVty copyEvent
                 , FullscreenScriptHalt
                 ]
             readIORef copied `shouldReturn` Just "selected transcript text"

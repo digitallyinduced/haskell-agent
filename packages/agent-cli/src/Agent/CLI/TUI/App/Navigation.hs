@@ -412,6 +412,7 @@ handleScrollbackKey = \case
     V.EvKey V.KRight [] -> toggle
     V.EvKey V.KEnter [] -> toggle
     V.EvKey (V.KChar 'y') [V.MCtrl] -> copySelected
+    V.EvKey (V.KChar '\EM') [] -> copySelected
     V.EvKey (V.KChar '\t') [] -> focusComposer
     V.EvKey V.KEsc [] -> focusComposer
     _ -> pure ()
