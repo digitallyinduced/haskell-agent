@@ -58,6 +58,7 @@ import Network.HTTP.Types
     , hContentType
     , methodGet
     , status200
+    , status400
     , status404
     , status405
     )
@@ -265,10 +266,12 @@ authorizeMcp host options oauthConfig serverUrl = do
                 <> (if Text.null scopeText then "" else "&scope=" <> encode scopeText)
                 <> "&resource=" <> encode resourceUri
         callback <-
-            withListeningCallback listener \awaitCallback -> do
-                host.oauthOpenBrowser authUrl
-                    >>= either (const (failText "The authorization browser could not be opened.")) pure
-                awaitCallback
+            withListeningCallback listener
+                metadata.authorizationResponseIssParameterSupported recordedIssuer state
+                \awaitCallback -> do
+                    host.oauthOpenBrowser authUrl
+                        >>= either (const (failText "The authorization browser could not be opened.")) pure
+                    awaitCallback
         either (const (failText "MCP OAuth callback issuer mismatch.")) pure $ OAuth.validateAuthorizationResponseIssuer
             metadata.authorizationResponseIssParameterSupported recordedIssuer callback.callbackIss
         when (callback.callbackState /= Just state) (failText "MCP OAuth callback state mismatch")
@@ -462,12 +465,14 @@ loginMcpWithHostThrow host options serverUrl = do
                 <> "&resource=" <> encode resourceUri
         host.mcpLoginSay ("Opening browser for MCP authorization: " <> authUrl)
         callback <-
-            withListeningCallback listener \awaitCallback ->
-                host.mcpLoginAuthorize authUrl awaitCallback >>= \case
-                    Left err -> failText err
-                    Right Nothing ->
-                        failText "Timed out waiting for MCP OAuth callback"
-                    Right (Just received) -> pure received
+            withListeningCallback listener
+                metadata.authorizationResponseIssParameterSupported recordedIssuer state
+                \awaitCallback ->
+                    host.mcpLoginAuthorize authUrl awaitCallback >>= \case
+                        Left err -> failText err
+                        Right Nothing ->
+                            failText "Timed out waiting for MCP OAuth callback"
+                        Right (Just received) -> pure received
         -- RFC 9207: validate the issuer before acting on any other parameter,
         -- including error responses.
         either failText pure $ OAuth.validateAuthorizationResponseIssuer
@@ -644,19 +649,22 @@ callbackPort sock = do
 
 -- | Run the loopback HTTP server and invoke the action only after Warp is
 -- accepting connections, so the browser redirect cannot lose the race.
-withListeningCallback :: Socket -> (IO Callback -> IO a) -> IO a
-withListeningCallback listener action = do
+-- Invalid callbacks are rejected without completing the pending authorization.
+withListeningCallback
+    :: Socket -> Bool -> Text -> Text -> (IO Callback -> IO a) -> IO a
+withListeningCallback listener issuerRequired issuer expectedState action = do
     readyVar <- newEmptyMVar
-    withAsync (receiveCallback listener readyVar) \callbackAsync -> do
-        race (waitCatch callbackAsync) (readMVar readyVar) >>= \case
-            Left (Left err) -> throwIO err
-            Left (Right _) ->
-                failText
-                    "MCP OAuth callback server exited before accepting connections"
-            Right () -> action (wait callbackAsync)
+    withAsync (receiveCallback listener readyVar issuerRequired issuer expectedState)
+        \callbackAsync -> do
+            race (waitCatch callbackAsync) (readMVar readyVar) >>= \case
+                Left (Left err) -> throwIO err
+                Left (Right _) ->
+                    failText
+                        "MCP OAuth callback server exited before accepting connections"
+                Right () -> action (wait callbackAsync)
 
-receiveCallback :: Socket -> MVar () -> IO Callback
-receiveCallback listener readyVar = do
+receiveCallback :: Socket -> MVar () -> Bool -> Text -> Text -> IO Callback
+receiveCallback listener readyVar issuerRequired issuer expectedState = do
     resultVar <- newEmptyMVar
     shutdownVar <- newEmptyMVar
     let settings =
@@ -670,6 +678,9 @@ receiveCallback listener readyVar = do
                 respond (plainResponse status405 "Method Not Allowed")
             | Wai.rawPathInfo request /= "/callback" =
                 respond (plainResponse status404 "Not Found")
+            | Left _ <- validateMcpOAuthCallback issuerRequired issuer expectedState
+                (Wai.queryString request) =
+                respond (plainResponse status400 "Invalid authorization response")
             | otherwise = do
                 let callback = callbackFromQuery (Wai.queryString request)
                     finish = do
