@@ -188,6 +188,7 @@ library
                     , Agent.CLI.ComputerUse.Linux.X11
                     , Agent.CLI.ComputerUse.Accessibility
                     , Agent.CLI.Config
+                    , Agent.CLI.McpAdd
                     , Agent.CLI.McpCatalog
                     , Agent.CLI.McpOAuthStore
                     , Agent.CLI.McpOAuth
@@ -223,6 +224,7 @@ library
                     , Agent.CLI.McpElicitation
                     , Agent.CLI.McpSampling
                     , Agent.CLI.McpManager
+                    , Agent.CLI.McpManager.Fullscreen
                     , Agent.CLI.NativeAgents
                     , Agent.CLI.Notification
                     , Agent.CLI.NativeRuntime

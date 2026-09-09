@@ -15,6 +15,9 @@ agent-cli mcp login https://example.com/mcp --scope files:write
 agent-cli mcp logout https://example.com/mcp
 ```
 
+In an interactive session, `/mcp` can add the HTTP server and then authorize
+it with `i` without leaving the UI.
+
 `--scope` (repeatable) requests additional scopes for step-up authorization;
 they are unioned with the scopes already granted for the same issuer. A `403`
 with `insufficient_scope` during a session names the missing scope in its

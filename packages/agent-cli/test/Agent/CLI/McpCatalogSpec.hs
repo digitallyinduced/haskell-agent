@@ -10,6 +10,7 @@ import Agent.CLI.Config
     )
 import Agent.CLI.McpCatalog
 import Agent.CLI.McpOAuth (lookupServerOAuthConfig, registerAuthorizedMcpServer)
+import Agent.CLI.Options (McpAddCommand(..), McpAddTransport(..))
 import Agent.MCP (McpProtocolPreference(..))
 import Control.Exception.Safe (bracket)
 import Control.Monad (forM_)
@@ -206,6 +207,49 @@ spec = describe "Agent.CLI.McpCatalog" do
                 , mcpCatalogEntry = docsEntry False
                 }
                 `shouldBe` "MCP server docs is already disabled"
+
+    it "adds remote HTTP and local stdio servers" $
+        withTempDir \home -> do
+            saveHarnessConfig home catalogConfig `shouldReturn` Right ()
+            addMcpCatalogServer home
+                McpAddCommand
+                    { mcpAddName = "sentry"
+                    , mcpAddTransport = Just McpAddTransportHttp
+                    , mcpAddTarget = "https://mcp.sentry.dev/mcp"
+                    , mcpAddArgs = []
+                    }
+                `shouldReturn` Right
+                    remoteEntry
+                        { mcpCatalogName = "sentry"
+                        , mcpCatalogUrl = Just "https://mcp.sentry.dev/mcp"
+                        }
+            addMcpCatalogServer home
+                McpAddCommand
+                    { mcpAddName = "files"
+                    , mcpAddTransport = Nothing
+                    , mcpAddTarget = "npx"
+                    , mcpAddArgs = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+                    }
+                `shouldReturn` Right
+                    McpCatalogEntry
+                        { mcpCatalogName = "files"
+                        , mcpCatalogEnabled = True
+                        , mcpCatalogUrl = Nothing
+                        , mcpCatalogCommand = "npx"
+                        , mcpCatalogArgs =
+                            ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+                        , mcpCatalogCwd = Nothing
+                        , mcpCatalogEnvKeys = []
+                        }
+            addMcpCatalogServer home
+                McpAddCommand
+                    { mcpAddName = "docs"
+                    , mcpAddTransport = Nothing
+                    , mcpAddTarget = "other"
+                    , mcpAddArgs = []
+                    }
+                `shouldReturn` Left
+                    (McpCatalogInvalid "MCP server docs already exists")
 
     it "rejects unknown and empty names without rewriting config" $
         withTempDir \home -> do

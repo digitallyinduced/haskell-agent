@@ -65,6 +65,8 @@ data PickerKey
     | PickerKeyConfirm
     | PickerKeyCancel
     | PickerKeyBackspace
+    | PickerKeyTab
+    | PickerKeyBackTab
     | PickerKeyChar Char
     deriving (Eq, Show)
 
@@ -81,6 +83,8 @@ decodePickerKey = \case
         | kittyEvent sequence_ == Just kittyRelease -> Nothing
     "\n" -> Just PickerKeyConfirm
     "\r" -> Just PickerKeyConfirm
+    "\t" -> Just PickerKeyTab
+    "\ESC[Z" -> Just PickerKeyBackTab
     "\ESC" -> Just PickerKeyCancel
     "q" -> Just PickerKeyCancel
     "Q" -> Just PickerKeyCancel
@@ -181,6 +185,7 @@ codepointKey = \case
     13 -> Just PickerKeyConfirm
     27 -> Just PickerKeyCancel
     8 -> Just PickerKeyBackspace
+    9 -> Just PickerKeyTab
     127 -> Just PickerKeyBackspace
     n
         | n >= 0

@@ -54,6 +54,7 @@ import Agent.CLI.Login
     , runLoginManager
     )
 import Agent.CLI.McpManager ( runMcpManager )
+import Agent.CLI.McpManager.Fullscreen ( runFullscreenMcpManager )
 import Agent.CLI.Options
     ( ApprovalPolicy(..), gatewayRoutingChanged )
 import Agent.CLI.Permission ( approvalPolicyOptions )
@@ -577,9 +578,15 @@ chooseAgent env next =
 
 manageMcpServers :: ReplHandlerContext -> IO RunResult -> IO RunResult
 manageMcpServers handlerContext next = do
-        color <- resolveColor stderr
-        restart <-
-            legacy $
+        restart <- case fullscreen of
+            Just runtime ->
+                runFullscreenMcpManager
+                    runtime
+                    env.sessionWorkspace.home
+                    env.sessionMcpRegistrations
+                    env.sessionMcpWarnings
+            Nothing -> do
+                color <- resolveColor stderr
                 runMcpManager
                     color
                     env.sessionWorkspace.home
@@ -592,7 +599,6 @@ manageMcpServers handlerContext next = do
     env = handlerContext.handlerSessionEnv
     fullscreen = env.sessionFullscreen
     persist = env.sessionPersist
-    legacy = withReplSuspended handlerContext
 
 -- | Submit an expanded prompt with the original command retained for display.
 type ExpandedTurn = IO RunResult -> Bool -> Text -> Text -> IO RunResult
