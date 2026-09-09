@@ -46,6 +46,8 @@ spec = describe "Agent.CLI.ModelConfig" do
             `shouldBe` replicate 3 (Just 1_048_576)
         catalogContextWindowFor catalog "openrouter" "stealth/ox-alpha"
             `shouldBe` Just 1_048_576
+        catalogContextWindowFor catalog "claude-code" "claude-fable-5-1"
+            `shouldBe` Just 200_000
         fmap (.catalogModelId)
             (catalogModelsForConnection "openai" catalog)
             `shouldBe`

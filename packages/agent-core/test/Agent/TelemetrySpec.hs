@@ -46,6 +46,25 @@ spec = describe "provider turn telemetry" do
             `shouldBe`
                 "$0.0123 · 2.5s · 3 provider turns · stop end_turn · context 140/200000"
 
+    it "prefers the tightest positive provider-reported context window" do
+        reportedContextWindow sampleTelemetry `shouldBe` Just 200000
+        reportedContextWindow sampleTelemetry
+            { telemetryModels = Map.empty
+            }
+            `shouldBe` Nothing
+        reportedContextWindow sampleTelemetry
+            { telemetryModels =
+                Map.fromList
+                    [ ("claude-fable-5-1", (sampleModel 1048576)
+                        { modelContextWindow = Just 200000 })
+                    , ("helper", sampleModel 1048576)
+                    ]
+            }
+            `shouldBe` Just 200000
+        preferReportedContextWindow (Just 200000) 1048576 `shouldBe` 200000
+        preferReportedContextWindow Nothing 1048576 `shouldBe` 1048576
+        preferReportedContextWindow (Just 0) 200000 `shouldBe` 200000
+
     it "rejects negative counters and non-finite costs" do
         Json.decodeText turnTelemetryDecoder
             "{\"duration_ms\":-1,\"models\":{}}"
@@ -54,6 +73,20 @@ spec = describe "provider turn telemetry" do
             "{\"cost_usd\":1e999,\"models\":{}}"
             `shouldSatisfy` isLeft
 
+sampleModel :: Int -> ModelTelemetry
+sampleModel window = ModelTelemetry
+    { modelInputTokens = 100
+    , modelOutputTokens = 20
+    , modelCacheReadInputTokens = 30
+    , modelCacheCreationInputTokens = 10
+    , modelWebSearchRequests = Just 1
+    , modelCostUsd = Just 0.0123
+    , modelContextWindow = Just window
+    , modelMaxOutputTokens = Just 32000
+    , modelCanonicalName = Just "claude-test-202608"
+    , modelProviderName = Just "firstParty"
+    }
+
 sampleTelemetry :: TurnTelemetry
 sampleTelemetry = TurnTelemetry
     { telemetryDurationMs = Just 2500
@@ -61,18 +94,7 @@ sampleTelemetry = TurnTelemetry
     , telemetryCostUsd = Just 0.0123
     , telemetryStopReason = Just "end_turn"
     , telemetryProviderTurns = Just 3
-    , telemetryModels = Map.singleton "claude-test" ModelTelemetry
-        { modelInputTokens = 100
-        , modelOutputTokens = 20
-        , modelCacheReadInputTokens = 30
-        , modelCacheCreationInputTokens = 10
-        , modelWebSearchRequests = Just 1
-        , modelCostUsd = Just 0.0123
-        , modelContextWindow = Just 200000
-        , modelMaxOutputTokens = Just 32000
-        , modelCanonicalName = Just "claude-test-202608"
-        , modelProviderName = Just "firstParty"
-        }
+    , telemetryModels = Map.singleton "claude-test" (sampleModel 200000)
     , telemetryStructuredOutput =
         Just (rawJsonFromEncoding (Aeson.toEncoding
             (Aeson.object ["answer" Aeson..= (42 :: Int)])))

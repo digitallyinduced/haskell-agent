@@ -111,7 +111,7 @@ spec = do
             fmap (.modelTarget.targetWireModelId) fable
                 `shouldBe` Just "claude-fable-5-1"
             fmap (.modelContextWindow) fable
-                `shouldBe` Just (Just 1048576)
+                `shouldBe` Just (Just 200000)
             fmap (.catalogModelDefaultReasoningEffort)
                 (catalogModelById catalog "claude-fable-5-1")
                 `shouldBe` Just (Just "high")

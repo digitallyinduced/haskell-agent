@@ -10,6 +10,7 @@ import Agent.CLI.Compaction
     , claudeAutoCompactTokenLimit
     , claudeCompactionInputLimit
     , installLiveCompactOutcome
+    , rememberReportedContextWindow
     , runClaudeBackendCompactHistoryWithLimits
     , runClaudeBackendCompactWithLimits
     )
@@ -40,7 +41,8 @@ import Agent.Loop
     , backendWithCallbacks
     )
 import Agent.OsPath (unsafeToFilePath)
-import Data.IORef (newIORef, writeIORef)
+import Agent.Telemetry (preferReportedContextWindow)
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Maybe (fromMaybe)
 
 withClaudeProvider
@@ -51,6 +53,7 @@ withClaudeProvider
 withClaudeProvider ClaudeConfig{..}
         ProviderHost{compaction = ProviderCompaction{..}} use =
     withAuth \claudeAuth -> do
+        reportedWindowRef <- newIORef Nothing
         let permission =
                 ClaudeCodeManual
             claudeOptions =
@@ -63,11 +66,13 @@ withClaudeProvider ClaudeConfig{..}
                     }
             claudeContextWindow = do
                 currentParams <- readSessionRequestParams paramsRef
+                reported <- readIORef reportedWindowRef
                 pure $
-                    contextWindowForParams
-                        transportModel
-                        200_000
-                        currentParams
+                    preferReportedContextWindow reported $
+                        contextWindowForParams
+                            transportModel
+                            200_000
+                            currentParams
             claudeCompactThreshold = do
                 contextWindow <- claudeContextWindow
                 let hardLimit =
@@ -151,7 +156,9 @@ withClaudeProvider ClaudeConfig{..}
                             installAutomaticCompact
                             (readSessionRequestParams paramsRef)
                             contextTokensRef
-                            handle.loopBackend
+                            (rememberReportedContextWindow
+                                reportedWindowRef
+                                handle.loopBackend)
                 use ProviderRuntime
                     { sessionBackend = SessionBackend
                         { backend = compactingBackend

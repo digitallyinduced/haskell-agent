@@ -7,6 +7,7 @@ import Agent.CLI.Compaction
     ( CompactOutcome(..)
     , CompactionInstall(..)
     , autoCompactBackendWith
+    , rememberReportedContextWindow
     , autoCompactOpenAiBackendWith
     , autoCompactOpenAiBackendWithApi
     , autoCompactOpenAiBackendWithSender
@@ -34,6 +35,11 @@ import Agent.CLI.Compaction
 import Agent.Connectivity (withConnectionRecoveryUsing)
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop
+import Agent.Telemetry
+    ( ModelTelemetry(..)
+    , TurnTelemetry(..)
+    , preferReportedContextWindow
+    )
 import Agent.OpenAI.Compaction
     ( assistantSummaryItem
     , compactionTriggerItem
@@ -75,6 +81,7 @@ import Control.Exception
     , try
     )
 import Data.IORef
+import qualified Data.Map.Strict as Map
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Text as Text
@@ -815,6 +822,15 @@ spec = do
         it "matches Claude Code headroom for a 200k context window" do
             claudeAutoCompactTokenLimit 200_000 `shouldBe` 144_000
             claudeCompactionInputLimit 200_000 `shouldBe` 167_000
+
+        it "compacts against Claude's reported window instead of a 1M catalog" do
+            preferReportedContextWindow (Just 200_000) 1_048_576
+                `shouldBe` 200_000
+            claudeAutoCompactTokenLimit
+                (preferReportedContextWindow (Just 200_000) 1_048_576)
+                `shouldBe` 144_000
+            claudeAutoCompactTokenLimit 1_048_576
+                `shouldBe` 822_860
 
         it "uses an isolated fresh backend and records summary usage" do
             let history = [userTextItem "old context"]
@@ -2005,6 +2021,49 @@ spec = do
                         ("expected one bounded tool result, got "
                             <> show submitted)
             readIORef events `shouldReturn` [ModelContextReset]
+
+        it "records a provider-reported context window from turn telemetry" do
+            reported <- newIORef Nothing
+            let telemetry = TurnTelemetry
+                    { telemetryDurationMs = Nothing
+                    , telemetryApiDurationMs = Nothing
+                    , telemetryCostUsd = Nothing
+                    , telemetryStopReason = Nothing
+                    , telemetryProviderTurns = Nothing
+                    , telemetryModels =
+                        Map.singleton "claude-fable-5-1" ModelTelemetry
+                            { modelInputTokens = 12_329
+                            , modelOutputTokens = 96_202
+                            , modelCacheReadInputTokens = 14_482_321
+                            , modelCacheCreationInputTokens = 263_166
+                            , modelWebSearchRequests = Just 0
+                            , modelCostUsd = Just 11.35
+                            , modelContextWindow = Just 200_000
+                            , modelMaxOutputTokens = Just 32_000
+                            , modelCanonicalName = Just "claude-fable-5-1"
+                            , modelProviderName = Just "firstParty"
+                            }
+                    , telemetryStructuredOutput = Nothing
+                    }
+                base = Backend \state _ _ _ ->
+                    pure $ successful state TurnOutput
+                        { responseId = "claude-session"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 12_329 96_202 14_482_321
+                        , contextUsage = Just (TokenUsage 180_000 500 0)
+                        , providerTelemetry = Just telemetry
+                        , completion = TurnCompleted
+                        }
+                backend = rememberReportedContextWindow reported base
+            result <-
+                backend.submitTurn
+                    (initialBackendSnapshot [userTextItem "old"])
+                    (Just "claude-session")
+                    [UserMessage "continue"]
+                    (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef reported `shouldReturn` Just 200_000
 
         it "records provider-reported occupancy after a successful turn" do
             let history = [userTextItem "old"]
