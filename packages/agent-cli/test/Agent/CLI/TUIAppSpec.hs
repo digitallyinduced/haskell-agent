@@ -780,6 +780,53 @@ spec = do
             rendered `shouldSatisfy` Text.isInfixOf marker
 
     describe "planning question panel" do
+        forM_ [False, True] \textPrompt ->
+            describe (if textPrompt then "custom answer" else "choice") do
+                forM_ [False, True] \following ->
+                    it (if following
+                        then "keeps the transcript tail visible when opening"
+                        else "preserves a manually scrolled transcript when opening") do
+                        let marker = "LATESTEXPLANATION"
+                            transcript = Text.unlines
+                                ([ "Earlier explanation row " <> Text.pack (show index)
+                                 | index <- [1 .. 100 :: Int]
+                                 ] <> [marker])
+                            ui = reduceUi (UiAssistantHistory transcript) initialUiState
+                            bounds = (80, 24)
+                        runtime <- newScriptRuntime ui
+                        choiceReply <- newEmptyTMVarIO
+                        textReply <- newEmptyTMVarIO
+                        let initial = (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                                { appUi = ui }
+                            prompt = if textPrompt
+                                then AppAskText TextInputPlanning "Planning question"
+                                    "Describe the preferred approach." "" textReply
+                                else AppAskChoice ChoicePlanning "Planning question"
+                                    "Choose the preferred approach." 0
+                                    [("First approach", ""), ("Second approach", "")] choiceReply
+                            scroll = if following then [] else
+                                [FullscreenScriptMouseDown ConversationViewport
+                                    V.BScrollUp (B.Location (0, 0))]
+                        (_, frames, finalState) <- runFullscreenScriptDetailedAt bounds initial
+                            (scroll <> [FullscreenScriptApp prompt, FullscreenScriptHalt])
+                        let rendered = map (renderedPictureTextAt bounds) frames
+                        rendered `shouldSatisfy` (not . null)
+                        take 1 rendered `shouldSatisfy` all (Text.isInfixOf marker)
+                        last rendered `shouldSatisfy` Text.isInfixOf "Planning question"
+                        finalState.appUi.uiFollow `shouldBe` following
+                        if following
+                            then last rendered `shouldSatisfy` Text.isInfixOf marker
+                            else do
+                                last rendered `shouldSatisfy` (not . Text.isInfixOf marker)
+                                let transcriptRows =
+                                        filter (Text.isInfixOf "Earlier explanation row")
+                                            . Text.lines
+                                    before = transcriptRows (rendered !! 1)
+                                    after = transcriptRows (last rendered)
+                                before `shouldSatisfy` (not . null)
+                                after `shouldSatisfy` (not . null)
+                                take 1 after `shouldBe` take 1 before
+
         it "keeps the explanation visible and wraps complete option descriptions" do
             let explanation = "EXPLANATIONVISIBLE"
                 marker = "DESCRIPTIONEND"
