@@ -142,3 +142,12 @@ its construction. Including the final render, 50 prose paragraphs delivered
 in one delta measured 6.878 → 7.076 ms CPU and 31.513 → 31.841 MB allocated.
 The mixed equivalent measured 47.791 → 48.504 ms and 146.146 → 146.890 MB.
 The change targets incremental streaming, not this two-frame boundary case.
+
+### Cache-lifecycle scope
+
+Production now evicts a terminating streaming message's prose cache entries
+through the CLI event loop, preserving its closed-code entries. The renderer
+and benchmark source are unchanged: the timings above include the final
+completed-message render, but exclude that targeted event-loop cleanup.
+The harness retains its prose entries until the sample ends, so these results
+do not measure production cache residency after completion.

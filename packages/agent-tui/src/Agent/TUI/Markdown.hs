@@ -17,6 +17,7 @@ module Agent.TUI.Markdown
     , markdownWidgetWithSyntaxHighlighting
     , markdownWidgetWithSyntaxHighlightingAndLinks
     , markdownWidgetWithStreamingCache
+    , markdownStreamingCacheSections
     , parseInline
     ) where
 
@@ -203,6 +204,15 @@ markdownWidgetWithStreamingCache highlighter linkName cacheProse cacheCode codeH
                                     (Just linkName)
                                     (Text.lines (prefix <> "\n\n")))
                     : sections chunkIndex (sectionIndex + 1) (Text.drop 2 suffix)
+
+-- | Enumerate the prose cache keys a message may have populated while streaming.
+-- Use this when retiring an append-only message's section caches.
+markdownStreamingCacheSections :: Text -> [(Int, Int)]
+markdownStreamingCacheSections input =
+    [ (chunkIndex, sectionIndex)
+    | (chunkIndex, FenceText prose) <- zip [1 ..] (fenceChunks input)
+    , sectionIndex <- [1 .. Text.count "\n\n" prose]
+    ]
 
 -- | Render a standalone code body with the same width bounding and optional
 -- syntax highlighting used by fenced Markdown blocks.
