@@ -123,6 +123,11 @@ inspect repository = do
     flags <- git repository ["ls-files", "-v", "-z"] ""
     unless (all ((== "H ") . take 2) (nul flags)) $
         fail "unsupported Git index: assume-unchanged or sparse checkout"
+    -- Tree-based recovery cannot reconstruct saved conflict stages, even when
+    -- the resolved index contains only stage-zero entries and status is clean.
+    resolveUndo <- git repository ["ls-files", "--resolve-undo", "-z"] ""
+    unless (null resolveUndo) $
+        fail "unsupported Git index: resolve-undo records"
     stages <- git repository ["ls-files", "--stage", "-z"] ""
     forM_ (nul stages) $ \entry ->
         case words (takeWhile (/= '\t') entry) of

@@ -70,6 +70,31 @@ spec = describe "clean worktree recovery" $ do
             void $ git checkout ["commit", "-m", "Remove text conversion"]
             void $ git checkout ["update-index", "--assume-unchanged", "source.txt"]
             inspectCleanCheckout (unsafeEncodeUtf checkout) `shouldReturnSatisfy` isLeft
+    it "retains clean committed resolutions with resolve-undo records without changing the index" $
+        withCheckout $ \repository checkout -> do
+            writeFile (repository </> "source.txt") "primary change\n"
+            void $ git repository ["commit", "-am", "Change primary branch"]
+            writeFile (checkout </> "source.txt") "checkout change\n"
+            void $ git checkout ["commit", "-am", "Change checkout"]
+            (code, _, _) <- readCreateProcessWithExitCode
+                (proc "git" ["merge", "main"]) { cwd = Just checkout } ""
+            code `shouldBe` ExitFailure 1
+            writeFile (checkout </> "source.txt") "resolved change\n"
+            void $ git checkout ["add", "source.txt"]
+            void $ git checkout ["commit", "-m", "Resolve conflict"]
+            git checkout ["status", "--porcelain"] `shouldReturn` ""
+            git checkout ["ls-files", "--unmerged"] `shouldReturn` ""
+            records <- git checkout ["ls-files", "--resolve-undo"]
+            records `shouldSatisfy` (not . null)
+            administration <- git checkout ["rev-parse", "--absolute-git-dir"]
+            index <- BS.readFile (administration </> "index")
+            outcome <- inspectCleanCheckout (unsafeEncodeUtf checkout)
+            outcome `shouldSatisfy` either (Text.isInfixOf "resolve-undo records") (const False)
+            BS.readFile (administration </> "index") `shouldReturn` index
+            git checkout ["ls-files", "--resolve-undo"] `shouldReturn` records
+            git repository ["for-each-ref", "refs/haskell-agent"] `shouldReturn` ""
+            void $ git checkout ["update-index", "--clear-resolve-undo"]
+            inspectCleanCheckout (unsafeEncodeUtf checkout) `shouldReturnSatisfy` isRight
     it "retains private Git operation state" $
         withCheckout $ \_ checkout -> do
             administration <- git checkout ["rev-parse", "--absolute-git-dir"]
