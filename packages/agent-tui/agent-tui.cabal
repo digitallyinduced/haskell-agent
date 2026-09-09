@@ -11,6 +11,7 @@ copyright:          (c) 2026 digitally induced GmbH
 category:           Development
 build-type:         Simple
 extra-source-files: README.md
+                  , benchmark/FullscreenMarkdown.md
 
 common common-options
     default-language: GHC2021
@@ -90,5 +91,31 @@ test-suite agent-tui-test
                     , containers >= 0.6 && < 0.8
                     , hspec >= 2.11 && < 2.12
                     , QuickCheck >= 2.14 && < 2.16
+                    , text
+                    , vty
+
+benchmark fullscreen-markdown-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark, src
+    main-is:          FullscreenMarkdown.hs
+    ghc-options:      -O2 -rtsopts
+    other-modules:    Agent.TUI.FencedCode
+                    , Agent.TUI.Markdown
+                    , Agent.TUI.Markdown.Block
+                    , Agent.TUI.Markdown.Inline
+                    , Agent.TUI.Motion
+                    , Agent.TUI.Presentation
+                    , Agent.TUI.TextWidth
+                    , Agent.TUI.Theme
+    build-depends:    agent-core
+                    , agent-json
+                    , agent-syntax
+                    , aeson
+                    , aeson-pretty
+                    , base
+                    , brick
+                    , bytestring
+                    , containers
                     , text
                     , vty

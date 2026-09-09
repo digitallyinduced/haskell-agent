@@ -143,7 +143,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
 import Control.Exception.Safe (finally, mask, onException, throwIO, tryAny)
 import Control.Exception (AsyncException(UserInterrupt))
-import Data.Char (isControl, isSpace)
+import Data.Char (isControl, isPrint, isSpace)
 import Data.Foldable (toList)
 import Data.IORef ( atomicModifyIORef' , modifyIORef' , newIORef , readIORef , writeIORef )
 import Data.List ( find , findIndex , intersperse , nub , sort , sortOn )
@@ -378,6 +378,18 @@ mouseScrollLines = 3
 
 handleScrollbackKey :: V.Event -> EventM Name AppState ()
 handleScrollbackKey = \case
+    V.EvKey (V.KChar character) modifiers
+        | isPrint character && all (== V.MShift) modifiers -> do
+            -- Typing expresses intent to edit, even when transcript focus was
+            -- retained across a terminal tab switch. The character already
+            -- contains the effect of Shift; the composer expects text keys
+            -- without modifiers.
+            focusComposer
+            Composer.handleComposerKey
+                applyLocalUiEventWith
+                handleCtrlC
+                scrollConversationPage
+                (V.EvKey (V.KChar character) [])
     V.EvKey V.KUp [] -> moveBlock (-1)
     V.EvKey V.KDown [] -> moveBlock 1
     V.EvKey V.KPageUp [] -> scrollConversationPage Up
@@ -396,17 +408,11 @@ handleScrollbackKey = \case
         vScrollToBeginning scroll
         queueConversationReflow
     V.EvKey V.KEnd [] -> resumeConversationFollow
-    V.EvKey (V.KChar 'g') [] -> do
-        leaveFollow
-        requestHistoryPage HistoryOlder
-        vScrollToBeginning scroll
-        queueConversationReflow
-    V.EvKey (V.KChar 'G') [] -> resumeConversationFollow
     V.EvKey V.KLeft [] -> toggle
     V.EvKey V.KRight [] -> toggle
     V.EvKey V.KEnter [] -> toggle
-    V.EvKey (V.KChar 'y') [] -> copySelected
-    V.EvKey (V.KChar ' ') [] -> focusComposer
+    V.EvKey (V.KChar 'y') [V.MCtrl] -> copySelected
+    V.EvKey (V.KChar '\EM') [] -> copySelected
     V.EvKey (V.KChar '\t') [] -> focusComposer
     V.EvKey V.KEsc [] -> focusComposer
     _ -> pure ()

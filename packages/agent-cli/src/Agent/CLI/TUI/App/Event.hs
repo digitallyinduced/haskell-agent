@@ -139,7 +139,7 @@ import Codec.Picture (pixelAt)
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async (wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
-import Control.Monad (forever, unless, void, when, (>=>))
+import Control.Monad (forM_, forever, unless, void, when, (>=>))
 import Control.Concurrent.STM ( STM , TMVar , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , writeTQueue , writeTVar )
 import Agent.CLI.Recap ( autoRecapAwayThreshold , autoRecapIdleThreshold , autoRecapRetryInterval )
 import Control.Monad.IO.Class (liftIO)
@@ -848,6 +848,13 @@ handleAgentSnapshotEvent selected entries = do
         && state.appAgentEntries == mergedEntries
         then pure ()
         else do
+            forM_ state.appAgentEntries \entry ->
+                evictFinishedMarkdownProse entry.agentTarget
+                    entry.agentConversation
+                    (maybe
+                        (reduceUi UiConversationCleared entry.agentConversation)
+                        (.agentConversation)
+                        (lookupAgentEntry entry.agentTarget mergedEntries))
             modify' \current ->
                 current
                     { appAgentSelected = normalized

@@ -513,12 +513,14 @@ not replace that approval requirement; consult the linked documents for
 current terms. See [`packages/agent-claude/README.md`](packages/agent-claude/README.md)
 for details.
 
-### Local MCP servers
+### MCP servers
 
-Use `/mcp` to manage local stdio MCP servers, or configure them in
-`~/.haskell-agent/config.json`. `agent-cli mcp list`, `enable`, and `disable`
-toggle that catalog from the command line. See the [MCP guide](docs/mcp.md) for the
-configuration schema, startup strategies, and tool exposure rules.
+Use `/mcp` to add, authorize, enable, or remove MCP servers from the session
+UI, or configure them in `~/.haskell-agent/config.json`. Paste a remote
+`https://…` URL or a local stdio command; HTTP servers that need OAuth can be
+authorized with `i`. `agent-cli mcp list`, `add`, `enable`, and `disable`
+manage the same catalog from the command line. See the [MCP guide](docs/mcp.md)
+for the configuration schema, startup strategies, and tool exposure rules.
 
 ### Meta Console
 

@@ -23,12 +23,14 @@ import Brick
     , RenderState
     , ViewportType(..)
     , Widget
+    , cached
     , renderFinal
     , renderWidget
     , txt
     , viewport
     )
 import Brick.AttrMap (attrMapLookup)
+import qualified Brick.Types as B
 import Control.Monad (forM_)
 import Data.Char (isControl)
 import Data.Foldable (toList)
@@ -44,6 +46,64 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "fullscreen Markdown rendering" do
+    it "preserves images and link extents across every streamed prefix with warm prose caches" do
+        let inputs =
+                [ "# Heading\n\nUse **bold**, `code`, and [docs](https://example.com).\n\nNext"
+                , "| A | B |\n| --- | --- |\n| one | two |\n\nFollowing\n\n"
+                , "before\n\n```hs\nmain = pure ()\n```\n\nafter\n\n~~~\ncode\n~~~\n"
+                , "- list\n\n    ```hs\n    x = 1\n    ```\n\nTail"
+                , "a\n\n\n\n界 👩\x200d💻\n\n---\n\n> quote\n\n"
+                , "| potential | table |\n\n| -- | -- |\n"
+                , "before\n\n```hs`not a fence\n\n[link](https://example.com)\n\nTail"
+                ]
+        forM_ [12, 40, 80] \width ->
+            forM_ inputs \input ->
+                checkStreamingPictures width (Text.inits input)
+
+    it "keeps unterminated blank-looking lines live" do
+        checkStreamingPictures 30
+            [ "one\n\nsecond\n"
+            , "one\n\nsecond\n "
+            , "one\n\nsecond\n **third**"
+            , "one\n\nsecond\n **third**\n\n"
+            ]
+
+    it "preserves clipped sections and click extents with warm caches" do
+        forM_ [3, 7] \height ->
+            checkStreamingPicturesAtHeight height 18 $
+                Text.inits
+                    "A [long link](https://example.com/abcdefgh) that wraps.\n\n\
+                    \| A | B |\n| --- | --- |\n| first | second |\n\nTail"
+
+    it "rebuilds warm sections after resize cache invalidation" do
+        let body = "A [long link](https://example.com/abcdefgh) that wraps.\n\nTail"
+        checkStreamingFrames $
+            concatMap
+                (\region -> [(region, body), (region, body <> " grows")])
+                [(40, 20), (12, 3), (18, 7), (80, 20)]
+
+    it "does not evaluate completed prose render bodies on cache hits" do
+        let body = "[stable link](https://example.com)\n\nTail"
+            widget failOnRender =
+                markdownWidgetWithStreamingCache Nothing id
+                    (\chunk section sectionWidget ->
+                        cached (Text.pack (show (chunk, section))) $
+                            B.Widget (B.hSize sectionWidget) (B.vSize sectionWidget) $
+                                if failOnRender
+                                    then error "cached prose was rendered again"
+                                    else B.render sectionWidget)
+                    (\_ code -> code)
+                    (\_ _ -> txt "")
+                    body
+            (warm, _, _, _) =
+                renderFinal Theme.terminalDefault [widget False] (40, 20)
+                    (const Nothing) emptyRenderState
+            (_, picture, _, extents) =
+                renderFinal Theme.terminalDefault [widget True] (40, 20)
+                    (const Nothing) warm
+        V.imageHeight (V.picImage picture) `shouldSatisfy` (> 0)
+        map extentName extents `shouldBe` ["https://example.com"]
+
     it "parses strong, emphasis, code, and links" do
         parseInline
             "Use **bold**, *italics*, `code`, and [docs](https://example.com)."
@@ -1123,6 +1183,52 @@ emptyRenderState =
         \observedNames = fromList [], renderCache = fromList [], \
         \clickableNames = [], requestedVisibleNames_ = fromList [], \
         \reportedExtents = fromList []}"
+
+checkStreamingPictures :: Int -> [Text.Text] -> Expectation
+checkStreamingPictures = checkStreamingPicturesAtHeight 200
+
+checkStreamingPicturesAtHeight :: Int -> Int -> [Text.Text] -> Expectation
+checkStreamingPicturesAtHeight height width =
+    checkStreamingFrames . map ((width, height),)
+
+checkStreamingFrames :: [((Int, Int), Text.Text)] -> Expectation
+checkStreamingFrames = go Nothing emptyRenderState
+  where
+    go _ _ [] = pure ()
+    go previousRegion previous ((region, input) : rest) = do
+        let baseline = markdownWidgetWithLinks id input
+            streaming =
+                markdownWidgetWithStreamingCache
+                    Nothing
+                    id
+                    (\chunk section -> cached (Text.pack (show (chunk, section))))
+                    (\_ widget -> widget)
+                    (\_ _ -> txt "")
+                    input
+            (next, actual, _, actualExtents) =
+                renderFinal Theme.terminalDefault [streaming] region
+                    (const Nothing)
+                    -- Match the CLI's handleResizeEvent invalidation.
+                    (if previousRegion == Just region
+                        then previous
+                        else emptyRenderState)
+            (_, expected, _, expectedExtents) =
+                renderFinal Theme.terminalDefault [baseline] region
+                    (const Nothing) emptyRenderState
+            extentKey extent =
+                (extentName extent, extentUpperLeft extent, extentSize extent)
+            rows picture =
+                map (concatMap cells . toList) $
+                    toList (displayOpsForPic picture region)
+            cells = \case
+                TextSpan{textSpanText, textSpanAttr} ->
+                    map (, textSpanAttr) (LazyText.unpack textSpanText)
+                Skip count -> replicate count (' ', V.defAttr)
+                RowEnd count -> replicate count (' ', V.defAttr)
+        rows actual `shouldBe` rows expected
+        sortOn id (map extentKey actualExtents)
+            `shouldBe` sortOn id (map extentKey expectedExtents)
+        go (Just region) next rest
 
 spanRowText :: [SpanOp] -> Text.Text
 spanRowText =

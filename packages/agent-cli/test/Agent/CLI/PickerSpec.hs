@@ -9,6 +9,8 @@ spec = do
         it "decodes Kitty keyboard protocol keys" do
             decodePickerKey "\ESC[13u" `shouldBe` Just PickerKeyConfirm
             decodePickerKey "\ESC[27u" `shouldBe` Just PickerKeyCancel
+            decodePickerKey "\t" `shouldBe` Just PickerKeyTab
+            decodePickerKey "\ESC[Z" `shouldBe` Just PickerKeyBackTab
             decodePickerKey "\ESC[97;2u" `shouldBe` Just (PickerKeyChar 'a')
 
         it "decodes modified CSI arrows" do

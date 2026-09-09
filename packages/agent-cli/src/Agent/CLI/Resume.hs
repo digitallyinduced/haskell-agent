@@ -642,6 +642,8 @@ applyResumeKey key state = case key of
                 , resumeIndex = 0
                 }
         | otherwise -> Right state
+    PickerKeyTab -> Right state
+    PickerKeyBackTab -> Right state
 
 move :: Int -> ResumeState -> ResumeState
 move delta state =

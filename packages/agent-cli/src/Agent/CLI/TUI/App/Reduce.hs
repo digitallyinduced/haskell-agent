@@ -3,6 +3,7 @@
 module Agent.CLI.TUI.App.Reduce where
 
 import Agent.CLI.Clipboard ( formatImageSize )
+import Agent.TUI.Markdown (markdownStreamingCacheSections)
 import Agent.CLI.Dictation ( DictationControl(..)
     , DictationResult(..)
     , dictateWith
@@ -218,6 +219,8 @@ handleUiEvents uiEvents = do
         Just active ->
             liftIO (final.appRuntime.runtimeNativeProgress active)
     when shouldInvalidate invalidateCache
+    when (not shouldInvalidate && any uiEventMayRetireProse uiEvents) $
+        evictFinishedMarkdownProse AgentRoot initial.appUi final.appUi
     when shouldFollow $
         case final.appConversationAnchor of
             Just _ -> do
@@ -267,6 +270,43 @@ uiEventInvalidatesCache = \case
     UiConversationCleared -> True
     UiLoop (ToolRetracted _) -> True
     _ -> False
+
+-- Only these reducer transitions retire assistant streams. In particular,
+-- token deltas, clock ticks, and composer edits must not scan the current turn.
+uiEventMayRetireProse :: UiEvent -> Bool
+uiEventMayRetireProse = \case
+    UiTurnEnded _ -> True
+    UiTurnRestarted -> True
+    UiSetAwaitingInput True -> True
+    UiConversationCleared -> True
+    UiLoop (TurnFinished _) -> True
+    UiLoop (ResponseRestarted _) -> True
+    UiLoop ResponseAttemptDiscarded -> True
+    UiLoop ResponseAttemptFailed -> True
+    _ -> False
+
+-- | Only retire caches belonging to assistant blocks that stopped streaming.
+-- This also handles removed/restarted blocks and batched events, without
+-- invalidating completed history, code images, or another agent's live prose.
+finishedMarkdownProseCaches :: AgentTarget -> UiState -> UiState -> [Name]
+finishedMarkdownProseCaches target previous next =
+    [ MarkdownProseCache target block.blockId chunk section
+    | block <- toList (Seq.drop previous.uiTurnStartBlock previous.uiBlocks)
+    , block.blockKind == BlockAssistant
+    , block.blockState == BlockStreaming
+    , not (stillStreaming block.blockId)
+    , (chunk, section) <- markdownStreamingCacheSections block.blockBody
+    ]
+  where
+    stillStreaming blockId =
+        case Map.lookup blockId next.uiBlockIndices >>= (`Seq.lookup` next.uiBlocks) of
+            Just block -> block.blockKind == BlockAssistant
+                && block.blockState == BlockStreaming
+            Nothing -> False
+
+evictFinishedMarkdownProse :: AgentTarget -> UiState -> UiState -> EventM Name AppState ()
+evictFinishedMarkdownProse target previous next =
+    mapM_ invalidateCacheEntry (finishedMarkdownProseCaches target previous next)
 
 applyConversationUiEvent :: Int -> UiEvent -> AppState -> AppState
 applyConversationUiEvent renderedContentHeight uiEvent state =
@@ -518,7 +558,11 @@ applyLocalUiEventWith
     -> EventM Name AppState ()
 applyLocalUiEventWith event update = do
     advanceAppClockNow
+    previous <- get
     modify' (update . applyUiEvent event)
+    next <- get
+    when (uiEventMayRetireProse event) $
+        evictFinishedMarkdownProse AgentRoot previous.appUi next.appUi
 
 refreshNativeProgressKeepalive :: EventM Name AppState ()
 refreshNativeProgressKeepalive = do

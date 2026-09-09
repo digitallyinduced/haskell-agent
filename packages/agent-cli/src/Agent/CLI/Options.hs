@@ -5,6 +5,8 @@ module Agent.CLI.Options
     , CliOptions(..)
     , Command(..)
     , GatewayCommand(..)
+    , McpAddCommand(..)
+    , McpAddTransport(..)
     , McpCommand(..)
     , ScreenMode(..)
     , SessionOutputFormat(..)
@@ -42,6 +44,7 @@ import Agent.CLI.Runtime.Options
     , defaultEffortFor
     )
 import Agent.TUI.Motion (MotionMode(..))
+import Data.Char (toLower)
 import Data.Foldable (asum)
 import Data.Int (Int64)
 import qualified Data.List as List
@@ -90,6 +93,20 @@ data McpCommand
     | McpList SessionOutputFormat
     | McpEnable Text
     | McpDisable Text
+    | McpAdd McpAddCommand
+    deriving (Eq, Show)
+
+data McpAddTransport
+    = McpAddTransportStdio
+    | McpAddTransportHttp
+    deriving (Eq, Show)
+
+data McpAddCommand = McpAddCommand
+    { mcpAddName :: !Text
+    , mcpAddTransport :: !(Maybe McpAddTransport)
+    , mcpAddTarget :: !Text
+    , mcpAddArgs :: ![Text]
+    }
     deriving (Eq, Show)
 
 -- | Administrative commands for the harness-managed PostgreSQL server.
@@ -455,6 +472,10 @@ mcpParser = Mcp <$> Options.hsubparser
         (Options.info
             (McpDisable <$> mcpNameArgument)
             (Options.progDesc "Disable a configured MCP server"))
+    <> Options.command "add"
+        (Options.info mcpAddParser
+            (Options.progDesc
+                "Add a local stdio or remote HTTP MCP server"))
     <> Options.command "login"
         (Options.info
             (McpLogin
@@ -475,6 +496,36 @@ mcpParser = Mcp <$> Options.hsubparser
 mcpNameArgument :: Options.Parser Text
 mcpNameArgument =
     Text.pack <$> Options.argument Options.str (Options.metavar "NAME")
+
+mcpAddParser :: Options.Parser McpCommand
+mcpAddParser =
+    McpAdd <$>
+        ( McpAddCommand
+            <$> mcpNameArgument
+            <*> Options.optional
+                (Options.option mcpAddTransportReader
+                    ( Options.long "transport"
+                        <> Options.short 't'
+                        <> Options.metavar "TRANSPORT"
+                        <> Options.help
+                            "stdio (local process) or http (remote URL). Defaults to http when COMMAND_OR_URL is an http(s) URL"
+                    ))
+            <*> (Text.pack
+                <$> Options.argument Options.str
+                    (Options.metavar "COMMAND_OR_URL"))
+            <*> Options.many
+                (Text.pack
+                    <$> Options.argument Options.str
+                        (Options.metavar "ARGS"))
+        )
+
+mcpAddTransportReader :: Options.ReadM McpAddTransport
+mcpAddTransportReader =
+    Options.eitherReader \raw ->
+        case map toLower raw of
+            "stdio" -> Right McpAddTransportStdio
+            "http" -> Right McpAddTransportHttp
+            _ -> Left "TRANSPORT must be stdio or http"
 
 type OptionUpdate = CliOptions -> CliOptions
 
@@ -732,6 +783,7 @@ usage = unlines
     , "       agent-cli sessions [list]"
     , "       agent-cli sessions show <session-id>"
     , "       agent-cli mcp list [--json]"
+    , "       agent-cli mcp add [--transport stdio|http] <name> <command-or-url> [args...]"
     , "       agent-cli mcp enable <name>"
     , "       agent-cli mcp disable <name>"
     , "       agent-cli mcp login <url> [--scope SCOPE]..."

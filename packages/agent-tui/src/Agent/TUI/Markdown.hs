@@ -16,6 +16,8 @@ module Agent.TUI.Markdown
     , markdownWidgetWithCodeControls
     , markdownWidgetWithSyntaxHighlighting
     , markdownWidgetWithSyntaxHighlightingAndLinks
+    , markdownWidgetWithStreamingCache
+    , markdownStreamingCacheSections
     , parseInline
     ) where
 
@@ -156,6 +158,61 @@ markdownWidgetWithInteractions
         concatMap
             (renderChunk syntaxHighlighter linkName cacheCode codeHeader)
             (fenceChunks input)
+
+-- | Render an append-only Markdown message while retaining completed prose
+-- sections as well as closed code bodies. The prose callback receives the
+-- one-based fence-chunk and section indices. Cache keys must also be scoped to
+-- the message; invalidate them if existing text, rendering attributes, or
+-- available width changes.
+--
+-- Only sections ending with an empty, newline-terminated line are cached.
+-- This leaves potential table headers, growing tables, partial delimiters, and
+-- the current line live. Fence parsing still uses the complete source so that
+-- list-container context and copy-code indices remain identical.
+markdownWidgetWithStreamingCache
+    :: Ord n
+    => Maybe SyntaxHighlighter
+    -> (Text -> n)
+    -> (Int -> Int -> Widget n -> Widget n)
+    -> (Int -> Widget n -> Widget n)
+    -> (Int -> Text -> Widget n)
+    -> Text
+    -> Widget n
+markdownWidgetWithStreamingCache highlighter linkName cacheProse cacheCode codeHeader input =
+    vBox $
+        concatMap renderIndexedChunk (zip [1 ..] (fenceChunks input))
+  where
+    renderIndexedChunk (chunkIndex, FenceText prose) =
+        sections chunkIndex 1 prose
+    renderIndexedChunk (_, chunk) =
+        renderChunk highlighter (Just linkName) cacheCode codeHeader chunk
+
+    sections chunkIndex sectionIndex prose =
+        case Text.breakOn "\n\n" prose of
+            (_, suffix) | Text.null suffix ->
+                renderLines (Just linkName) (Text.lines prose)
+            (prefix, suffix) ->
+                cacheProse chunkIndex sectionIndex
+                    -- Brick consults size policies before looking up a cache
+                    -- entry. Do not force inline parsing/layout on that path.
+                    (B.Widget
+                        (if Text.all isSpace prefix then B.Fixed else B.Greedy)
+                        B.Fixed $
+                        B.render $
+                            vBox $
+                                renderLines
+                                    (Just linkName)
+                                    (Text.lines (prefix <> "\n\n")))
+                    : sections chunkIndex (sectionIndex + 1) (Text.drop 2 suffix)
+
+-- | Enumerate the prose cache keys a message may have populated while streaming.
+-- Use this when retiring an append-only message's section caches.
+markdownStreamingCacheSections :: Text -> [(Int, Int)]
+markdownStreamingCacheSections input =
+    [ (chunkIndex, sectionIndex)
+    | (chunkIndex, FenceText prose) <- zip [1 ..] (fenceChunks input)
+    , sectionIndex <- [1 .. Text.count "\n\n" prose]
+    ]
 
 -- | Render a standalone code body with the same width bounding and optional
 -- syntax highlighting used by fenced Markdown blocks.

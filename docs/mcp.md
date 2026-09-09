@@ -31,21 +31,24 @@ Manage configured servers from the command line without starting a session:
 ```
 agent-cli mcp list
 agent-cli mcp list --json
+agent-cli mcp add sentry --transport http https://mcp.sentry.dev/mcp
+agent-cli mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem /path
 agent-cli mcp enable github
 agent-cli mcp disable github
 ```
 
 `list` prints every server in `~/.haskell-agent/config.json`, marking disabled
-ones and never showing environment values. `enable` / `disable` persist
-`enabled` on that named entry; they are idempotent and exit 1 when the name
-is not configured. The next session (or `/mcp` `r` in a running one) picks up
-the change.
+ones and never showing environment values. `add` writes a local stdio command
+or a remote HTTP URL. `enable` / `disable` persist `enabled` on that named
+entry; they are idempotent and exit 1 when the name is not configured. The
+next session (or `/mcp` `r` in a running one) picks up the change.
 
-In an interactive session, `/mcp` opens the server manager. Use the arrow
-keys or `j`/`k` to navigate, Enter to inspect tools, `a` to add a server,
-Space to enable or disable it, `x` to remove it, and `r` to restart the MCP
-runtime. Saved changes restart the runtime while preserving the session.
-Environment variable values are never displayed.
+In an interactive session, `/mcp` opens the server manager in the UI. Use the
+arrow keys or `j`/`k` to navigate, Enter to inspect tools, `a` to add a
+remote URL or local command, `i` to authorize an HTTP server with OAuth,
+Space to enable or disable it, `x` then `y` to remove it, and `r` to restart
+the MCP runtime. Saved changes restart the runtime while preserving the
+session. Environment variable values are never displayed.
 
 `mcpInitStrategy` accepts `auto`, `progressive`, or `blocking`. `auto` starts
 servers progressively for interactive sessions so the prompt is immediately

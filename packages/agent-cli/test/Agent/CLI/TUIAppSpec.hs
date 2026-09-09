@@ -1,7 +1,10 @@
 module Agent.CLI.TUIAppSpec (spec) where
 
+import qualified Agent.TUI.Theme as Theme
 import Agent.CLI.TUI.Keyboard (decodeKeyboardBody, classifyKeyboard, runKeyboardInput)
+import Agent.CLI.TUI.App (finishedMarkdownProseCaches)
 import Control.Monad (forM_, when)
+import Control.Monad.IO.Class (liftIO)
 import Graphics.Vty.Platform.Unix.Input.Classify.Types (KClass(..))
 
 import Agent.CLI.TUIAppSpec.AgentFixtures
@@ -142,6 +145,9 @@ import Brick
     , VScrollbarRenderer(..)
     , Widget
     , customMain
+    , cached
+    , getRenderState
+    , renderFinal
     , halt
     , hLimit
     , renderWidget
@@ -213,6 +219,51 @@ import Agent.Tools.RenderChart (renderChartResult)
 
 spec :: Spec
 spec = do
+    describe "streaming Markdown cache lifetime" do
+        let streaming =
+                reduceUi (UiLoop (TextDelta "one\n\ntwo\n\nTail")) $
+                    reduceUi (UiLoop TurnStarted) initialUiState
+            blockId = (Seq.index streaming.uiBlocks 0).blockId
+            expected target =
+                [MarkdownProseCache target blockId 1 1, MarkdownProseCache target blockId 1 2]
+        it "retires root prose on completion, cancellation, failure, and restart" do
+            forM_ [UiTurnEnded BlockComplete, UiTurnEnded BlockCancelled,
+                    UiTurnEnded BlockFailed, UiTurnRestarted,
+                    UiLoop (TurnFinished (emptyTurnOutput "" [] Nothing)),
+                    UiSetAwaitingInput True,
+                    UiLoop ResponseAttemptDiscarded, UiLoop ResponseAttemptFailed,
+                    UiLoop (ResponseRestarted "retry")] \event ->
+                finishedMarkdownProseCaches AgentRoot streaming (reduceUi event streaming)
+                    `shouldBe` expected AgentRoot
+        it "keeps caches live across append-only updates" do
+            finishedMarkdownProseCaches AgentRoot streaming
+                (reduceUi (UiLoop (TextDelta " grows")) streaming)
+                `shouldBe` []
+        it "scopes child completion and removal to the child's own keys" do
+            let target = AgentChild (SubagentId "worker")
+            finishedMarkdownProseCaches target streaming
+                (reduceUi (UiTurnEnded BlockComplete) streaming)
+                `shouldBe` expected target
+            finishedMarkdownProseCaches target streaming
+                (reduceUi UiConversationCleared streaming)
+                `shouldBe` expected target
+        it "does not evict already completed history again" do
+            let complete = reduceUi (UiTurnEnded BlockComplete) streaming
+            finishedMarkdownProseCaches AgentRoot complete complete `shouldBe` []
+        it "removes real Brick prose entries after terminal events" do
+            forM_ [UiTurnEnded BlockComplete, UiTurnEnded BlockCancelled,
+                    UiTurnEnded BlockFailed, UiSetAwaitingInput True,
+                    UiLoop ResponseAttemptDiscarded, UiLoop ResponseAttemptFailed,
+                    UiLoop (TurnFinished (emptyTurnOutput "" [] Nothing))] \event -> do
+                runtime <- newScriptRuntime streaming
+                let initial = initialFullscreenAppState runtime [] AgentRoot [] 0
+                    names = expected AgentRoot
+                _ <- runFullscreenScript initial $
+                    map (`FullscreenScriptCachePresent` True) names
+                    <> [FullscreenScriptApp (AppUi event)]
+                    <> map (`FullscreenScriptCachePresent` False) names
+                    <> [FullscreenScriptHalt]
+                pure ()
     describe "active-turn image paste" do
         it "shows a bracketed image paste before the REPL consumes it and survives delayed refreshes" $
             withPastedImageFixtures \path _ -> do
@@ -2971,6 +3022,83 @@ spec = do
             timeout 2_000_000 evictedPreviewKeys
                 `shouldReturn` Just []
 
+    describe "transcript typing focus recovery" do
+        it "inserts the first printable character at the existing draft cursor" do
+            forM_ [('a', []), ('G', [V.MShift]), ('g', []), ('y', []),
+                    (' ', []), ('!', [V.MShift]), ('λ', [])] $
+                \(character, modifiers) -> do
+                    state <- runTranscriptFocusInput []
+                        [V.EvKey (V.KChar character) modifiers]
+                    state.appUi.uiDraft
+                        `shouldBe` "be" <> Text.singleton character <> "fore"
+                    state.appUi.uiCursor `shouldBe` 3
+                    state.appUi.uiFocus `shouldBe` FocusComposer
+                    state.appHistorySelectedBlock `shouldBe` Nothing
+
+        it "preserves the whole typed prompt after returning to a terminal tab" do
+            state <- runTranscriptFocusInput []
+                ([V.EvLostFocus, V.EvGainedFocus]
+                    <> map (\character -> V.EvKey (V.KChar character) [])
+                        "guidance")
+            state.appUi.uiDraft `shouldBe` "beguidancefore"
+            state.appUi.uiFocus `shouldBe` FocusComposer
+
+        it "recovers while running even without a focus-gained event" do
+            state <- runTranscriptFocusInput [UiLoop TurnStarted]
+                [V.EvLostFocus, V.EvKey (V.KChar 'x') []]
+            state.appUi.uiDraft `shouldBe` "bexfore"
+            state.appUi.uiFocus `shouldBe` FocusComposer
+
+        it "keeps Tab and Escape as focus-only commands" do
+            forM_ [V.KChar '\t', V.KEsc] $ \key -> do
+                state <- runTranscriptFocusInput [] [V.EvKey key []]
+                state.appUi.uiDraft `shouldBe` "before"
+                state.appUi.uiFocus `shouldBe` FocusComposer
+
+        it "does not insert navigation keys or modified character shortcuts" do
+            forM_
+                [ V.EvKey V.KUp []
+                , V.EvKey V.KDown []
+                , V.EvKey V.KLeft []
+                , V.EvKey V.KRight []
+                , V.EvKey V.KEnter []
+                , V.EvKey (V.KChar 'j') [V.MCtrl]
+                , V.EvKey (V.KChar 'x') [V.MAlt]
+                , V.EvKey (V.KChar 'x') [V.MMeta]
+                ] $ \event -> do
+                    state <- runTranscriptFocusInput [] [event]
+                    state.appUi.uiDraft `shouldBe` "before"
+                    state.appUi.uiFocus `shouldBe` FocusScrollback
+
+        forM_ [V.EvKey (V.KChar 'y') [V.MCtrl], V.EvKey (V.KChar '\EM') []] $ \copyEvent ->
+          it ("copies the selected transcript block without editing the draft: " <> show copyEvent) do
+            copied <- newIORef Nothing
+            initialState <- cachedHistoryState
+                [markerBlock (BlockId (-1)) "selected transcript text"]
+            let runtime = initialState.appRuntime
+                state = initialState
+                    { appRuntime = runtime
+                        { runtimeCopy = \body ->
+                            writeIORef copied (Just body) >> pure True
+                        }
+                    , appHistorySelectedBlock = Just (BlockId (-1))
+                    }
+            (_, finalState) <- runFullscreenScriptWithState state
+                [ FullscreenScriptVty copyEvent
+                , FullscreenScriptHalt
+                ]
+            readIORef copied `shouldReturn` Just "selected transcript text"
+            finalState.appUi.uiDraft `shouldBe` ""
+            finalState.appUi.uiFocus `shouldBe` FocusScrollback
+
+        it "does not redirect typing out of an approval overlay" do
+            state <- runTranscriptFocusInput
+                [UiPermissionShown "Approve a test operation"]
+                [V.EvKey (V.KChar 'x') []]
+            state.appUi.uiDraft `shouldBe` "before"
+            state.appUi.uiFocus `shouldBe` FocusPermission
+            state.appUi.uiPermission `shouldSatisfy` isJust
+
     describe "unfocused terminal recovery" do
         it "treats paste input as proof that focus returned" do
             timeout 2_000_000 unfocusedPasteRendersDraft
@@ -3012,6 +3140,7 @@ data FullscreenScriptEvent
     | FullscreenScriptMouseDown !Name !V.Button !B.Location
     | FullscreenScriptMouseRelease !Name !V.Button !B.Location
     | FullscreenScriptMouseUp !Name !B.Location
+    | FullscreenScriptCachePresent !Name !Bool
     | FullscreenScriptHalt
 
 data ReplacementScenario
@@ -3406,6 +3535,19 @@ historyPlacement preview =
         , nativePreviewAttachment = preview.previewKittyAttachment
         }
 
+runTranscriptFocusInput :: [UiEvent] -> [V.Event] -> IO AppState
+runTranscriptFocusInput setup events = do
+    let ui = foldl (flip reduceUi) initialUiState
+            ([UiSetDraft "before" 2, UiFocusChanged FocusScrollback] <> setup)
+    runtime <- newScriptRuntime ui
+    let initialState =
+            (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                { appUi = ui
+                , appHistorySelectedBlock = Just (BlockId (-1))
+                }
+    snd <$> runFullscreenScriptWithState initialState
+        (map FullscreenScriptVty events <> [FullscreenScriptHalt])
+
 unfocusedPasteRendersDraft :: IO Bool
 unfocusedPasteRendersDraft = do
     runtime <- newScriptRuntime initialUiState
@@ -3645,6 +3787,16 @@ runFullscreenScriptDetailedAt bounds initialState script = do
                         (MouseUp name Nothing location)
                 AppEvent FullscreenScriptHalt ->
                     halt
+                AppEvent (FullscreenScriptCachePresent name expected) -> do
+                    renderState <- getRenderState
+                    let (_, picture, _, _) =
+                            renderFinal Theme.terminalDefault
+                                [cached name (txt "CACHE_MISS_SENTINEL")]
+                                bounds (const Nothing) renderState
+                        present = not $
+                            "CACHE_MISS_SENTINEL" `Text.isInfixOf`
+                                renderedPictureTextAt bounds picture
+                    liftIO (present `shouldBe` expected)
                 VtyEvent event ->
                     fullscreenApp.appHandleEvent (VtyEvent event)
                 MouseDown name button modifiers location ->

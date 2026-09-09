@@ -30,6 +30,18 @@ wrapped for tmux passthrough when `TMUX` is set.
 Ghostty may require clipboard-write permission in its configuration for OSC 52.
 tmux may likewise require escape-sequence passthrough to be enabled.
 
+## Fullscreen prompt focus
+
+In fullscreen mode, typing a printable character while the transcript has
+focus returns to the prompt and inserts that character at the existing cursor.
+This also works after switching terminal tabs, and applies in other terminals.
+Approval dialogs and other active input panels retain their own key handling.
+
+Tab or Escape returns from the transcript to the prompt without inserting text.
+Use arrows and Page Up/Page Down to navigate the transcript, Home/End to reach
+its beginning/end, and Ctrl+Y to copy the selected block. Plain `g`, `G`, and
+`y` enter text rather than invoking transcript commands.
+
 ## Recommended quick-terminal profile
 
 The harness works well as Ghostty's global quick terminal. Add a binding like
