@@ -54,8 +54,9 @@ mkDerivation {
   benchmarkHaskellDepends = [
     aeson agent-cli-runtime agent-core agent-json agent-mcp
     agent-openai agent-responses agent-responses-types agent-store
-    agent-tui async base brick bytestring containers deepseq directory
-    filepath JuicyPixels process safe-exceptions stm text time unix vty
+    agent-tui ansi-terminal async base brick bytestring colour
+    containers deepseq directory filepath JuicyPixels process
+    safe-exceptions stm text time unix vty
   ];
   description = "Command-line interface for the universal agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";

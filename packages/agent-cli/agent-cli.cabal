@@ -413,6 +413,24 @@ executable eval-ghci-vs-bash
                     , time
                     , unix
 
+benchmark markdown-streaming-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark, src
+    main-is:          MarkdownStreaming.hs
+    -- Compile old/new streaming and shared rendering with identical -O2.
+    other-modules:    MarkdownStreamBaseline
+                    , Agent.CLI.Render.MarkdownStream
+                    , Agent.CLI.Markdown
+                    , Agent.CLI.Style
+    ghc-options:      -O2 -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-tui
+                    , ansi-terminal
+                    , base >= 4.17 && < 5
+                    , colour
+                    , filepath
+                    , text
+
 benchmark worktree-collection-bench
     import:           common-options
     type:             exitcode-stdio-1.0
