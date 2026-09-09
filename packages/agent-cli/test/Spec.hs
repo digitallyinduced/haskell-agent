@@ -93,6 +93,7 @@ import qualified Agent.CLI.ReviewSpec as ReviewSpec
 import qualified Agent.CLI.SecretSpec as SecretSpec
 import qualified Agent.CLI.SessionHistorySpec as SessionHistorySpec
 import qualified Agent.CLI.SessionStateSpec as SessionStateSpec
+import qualified Agent.CLI.SessionResourcesSpec as SessionResourcesSpec
 import qualified Agent.CLI.SessionTitleSpec as SessionTitleSpec
 import qualified Agent.CLI.SkillsSpec as SkillsSpec
 import qualified Agent.CLI.SubagentStoreSpec as SubagentStoreSpec
@@ -239,6 +240,7 @@ specs = do
     TerminalSpec.spec
     TextLayoutSpec.spec
     SessionStateSpec.spec
+    SessionResourcesSpec.spec
     SessionTitleSpec.spec
     SkillsSpec.spec
     SubagentStoreSpec.spec

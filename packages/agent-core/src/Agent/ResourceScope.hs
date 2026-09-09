@@ -10,6 +10,8 @@ module Agent.ResourceScope
     , withResourceScope
     , newResourceScope
     , closeResourceScope
+    , closeResourceScopeChecked
+    , allocateAcquire
     , allocateResource
     , allocateResourcesConcurrently
     , allocateFourResourcesConcurrently
@@ -26,9 +28,13 @@ import Control.Concurrent.MVar
     , newMVar
     , withMVar
     )
+-- safe-exceptions makes bracket release uninterruptible.  State cleanup must
+-- retain interruptible masking so blocking finalizers can be cancelled.
 import qualified Control.Exception as Exception
 import Control.Exception.Safe (bracket, catchAny, throwIO)
 import Control.Monad (when)
+import Data.Acquire (Acquire)
+import qualified Data.Acquire as Acquire
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
 import System.IO (hPutStrLn, stderr)
@@ -43,6 +49,9 @@ import Control.Monad.Trans.Resource
     , release
     , runInternalState
     )
+-- resourcet exposes checked cleanup of an existing state only in this module.
+-- Keep that dependency at the resource-ownership boundary.
+import Control.Monad.Trans.Resource.Internal (stateCleanupChecked)
 
 newtype ResourceScope = ResourceScope (MVar (Maybe InternalState))
 
@@ -82,11 +91,38 @@ newResourceScope = do
     state <- createInternalState
     ResourceScope <$> newMVar (Just state)
 
+-- | Close all remaining resources using resourcet's best-effort cleanup:
+-- finalizer exceptions are suppressed after all finalizers are attempted.
+-- Use 'closeResourceScopeChecked' or 'releaseResource' when the caller needs
+-- cleanup failure reporting.
 closeResourceScope :: ResourceScope -> IO ()
-closeResourceScope (ResourceScope stateVar) = do
-    state <- modifyMVar stateVar \current ->
-        pure (Nothing, current)
-    mapM_ closeInternalState state
+closeResourceScope = closeResourceScopeWith closeInternalState
+
+-- | Close all remaining resources and report cleanup failures after every
+-- finalizer has been attempted.  Subsequent closure calls are no-ops, including
+-- when this call reports a resourcet @ResourceCleanupException@.
+closeResourceScopeChecked :: ResourceScope -> IO ()
+closeResourceScopeChecked = closeResourceScopeWith (stateCleanupChecked Nothing)
+
+closeResourceScopeWith :: (InternalState -> IO ()) -> ResourceScope -> IO ()
+closeResourceScopeWith cleanup (ResourceScope stateVar) =
+    -- Detachment transfers ownership from the scope to this bracket.  Its
+    -- release action cannot be skipped by cancellation between those steps.
+    Exception.bracket
+        (modifyMVar stateVar \current -> pure (Nothing, current))
+        (mapM_ cleanup)
+        (const (pure ()))
+
+-- | Acquire a resource together with its composed release action.
+--
+-- Intermediate acquisitions are released if composition fails before the
+-- complete value can be registered.  The returned key releases the complete
+-- composition once, in reverse dependency order.
+allocateAcquire :: ResourceScope -> Acquire a -> IO (ResourceKey, a)
+allocateAcquire scope acquisition =
+    withOpenScope scope \state -> do
+        (key, value) <- runInScope state (Acquire.allocateAcquire acquisition)
+        pure (ResourceKey key, value)
 
 allocateResource
     :: ResourceScope

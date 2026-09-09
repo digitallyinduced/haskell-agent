@@ -345,6 +345,7 @@ test-suite agent-core-test
                     , process
                     , QuickCheck >= 2.14 && < 2.16
                     , retry >= 0.9.3.1 && < 0.10
+                    , resourcet
                     , safe-exceptions
                     , stm
                     , text

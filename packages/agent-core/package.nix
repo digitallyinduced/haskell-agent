@@ -21,8 +21,8 @@ mkDerivation {
   testHaskellDepends = [
     aeson agent-json agent-responses-types async base base64-bytestring
     bytestring containers crypton-connection directory filepath hspec
-    JuicyPixels process QuickCheck retry safe-exceptions stm text time
-    tls unix websockets yaml zlib
+    JuicyPixels process QuickCheck resourcet retry safe-exceptions stm
+    text time tls unix websockets yaml zlib
   ];
   benchmarkHaskellDepends = [
     aeson agent-json agent-responses-types async base bytestring

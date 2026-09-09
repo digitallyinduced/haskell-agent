@@ -1,8 +1,8 @@
--- | Root collaboration setup and callbacks. Registry ownership remains with
--- the session's existing close action.
+-- | Root collaboration setup and callbacks. Acquisition owns the registry
+-- before later initialization, and releases it even when persistence fails.
 module Agent.CLI.Runtime.Orchestration.Tools.Collaboration
     ( CollaborationRuntime(..)
-    , newCollaborationRuntime
+    , acquireCollaborationRuntime
     , installCollaborationCallbacks
     ) where
 
@@ -32,6 +32,7 @@ import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs, grokRootChildModels)
 import Agent.Loop (TurnInput(..), LoopError(..))
 import Agent.Provider (Provider(..), TokenProvider, tokenProviderBillingMode)
 import Agent.Responses.Types (ResponseItem)
+import Agent.ResourceScope (logSlowCleanup)
 import Agent.Subagents
     ( RootTurnId, SubagentId, SubagentRegistry, SubagentConfig(..)
     , closeSubagentRegistry, defaultMaxConcurrent, defaultSubagentConfig
@@ -41,6 +42,9 @@ import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.Tools.MultiAgents
     ( CollaborationModelTarget(..), MultiAgentContext(..), SubagentWorktree(..) )
 import Control.Applicative ((<|>))
+import Control.Exception.Safe (finally)
+import Control.Monad.IO.Class (liftIO)
+import Data.Acquire (Acquire, mkAcquire)
 import Data.IORef (IORef, newIORef, readIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -71,15 +75,14 @@ data CollaborationRuntime = CollaborationRuntime
     , collaborationCreateWorktree
         :: OsPath -> IO (Either Text SubagentWorktree)
     , collaborationContext :: Maybe MultiAgentContext
-    , collaborationCloseAgents :: IO ()
     }
 
-newCollaborationRuntime
+acquireCollaborationRuntime
     :: AgentToolsRequest windowTitleResult
     -> ToolStartup
     -> ToolModelRuntime
-    -> IO CollaborationRuntime
-newCollaborationRuntime AgentToolsRequest
+    -> Acquire CollaborationRuntime
+acquireCollaborationRuntime AgentToolsRequest
     { resumeLock
     , options
     , projectSettings
@@ -107,27 +110,41 @@ newCollaborationRuntime AgentToolsRequest
     -- Keep inferred startup, resume, and delegated-agent targets session-local.
     -- Live top-level model/provider switches persist their selection in
     -- Agent.CLI.Provider.Switch instead.
-    collaborationActiveSessionLock <- newIORef resumeLock
-    collaborationPersistSlotRef <- newIORef PersistenceDisabled
+    collaborationActiveSessionLock <- liftIO $ newIORef resumeLock
+    collaborationPersistSlotRef <- liftIO $ newIORef PersistenceDisabled
     -- Per-subagent transcripts / previous ids, shared across send_input / task.
-    collaborationSubagentSessions <- newIORef Map.empty
-    collaborationSubagentStoreRoot <- newIORef Nothing
+    collaborationSubagentSessions <- liftIO $ newIORef Map.empty
+    collaborationSubagentStoreRoot <- liftIO $ newIORef Nothing
     collaborationSubagentForkSource <-
-        newIORef (Nothing :: Maybe (IO [ResponseItem]))
-    collaborationPendingNotices <- newPendingInputs
+        liftIO $ newIORef (Nothing :: Maybe (IO [ResponseItem]))
+    collaborationPendingNotices <- liftIO newPendingInputs
+    collaborationAgentTypes <- liftIO $ newIORef Map.empty
     let maxConcurrentAgents =
             fromMaybe defaultMaxConcurrent $
                 options.optMaxConcurrentAgents
                     <|> projectSettings.settingsMaxConcurrentAgents
                     <|> harnessConfig.configMaxConcurrentAgents
-    collaborationRegistry <- newSubagentRegistry
-        defaultSubagentConfig { maxConcurrent = maxConcurrentAgents }
-        cwd
-        (\_ _ _ _ -> pure $ Left LoopNoResponseId)
-        (\_ _ -> pure ())
-    collaborationRootTurnRef <- newIORef (Nothing :: Maybe RootTurnId)
-    collaborationAgentTypes <- newIORef Map.empty
-    collaborationOpenAiChild <-
+        finalizeRegistry registry = logSlowCleanup "collaboration agents" $
+            -- Persistence needs the interrupted agents' final state, but a
+            -- failed snapshot must never leave their supervisors alive while
+            -- the session releases dependent tool resources.
+            (do
+                interruptActiveSubagents registry
+                flushAllSubagentSnapshots
+                    collaborationSubagentStoreRoot
+                    registry
+                    collaborationSubagentSessions
+                    collaborationAgentTypes)
+                `finally` closeSubagentRegistry registry
+    collaborationRegistry <- mkAcquire
+        (newSubagentRegistry
+            defaultSubagentConfig { maxConcurrent = maxConcurrentAgents }
+            cwd
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ()))
+        finalizeRegistry
+    collaborationRootTurnRef <- liftIO $ newIORef (Nothing :: Maybe RootTurnId)
+    collaborationOpenAiChild <- liftIO $
         if not nativeCapabilities.nativeCollaboration
             || isJust gatewayAllowedChildModels
             then pure Nothing
@@ -250,17 +267,6 @@ newCollaborationRuntime AgentToolsRequest
                 , multiChildModelAllowed =
                     collaborationChildModelAllowed
                 }
-        collaborationCloseAgents =
-            case collaborationContext of
-                Just ctx -> do
-                    interruptActiveSubagents ctx.multiRegistry
-                    flushAllSubagentSnapshots
-                        collaborationSubagentStoreRoot
-                        ctx.multiRegistry
-                        collaborationSubagentSessions
-                        collaborationAgentTypes
-                    closeSubagentRegistry ctx.multiRegistry
-                Nothing -> pure ()
     pure CollaborationRuntime{..}
 
 installCollaborationCallbacks
