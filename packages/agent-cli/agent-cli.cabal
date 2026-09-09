@@ -97,7 +97,6 @@ library
                     , Agent.CLI.Runtime.Orchestration.Session
                     , Agent.CLI.Runtime.Orchestration.Startup
                     , Agent.CLI.Runtime.Orchestration.Tools
-                    , Agent.CLI.Runtime.Orchestration.Tools.Resources
                     , Agent.CLI.Runtime.Orchestration.Tools.Request
                     , Agent.CLI.Runtime.Orchestration.Tools.Model
                     , Agent.CLI.Runtime.Orchestration.Tools.Collaboration
@@ -247,6 +246,7 @@ library
                     , Agent.CLI.Runtime.MetaConsole
                     , Agent.CLI.Runtime.Orchestration.Providers
                     , Agent.CLI.Runtime.Orchestration.Providers.Types
+                    , Agent.CLI.Runtime.Orchestration.Tools.Resources
                     , Agent.CLI.Resume
                     , Agent.CLI.Session.ConversationStore
                     , Agent.CLI.Session.History
