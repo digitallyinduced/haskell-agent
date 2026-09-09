@@ -64,6 +64,8 @@ import qualified Agent.CLI.LoginSpec as LoginSpec
 import qualified Agent.CLI.LearnedSkillsSpec as LearnedSkillsSpec
 import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
 import qualified Agent.CLI.McpCatalogSpec as McpCatalogSpec
+import qualified Agent.CLI.McpOAuthSpec as McpOAuthSpec
+import qualified Agent.CLI.McpConnectionCredentialsSpec as McpConnectionCredentialsSpec
 import qualified Agent.CLI.McpManagerSpec as McpManagerSpec
 import qualified Agent.CLI.McpSamplingSpec as McpSamplingSpec
 import qualified Agent.CLI.MetaConsoleSpec as MetaConsoleSpec
@@ -204,6 +206,8 @@ specs = do
     LearnedSkillsSpec.spec
     MarkdownSpec.spec
     McpCatalogSpec.spec
+    McpOAuthSpec.spec
+    McpConnectionCredentialsSpec.spec
     McpManagerSpec.spec
     McpSamplingSpec.spec
     MetaConsoleSpec.spec

@@ -191,6 +191,7 @@ fakeConfig script delayMillis index = McpServerConfig
     , mcpServerSamplingEnabled = False
     , mcpServerLogLevel = Nothing
     , mcpServerExcludedTools = []
+    , mcpServerConnection = Nothing
     }
 
 withFakeServer :: (FilePath -> IO a) -> IO a

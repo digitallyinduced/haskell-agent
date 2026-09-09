@@ -8,6 +8,7 @@
 -- have stopped.
 module Agent.MCP
     ( McpServerConfig(..)
+    , McpConnectionIdentity(..)
     , McpProtocolPreference(..)
     , McpProtocolEra(..)
     , McpServerInfo(..)
@@ -15,6 +16,7 @@ module Agent.MCP
     , McpListCapability(..)
     , McpResourcesCapability(..)
     , McpHostHooks(..)
+    , McpCredentialProvider(..)
     , defaultMcpHostHooks
     , McpLogLevel(..)
     , mcpLogLevelText
@@ -172,6 +174,7 @@ import Agent.MCP.Supervisor
     )
 import Agent.MCP.Types
     ( McpToolServer(..)
+    , McpCredentialProvider(..)
     , McpTool(..)
     , emptyServerCapabilities
     , McpCallToolRequest(..)
@@ -208,6 +211,7 @@ import Agent.MCP.Types
     , McpSamplingResult(..)
     , McpServerCapabilities(..)
     , McpServerConfig(..)
+    , McpConnectionIdentity(..)
     , McpServerEvent(..)
     , McpServerInfo(..)
     , McpServerStatus(..)

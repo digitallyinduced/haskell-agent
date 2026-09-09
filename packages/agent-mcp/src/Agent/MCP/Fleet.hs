@@ -882,7 +882,7 @@ mcpSearchTool fleet = AppTool
                             `Text.isInfixOf`
                                 Text.toCaseFold
                                     (name <> " "
-                                        <> describeTool entry.catalogTool))
+                                        <> describeToolFor entry.catalogClient.clientConfig entry.catalogTool))
                     query
                     && maybe True
                         (== entry.catalogClient.clientConfig.mcpServerName)
@@ -934,7 +934,7 @@ grokSearchTool fleet = AppTool
                                     entry.catalogClient.clientConfig.mcpServerName
                             normalizedDescription =
                                 normalizeSearchText
-                                    (describeTool entry.catalogTool)
+                                    (describeToolFor entry.catalogClient.clientConfig entry.catalogTool)
                             haystack =
                                 normalizedName
                                     <> " "
@@ -971,7 +971,7 @@ grokSearchTool fleet = AppTool
                                         { grokSearchToolName = name
                                         , grokSearchToolDescription =
                                             truncateMcpDescription
-                                                (describeTool entry.catalogTool)
+                                                (describeToolFor entry.catalogClient.clientConfig entry.catalogTool)
                                         , grokSearchToolScore = scoreEntry pair
                                         , grokSearchToolSchema =
                                             entry.catalogTool.discoveredInputSchema
@@ -1583,7 +1583,7 @@ renderMcpSearchTool (name, entry) =
     Text.intercalate "\n" $
         [ name
         , "  Server: " <> entry.catalogClient.clientConfig.mcpServerName
-        , "  Description: " <> describeTool entry.catalogTool
+        , "  Description: " <> describeToolFor entry.catalogClient.clientConfig entry.catalogTool
         , "  Read-only: "
             <> if entry.catalogTool.discoveredReadOnly then "true" else "false"
         , "  Input schema:"

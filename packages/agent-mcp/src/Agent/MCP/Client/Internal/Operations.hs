@@ -47,7 +47,8 @@ import Agent.MCP.Types
       McpError(..),
       McpServerCapabilities(capabilitySkills),
       McpServerInfo(serverInfoCapabilities),
-      McpServerConfig(mcpServerName, mcpServerExcludedTools),
+      McpServerConfig(mcpServerName, mcpServerExcludedTools, mcpServerConnection),
+      McpConnectionIdentity(mcpConnectionLabel),
       renderMcpError,
       mcpSkillEntryDecoder,
       mcpResourceContentDecoder,
@@ -536,7 +537,7 @@ appToolForArtifactDirectory
     -> AppTool
 appToolForArtifactDirectory artifactDirectory client tool = AppTool
     { appToolName = qualifiedName
-    , appToolDescription = describeTool tool
+    , appToolDescription = describeToolFor client.clientConfig tool
     -- Tool schemas enter the legacy Aeson-valued tool API here. Their wire
     -- decode and storage remain RawJson.
     , appToolSchema =
@@ -592,6 +593,12 @@ appToolForArtifactDirectory artifactDirectory client tool = AppTool
 
 -- | Description shown to the model: the server's description, with the
 -- human-readable title as a prefix when the server provides one.
+describeToolFor :: McpServerConfig -> McpTool -> Text
+describeToolFor config tool =
+    maybe "" (\label -> "Connection: " <> label <> "\n")
+        (config.mcpServerConnection >>= (.mcpConnectionLabel))
+        <> describeTool tool
+
 describeTool :: McpTool -> Text
 describeTool tool =
     case tool.discoveredTitle of

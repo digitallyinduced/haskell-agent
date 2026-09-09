@@ -14,13 +14,16 @@ module Agent.CLI.McpAdmin
     , removeMcpAdminServer
     , restartMcpAdminServer
     , setMcpAdminServerEnabled
+    , loadSnapshot
+    , mutate
+    , mutateEffect
     ) where
 
 import Agent.CLI.Config
     ( HarnessConfig(..)
     , McpServerConfig(..)
     , loadHarnessConfigSnapshot
-    , modifyHarnessConfig
+    , modifyHarnessConfigEffect
     , withHarnessConfigSnapshot
     )
 import Agent.MCP (McpProtocolPreference(..))
@@ -90,6 +93,7 @@ listMcpAdminServers home =
     loadSnapshot home \config ->
         [ publicServer name server
         | (name, server) <- Map.toAscList config.configMcpServers
+        , server.mcpConnectionId == Nothing
         ]
 
 readMcpAdminServer
@@ -216,6 +220,9 @@ removeMcpAdminServer home expected name =
     mutate home expected \config -> do
         when (not (Map.member name config.configMcpServers)) $
             Left (McpAdminNotFound name)
+        when (maybe False ((/= Nothing) . (.mcpConnectionId))
+                (Map.lookup name config.configMcpServers)) $
+            Left (McpAdminInvalid "Managed MCP connections must be removed through the connection API")
         pure
             ( config
                 { configMcpServers =
@@ -230,7 +237,7 @@ loadSnapshot
     -> IO (Either McpAdminError (McpAdminSnapshot a))
 loadSnapshot home project =
     loadHarnessConfigSnapshot home >>= \case
-        Left err -> pure (Left (McpAdminInvalid err))
+        Left _ -> pure (Left (McpAdminInvalid "Unable to read the machine configuration"))
         Right (revision, config) ->
             pure (Right McpAdminSnapshot
                 { mcpAdminRevision = revision
@@ -243,11 +250,19 @@ mutate
     -> (HarnessConfig -> Either McpAdminError (HarnessConfig, a))
     -> IO (Either McpAdminError (McpAdminSnapshot a))
 mutate home expected change =
-    modifyHarnessConfig home
+    mutateEffect home expected (pure . change)
+
+mutateEffect
+    :: OsPath
+    -> Word64
+    -> (HarnessConfig -> IO (Either McpAdminError (HarnessConfig, a)))
+    -> IO (Either McpAdminError (McpAdminSnapshot a))
+mutateEffect home expected change =
+    modifyHarnessConfigEffect home
         (\current config ->
             if expected /= current
-                then Left ("conflict:" <> Text.pack (show current))
-                else first renderMutationError (change config))
+                then pure (Left ("conflict:" <> Text.pack (show current)))
+                else first renderMutationError <$> change config)
         >>= \case
                 Left err -> pure (Left (parseMutationError err))
                 Right (revision, _, value) ->
@@ -290,6 +305,9 @@ inputServer :: Bool -> McpAdminServerInput -> McpServerConfig
 inputServer enabled input = McpServerConfig
     { mcpEnabled = enabled
     , mcpUrl = Nothing
+    , mcpConnectionId = Nothing
+    , mcpConnectionGeneration = Nothing
+    , mcpDisplayName = Nothing
     , mcpCommand = Text.strip input.mcpAdminInputCommand
     , mcpArgs = input.mcpAdminInputArgs
     , mcpCwd = input.mcpAdminInputCwd

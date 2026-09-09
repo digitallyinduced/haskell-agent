@@ -191,6 +191,9 @@ library
                     , Agent.CLI.McpAdd
                     , Agent.CLI.McpCatalog
                     , Agent.CLI.McpOAuthStore
+                    , Agent.CLI.McpConnectionCredentials
+                    , Agent.CLI.McpConnectionLifecycle
+                    , Agent.CLI.McpConnectionRuntime
                     , Agent.CLI.McpOAuth
                     , Agent.CLI.Database
                     , Agent.CLI.Database.Store
@@ -601,6 +604,8 @@ test-suite agent-cli-test
                     , Agent.CLI.LearnedSkillsSpec
                     , Agent.CLI.MarkdownSpec
                     , Agent.CLI.McpCatalogSpec
+                    , Agent.CLI.McpOAuthSpec
+                    , Agent.CLI.McpConnectionCredentialsSpec
                     , Agent.CLI.McpManagerSpec
                     , Agent.CLI.McpSamplingSpec
                     , Agent.CLI.MetaConsoleSpec

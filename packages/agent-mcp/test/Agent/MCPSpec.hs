@@ -16,6 +16,7 @@ import Agent.MCP.Client
     , boundedTaskPollDelayMicros
     , cancelMcpTask
     , closeMcpClient
+    , configuredAccessToken
     , classifyProbe
     , encodeHeaderValue
     , ensureMcpClientReady
@@ -30,6 +31,7 @@ import Agent.MCP.Client
     , responseBodyLimitFor
     , remainingHardDeadlineMicros
     , retryUnauthorizedOnce
+    , requestMcp
     , emptyRequestRegistry
     , registerPending
     , spawnClientWorker
@@ -37,6 +39,7 @@ import Agent.MCP.Client
     , splitSseChunkWithLimit
     , splitLines
     , startMcpClient
+    , startMcpClientWith
     , toolAllowsAutomaticReissue
     , subscribeMcpResource
     , unsubscribeMcpResource
@@ -106,7 +109,7 @@ import Control.Concurrent
     , tryPutMVar
     )
 import Control.Concurrent.Async (async, cancel, poll, wait, waitCatch, withAsync)
-import Control.Monad (void)
+import Control.Monad (forM, void)
 import Data.Maybe (isNothing)
 import Data.Aeson (object, (.=))
 import qualified Data.Aeson
@@ -172,6 +175,15 @@ testPendingRequest = do
 spec :: Spec
 spec = describe "Agent.MCP" do
     describe "readable discovery results" do
+        it "captures authorization generation independently of the stable namespace" do
+            let identity = McpConnectionIdentity "first" (Just "generation-1") (Just "Production")
+                original = (baseConfig "connection_first" "")
+                    { mcpServerConnection = Just identity }
+                replacement = original { mcpServerConnection =
+                    Just identity { mcpConnectionGeneration = Just "generation-2" } }
+            original `shouldNotBe` replacement
+            original.mcpServerName `shouldBe` replacement.mcpServerName
+
         it "labels an empty catalog without a JSON envelope" do
             renderMcpSearch [] []
                 `shouldBe` "Servers: (none)\n\n(no matching MCP tools)"
@@ -232,6 +244,7 @@ spec = describe "Agent.MCP" do
                 , mcpServerSamplingEnabled = False
                 , mcpServerLogLevel = Nothing
                 , mcpServerExcludedTools = []
+                , mcpServerConnection = Nothing
                 }
         rendered `shouldContain` "API_TOKEN"
         rendered `shouldContain` "<redacted>"
@@ -299,6 +312,130 @@ spec = describe "Agent.MCP" do
                         `shouldBe` True
 
     describe "client transport" do
+        it "uses the correct connection credential for HTTP requests and 401 refresh" $
+            Socket.withSocketsDo $
+                bracket
+                    (Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol)
+                    Socket.close
+                    \listener -> do
+                        Socket.bind listener
+                            (Socket.SockAddrInet 0 (Socket.tupleToHostAddress (127, 0, 0, 1)))
+                        Socket.listen listener 4
+                        address <- Socket.getSocketName listener
+                        port <- case address of
+                            Socket.SockAddrInet port _ -> pure port
+                            _ -> fail "expected an IPv4 listener"
+                        refreshed <- newIORef []
+                        let hooks = defaultMcpHostHooks
+                                { mcpHostCredentials = \config -> pure (Just McpCredentialProvider
+                                    { mcpCredentialAccessToken =
+                                        pure (Right (Just ("token-" <> config.mcpServerName)))
+                                    , mcpCredentialRefreshAccessToken = do
+                                        modifyIORef' refreshed (<> [config.mcpServerName])
+                                        pure (Right ("refreshed-" <> config.mcpServerName))
+                                    })
+                                }
+                            configuration name = workerClientConfig
+                                { mcpServerName = name
+                                , mcpServerUrl = Just
+                                    ("http://127.0.0.1:" <> Text.pack (show port) <> "/mcp")
+                                , mcpServerEnv = [("MCP_ACCESS_TOKEN", "unrelated-account")]
+                                }
+                            readHeaders handle = do
+                                line <- BS8.hGetLine handle
+                                if line == "\r"
+                                    then pure []
+                                    else (line :) <$> readHeaders handle
+                            serve = forM [False, True, False, True] \authorized ->
+                                bracket
+                                    (Socket.accept listener >>= \(connection, _) ->
+                                        Socket.socketToHandle connection ReadWriteMode)
+                                    hClose
+                                    \handle -> do
+                                        headers <- readHeaders handle
+                                        case find (BS8.isPrefixOf "Content-Length: ") headers of
+                                            Nothing -> fail "expected Content-Length"
+                                            Just header -> case BS8.readInt (BS8.drop 16 header) of
+                                                Nothing -> fail "invalid Content-Length"
+                                                Just (size, _) -> void (BS.hGet handle size)
+                                        let body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}"
+                                        BS8.hPutStr handle $
+                                            if authorized
+                                                then "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                                                    <> BS8.pack (show (BS.length body))
+                                                    <> "\r\nConnection: close\r\n\r\n" <> body
+                                                else "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                                        hFlush handle
+                                        pure (find (BS8.isPrefixOf "Authorization: ") headers)
+                        withAsync serve \server -> do
+                            bracket (startMcpClientWith hooks Nothing (configuration "first")) closeMcpClient \first ->
+                                bracket (startMcpClientWith hooks Nothing (configuration "second")) closeMcpClient \second -> do
+                                    firstResult <- requestMcp first 2000000 "tools/list" mempty
+                                    secondResult <- requestMcp second 2000000 "tools/list" mempty
+                                    fmap rawJsonBytes firstResult `shouldBe` Right "{}"
+                                    fmap rawJsonBytes secondResult `shouldBe` Right "{}"
+                            wait server `shouldReturn`
+                                [ Just "Authorization: Bearer token-first\r"
+                                , Just "Authorization: Bearer refreshed-first\r"
+                                , Just "Authorization: Bearer token-second\r"
+                                , Just "Authorization: Bearer refreshed-second\r"
+                                ]
+                            readIORef refreshed `shouldReturn` ["first", "second"]
+
+        it "isolates host credentials for two connection identities at one endpoint" do
+            let hooks = defaultMcpHostHooks
+                    { mcpHostCredentials = \config -> pure (Just McpCredentialProvider
+                        { mcpCredentialAccessToken =
+                            pure (Right (Just ("token-" <> config.mcpServerName)))
+                        , mcpCredentialRefreshAccessToken =
+                            pure (Right ("refreshed-" <> config.mcpServerName))
+                        })
+                    }
+                firstConfig = workerClientConfig { mcpServerName = "connection-first" }
+                secondConfig = workerClientConfig { mcpServerName = "connection-second" }
+            bracket (startMcpClientWith hooks Nothing firstConfig) closeMcpClient \first ->
+                bracket (startMcpClientWith hooks Nothing secondConfig) closeMcpClient \second -> do
+                    configuredAccessToken first `shouldReturn` Right (Just "token-connection-first")
+                    configuredAccessToken second `shouldReturn` Right (Just "token-connection-second")
+
+        it "does not use environment credentials when a host connection has no token" do
+            let hooks = defaultMcpHostHooks
+                    { mcpHostCredentials = const (pure (Just McpCredentialProvider
+                        { mcpCredentialAccessToken = pure (Right Nothing)
+                        , mcpCredentialRefreshAccessToken = pure (Left "Authorization required")
+                        }))
+                    }
+                config = workerClientConfig
+                    { mcpServerEnv =
+                        [ ("MCP_ACCESS_TOKEN", "another-account")
+                        , ("MCP_OAUTH_TOKEN_FILE", "/nonexistent/another-account.json")
+                        ]
+                    }
+            bracket (startMcpClientWith hooks Nothing config) closeMcpClient \client ->
+                configuredAccessToken client `shouldReturn` Right Nothing
+
+        it "fails closed when a captured connection has no host credential provider" do
+            let config = workerClientConfig
+                    { mcpServerConnection = Just
+                        (McpConnectionIdentity "first" (Just "generation") Nothing)
+                    , mcpServerEnv = [("MCP_ACCESS_TOKEN", "another-account")]
+                    }
+            bracket (startMcpClient config) closeMcpClient \client ->
+                configuredAccessToken client `shouldReturn`
+                    Left "MCP connection credential provider is unavailable"
+
+        it "does not fall back to environment credentials after a host storage error" do
+            let hooks = defaultMcpHostHooks
+                    { mcpHostCredentials = const (pure (Just McpCredentialProvider
+                        { mcpCredentialAccessToken = pure (Left "Protected storage is unavailable")
+                        , mcpCredentialRefreshAccessToken = pure (Left "Authorization required")
+                        }))
+                    }
+                config = workerClientConfig
+                    { mcpServerEnv = [("MCP_ACCESS_TOKEN", "another-account")] }
+            bracket (startMcpClientWith hooks Nothing config) closeMcpClient \client ->
+                configuredAccessToken client `shouldReturn` Left "Protected storage is unavailable"
+
         it "stores only HTTP state for an HTTP client" $
             bracket (startMcpClient workerClientConfig) closeMcpClient \client ->
                 case client.clientTransport of
@@ -589,6 +726,18 @@ spec = describe "Agent.MCP" do
                     <> "{\"dev.haskell-agent/fresh-approval\":false}}")
                 `shouldBe` Right False
 
+    it "includes connection labels in tool descriptions without renaming tools" $
+        withFakeServer \script -> do
+            let config = (baseConfig "connection_first" script)
+                    { mcpServerConnection = Just
+                        (McpConnectionIdentity "first" (Just "generation") (Just "Production")) }
+            bracket (startMcpFleet [config]) closeMcpFleet \fleet -> do
+                let tools = mcpFleetTools fleet
+                map (.appToolName) tools `shouldBe`
+                    ["connection_first__echo_read", "connection_first__mutate", "connection_first__draft"]
+                map (.appToolDescription) tools `shouldSatisfy`
+                    all (Text.isPrefixOf "Connection: Production\n")
+
     it "exposes MCP mutations behind approval while reads stay unprompted" $
         withFakeServer \script -> do
             started <- newIORef []
@@ -608,6 +757,7 @@ spec = describe "Agent.MCP" do
                     , mcpServerSamplingEnabled = True
                     , mcpServerLogLevel = Nothing
                     , mcpServerExcludedTools = []
+                    , mcpServerConnection = Nothing
                     }
                 ]
             bracket (pure fleet) closeMcpFleet \_ -> do
@@ -2045,6 +2195,7 @@ concurrentConfig script barrier name = McpServerConfig
     , mcpServerSamplingEnabled = True
     , mcpServerLogLevel = Nothing
     , mcpServerExcludedTools = []
+    , mcpServerConnection = Nothing
     }
 
 data WorkerLifecycleOperation
@@ -2086,6 +2237,7 @@ progressiveConfig script delay name =
 baseConfig :: Text.Text -> FilePath -> McpServerConfig
 baseConfig name command = McpServerConfig
     { mcpServerName = name
+    , mcpServerConnection = Nothing
     , mcpServerUrl = Nothing
     , mcpServerCommand = command
     , mcpServerArgs = []

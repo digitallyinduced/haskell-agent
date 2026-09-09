@@ -54,7 +54,7 @@ import Agent.Provider (providerSlug)
 import Agent.ReasoningEffort (reasoningEffortText)
 import Agent.Responses.Types (ResponseCreateParams(..))
 import Control.Applicative ((<|>))
-import Control.Monad (foldM)
+import Control.Monad (foldM, when)
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import Data.IORef (readIORef)
@@ -104,6 +104,9 @@ applyMetaConfigAction secrets config = \case
         let name = proposed.metaMcpName
             existing = Map.lookup name config.configMcpServers
         remote <- resolveMetaMcpUrl name existing proposed.metaMcpUrl
+        when (maybe False ((/= Nothing) . (.mcpConnectionId)) existing
+                && remote /= (existing >>= (.mcpUrl))) $
+            Left "Managed MCP connection endpoints cannot be changed"
         let
             oauth =
                 case remote of
@@ -125,6 +128,9 @@ applyMetaConfigAction secrets config = \case
             next = McpServerConfig
                 { mcpEnabled = proposed.metaMcpEnabled
                 , mcpUrl = remote
+                , mcpConnectionId = existing >>= (.mcpConnectionId)
+                , mcpConnectionGeneration = existing >>= (.mcpConnectionGeneration)
+                , mcpDisplayName = existing >>= (.mcpDisplayName)
                 , mcpCommand =
                     maybe "" Text.strip proposed.metaMcpCommand
                 , mcpArgs =
@@ -156,7 +162,9 @@ applyMetaConfigAction secrets config = \case
                 Map.insert name next config.configMcpServers
             }
     MetaRemoveMcp name -> do
-        requireMember "MCP server" name config.configMcpServers
+        server <- requireLookup "MCP server" name config.configMcpServers
+        when (server.mcpConnectionId /= Nothing) $
+            Left "Remove managed MCP connections from Plugins so their credentials are deleted"
         Right config
             { configMcpServers =
                 Map.delete name config.configMcpServers

@@ -100,6 +100,7 @@ import System.Exit ( die )
 import System.IO ( stderr )
 
 import qualified Agent.MCP as MCP
+import Agent.CLI.McpConnectionRuntime (mcpConnectionCredentials)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import qualified Data.Text as Text
 
@@ -240,6 +241,7 @@ runAgentWithRestarts options =
                                 { MCP.mcpHostElicit = readIORef elicitationRef
                                 , MCP.mcpHostRoots = readIORef rootsRef
                                 , MCP.mcpHostSample = readIORef samplingRef
+                                , MCP.mcpHostCredentials = mcpConnectionCredentials
                                 }
                             `onException`
                                 closeIntegrationSupervisor integrationSupervisor

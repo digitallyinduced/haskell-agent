@@ -36,6 +36,7 @@ gatewayIntegrationMcpConfig credential = McpServerConfig
     , mcpServerSamplingEnabled = False
     , mcpServerLogLevel = Nothing
     , mcpServerExcludedTools = []
+    , mcpServerConnection = Nothing
     }
 
 availableIntegrationServerName :: [Text.Text] -> Text.Text

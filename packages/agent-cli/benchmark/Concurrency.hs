@@ -1347,6 +1347,7 @@ fakeMcpConfig executable project delayMillis index = McpServerConfig
     , mcpServerSamplingEnabled = False
     , mcpServerLogLevel = Nothing
     , mcpServerExcludedTools = []
+    , mcpServerConnection = Nothing
     }
 
 runFakeMcpServer :: Int -> Int -> IO ()

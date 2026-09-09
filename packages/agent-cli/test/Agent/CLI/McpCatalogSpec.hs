@@ -300,6 +300,10 @@ docsServer =
     McpServerConfig
         { mcpEnabled = False
         , mcpUrl = Nothing
+        , mcpConnectionId = Nothing
+        , mcpConnectionGeneration = Nothing
+        , mcpConnectionGeneration = Nothing
+        , mcpDisplayName = Nothing
         , mcpCommand = "mcp-docs"
         , mcpArgs = ["--stdio"]
         , mcpCwd = Just "/tmp"
@@ -318,6 +322,8 @@ remoteServer =
     McpServerConfig
         { mcpEnabled = True
         , mcpUrl = Just "https://example.test/mcp"
+        , mcpConnectionId = Nothing
+        , mcpDisplayName = Nothing
         , mcpCommand = ""
         , mcpArgs = []
         , mcpCwd = Nothing

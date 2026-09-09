@@ -70,6 +70,9 @@ mcpConfiguration AgentToolsRequest
     serverConfigs =
         [ MCP.McpServerConfig
             { MCP.mcpServerName = label
+            , MCP.mcpServerConnection = fmap (\identifier -> MCP.McpConnectionIdentity
+                identifier config.mcpConnectionGeneration config.mcpDisplayName)
+                config.mcpConnectionId
             , MCP.mcpServerUrl = config.mcpUrl
             , MCP.mcpServerCommand = Text.unpack config.mcpCommand
             , MCP.mcpServerArgs = map Text.unpack config.mcpArgs
@@ -79,8 +82,8 @@ mcpConfiguration AgentToolsRequest
             , MCP.mcpServerEnv =
                 [ (Text.unpack name, Text.unpack value)
                 | (name, value) <- Map.toAscList config.mcpEnv
-                ] <> case config.mcpUrl of
-                    Just url
+                ] <> case (config.mcpConnectionId, config.mcpUrl) of
+                    (Nothing, Just url)
                         | Map.notMember
                             "MCP_OAUTH_TOKEN_FILE"
                             config.mcpEnv ->
@@ -283,4 +286,5 @@ integrationsMcpConfig serverName = MCP.McpServerConfig
     , MCP.mcpServerSamplingEnabled = False
     , MCP.mcpServerLogLevel = Nothing
     , MCP.mcpServerExcludedTools = []
+    , MCP.mcpServerConnection = Nothing
     }
