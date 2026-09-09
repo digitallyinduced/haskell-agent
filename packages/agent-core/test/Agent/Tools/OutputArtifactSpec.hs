@@ -25,9 +25,13 @@ import Agent.Tools.Types
     , setToolSessionTmp
     )
 import Control.Concurrent.Async (mapConcurrently)
+import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Lazy as LazyByteString
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (find, nub)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Encoding
 import System.Directory
     ( createDirectory
     , getTemporaryDirectory
@@ -85,6 +89,8 @@ spec = describe "Agent.Tools.OutputArtifact" do
                 call = functionToolCall "c" "shell" ""
             rendered <- finalizeToolOutput env call (Text.replicate 100 "x")
             rendered `shouldSatisfy` Text.isInfixOf "storage cap reached"
+            rendered `shouldSatisfy` Text.isInfixOf "stored file is incomplete"
+            rendered `shouldSatisfy` (not . Text.isInfixOf "complete tool response stored")
             handles <- listArtifactHandles rendered
             case handles of
                 [] -> expectationFailure "artifact handle missing from marker"
@@ -92,6 +98,40 @@ spec = describe "Agent.Tools.OutputArtifact" do
                     readOutputArtifact env handle >>= \case
                         Left err -> expectationFailure (Text.unpack err)
                         Right stored -> Text.length stored `shouldBe` 16
+
+    it "exposes the complete single-line JSON file for programmatic aggregation" do
+        withTempEnv \env -> do
+            let values = [1 .. 20000] :: [Int]
+                bytes = LazyByteString.toStrict (Aeson.encode values)
+            rendered <- finalizeToolOutput env
+                (functionToolCall "response" "mcp_call" "{}")
+                (Encoding.decodeUtf8 bytes)
+            handles <- listArtifactHandles rendered
+            case handles of
+                [] -> expectationFailure "artifact handle missing"
+                handle : _ -> do
+                    captured <- newIORef ""
+                    let analysis _ _ instruction =
+                            writeIORef captured instruction >> pure (Right "spawned")
+                    _ <- runArtifactToolWithAnalysis env (Just analysis)
+                        "analyze_tool_output" $
+                        functionToolCall "analysis" "analyze_tool_output"
+                            ("{\"handle\":\"" <> handle <> "\",\"instruction\":\"Sum the values.\"}")
+                    instruction <- readIORef captured
+                    let encodedPath = Text.takeWhile (/= '\n') $
+                            Text.drop (Text.length "Stored output file (JSON-quoted path): ") instruction
+                        -- Decode just the JSON string before the prose suffix.
+                        pathText = fst (Text.breakOn ". Use jq" encodedPath)
+                    case Aeson.eitherDecodeStrict (Encoding.encodeUtf8 pathText) of
+                        Left err -> expectationFailure err
+                        Right path -> do
+                            rendered `shouldSatisfy` Text.isInfixOf pathText
+                            stored <- ByteString.readFile path
+                            stored `shouldBe` bytes
+                            (sum <$> (Aeson.eitherDecodeStrict stored :: Either String [Int]))
+                                `shouldBe` Right 200010000
+                    instruction `shouldSatisfy` Text.isInfixOf "untrusted data"
+                    instruction `shouldSatisfy` Text.isInfixOf "Sum the values."
 
     it "allocates unique handles concurrently" do
         withTempEnv \env -> do
@@ -106,6 +146,18 @@ spec = describe "Agent.Tools.OutputArtifact" do
         withTempEnv \env ->
             readOutputArtifact env "../output-secret"
                 `shouldReturn` Left "invalid tool-output artifact handle"
+
+    it "does not delegate invalid or missing artifact paths" do
+        withTempEnv \env -> do
+            called <- newIORef False
+            let analysis _ _ _ = writeIORef called True >> pure (Right "spawned")
+            mapM_ (\handle -> do
+                _ <- runArtifactToolWithAnalysis env (Just analysis)
+                    "analyze_tool_output" $
+                    functionToolCall "analysis" "analyze_tool_output"
+                        ("{\"handle\":\"" <> handle <> "\",\"instruction\":\"Inspect.\"}")
+                readIORef called `shouldReturn` False)
+                ["../output-secret", "output-missing"]
 
     it "reports on-disk bytes for invalid UTF-8 artifacts" do
         withTempEnv \env -> do
@@ -252,7 +304,16 @@ runArtifactTool
     -> ToolCall
     -> IO (Either Text.Text Text.Text)
 runArtifactTool env toolName call = do
-    let tool = find ((== toolName) . (.appToolName)) (artifactTools env Nothing)
+    runArtifactToolWithAnalysis env Nothing toolName call
+
+runArtifactToolWithAnalysis
+    :: ToolEnv
+    -> Maybe (ToolCall -> Text.Text -> Text.Text -> IO (Either Text.Text Text.Text))
+    -> Text.Text
+    -> ToolCall
+    -> IO (Either Text.Text Text.Text)
+runArtifactToolWithAnalysis env analysis toolName call = do
+    let tool = find ((== toolName) . (.appToolName)) (artifactTools env analysis)
         config = ToolDispatchConfig
             { toolDispatchUnknownTool = ("unknown tool: " <>)
             , toolDispatchFormatResult = either id id
