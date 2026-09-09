@@ -30,7 +30,8 @@ import Network.HTTP.Client qualified as HTTP
 import Network.HTTP.Client.MultipartFormData qualified as Multipart
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types
-    ( hAccept
+    ( Status
+    , hAccept
     , hAuthorization
     , statusCode
     , statusIsSuccessful
@@ -248,9 +249,7 @@ postGatewayTranscription credential wav =
                         Left
                             "Dictation is not supported by this organization gateway."
                     | otherwise ->
-                        Left $
-                            "Gateway dictation returned HTTP "
-                                <> Text.pack (show (statusCode status))
+                        Left (gatewayDictationStatusError status responseBody)
 
 gatewayTranscriptionBoundary :: IO BS.ByteString
 gatewayTranscriptionBoundary =
@@ -265,6 +264,37 @@ instance Aeson.FromJSON GatewayTranscript where
     parseJSON =
         Aeson.withObject "GatewayTranscript" \object ->
             GatewayTranscript <$> object .: "text"
+
+newtype GatewayErrorEnvelope =
+    GatewayErrorEnvelope { gatewayErrorMessage :: Text }
+
+instance Aeson.FromJSON GatewayErrorEnvelope where
+    parseJSON =
+        Aeson.withObject "GatewayErrorEnvelope" \root -> do
+            err <- root .: "error"
+            Aeson.withObject "GatewayError" (\object ->
+                GatewayErrorEnvelope <$> object .: "message") err
+
+gatewayDictationStatusError :: Status -> BS.ByteString -> Text
+gatewayDictationStatusError status body =
+    "Gateway dictation returned HTTP "
+        <> Text.pack (show (statusCode status))
+        <> case gatewayErrorMessageFromBody body of
+            Just message -> ": " <> message
+            Nothing -> ""
+
+gatewayErrorMessageFromBody :: BS.ByteString -> Maybe Text
+gatewayErrorMessageFromBody body = do
+    envelope <-
+        either
+            (const Nothing)
+            Just
+            (Aeson.eitherDecodeStrict' body
+                :: Either String GatewayErrorEnvelope)
+    let trimmed = Text.strip envelope.gatewayErrorMessage
+    if Text.null trimmed
+        then Nothing
+        else Just (Text.take 200 (Text.unwords (Text.words trimmed)))
 
 decodeGatewayTranscript :: BS.ByteString -> Either Text Text
 decodeGatewayTranscript body =
