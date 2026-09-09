@@ -1,6 +1,7 @@
 -- | Mutable session state shared by the REPL, one-shot turns, and plan mode.
 module Agent.CLI.SessionEnv
     ( PreparedWorkspaceEnvironment(..)
+    , SessionInboxRuntime(..)
     , SessionEnv(..)
     ) where
 
@@ -23,6 +24,7 @@ import Agent.CLI.Compaction
 import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
 import Agent.CLI.Session (Persistence, SessionHandle)
+import Agent.CLI.Session.Inbox (SessionInbox)
 import Agent.CLI.Session.Observation (SessionObservationPublisher)
 import Agent.Runtime.SessionState (SessionState)
 import Agent.CLI.Session.Workspace (WorkspaceContext)
@@ -48,11 +50,21 @@ import Agent.Store.Postgres.Connection (StorePool)
 import Data.IORef (IORef)
 import Data.Set (Set)
 import Data.Text (Text)
-import Control.Concurrent.STM (STM)
+import Control.Concurrent.MVar (MVar)
+import Control.Concurrent.STM (STM, TMVar)
 
 data PreparedWorkspaceEnvironment = PreparedWorkspaceEnvironment
     { preparedOperatingSystem :: !Text
     , preparedShell :: !Text
+    }
+
+-- | Cross-process follow-up delivery for the process that owns this session.
+data SessionInboxRuntime = SessionInboxRuntime
+    { inboxMessages :: !SessionInbox
+    , inboxReady :: !(MVar SessionHandle)
+    , inboxTurn :: !(IORef Bool)
+    , inboxTurnActive :: !(IORef Bool)
+    , inboxInline :: !(TMVar Text)
     }
 
 data SessionEnv = SessionEnv
@@ -82,6 +94,7 @@ data SessionEnv = SessionEnv
     -- presentation callback. Nested follow-ups reuse the same service.
     , sessionObservationPublisher :: !(IORef (Maybe SessionObservationPublisher))
     , sessionObservationEnabled :: !Bool
+    , sessionInboxRuntime :: !SessionInboxRuntime
     , sessionDatabasePool :: !StorePool
     , sessionTitleManager :: !SessionTitleManager
     , sessionTitleTurnCount :: !(IORef Int)

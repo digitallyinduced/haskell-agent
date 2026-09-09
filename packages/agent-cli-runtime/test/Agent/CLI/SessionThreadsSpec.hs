@@ -1,6 +1,11 @@
 module Agent.CLI.SessionThreadsSpec (spec) where
 
 import Agent.CLI.Session.Threads
+import Agent.CLI.SessionLock
+    ( acquireSessionLock
+    , adjustSessionInboxPending
+    , releaseSessionLock
+    )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
     ( newEmptyMVar, putMVar, takeMVar, tryTakeMVar )
@@ -10,7 +15,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified System.Directory as Directory
 import qualified System.FilePath as FilePath
-import System.OsPath (unsafeEncodeUtf)
+import System.OsPath (unsafeEncodeUtf, (</>))
 import System.Posix.Temp (mkdtemp)
 import System.Timeout (timeout)
 import Test.Hspec
@@ -78,6 +83,27 @@ spec = describe "shared session thread manager" do
             launchSessionThread manager "session" (pure (Right ()))
                 `shouldReturn` Right "started session session"
             waitForStatus manager "session" "completed"
+
+    it "waits for accepted inbox messages on an otherwise idle open session" $ do
+        tmp <- Directory.getTemporaryDirectory
+        bracket
+            (mkdtemp (tmp FilePath.</> "ha-inbox-wait"))
+            Directory.removeDirectoryRecursive
+            \root -> do
+                Directory.createDirectory (root FilePath.</> "session")
+                bracket
+                    (newSessionThreadManager (unsafeEncodeUtf root))
+                    closeSessionThreadManager
+                    \manager -> do
+                        let sessionDir =
+                                unsafeEncodeUtf root </> unsafeEncodeUtf "session"
+                        Right lock <- acquireSessionLock sessionDir "session"
+                        flip finally (releaseSessionLock lock) do
+                            _ <- adjustSessionInboxPending sessionDir 1
+                            wait <- prepareSessionThreadWait manager "session"
+                            timeout 50000 wait `shouldReturn` Nothing
+                            _ <- adjustSessionInboxPending sessionDir (-1)
+                            timeout 500000 wait `shouldReturn` Just "idle"
 
 -- Bound only interruptible handshakes, never wrap masked resource release in
 -- nested timeouts. The manager's bracket owns cancellation and joining.

@@ -152,6 +152,7 @@ takeFullscreenInput (FullscreenInputBuffer inputs retainedBytes closed) = do
             { fullscreenInputLine = ReplEof
             , fullscreenInputQueued = False
             , fullscreenInputDisplay = Nothing
+            , fullscreenInputFromInbox = False
             }
         else case Seq.viewl queued of
             EmptyL -> retry
