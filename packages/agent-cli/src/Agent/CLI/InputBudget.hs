@@ -85,6 +85,7 @@ logicalReplLineBytes = \case
         logicalTextBytes draft
             `saturatingAdd` maybe 0 (foldBytes logicalImageBytes) images
     ReplClipboardPasteCaptured images -> foldBytes logicalImageBytes images
+    ReplRemoveCapturedImage _ -> 0
     ReplClipboardPasteOrText draft pasted inserted ->
         logicalTextBytes draft
             `saturatingAdd` logicalTextBytes pasted

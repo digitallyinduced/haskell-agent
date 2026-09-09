@@ -46,7 +46,7 @@ import Agent.CLI.Input
       truncateDisplayText,
       ReplLine(ReplText, ReplMeta, ReplEof, ReplQuitInterrupt, ReplCycleMode,
                ReplClipboardPaste, ReplClipboardPasteCaptured, ReplClipboardPasteOrText, ReplChooseModel,
-               ReplChooseEffort, ReplChooseAccount, ReplRemovePendingImage,
+               ReplChooseEffort, ReplChooseAccount, ReplRemovePendingImage, ReplRemoveCapturedImage,
                ReplPasted) )
 import Agent.CLI.GatewayClient ( loadGatewayCredential )
 import Agent.CLI.Login
@@ -300,6 +300,9 @@ handleReplLine
             finishTurn
             (continueWith keptDraft)
             (ReplRemoveAttachment index)
+    ReplRemoveCapturedImage index ->
+        handleClipboardInput env continueWith stdoutColor
+            (ClipboardRemoveCaptured index)
     ReplPasted pasted ->
         submit (continueWith "") True pasted
     ReplText line ->

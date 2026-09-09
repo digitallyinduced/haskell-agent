@@ -688,9 +688,7 @@ activateControl = \case
             applyLocalUiEventWith
             ReplChooseAccount
     ComposerImageRemove index ->
-        Composer.handlePromptControlClick
-            applyLocalUiEventWith
-            (\draft -> ReplRemovePendingImage draft index)
+        Composer.handleImageRemoveClick applyLocalUiEventWith index
     QuickStartWorktree ->
         activateQuickStartCommand "/worktree"
     QuickStartResume ->

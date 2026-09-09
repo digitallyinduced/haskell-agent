@@ -45,6 +45,7 @@ import qualified Data.Text.IO as Text ( hPutStrLn, putStrLn )
 data ClipboardInput
     = ClipboardPaste !Text !(Maybe [ImageAttachment])
     | ClipboardPasteCaptured ![ImageAttachment]
+    | ClipboardRemoveCaptured !Int
     | ClipboardPasteOrText !Text !Text !Text
 
 handleClipboardInput
@@ -66,6 +67,11 @@ handleClipboardInput
         -- order without restoring an old draft or replacing newer previews.
         _ <- queueAttachedImages
             conversationRef previewIdRef stdoutColor (isNothing fullscreen) images
+        continueWith ""
+    ClipboardRemoveCaptured index -> do
+        -- Apply the composer edit in queue order without replacing its newer
+        -- draft or previews when the REPL catches up.
+        _ <- modifyLiveAttachments conversationRef (removeImageAttachmentAt index)
         continueWith ""
     ClipboardPaste keptDraft clipboardPasteImages -> do
         case clipboardPasteImages of

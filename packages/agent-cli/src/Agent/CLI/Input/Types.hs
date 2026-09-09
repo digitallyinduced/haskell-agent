@@ -24,6 +24,7 @@ data ReplLine
     | ReplClipboardPaste !Text !(Maybe [ImageAttachment])
     -- | Images already captured and previewed by the active composer.
     | ReplClipboardPasteCaptured ![ImageAttachment]
+    | ReplRemoveCapturedImage !Int
     -- | Classify a bracketed paste off the UI thread. The fields are the draft
     -- before the paste, the raw pasted payload, and the draft with that payload
     -- inserted. Image paths or clipboard images become attachments; otherwise
