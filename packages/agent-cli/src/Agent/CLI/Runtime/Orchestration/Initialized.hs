@@ -65,12 +65,11 @@ import Agent.CLI.Models
 import Agent.CLI.Options
     ( CliOptions(optModel, optProvider, optSkills, optYolo) )
 import Agent.CLI.Project
-    ( loadProjectSettings,
-      loadUserSettings,
+    ( inheritProjectLastModel,
+      loadProjectSettings,
       projectAccountFor,
       projectModelProvider,
       resolveProjectRoot,
-      withInheritedLastModel,
       ProjectAccount(projectAccountId, projectAccountSelectionId),
       ProjectModel(projectModelTarget),
       ProjectSettings(settingsLastModel) )
@@ -376,12 +375,13 @@ prepareInitializedWorkspace request = do
     checkpoint "workspace scopes ready"
     let loadWorkspaceMetadata =
             concurrently
-                (concurrently
-                    (maybe
-                        (loadProjectSettings projectRoot)
-                        (pure . (.nativeDiscoveryProjectSettings))
-                        preparedDiscovery)
-                    (loadUserSettings home))
+                (do
+                    projectSettings0 <-
+                        maybe
+                            (loadProjectSettings projectRoot)
+                            (pure . (.nativeDiscoveryProjectSettings))
+                            preparedDiscovery
+                    inheritProjectLastModel home projectRoot projectSettings0)
                 (concurrently
                     (loadModelCatalogAt home
                         (maybe
@@ -401,7 +401,7 @@ prepareInitializedWorkspace request = do
         shouldPreloadSkills =
             request.initializedOptions.optSkills
                 && isNothing preparedDiscovery
-    (((projectSettings0, userSettings), (catalogResult, branch)),
+    ((projectSettings, (catalogResult, branch)),
         initializedSkills) <-
         if shouldPreloadSkills
             then concurrently loadWorkspaceMetadata loadInitialSkills
@@ -409,8 +409,6 @@ prepareInitializedWorkspace request = do
                 metadata <- loadWorkspaceMetadata
                 pure (metadata, SkillCatalog [] [])
     checkpoint "workspace metadata and skills ready"
-    let projectSettings =
-            withInheritedLastModel projectSettings0 userSettings
     catalog <- either
         (startupDie startup)
         pure

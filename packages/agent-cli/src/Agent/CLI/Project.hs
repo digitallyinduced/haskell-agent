@@ -1,11 +1,15 @@
 -- | Project-scoped settings under @<project>/.haskell-agent/settings.json@,
 -- plus the user-level last model under @~/.haskell-agent/settings.json@.
+-- Last-model is stored on the current checkout and on the primary Git clone
+-- so a later session in the same repository, including a fresh worktree,
+-- restores that selection instead of the catalog default.
 module Agent.CLI.Project
     ( ModelSwitchScope(..)
     , ProjectAccount(..)
     , ProjectModel(..)
     , ProjectSettings(..)
     , defaultProjectSettings
+    , inheritProjectLastModel
     , loadProjectSettings
     , loadUserSettings
     , projectDialectFor
@@ -13,6 +17,7 @@ module Agent.CLI.Project
     , projectModelFor
     , projectModelProvider
     , projectSettingsPath
+    , resolvePrimaryProjectRoot
     , resolveProjectRoot
     , saveProjectAutoApprove
     , saveProjectMaxConcurrentAgents
@@ -57,7 +62,14 @@ import System.Directory.OsPath
     , doesFileExist
     )
 import System.Exit (ExitCode(..))
-import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
+import System.OsPath
+    ( OsPath
+    , isAbsolute
+    , takeDirectory
+    , takeFileName
+    , unsafeEncodeUtf
+    , (</>)
+    )
 import System.Posix.Files (setFileMode)
 import System.Process (CreateProcess(..), proc, readCreateProcessWithExitCode)
 
@@ -213,12 +225,33 @@ lenient decoder =
 -- Uses @git rev-parse --show-toplevel@ so a linked worktree stays in that
 -- worktree instead of jumping to the primary clone. Falls back to @cwd@.
 -- Paths are canonicalized so macOS @/var@ vs @/private/var@ does not diverge.
+-- Checkout-local flags such as auto-approve stay here; last-model selection
+-- is also written to 'resolvePrimaryProjectRoot' so a later session in the
+-- same repository can find it.
 resolveProjectRoot :: OsPath -> IO OsPath
 resolveProjectRoot cwd = do
     root <- gitToplevel cwd >>= \case
         Just toplevel -> pure toplevel
         Nothing -> pure cwd
     canonicalizePath root
+
+-- | Primary clone that owns Git's common directory.
+-- Linked and managed worktrees share this checkout, so project last-model
+-- settings outlive a disposable worktree. Falls back to the current checkout
+-- when Git is unavailable or the common directory is not a @.git@ directory.
+resolvePrimaryProjectRoot :: OsPath -> IO OsPath
+resolvePrimaryProjectRoot checkout = do
+    canonical <- canonicalizePath checkout
+    gitCommonDir canonical >>= \case
+        Just common
+            | takeFileName common == unsafeEncodeUtf ".git" ->
+                let parent = takeDirectory common
+                in canonicalizePath $
+                    if isAbsolute common
+                        then parent
+                        else canonical
+        _ ->
+            pure canonical
 
 -- | Missing or unreadable settings files yield the defaults.
 loadProjectSettings :: OsPath -> IO ProjectSettings
@@ -240,17 +273,44 @@ loadProjectSettings projectRoot = do
 loadUserSettings :: OsPath -> IO ProjectSettings
 loadUserSettings = loadProjectSettings
 
--- | Prefer the checkout's last model. A missing checkout value falls back to
--- the user-level last model so a freshly created worktree inherits the model
--- from the previous session instead of catalog or auth defaults.
+-- | Prefer the current checkout's last model, then the primary clone, then
+-- the user-level default. A freshly created worktree therefore inherits the
+-- repository's last model instead of a different project's user default.
+-- Checkout-local settings such as auto-approve are unchanged.
 withInheritedLastModel
     :: ProjectSettings
     -> ProjectSettings
     -> ProjectSettings
-withInheritedLastModel project user =
-    case project.settingsLastModel of
-        Just _ -> project
-        Nothing -> project { settingsLastModel = user.settingsLastModel }
+    -> ProjectSettings
+withInheritedLastModel project primary user =
+    project
+        { settingsLastModel =
+            case project.settingsLastModel of
+                Just model -> Just model
+                Nothing ->
+                    case primary.settingsLastModel of
+                        Just model -> Just model
+                        Nothing -> user.settingsLastModel
+        }
+
+-- | Load checkout settings and fill in last-model from the primary clone and
+-- user defaults when the current checkout has none.
+inheritProjectLastModel
+    :: OsPath
+    -- ^ User home (@~/.haskell-agent/settings.json@).
+    -> OsPath
+    -- ^ Current checkout root.
+    -> ProjectSettings
+    -> IO ProjectSettings
+inheritProjectLastModel home projectRoot project = do
+    user <- loadUserSettings home
+    canonicalCheckout <- canonicalizePath projectRoot
+    primaryRoot <- resolvePrimaryProjectRoot canonicalCheckout
+    primary <-
+        if primaryRoot == canonicalCheckout
+            then pure project
+            else loadProjectSettings primaryRoot
+    pure (withInheritedLastModel project primary user)
 
 -- | Persist the project-wide auto-approve flag, creating @.haskell-agent@ as needed.
 saveProjectAutoApprove :: OsPath -> Bool -> IO ()
@@ -316,8 +376,9 @@ data ModelSwitchScope
     | SessionLocalSwitch
     deriving (Eq, Show)
 
--- | Persist a top-level switch on the current checkout and as the user-level
--- default. Session-local switches retain their target only in session state.
+-- | Persist a top-level switch on the current checkout, the primary clone
+-- when that is a different path, and the user-level default. Session-local
+-- switches retain their target only in session state.
 persistModelSwitch
     :: ModelSwitchScope
     -> OsPath
@@ -328,7 +389,11 @@ persistModelSwitch
     -> IO ()
 persistModelSwitch SessionLocalSwitch _ _ _ = pure ()
 persistModelSwitch TopLevelSwitch home projectRoot target = do
-    saveProjectModel projectRoot target
+    checkoutRoot <- canonicalizePath projectRoot
+    primaryRoot <- resolvePrimaryProjectRoot checkoutRoot
+    saveProjectModel checkoutRoot target
+    unless (primaryRoot == checkoutRoot) $
+        saveProjectModel primaryRoot target
     saveProjectModel home target
 
 projectModelProvider :: ProjectSettings -> Maybe Provider
@@ -363,10 +428,19 @@ updateProjectSettings projectRoot update = do
     writeLazyFileAtomically path 0o600 (Aeson.encode settings)
 
 gitToplevel :: OsPath -> IO (Maybe OsPath)
-gitToplevel dir = do
+gitToplevel dir =
+    gitRevParse dir ["rev-parse", "--show-toplevel"]
+
+gitCommonDir :: OsPath -> IO (Maybe OsPath)
+gitCommonDir dir =
+    gitRevParse dir
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"]
+
+gitRevParse :: OsPath -> [String] -> IO (Maybe OsPath)
+gitRevParse dir args = do
     result <- tryIO $
         readCreateProcessWithExitCode
-            (proc "git" ["rev-parse", "--show-toplevel"])
+            (proc "git" args)
                 { cwd = Just (unsafeToFilePath dir) }
             ""
     pure $ case result of
