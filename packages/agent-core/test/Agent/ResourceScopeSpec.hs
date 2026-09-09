@@ -1,3 +1,5 @@
+{-# LANGUAGE NumericUnderscores #-}
+
 module Agent.ResourceScopeSpec (spec) where
 
 import Agent.ResourceScope
@@ -10,6 +12,7 @@ import Control.Concurrent.MVar
     , takeMVar
     )
 import Control.Exception.Safe (throwIO, tryAny)
+import qualified Control.Exception as Exception
 import Control.Monad (replicateM_, when)
 import Data.IORef
 import Data.List (sort)
@@ -18,6 +21,57 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.ResourceScope" do
+    describe "slow cleanup diagnostics" do
+        it "keeps cleanup below 100 ms silent and preserves its result" do
+            elapsed <- newIORef 0
+            messages <- newIORef []
+            logSlowCleanupWith (readIORef elapsed) (record messages) "test resource"
+                (writeIORef elapsed 99_999_999 >> pure (42 :: Int))
+                `shouldReturn` 42
+            readIORef messages `shouldReturn` []
+
+        it "reports the resource and elapsed milliseconds at the threshold" do
+            elapsed <- newIORef 0
+            messages <- newIORef []
+            logSlowCleanupWith (readIORef elapsed) (record messages) "test resource"
+                (writeIORef elapsed 100_000_000)
+            readIORef messages `shouldReturn`
+                ["[slow cleanup] test resource: 100 ms"]
+
+        it "reports slow failures without replacing their exception" do
+            elapsed <- newIORef 0
+            messages <- newIORef []
+            let failure = userError "cleanup failed"
+            logSlowCleanupWith (readIORef elapsed) (record messages) "test resource"
+                (writeIORef elapsed 250_000_000 >> throwIO failure)
+                `shouldThrow` (== failure)
+            readIORef messages `shouldReturn`
+                ["[slow cleanup] test resource: 250 ms"]
+
+        it "ignores diagnostic failures without hiding cleanup failures" do
+            elapsed <- newIORef 0
+            let report _ = throwIO (userError "diagnostic failed")
+                failure = userError "cleanup failed"
+            logSlowCleanupWith (readIORef elapsed) report "test resource"
+                (writeIORef elapsed 250_000_000 >> throwIO failure)
+                `shouldThrow` (== failure)
+
+        it "preserves asynchronous exceptions" do
+            elapsed <- newIORef 0
+            messages <- newIORef []
+            logSlowCleanupWith (readIORef elapsed) (record messages) "test resource"
+                (writeIORef elapsed 250_000_000
+                    >> Exception.throwIO Exception.UserInterrupt)
+                `shouldThrow` (== Exception.UserInterrupt)
+            length <$> readIORef messages `shouldReturn` 1
+
+        it "preserves the cleanup masking state" do
+            let observe = logSlowCleanupWith (pure 0) (const (pure ())) "test resource"
+                    Exception.getMaskingState
+            observe `shouldReturn` Exception.Unmasked
+            Exception.mask_ observe `shouldReturn` Exception.MaskedInterruptible
+            Exception.uninterruptibleMask_ observe `shouldReturn` Exception.MaskedUninterruptible
+
     it "releases resources in reverse acquisition order" do
         released <- newIORef ([] :: [Int])
         scope <- newResourceScope
@@ -197,7 +251,7 @@ spec = describe "Agent.ResourceScope" do
             Right () -> pure ()
         (sort <$> readIORef releases) `shouldReturn` [1, 2, 3]
 
-record :: IORef [Int] -> Int -> IO ()
+record :: IORef [a] -> a -> IO ()
 record ref value =
     atomicModifyIORef' ref \values -> (values <> [value], ())
 
