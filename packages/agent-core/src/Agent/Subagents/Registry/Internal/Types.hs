@@ -3,6 +3,7 @@ module Agent.Subagents.Registry.Internal.Types where
 import Agent.Cancel (CancelFlag)
 import Agent.InterAgentMessage (InterAgentMessage)
 import Agent.Loop (LoopEvent)
+import Agent.ResourceScope (ResourceKey, ResourceScope)
 import Agent.Subagents.TaskPath (TaskPath)
 import Agent.Subagents.Types
     ( RootTurnId
@@ -13,7 +14,7 @@ import Agent.Subagents.Types
     )
 import Control.Concurrent.Async (Async)
 import Control.Concurrent.MVar (MVar)
-import Control.Concurrent.STM (TQueue, TVar)
+import Control.Concurrent.STM (TMVar, TQueue, TVar)
 import Data.Acquire (Acquire, mkAcquire)
 import Data.IORef (IORef)
 import Data.Map.Strict (Map)
@@ -30,20 +31,14 @@ data SubagentRecord = SubagentRecord
     , recordPhase :: !(TVar SubagentPhase)
     , recordCancel :: !CancelFlag
     , recordMailbox :: !(TQueue SubagentWork)
-    , recordAsync :: !(TVar (Maybe OwnedSubagentSupervisor))
+    , recordExecution :: !(TVar Bool)
+    , recordLease :: !(TVar (Maybe ResourceKey))
+    , recordCleanup :: !(TVar (Maybe (TMVar ())))
       -- | Last successful response id for conversation continuity.
     , recordPreviousResponseId :: !(TVar (Maybe Text))
     , recordLastUpdate :: !(TVar (Maybe (Int, SubagentStatus)))
     , recordTaskPath :: !TaskPath
     , recordCwd :: !OsPath
-    }
-
--- | The cancellation request remains owned alongside the supervisor until both
--- have completed. An interrupted closer can therefore resume the same shutdown
--- without delivering another exception into resource cleanup.
-data OwnedSubagentSupervisor = OwnedSubagentSupervisor
-    { supervisorAsync :: !(Async ())
-    , supervisorCancellation :: !(MVar (Maybe (Async ())))
     }
 
 data SubagentWork = SubagentWork
@@ -87,9 +82,9 @@ phaseHoldsSlot = \case
     AgentIdle{} -> False
     AgentClosed -> False
 
--- | Resources acquired while preparing an agent and transferred to its
--- supervisor. They remain alive across turns and are released in reverse order
--- when the supervisor exits.
+-- | Resources acquired while preparing an agent and transferred to the
+-- registry resource scope. They remain alive across turns and are released in
+-- reverse order after the agent's final execution scope ends.
 newtype SubagentLease = SubagentLease (Acquire ())
 
 instance Semigroup SubagentLease where
@@ -122,4 +117,8 @@ data SubagentRegistry = SubagentRegistry
     , registryNextRootTurnId :: !(TVar Word64)
     , registryAbortedRootTurns :: !(TVar (Set RootTurnId))
     , registryLifecycle :: !(MVar ())
+    , registryResources :: !ResourceScope
+    , registryExecutor :: !(MVar (Async ()))
+    , registryExecutorStopped :: !(TVar Bool)
+    , registryCleanupQueue :: !(TQueue (SubagentRecord, TMVar ()))
     }
