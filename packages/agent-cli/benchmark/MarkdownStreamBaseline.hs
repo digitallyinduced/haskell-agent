@@ -1,11 +1,10 @@
-module Agent.CLI.Render.MarkdownStream
+-- Frozen streaming implementation from 89102f95873de78ccf23142c847105bce9ac4777.
+-- Keep the repeated strict append/full-block scan as the comparison workload.
+module MarkdownStreamBaseline
     ( MarkdownStreamState
     , emptyMarkdownStreamState
-    , feedMarkdownStream
     , feedMarkdownStreamAtWidth
-    , flushMarkdownStream
     , flushMarkdownStreamAtWidth
-    , streamMarkdownText
     ) where
 
 import Agent.CLI.Markdown
@@ -15,11 +14,7 @@ import Agent.CLI.Markdown
     , renderMarkdownFragment
     , splitMarkdownFragment
     )
-import Agent.TUI.FencedCode
-    ( FenceMarker
-    , fenceOpener
-    , isFenceCloser
-    )
+import Agent.TUI.FencedCode (FenceMarker, fenceOpener, isFenceCloser)
 import qualified Agent.TUI.Markdown.Block as Block
 import Agent.TUI.TextWidth (splitTerminalGraphemeSuffix)
 import Data.Char (isDigit, isSpace)
@@ -38,60 +33,29 @@ data MarkdownStreamState = MarkdownStreamState
 data MarkdownStreamMode
     = StreamLineStart
     | StreamProse
-    | StreamFence !FenceMarker !BufferedBlock
-    | StreamTableCandidate !Text ![Text]
-    | StreamTable !BufferedBlock
-
--- Completed lines and fragments of the current line are kept newest-first.
--- Only new input is searched for newlines; an unfinished block is flattened
--- once, when it is rendered, rather than copied and rescanned on every delta.
-data BufferedBlock = BufferedBlock
-    { completedLines :: ![Text]
-    , lineFragments :: ![Text]
-    }
+    | StreamFence !FenceMarker
+    | StreamTableCandidate
+    | StreamTable
 
 emptyMarkdownStreamState :: MarkdownStreamState
 emptyMarkdownStreamState =
     MarkdownStreamState "" Nothing StreamLineStart "" Nothing
 
-streamMarkdownText
-    :: MarkdownStreamState
-    -> Text
-    -> (MarkdownStreamState, Text)
-streamMarkdownText = feedMarkdownStream
-
-feedMarkdownStream
-    :: MarkdownStreamState
-    -> Text
-    -> (MarkdownStreamState, Text)
-feedMarkdownStream state =
-    feedMarkdownStreamCurrent state{renderWidth = Nothing}
-
 feedMarkdownStreamAtWidth
-    :: Int
-    -> MarkdownStreamState
-    -> Text
-    -> (MarkdownStreamState, Text)
+    :: Int -> MarkdownStreamState -> Text -> (MarkdownStreamState, Text)
 feedMarkdownStreamAtWidth width state =
-    feedMarkdownStreamCurrent
-        state{renderWidth = Just (max 1 width)}
+    feedMarkdownStreamCurrent state{renderWidth = Just (max 1 width)}
 
 feedMarkdownStreamCurrent
-    :: MarkdownStreamState
-    -> Text
-    -> (MarkdownStreamState, Text)
+    :: MarkdownStreamState -> Text -> (MarkdownStreamState, Text)
 feedMarkdownStreamCurrent state input = case state.streamMode of
     StreamLineStart -> feedLineStart state input
     StreamProse -> feedProse state input
-    StreamFence marker block -> feedFence marker block state input
-    StreamTableCandidate header fragments ->
-        feedTableCandidate header fragments state input
-    StreamTable block -> feedTable block state input
+    StreamFence marker -> feedFence marker state input
+    StreamTableCandidate -> feedTableCandidate state input
+    StreamTable -> feedTable state input
 
-feedLineStart
-    :: MarkdownStreamState
-    -> Text
-    -> (MarkdownStreamState, Text)
+feedLineStart :: MarkdownStreamState -> Text -> (MarkdownStreamState, Text)
 feedLineStart state input =
     let buffered = state.blockPending <> input
     in case takeCompleteLine buffered of
@@ -102,53 +66,32 @@ feedLineStart state input =
                 (state{blockPending = buffered}, "")
             | otherwise ->
                 feedProse
-                    state
-                        { streamMode = StreamProse
-                        , blockPending = ""
-                        }
+                    state{streamMode = StreamProse, blockPending = ""}
                     buffered
 
 classifyCompleteLine
-    :: MarkdownStreamState
-    -> Text
-    -> Text
-    -> (MarkdownStreamState, Text)
+    :: MarkdownStreamState -> Text -> Text -> (MarkdownStreamState, Text)
 classifyCompleteLine state line rest
     | Just (marker, _) <- fenceOpener (dropLineEnding line) =
         feedMarkdownStreamCurrent
-            state
-                { streamMode = StreamFence marker (BufferedBlock [line] [])
-                , blockPending = ""
-                }
+            state{streamMode = StreamFence marker, blockPending = line}
             rest
     | isPossibleTableHeader line =
         feedMarkdownStreamCurrent
-            state
-                { streamMode = StreamTableCandidate line []
-                , blockPending = ""
-                }
+            state{streamMode = StreamTableCandidate, blockPending = line}
             rest
     | lineIsBlock line =
         let (nextState, output) =
                 feedMarkdownStreamCurrent
-                    state
-                        { streamMode = StreamLineStart
-                        , blockPending = ""
-                        }
+                    state{streamMode = StreamLineStart, blockPending = ""}
                     rest
         in (nextState, renderBuffered state line <> output)
     | otherwise =
         feedProse
-            state
-                { streamMode = StreamProse
-                , blockPending = ""
-                }
+            state{streamMode = StreamProse, blockPending = ""}
             (line <> rest)
 
-feedProse
-    :: MarkdownStreamState
-    -> Text
-    -> (MarkdownStreamState, Text)
+feedProse :: MarkdownStreamState -> Text -> (MarkdownStreamState, Text)
 feedProse state input =
     case Text.breakOn "\n" input of
         (linePart, rest)
@@ -158,8 +101,7 @@ feedProse state input =
                         { markdownReady = parsedReady
                         , markdownPending = parsedPending
                         , markdownPrevChar = parsedContext
-                        } =
-                        splitMarkdownFragment state.context source
+                        } = splitMarkdownFragment state.context source
                     (stablePrefix, graphemePending) =
                         splitTerminalGraphemeSuffix parsedReady
                     MarkdownFragmentSplit
@@ -174,13 +116,9 @@ feedProse state input =
                                 , markdownPrevChar = parsedContext
                                 }
                         | otherwise =
-                            splitMarkdownFragment
-                                state.context
-                                stablePrefix
+                            splitMarkdownFragment state.context stablePrefix
                     pending' =
-                        reparsedPending
-                            <> graphemePending
-                            <> parsedPending
+                        reparsedPending <> graphemePending <> parsedPending
                 in ( state
                         { pending = pending'
                         , context = nextContext
@@ -193,8 +131,7 @@ feedProse state input =
                     MarkdownFragmentSplit
                         { markdownReady = ready
                         , markdownPending = pending'
-                        } =
-                        splitMarkdownFragment state.context source
+                        } = splitMarkdownFragment state.context source
                     rendered =
                         renderMarkdownFragment True state.context
                             (ready <> pending')
@@ -210,103 +147,85 @@ feedProse state input =
                 in (nextState, rendered <> following)
 
 feedFence
-    :: FenceMarker
-    -> BufferedBlock
-    -> MarkdownStreamState
-    -> Text
-    -> (MarkdownStreamState, Text)
-feedFence marker block state input =
-    case takeBufferedLine block.lineFragments input of
-        Left fragments ->
-            ( state
-                { streamMode =
-                    StreamFence marker block{lineFragments = fragments}
-                }
-            , ""
-            )
-        Right (line, rest)
-            | isFenceCloser marker (dropLineEnding line) ->
-                let source = Text.concat (reverse (line : block.completedLines))
-                    reset =
-                        state
-                            { streamMode = StreamLineStart
-                            , pending = ""
-                            , context = Nothing
-                            }
-                    (nextState, following) =
-                        feedMarkdownStreamCurrent reset rest
-                in (nextState, renderBuffered state source <> following)
-            | otherwise ->
-                feedFence marker
-                    (BufferedBlock (line : block.completedLines) [])
-                    state rest
+    :: FenceMarker -> MarkdownStreamState -> Text -> (MarkdownStreamState, Text)
+feedFence marker state input =
+    let buffered = state.blockPending <> input
+        (lines_, partial) = completeLines buffered
+        (beforeCloser, closingAndAfter) =
+            break (isFenceCloser marker . dropLineEnding) (drop 1 lines_)
+    in case closingAndAfter of
+        [] -> (state{blockPending = buffered}, "")
+        closing : after ->
+            let block = Text.concat (take 1 lines_ <> beforeCloser <> [closing])
+                rest = Text.concat after <> partial
+                reset =
+                    state
+                        { streamMode = StreamLineStart
+                        , blockPending = ""
+                        , pending = ""
+                        , context = Nothing
+                        }
+                (nextState, following) =
+                    feedMarkdownStreamCurrent reset rest
+            in (nextState, renderBuffered state block <> following)
 
 feedTableCandidate
-    :: Text
-    -> [Text]
-    -> MarkdownStreamState
-    -> Text
-    -> (MarkdownStreamState, Text)
-feedTableCandidate header fragments state input =
-    case takeBufferedLine fragments input of
-        Right (separator, rest)
+    :: MarkdownStreamState -> Text -> (MarkdownStreamState, Text)
+feedTableCandidate state input =
+    let buffered = state.blockPending <> input
+        (lines_, partial) = completeLines buffered
+    in case lines_ of
+        header : separator : after
             | isTableStart header separator ->
-                feedTable (BufferedBlock [separator, header] []) state rest
+                feedMarkdownStreamCurrent
+                    state
+                        { streamMode = StreamTable
+                        , blockPending = header <> separator
+                        }
+                    (Text.concat after <> partial)
             | otherwise ->
                 let reset =
-                        state
-                            { streamMode = StreamLineStart
-                            }
+                        state{streamMode = StreamLineStart, blockPending = ""}
                     (nextState, following) =
-                        feedMarkdownStreamCurrent reset (separator <> rest)
+                        feedMarkdownStreamCurrent reset
+                            (separator <> Text.concat after <> partial)
                 in (nextState, renderBuffered state header <> following)
-        Left remaining ->
-            (state{streamMode = StreamTableCandidate header remaining}, "")
+        _ -> (state{blockPending = buffered}, "")
 
-feedTable
-    :: BufferedBlock
-    -> MarkdownStreamState
-    -> Text
-    -> (MarkdownStreamState, Text)
-feedTable block state input =
-    case takeBufferedLine block.lineFragments input of
-        Left fragments ->
-            (state{streamMode = StreamTable block{lineFragments = fragments}}, "")
-        Right (line, rest)
-            | isPossibleTableHeader line ->
-                feedTable (BufferedBlock (line : block.completedLines) [])
-                    state rest
-            | otherwise ->
-                let table = Text.concat (reverse block.completedLines)
-                    reset = state{streamMode = StreamLineStart}
-                    (nextState, following) =
-                        feedMarkdownStreamCurrent reset (line <> rest)
-                in (nextState, renderBuffered state table <> following)
-
-flushMarkdownStream :: MarkdownStreamState -> Text
-flushMarkdownStream = flushMarkdownStreamCurrent
+feedTable :: MarkdownStreamState -> Text -> (MarkdownStreamState, Text)
+feedTable state input =
+    let buffered = state.blockPending <> input
+        (lines_, partial) = completeLines buffered
+        (tableLines, after) =
+            case lines_ of
+                header : separator : rows ->
+                    let (body, following) =
+                            span isPossibleTableHeader rows
+                    in (header : separator : body, following)
+                _ -> (lines_, [])
+    in case after of
+        [] -> (state{blockPending = buffered}, "")
+        line : rest ->
+            let table = Text.concat tableLines
+                reset =
+                    state{streamMode = StreamLineStart, blockPending = ""}
+                (nextState, following) =
+                    feedMarkdownStreamCurrent reset
+                        (line <> Text.concat rest <> partial)
+            in (nextState, renderBuffered state table <> following)
 
 flushMarkdownStreamAtWidth :: Int -> MarkdownStreamState -> Text
 flushMarkdownStreamAtWidth width state =
-    flushMarkdownStreamCurrent
-        state{renderWidth = Just (max 1 width)}
+    flushMarkdownStreamCurrent state{renderWidth = Just (max 1 width)}
 
 flushMarkdownStreamCurrent :: MarkdownStreamState -> Text
 flushMarkdownStreamCurrent state = case state.streamMode of
     StreamProse ->
         renderMarkdownFragment True state.context state.pending
-    StreamLineStart ->
-        renderBuffered state state.blockPending
-    StreamFence _ block ->
-        renderBuffered state (bufferedBlockText block)
-    StreamTableCandidate header fragments ->
-        renderBuffered state (Text.concat (header : reverse fragments))
-    StreamTable block ->
-        renderBuffered state (bufferedBlockText block)
-
-bufferedBlockText :: BufferedBlock -> Text
-bufferedBlockText block =
-    Text.concat (reverse block.completedLines <> reverse block.lineFragments)
+    StreamLineStart -> renderBuffered state state.blockPending
+    StreamFence _ -> renderBuffered state state.blockPending
+    StreamTableCandidate -> renderBuffered state state.blockPending
+    StreamTable -> renderBuffered state state.blockPending
 
 renderBuffered :: MarkdownStreamState -> Text -> Text
 renderBuffered state =
@@ -320,19 +239,13 @@ takeCompleteLine text =
         (_, rest) | Text.null rest -> Nothing
         (line, rest) -> Just (line <> "\n", Text.drop 1 rest)
 
--- The Left result retains a partial line without joining or rescanning its
--- earlier fragments. A Right result includes the newline, as takeCompleteLine
--- does, and leaves the remainder of this delta untouched.
-takeBufferedLine :: [Text] -> Text -> Either [Text] (Text, Text)
-takeBufferedLine fragments input =
-    case Text.breakOn "\n" input of
-        (_, rest) | Text.null rest ->
-            Left (if Text.null input then fragments else input : fragments)
-        (line, rest) ->
-            Right
-                ( Text.concat (reverse ("\n" : line : fragments))
-                , Text.drop 1 rest
-                )
+completeLines :: Text -> ([Text], Text)
+completeLines = go []
+  where
+    go reversed remaining =
+        case takeCompleteLine remaining of
+            Nothing -> (reverse reversed, remaining)
+            Just (line, rest) -> go (line : reversed) rest
 
 dropLineEnding :: Text -> Text
 dropLineEnding = Text.dropWhileEnd (== '\n')
@@ -380,10 +293,6 @@ lineNeedsLookahead line =
             isPossibleTableHeader line
                 || plausibleTableHeaderPrefix stripped
 
--- Before the first pipe, a table header is indistinguishable from prose.
--- Retain a single word and whitespace-terminated token prefixes so the next
--- chunk can supply a delimiter without imposing casing or script assumptions.
--- Once a second word is complete, ordinary prose can stream immediately.
 plausibleTableHeaderPrefix :: Text -> Bool
 plausibleTableHeaderPrefix stripped =
     length (Text.words stripped) <= 1

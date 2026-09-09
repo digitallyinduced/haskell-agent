@@ -42,6 +42,7 @@ import Control.Concurrent.MVar (newEmptyMVar, newMVar, putMVar, takeMVar)
 import Control.Exception (finally)
 import Control.Monad (forM_)
 import Data.IORef (newIORef, readIORef)
+import Data.List (mapAccumL)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -186,6 +187,49 @@ spec = do
             output `shouldSatisfy` Text.isInfixOf "Control Center"
             output `shouldSatisfy` Text.isInfixOf "─"
             output `shouldSatisfy` (not . Text.isInfixOf "|")
+
+        it "renders buffered blocks identically across every two-chunk split" do
+            let sources =
+                    [ "```haskell\nmain = pure ()\n```\n# After\n"
+                    , "````\n```\n~~~\n```` not a closer\n\nλ界\n`````\n# After\n"
+                    , "  ~~~text\r\none\r\n\r\ntwo\r\n  ~~~~\r\n# After\n"
+                    , "| name | value |\n| --- | ---: |\n| λ | **bold** |\n# After\n"
+                    , "Name | Value\n--- | ---\na | `x`\nb | y\n# After\n"
+                    , "| not | a table |\n# Heading\n```text\nbody\n```\n"
+                    ]
+                renderChunks feed chunks =
+                    Text.concat (snd (mapAccumL (flip feed) emptyRenderState chunks))
+            forM_ [streamMarkdown, streamMarkdownAtWidth 24] \feed ->
+                forM_ sources \source -> do
+                    let expected = renderChunks feed [source]
+                    forM_ [0 .. Text.length source] \offset -> do
+                        let (before, after) = Text.splitAt offset source
+                        renderChunks feed [before, "", after, ""]
+                            `shouldBe` expected
+                    renderChunks feed (map Text.singleton (Text.unpack source))
+                        `shouldBe` expected
+
+        it "holds a split fence closer until its complete line arrives" do
+            let chunks = ["```text\n", "body\n", "``", "", "`", " "]
+                (state, outputs) =
+                    mapAccumL (flip streamMarkdown) emptyRenderState chunks
+                (_, closed) = streamMarkdown "\n# After\n" state
+                (_, expected) =
+                    streamMarkdown (Text.concat chunks <> "\n# After\n")
+                        emptyRenderState
+            outputs `shouldSatisfy` all Text.null
+            closed `shouldBe` expected
+
+        it "retains many fragments of a long code line in order" do
+            let source =
+                    "```text\n"
+                        <> Text.replicate 512 "xλ界 "
+                        <> "\n```\n"
+                (_, outputs) =
+                    mapAccumL (flip streamMarkdown) emptyRenderState
+                        (Text.chunksOf 7 source)
+                (_, expected) = streamMarkdown source emptyRenderState
+            Text.concat outputs `shouldBe` expected
 
         it "constrains streamed tables to the terminal width" do
             let input =
@@ -985,6 +1029,23 @@ spec = do
                 body `shouldSatisfy` Text.isInfixOf "bold"
                 body `shouldSatisfy` (not . Text.isInfixOf "```")
                 body `shouldSatisfy` (not . Text.isInfixOf "**bold**")
+
+        it "flushes chunked incomplete blocks without dropping or reordering text" do
+            let sources =
+                    [ "```text\nfirst\n\nlast λ界"
+                    , "```text\nbody\n``"
+                    , "| name | value |\n| --- | --- |\n| first | one |\n| last | λ界"
+                    , "| name | value |\n| --"
+                    ]
+            forM_ sources \source ->
+                withRenderConfig False True \config handle path -> do
+                    mapM_ (renderEvent config . TextDelta)
+                        ("" : concatMap (\chunk -> [chunk, ""]) (Text.chunksOf 2 source))
+                    renderEvent config (TurnFinished (emptyTurnOutput "r1" [] Nothing))
+                    hClose handle
+                    actual <- stripTerminalControls <$> Text.readFile path
+                    actual `shouldBe`
+                        stripTerminalControls (renderAssistantText True source)
 
         it "flushes pre-tool assistant prose before tool lines" do
             withRenderConfig False True \config handle path -> do
