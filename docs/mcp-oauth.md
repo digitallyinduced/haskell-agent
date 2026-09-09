@@ -65,6 +65,20 @@ The token record is written atomically with mode `0600` to
 configured remote servers automatically. The wire client refreshes expired
 tokens with the stored `resource` and `client_secret`.
 
+After authorization is saved, login also registers the endpoint in
+`~/.haskell-agent/config.json` if it is missing, enabled by default. The
+generated server name is derived from the URL host, with a numeric suffix
+when necessary to avoid overwriting another server. Existing server names,
+settings, and explicit disabled states are preserved. If the server is
+disabled, login prints the command needed to enable it.
+
+Equivalent URL spellings (such as a trailing slash or host capitalization)
+reuse the configured server. Its URL is updated to the spelling used for login
+so it uses the saved credential. Query parameters remain significant.
+
+Start a new session to connect the
+registered server. A failed authorization does not register a server.
+
 ## Configuration
 
 Remote servers accept an optional `oauth` object. Every key is optional:

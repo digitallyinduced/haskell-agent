@@ -13,10 +13,12 @@ module Agent.CLI.McpOAuth
     , loginMcpWith
     , logoutMcp
     , lookupServerOAuthConfig
+    , registerAuthorizedMcpServer
     ) where
 
-import Agent.CLI.Config (HarnessConfig(..), McpOAuthConfig(..), McpServerConfig(..), loadHarnessConfig)
+import Agent.CLI.Config (HarnessConfig(..), McpOAuthConfig(..), McpServerConfig(..), loadHarnessConfig, modifyHarnessConfig)
 import Agent.CLI.McpOAuthStore (loadMcpOAuthRecord, mcpOAuthStorePath, saveMcpOAuthRecord)
+import Agent.MCP (McpProtocolPreference(..))
 import qualified Agent.MCP.OAuth as OAuth
 import Control.Concurrent.MVar
     ( newEmptyMVar
@@ -24,9 +26,11 @@ import Control.Concurrent.MVar
     , readMVar
     , tryPutMVar
     )
+import Network.URI (parseURI, uriAuthority, uriRegName, uriScheme, uriUserInfo, uriQuery)
 import Control.Exception.Safe (bracket, bracketOnError, finally, tryAny)
 import Control.Monad (forM_, void, when)
 import Crypto.Hash (Digest, SHA256, hash)
+import Data.Char (isAsciiLower, isDigit)
 import qualified Data.ByteArray as BA
 import qualified Data.ByteString.Base64.URL as Base64
 import qualified Data.Map.Strict as Map
@@ -56,6 +60,7 @@ import qualified Network.Wai.Handler.Warp as Warp
 import qualified System.Directory.OsPath as Dir
 import qualified System.Entropy
 import System.Exit (ExitCode(..))
+import System.OsPath (OsPath)
 import System.Process (rawSystem)
 import System.Timeout (timeout)
 
@@ -236,7 +241,78 @@ loginMcpWith options serverUrl = do
                     when (Text.null tokenFile.tokenRefreshToken) $
                         putStrLn "Warning: MCP provider returned no refresh token; reauthorization may be required."
                     saveMcpOAuthRecord serverUrl tokenFile extra
-                        >>= either failText (const (putStrLn "MCP authorization saved."))
+                        >>= either failText pure
+                    putStrLn "MCP authorization saved."
+                    registerAuthorizedMcpServer home serverUrl >>= \case
+                        Left err -> failText
+                            ("MCP authorization was saved, but server registration failed: " <> err)
+                        Right (name, enabled) -> do
+                            putStrLn ("MCP server configured: " <> Text.unpack name)
+                            if enabled
+                                then putStrLn "Start a new session to connect this server."
+                                else putStrLn ("This server remains disabled. Enable it with: agent-cli mcp enable "
+                                    <> Text.unpack (shellQuote name))
+
+-- | Register only after the token record has been persisted successfully.
+-- Re-read under the configuration lock so browser-time edits are preserved.
+registerAuthorizedMcpServer :: OsPath -> Text -> IO (Either Text (Text, Bool))
+registerAuthorizedMcpServer home serverUrl =
+    modifyHarnessConfig home (\_ -> authorizedMcpServerRegistration serverUrl)
+        >>= pure . fmap (\(_, _, result) -> result)
+
+-- | Preserve the configured server when the URL spelling changes. Its URL
+-- must be updated to the exact key under which login saved the credential.
+authorizedMcpServerRegistration
+    :: Text -> HarnessConfig -> Either Text (HarnessConfig, (Text, Bool))
+authorizedMcpServerRegistration serverUrl config = do
+    uri <- maybe (Left "MCP server URL is invalid") Right (parseURI (Text.unpack serverUrl))
+    authority <- maybe (Left "MCP server URL requires a host") Right (uriAuthority uri)
+    if uriScheme uri `notElem` ["https:", "http:"] || null (uriRegName authority)
+        || not (null (uriUserInfo authority))
+        then Left "MCP server URL must be an HTTP URL without user information"
+        else case [(name, server) | (name, server) <- Map.toAscList config.configMcpServers,
+                    maybe False (sameMcpEndpoint serverUrl) server.mcpUrl] of
+            (name, server) : _ -> Right
+                ( config { configMcpServers = Map.insert name
+                    (server { mcpUrl = Just serverUrl }) config.configMcpServers }
+                , (name, server.mcpEnabled)
+                )
+            [] ->
+                let hostName = Text.toLower (Text.pack (uriRegName authority))
+                    baseName = Text.map sanitize hostName
+                    name = availableName baseName 1
+                    server = McpServerConfig
+                        { mcpEnabled = True
+                        , mcpUrl = Just serverUrl
+                        , mcpCommand = ""
+                        , mcpArgs = []
+                        , mcpCwd = Nothing
+                        , mcpEnv = Map.empty
+                        , mcpStartupTimeoutSeconds = 30
+                        , mcpRequestTimeoutSeconds = 60
+                        , mcpOAuth = Nothing
+                        , mcpProtocol = McpProtocolAuto
+                        , mcpRoots = False
+                        , mcpSampling = False
+                        , mcpLogLevel = Nothing
+                        }
+                in Right
+                    ( config { configMcpServers = Map.insert name server config.configMcpServers }
+                    , (name, True)
+                    )
+  where
+    sanitize character
+        | isAsciiLower character || isDigit character || character == '-' = character
+        | otherwise = '-'
+    availableName baseName (suffix :: Int) =
+        let candidate = if suffix == 1 then baseName else baseName <> "-" <> Text.pack (show suffix)
+        in if Map.member candidate config.configMcpServers
+            then availableName baseName (suffix + 1)
+            else candidate
+
+-- Server names can be user-selected, so quote the suggested shell command.
+shellQuote :: Text -> Text
+shellQuote value = "'" <> Text.replace "'" "'\\''" value <> "'"
 
 logoutMcp :: Text -> IO ()
 logoutMcp server = do
@@ -253,8 +329,18 @@ lookupServerOAuthConfig serverUrl harness =
         server : _ -> server.mcpOAuth
         [] -> Nothing
   where
-    canonical = OAuth.canonicalResourceUri serverUrl
-    matches server = maybe False ((== canonical) . OAuth.canonicalResourceUri) server.mcpUrl
+    matches server = maybe False (sameMcpEndpoint serverUrl) server.mcpUrl
+
+-- | Use the resource URI's spelling normalization, but retain the complete
+-- query: different queries can identify different accounts or MCP endpoints.
+-- Invalid URLs only match exactly, never through the resource URI fallback.
+sameMcpEndpoint :: Text -> Text -> Bool
+sameMcpEndpoint left right =
+    left == right || case (parseURI (Text.unpack left), parseURI (Text.unpack right)) of
+        (Just leftUri, Just rightUri) ->
+            OAuth.canonicalResourceUri left == OAuth.canonicalResourceUri right
+                && uriQuery leftUri == uriQuery rightUri
+        _ -> False
 
 data Callback = Callback
     { callbackCode :: Maybe Text
