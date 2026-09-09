@@ -273,6 +273,24 @@ remote is selected from the current branch's configured remote, then
 fetch failure aborts worktree creation rather than falling back to a stale
 commit.
 
+Default-branch discovery first uses Git's local
+`refs/remotes/<remote>/HEAD` symbolic reference, shared across linked worktrees.
+The server is queried only when that reference is missing or invalid, or when
+fetching the cached branch reports that it no longer exists. Successful
+discovery and fetching refresh the local reference; unrelated fetch failures
+are not retried. If the server changes its default but retains the old branch,
+fetch the new default branch into its remote-tracking reference before
+refreshing the cache. For a new default named `main` on `origin`:
+
+```sh
+git fetch origin refs/heads/main:refs/remotes/origin/main &&
+git remote set-head origin --auto
+```
+
+Substitute the selected remote and its new default branch name.
+`set-head --auto` requires the new remote-tracking reference to exist; the
+agent's isolated fetches do not create it.
+
 ### Organization gateway model routing
 
 Connected organization gateways must include `provider` and `protocol` for every
@@ -293,34 +311,40 @@ child session.
 
 ### Worktree recovery and cleanup
 
-New managed worktrees are enrolled in snapshot-backed cleanup. After seven
-days of inactivity, an inactive, unprotected checkout may be collected even
-when it contains uncommitted work. Before removal, recovery refs preserve its
-commits, staged changes, working-tree changes, and non-ignored untracked files.
-Conversation history is not deleted; resuming a collected session restores
-its checkout. Recovery snapshots do not automatically expire.
+Managed worktrees are collected only when **clean, incorporated into another
+branch, and inactive for at least 24 hours** (configurable to a longer interval).
+Dirty checkouts and unmerged work never expire merely because they are old.
+Inactivity means saved-session idle time, not commit age or time since merge.
+Ownership, active-session, protection and safety checks still apply.
 
-A checkout whose exact `HEAD` is already an ancestor of the repository's
-default branch is eligible after **24 hours of inactivity**, rather than the
-normal configured interval. This means idle time, not 24 hours since merge;
-commit author/committer timestamps are not activity or merge clocks. Additional
-commits not incorporated into the default branch disqualify this fast path.
-Dirty checkouts still require the same verified recovery snapshot, and all
-ownership, active-session, protection and safety checks still apply.
+Local proof uses exact commit ancestry into another surviving local or
+remote-tracking branch, excluding the checkout's own branch and upstream.
+An equal-tip copy alone is insufficient, except for the resolved default branch
+(`origin/HEAD`, or local `main`/`master` when it is unavailable).
+For squash/rebase merges, authenticated GitHub API evidence must identify a
+merged PR with the checkout's exact HEAD. Its merge commit must exist locally
+and be reachable from the target branch, with exact final content and modes
+preserved for every branch-changed path. Missing or ambiguous evidence retains
+the checkout. GC does not fetch; cached refs may miss recent merges.
 
-Maintenance resolves the selected remote's existing local symbolic
-`refs/remotes/<remote>/HEAD`, using the branch's configured remote, then
-`upstream`, `origin`, or a sole remaining remote. It does not fetch, guess
-`master`/`main`, or use the currently checked-out branch as the default.
-Missing default-branch evidence keeps the normal interval. Locally cached refs
-can be stale: this proves incorporation into the available ref, not the current
-server state, and may miss recent merges. Squash/rebase merges without exact
-ancestry proof also keep the normal interval; matching commit messages or trees
-are not merge evidence.
+Clean recovery reuses existing Git trees rather than launching a hashing
+process for every file. Recovery refs also preserve checkout reflog commits,
+`REBASE_HEAD` commits, and `AUTO_MERGE` trees. Active merge/rebase operations
+still prevent collection.
+Conversation history and historical recovery snapshots are retained, and
+resuming a collected session restores its checkout.
 
-**Ignored untracked files are not backed up.** This includes ignored `.env`
-files, build output, and local databases. Move important ignored data outside
-the checkout or protect the worktree before relying on it.
+**Recognized, explicitly ignored build/cache directories are disposable and
+are not restored** (for example `node_modules`, `dist-newstyle`, and `.venv`).
+An ignored `result` symlink directly into the Nix store is also disposable.
+Known ignored agent settings (`.haskell-agent/settings.json`) and generated
+OpenAI provider files (`packages/agent-openai/data/models.json` and `prompt.md`)
+are permitted only when byte-identical regular copies remain in the primary
+checkout; these duplicate copies are not restored. Additional files under
+`.haskell-agent` or differing contents prevent collection.
+Other ignored data, including `.env` files and local databases, prevents
+collection. Protect a checkout if its build/cache directories contain
+irreplaceable data.
 
 Existing agent worktrees are automatically adopted only when their managed-root
 location, reciprocal linked-Git metadata, and saved-session provenance verify
@@ -346,7 +370,10 @@ overhead and filesystem/APFS sharing, not guaranteed net reclaimed disk space.
 Adoption reads the existing session database
 without starting it, migrating it, or importing old sessions. Manual `enroll`
 remains available for a checkout whose provenance cannot be established and
-starts its inactivity clock now. `gc` runs a bounded collection pass.
+starts its inactivity clock now. Manual `gc` examines every candidate and prints
+progress, with a per-checkout deadline. Background maintenance retains its
+short pass budget and rotates its starting point. Not-examined worktrees and
+failed operations are reported separately from retained worktrees.
 Active leases, explicit protection, unsupported Git state, incomplete snapshots,
 or detected concurrent edits prevent deletion. Restoration refuses to overwrite
 an existing directory and never resets a branch that moved after collection.

@@ -290,6 +290,9 @@ library
                     , Agent.CLI.Worktree.ReadOnlyLock
                     , Agent.CLI.Worktree.Provenance
                     , Agent.CLI.Worktree.Snapshot
+                    , Agent.CLI.Worktree.Clean
+                    , Agent.CLI.Worktree.Ignored
+                    , Agent.CLI.Worktree.Incorporation
     reexported-modules:
                       agent-external-session:Agent.CLI.ExternalSession as Agent.CLI.ExternalSession
                     , agent-cli-runtime:Agent.CLI.Auth as Agent.CLI.Auth
@@ -408,6 +411,22 @@ executable eval-ghci-vs-bash
                     , safe-exceptions
                     , text >= 2.0 && < 2.2
                     , time
+                    , unix
+
+benchmark worktree-collection-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          WorktreeCollection.hs
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-cli
+                    , base
+                    , bytestring
+                    , directory
+                    , filepath
+                    , safe-exceptions
+                    , text
+                    , process
                     , unix
 
 benchmark subagent-retention-bench
@@ -617,6 +636,9 @@ test-suite agent-cli-test
                     , Agent.CLI.UsageSpec
                     , Agent.CLI.WebLspSpec
                     , Agent.CLI.WorktreeSpec
+                    , Agent.CLI.WorktreeCleanSpec
+                    , Agent.CLI.WorktreeIgnoredSpec
+                    , Agent.CLI.WorktreeIncorporationSpec
                     , Agent.CLI.WorktreeAdminSpec
                     , Agent.CLI.Worktree.SnapshotSpec
                     , Agent.CLI.Worktree.ProvenanceSpec

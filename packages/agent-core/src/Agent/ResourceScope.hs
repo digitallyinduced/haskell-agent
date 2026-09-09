@@ -1,3 +1,5 @@
+{-# LANGUAGE NumericUnderscores #-}
+
 -- | Dynamically owned resources with explicit early release.
 --
 -- The public API stays in 'IO' so resource ownership does not force
@@ -15,6 +17,8 @@ module Agent.ResourceScope
     , allocateFourResourcesConcurrently
     , registerResource
     , releaseResource
+    , logSlowCleanup
+    , logSlowCleanupWith
     ) where
 
 import Control.Concurrent.Async (concurrently)
@@ -24,12 +28,16 @@ import Control.Concurrent.MVar
     , newMVar
     , withMVar
     )
-import Control.Exception.Safe (bracket, throwIO)
 -- safe-exceptions makes bracket release uninterruptible.  State cleanup must
 -- retain interruptible masking so blocking finalizers can be cancelled.
-import qualified Control.Exception as Exception (bracket)
+import qualified Control.Exception as Exception
+import Control.Exception.Safe (bracket, catchAny, throwIO)
+import Control.Monad (when)
 import Data.Acquire (Acquire)
 import qualified Data.Acquire as Acquire
+import Data.Word (Word64)
+import GHC.Clock (getMonotonicTimeNSec)
+import System.IO (hPutStrLn, stderr)
 import Control.Monad.Trans.Resource
     ( InternalState
     , ReleaseKey
@@ -48,6 +56,28 @@ import Control.Monad.Trans.Resource.Internal (stateCleanupChecked)
 newtype ResourceScope = ResourceScope (MVar (Maybe InternalState))
 
 newtype ResourceKey = ResourceKey ReleaseKey
+
+-- | Report cleanup taking at least 100 ms to stderr, without requiring debug
+-- mode. Labels should describe the resource, not include commands or secrets.
+-- This observes completion (including exceptions); it does not impose a
+-- timeout or change the cleanup's thread, masking state, or ownership.
+logSlowCleanup :: String -> IO a -> IO a
+logSlowCleanup = logSlowCleanupWith getMonotonicTimeNSec (hPutStrLn stderr)
+
+-- | Injectable monotonic nanosecond clock and diagnostic sink for testing.
+logSlowCleanupWith :: IO Word64 -> (String -> IO ()) -> String -> IO a -> IO a
+logSlowCleanupWith clock report label action = do
+    started <- clock
+    -- Base finally avoids making a diagnostic write uninterruptible when
+    -- the caller was interruptible. The action retains its incoming state.
+    action `Exception.finally`
+        -- Only the diagnostic is best-effort; never swallow an action failure.
+        ((do
+            finished <- clock
+            let elapsed = (finished - started) `div` 1_000_000
+            when (elapsed >= 100) $
+                report ("[slow cleanup] " <> label <> ": " <> show elapsed <> " ms")
+        ) `catchAny` \_ -> pure ())
 
 -- | Run an action inside a lexical resource scope.
 --

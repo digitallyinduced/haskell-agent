@@ -9,6 +9,7 @@ module Agent.CLI.Worktree
     , cleanupStaleWorktrees
     , gcWorktrees
     , gcWorktreesWithActivity
+    , gcWorktreesManuallyWithActivity
     , worktreeInactive
     , enrollWorktree
     , protectWorktree
@@ -33,6 +34,8 @@ import Agent.OsPath (unsafeToFilePath)
 import Agent.CLI.Worktree.Registry
 import Agent.CLI.Worktree.ReadOnlyLock (withExistingReadOnlyLock)
 import qualified Agent.CLI.Worktree.Snapshot as Snapshot
+import qualified Agent.CLI.Worktree.Clean as Clean
+import Agent.CLI.Worktree.Incorporation (inspectIncorporation)
 import Control.Applicative ((<|>))
 import Control.Exception.Safe
     ( SomeException
@@ -44,7 +47,7 @@ import Control.Exception.Safe
     , catchIO
     )
 import Control.Monad (foldM, void, when, unless)
-import Data.IORef (newIORef, readIORef, modifyIORef')
+import Data.IORef (newIORef, readIORef, modifyIORef', writeIORef)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
     ( ExceptT(..)
@@ -54,7 +57,7 @@ import Control.Monad.Trans.Except
     )
 import qualified Data.ByteString as ByteString
 import Data.Char (isHexDigit)
-import Data.List (isPrefixOf)
+import Data.List (isPrefixOf, sort)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (listToMaybe)
@@ -66,6 +69,7 @@ import Data.Time.Clock (UTCTime(..), getCurrentTime, nominalDiffTimeToSeconds, d
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
 import Numeric (showHex)
+import GHC.Clock (getMonotonicTimeNSec)
 import System.IO.Error (isDoesNotExistError)
 import System.Directory.OsPath
     ( createDirectoryIfMissing
@@ -81,6 +85,7 @@ import qualified System.Directory as Directory
 import qualified System.FilePath as FilePath
 import System.Timeout (timeout)
 import System.Exit (ExitCode(..))
+import System.Environment (getEnvironment)
 import qualified System.FileLock as FileLock
 import System.OsPath
     ( OsPath
@@ -118,6 +123,8 @@ data WorktreeCleanupReport = WorktreeCleanupReport
     , cleanupFailures :: ![(OsPath, Text)]
     , cleanupEligible :: ![(OsPath, Integer)]
     , cleanupRetained :: ![(OsPath, Text)]
+    , cleanupNotExamined :: ![(OsPath, Text)]
+    , cleanupEvidence :: ![(OsPath, Text)]
     }
     deriving (Eq, Show)
 
@@ -127,10 +134,12 @@ instance Semigroup WorktreeCleanupReport where
         , cleanupFailures = left.cleanupFailures <> right.cleanupFailures
         , cleanupEligible = left.cleanupEligible <> right.cleanupEligible
         , cleanupRetained = left.cleanupRetained <> right.cleanupRetained
+        , cleanupNotExamined = left.cleanupNotExamined <> right.cleanupNotExamined
+        , cleanupEvidence = left.cleanupEvidence <> right.cleanupEvidence
         }
 
 instance Monoid WorktreeCleanupReport where
-    mempty = WorktreeCleanupReport [] [] [] []
+    mempty = WorktreeCleanupReport [] [] [] [] [] []
 
 data WorktreeLease = WorktreeLease FileLock.FileLock (Maybe (OsPath, OsPath))
 
@@ -423,9 +432,10 @@ catchingWorktree action = tryAny action >>= \case
     Left err -> pure (Left (exceptionText err))
     Right result -> pure result
 
--- | Snapshot-backed GC. Actual passes are bounded to eight eligible checkouts
--- and sixty seconds; each snapshot/removal has a thirty-second deadline.
--- Dry runs do not create snapshots, registry entries, or recovery refs.
+-- | Merged-only GC. Background passes are bounded to eight eligible checkouts
+-- and sixty seconds; each assessment/removal has a thirty-second deadline.
+-- Dirty or unproven work is retained regardless of age. Dry runs do not create
+-- registry entries or recovery refs.
 -- This compatibility entry point has no legacy provenance; production callers
 -- supply the saved-session reader through 'gcWorktreesWithActivity'.
 gcWorktrees :: OsPath -> Int -> Bool -> [OsPath] -> IO WorktreeCleanupReport
@@ -437,17 +447,41 @@ gcWorktrees root = gcWorktreesWithActivity (pure (Right Map.empty)) root
 gcWorktreesWithActivity
     :: IO (Either Text (Map OsPath (Either Text UTCTime)))
     -> OsPath -> Int -> Bool -> [OsPath] -> IO WorktreeCleanupReport
-gcWorktreesWithActivity loadActivity root days dryRun protected = do
+gcWorktreesWithActivity loadActivity root days dryRun protected =
+    collectWorktrees False (const (pure ())) loadActivity root days dryRun protected
+
+-- | Explicit administration visits every discovered candidate, independently
+-- of the background pass budget. Each candidate still has a deadline.
+gcWorktreesManuallyWithActivity
+    :: IO (Either Text (Map OsPath (Either Text UTCTime)))
+    -> OsPath -> Int -> Bool -> [OsPath] -> (OsPath -> IO ())
+    -> IO WorktreeCleanupReport
+gcWorktreesManuallyWithActivity loadActivity root days dryRun protected progress =
+    collectWorktrees True progress loadActivity root days dryRun protected
+
+collectWorktrees
+    :: Bool -> (OsPath -> IO ())
+    -> IO (Either Text (Map OsPath (Either Text UTCTime)))
+    -> OsPath -> Int -> Bool -> [OsPath] -> IO WorktreeCleanupReport
+collectWorktrees manual progress loadActivity root days dryRun protected = do
     exists <- doesDirectoryExist root
     if not exists then pure mempty else do
         result <- tryAny do
             linked <- pathIsSymbolicLink root
             when linked (ioError (userError "symlinked managed worktree root"))
-            started <- getCurrentTime
+            started <- getMonotonicTimeNSec
             discovered <- timeout (30 * 1000000) (discoverManagedPaths root)
-            candidates <- maybe
+            paths <- maybe
                 (ioError (userError "worktree discovery deadline exceeded; no checkouts collected"))
                 pure discovered
+            -- Do not repeatedly spend the background budget on the same first
+            -- few slow candidates. Manual passes use stable display ordering.
+            candidates <- if manual || dryRun || null paths then pure (sort paths) else do
+                entropy <- getEntropy 8
+                let offset = fromIntegral
+                        (ByteString.foldl' (\value byte -> value * 256 + toInteger byte) 0 entropy
+                            `mod` toInteger (length paths))
+                pure (drop offset paths <> take offset paths)
             activity <- timeout (30 * 1000000) loadActivity
             attempts <- newIORef (0 :: Int)
             foldM (visit started attempts (maybe (Left "session activity discovery deadline exceeded") id activity))
@@ -457,10 +491,15 @@ gcWorktreesWithActivity loadActivity root days dryRun protected = do
     retained path reason = mempty { cleanupRetained = [(path, reason)] }
     visit started attempts activity report path = do
         now <- getCurrentTime
+        clock <- getMonotonicTimeNSec
         attempted <- readIORef attempts
-        let exhausted = not dryRun &&
-                (attempted >= 8 || diffUTCTime now started >= 60)
-        if exhausted then pure (report <> retained path "pass budget exhausted") else do
+        let exhausted = not manual && not dryRun &&
+                (attempted >= 8 || clock - started >= 60 * 1000000000)
+        if exhausted then pure (report <> mempty
+            { cleanupNotExamined = [(path, "background pass budget exhausted")] }) else do
+            progress path
+            assessed <- newIORef mempty
+            removing <- newIORef False
             result <- timeout (30 * 1000000) $ catchingWorktree $
                 checkoutLock path $ runExceptT do
                     when (any (isUnderWorktreeRoot path . normalise) protected)
@@ -474,62 +513,69 @@ gcWorktreesWithActivity loadActivity root days dryRun protected = do
                             throwE ("state: " <> record.recordState)
                         _ -> pure ()
                     record <- resolveRecord path activity existing
-                    isRecent <- lift (recent path now record)
+                    let isRecent = recent now record
                     if isRecent then pure (retained path "recent activity") else do
-                        lift $ modifyIORef' attempts (+ 1)
                         common <- inspectManagedIdentity root path
                         unless (unsafeToFilePath common == record.recordCommonDir)
                             (throwE "enrolled repository identity changed")
                         ExceptT $ repositoryLock common $ runExceptT do
-                            ExceptT $ Snapshot.checkSnapshotSupported path
-                            if dryRun then do
-                                bytes <- lift (estimateCheckoutBytes path)
-                                pure mempty { cleanupEligible = [(path, bytes)] }
-                            else do
+                            clean <- ExceptT $ Clean.inspectCleanCheckout path
+                            evidence <- ExceptT $ inspectIncorporation path
+                            bytes <- lift (estimateCheckoutBytes path)
+                            lift $ writeIORef assessed mempty
+                                { cleanupEligible = [(path, bytes)]
+                                , cleanupEvidence = [(path, evidence)]
+                                }
+                            if dryRun then pure mempty else do
+                                lift $ modifyIORef' attempts (+ 1)
                                 latest <- lift loadActivity
                                 refreshed <- resolveRecord path latest existing
                                 recheckedAt <- lift getCurrentTime
-                                recheckedRecent <- lift (recent path recheckedAt refreshed)
-                                when recheckedRecent
+                                when (recent recheckedAt refreshed)
                                     (throwE "recent activity")
                                 unless (refreshed.recordCommonDir == record.recordCommonDir)
                                     (throwE "repository identity changed during adoption")
-                                snapshot <- ExceptT $ Snapshot.createSnapshot path
+                                ExceptT $ Clean.verifyCleanCheckout path clean
+                                snapshot <- ExceptT $ Clean.preserveCleanCheckout path clean
                                 finalActivity <- lift loadActivity
                                 finalRecord <- resolveRecord path finalActivity existing
                                 finalAt <- lift getCurrentTime
-                                finalRecent <- lift (recent path finalAt finalRecord)
-                                when finalRecent
+                                when (recent finalAt finalRecord)
                                     (throwE "recent activity")
                                 finalCommon <- inspectManagedIdentity root path
                                 unless (finalCommon == common && finalRecord.recordCommonDir == record.recordCommonDir)
-                                    (throwE "repository identity changed during snapshot")
+                                    (throwE "repository identity changed during preservation")
+                                void $ ExceptT $ inspectIncorporation path
+                                ExceptT $ Clean.verifyCleanCheckout path clean
                                 -- Adoption is persisted with the original saved
                                 -- activity, never an artificial 'now' timestamp.
                                 let saved = finalRecord { recordSnapshot = Just snapshot, recordState = "collecting" }
                                 ExceptT $ writeRecord root path saved
                                 removalAt <- lift getCurrentTime
-                                removalRecent <- lift (recent path removalAt finalRecord)
-                                when removalRecent do
+                                when (recent removalAt finalRecord) do
                                     ExceptT $ writeRecord root path saved { recordState = "present" }
-                                    throwE "recent activity or default-branch ancestry changed before removal"
-                                verified <- lift $ Snapshot.verifySnapshotUnchanged path snapshot
+                                    throwE "recent activity before removal"
+                                verified <- lift $ Clean.verifyCleanCheckout path clean
                                 case verified of
                                     Right () -> pure ()
                                     Left err -> do
                                         ExceptT $ writeRecord root path saved { recordState = "present" }
                                         throwE err
-                                void $ ExceptT $ git common ["worktree", "remove", "--force", unsafeToFilePath path]
+                                lift $ writeIORef removing True
+                                -- Let Git perform its own final dirty check.
+                                -- Clean recovery never authorizes forced removal.
+                                void $ ExceptT $ git common ["worktree", "remove", "--", unsafeToFilePath path]
                                 ExceptT $ writeRecord root path saved { recordState = "collected" }
                                 pure mempty { cleanupRemoved = [path] }
-            pure $ report <> case result of
-                Nothing -> retained path "maintenance deadline exceeded; recovery record retained"
+            eligibility <- readIORef assessed
+            removalStarted <- readIORef removing
+            pure $ report <> eligibility <> case result of
+                Nothing -> mempty { cleanupFailures =
+                    [(path, "maintenance deadline exceeded; checkout/recovery state requires reassessment")] }
+                Just (Left err) | removalStarted -> mempty { cleanupFailures = [(path, err)] }
                 Just (Left err) -> retained path err
                 Just (Right one) -> one
-    recent path now record
-        | worktreeInactive days False now record.recordLastActivity = pure False
-        | not (worktreeInactive days True now record.recordLastActivity) = pure True
-        | otherwise = not <$> headInDefaultBranch path
+    recent now record = not (worktreeInactive days True now record.recordLastActivity)
     checkoutLock path
         | dryRun = withReadOnlyLock (worktreeLeasePath root path)
         | otherwise = withExclusiveManaged root path
@@ -560,40 +606,11 @@ gcWorktreesWithActivity loadActivity root days dryRun protected = do
                     , recordSnapshot = Nothing
                     }
 
--- | Inactivity, not commit age or time since merge. Exact ancestry proof permits
--- the one-day fast path; uncertainty keeps the configured normal threshold.
+-- | Inactivity is necessary but never sufficient: unproven work never expires.
+-- At least 24 hours are required, even for callers passing an invalid threshold.
 worktreeInactive :: Int -> Bool -> UTCTime -> UTCTime -> Bool
 worktreeInactive days incorporated now lastActivity =
-    diffUTCTime now lastActivity >= fromIntegral threshold * 86400
-  where
-    threshold = if incorporated then min 1 (max 0 days) else max 0 days
-
--- | Resolve only an existing remote-default symbolic ref, never infer the
--- default from a familiar branch name or from the current checkout. No fetch,
--- network request or ref mutation is performed by maintenance. Stale/missing
--- tracking refs can miss merges; squash/rebase equivalence is not ancestry.
--- This proof is recomputed after snapshotting so newer commits cannot inherit
--- an older HEAD's eligibility. Final snapshot verification also checks HEAD.
-headInDefaultBranch :: OsPath -> IO Bool
-headInDefaultBranch path = do
-    result <- runExceptT do
-        graftPath <- Text.strip <$> ExceptT
-            (git path ["rev-parse", "--path-format=absolute", "--git-path", "info/grafts"])
-        grafts <- lift $ Directory.doesPathExist (Text.unpack graftPath)
-        when grafts (throwE "grafted history is not merge evidence")
-        remote <- selectUpstreamRemote path >>= maybe (throwE "no default remote") pure
-        let prefix = "refs/remotes/" <> remote <> "/"
-        target <- Text.strip <$> ExceptT
-            (git path ["symbolic-ref", "--quiet", Text.unpack (prefix <> "HEAD")])
-        unless (prefix `Text.isPrefixOf` target && target /= prefix <> "HEAD")
-            (throwE "default branch is outside the selected remote")
-        base <- Text.strip <$> ExceptT
-            (git path ["--no-replace-objects", "rev-parse", "--verify", Text.unpack (target <> "^{commit}")])
-        headCommit <- Text.strip <$> ExceptT
-            (git path ["--no-replace-objects", "rev-parse", "--verify", "HEAD^{commit}"])
-        void $ ExceptT
-            (git path ["--no-replace-objects", "merge-base", "--is-ancestor", Text.unpack headCommit, Text.unpack base])
-    pure $ either (const False) (const True) result
+    incorporated && diffUTCTime now lastActivity >= fromIntegral (max 1 days) * 86400
 
 discoverManagedPaths :: OsPath -> IO [OsPath]
 discoverManagedPaths root = do
@@ -624,7 +641,7 @@ estimateCheckoutBytes path = walk (unsafeToFilePath path)
                 sum <$> mapM (walk . (file FilePath.</>)) children
             else Directory.getFileSize file
 
--- | Bounded snapshot-backed cleanup. The second argument is inactivity days.
+-- | Bounded merged-only cleanup. The second argument is minimum inactivity days.
 cleanupStaleWorktrees
     :: OsPath
     -> Int
@@ -796,7 +813,7 @@ withGitWorktreeLockAt commonDir action =
         FileLock.Exclusive
         (const action)
 
--- | Fetch and return the commit at the selected remote's advertised default
+-- | Fetch and return the commit at the selected remote's cached default
 -- branch, or use the local @HEAD@ when the repository has no remotes. The
 -- current branch's configured remote wins, followed by conventional @upstream@
 -- and @origin@ names, then a sole remaining remote.
@@ -808,15 +825,57 @@ fetchLatestUpstream report repo = do
     selectUpstreamRemote repo >>= \case
         Nothing -> pure Nothing
         Just remote -> do
-            lift (report (WorktreeCheckingRemote remote))
-            remoteHead <- remoteDefaultBranch repo remote
-            lift (report (WorktreeFetchingRemote remote remoteHead))
-            localRef <- lift freshFetchRef
-            commit <-
-                ExceptT $
-                    runExceptT (fetchIntoRef repo remote remoteHead localRef)
-                        `finally` cleanupFetchRef repo localRef
+            cached <- lift (cachedRemoteDefaultBranch repo remote)
+            commit <- case cached of
+                Nothing -> discoverAndFetch remote
+                Just remoteHead -> do
+                    result <- lift (runExceptT (fetchBranch remote remoteHead))
+                    case result of
+                        Right commit -> pure commit
+                        Left err
+                            | any (== "fatal: couldn't find remote ref " <> remoteHead)
+                                (map Text.strip (Text.lines err))
+                                || (": fatal: couldn't find remote ref " <> remoteHead)
+                                    `Text.isSuffixOf` Text.strip err ->
+                                discoverAndFetch remote
+                            | otherwise -> throwE err
             pure (Just commit)
+  where
+    fetchBranch remote remoteHead = do
+        lift (report (WorktreeFetchingRemote remote remoteHead))
+        localRef <- lift freshFetchRef
+        ExceptT $
+            runExceptT (fetchIntoRef repo remote remoteHead localRef)
+                `finally` cleanupFetchRef repo localRef
+    discoverAndFetch remote = do
+        lift (report (WorktreeCheckingRemote remote))
+        remoteHead <- remoteDefaultBranch repo remote
+        commit <- fetchBranch remote remoteHead
+        -- Cache only successful discoveries. Cache contention must not fail
+        -- worktree creation; the next invocation can discover again.
+        lift $ unless (remoteHead == "refs/heads/HEAD") $ void $ tryAny $ git repo
+            [ "symbolic-ref"
+            , Text.unpack ("refs/remotes/" <> remote <> "/HEAD")
+            , Text.unpack ("refs/remotes/" <> remote <> "/"
+                <> Text.drop (Text.length "refs/heads/") remoteHead)
+            ]
+        pure commit
+
+-- Git shares this symbolic reference across linked worktrees. Its target need
+-- not exist locally: our isolated fetch deliberately leaves tracking refs alone.
+-- A default-branch change that retains the old branch requires an explicit
+-- fetch into the new remote-tracking ref before
+-- `git remote set-head <remote> --auto` (see README).
+cachedRemoteDefaultBranch :: OsPath -> Text -> IO (Maybe Text)
+cachedRemoteDefaultBranch repo remote = do
+    let prefix = "refs/remotes/" <> remote <> "/"
+    result <- git repo ["symbolic-ref", "--quiet", "--no-recurse", Text.unpack (prefix <> "HEAD")]
+    pure $ case result of
+        Right output
+            | Just branch <- Text.stripPrefix prefix (Text.strip output)
+            , not (Text.null branch)
+            , branch /= "HEAD" -> Just ("refs/heads/" <> branch)
+        _ -> Nothing
 
 fetchIntoRef :: OsPath -> Text -> Text -> Text -> ExceptT Text IO Text
 fetchIntoRef repo remote remoteHead localRef = do
@@ -940,9 +999,16 @@ quote value = "'" <> value <> "'"
 
 git :: OsPath -> [String] -> IO (Either Text Text)
 git dir args = do
+    -- Only fetch diagnostics are parsed for missing-ref recovery.
+    environment <- if listToMaybe args == Just "fetch"
+        then Just . (("LC_ALL", "C") :) . filter ((/= "LC_ALL") . fst) <$> getEnvironment
+        else pure Nothing
     (code, out, err) <-
         readCreateProcessWithExitCode
-            (proc "git" args) { cwd = Just (unsafeToFilePath dir) }
+            (proc "git" args)
+                { cwd = Just (unsafeToFilePath dir)
+                , env = environment
+                }
             ""
     case code of
         ExitSuccess -> pure (Right (Text.pack out))

@@ -85,6 +85,7 @@ import Agent.CLI.Status
     )
 import Agent.CLI.Terminal ( resolveColor )
 import Agent.CLI.Worktree ( isUnderWorktreeRoot, worktreeRoot )
+import Agent.ResourceScope (logSlowCleanup)
 import Agent.Tools.Types (defaultToolEnv)
 import Agent.Tools.ResourceArbiter
     ( newToolResourceArbiter, closeToolResourceArbiter )
@@ -271,13 +272,16 @@ runAgentWithRestarts options =
                         (runAgentWithRuntime
                             processRuntime foregroundRunMode options)
                         `finally`
-                            (closeToolResourceArbiter toolResourceArbiter
-                                `finally` closeSessionThreadManager sessionThreads
+                            (logSlowCleanup "tool resource arbiter"
+                                (closeToolResourceArbiter toolResourceArbiter)
+                                `finally` logSlowCleanup "session thread manager"
+                                    (closeSessionThreadManager sessionThreads)
                                 `finally`
-                                    (MCP.closeMcpSupervisor
-                                        mcpSupervisor
+                                    (logSlowCleanup "MCP supervisor"
+                                        (MCP.closeMcpSupervisor mcpSupervisor)
                                         `finally`
-                                            closeIntegrationSupervisor
-                                                integrationSupervisor)))
+                                            logSlowCleanup "integration supervisor"
+                                                (closeIntegrationSupervisor
+                                                    integrationSupervisor))))
         (pure DevQuit)
 

@@ -4,12 +4,11 @@ module Agent.CLI.WorktreeAdmin (runWorktreeAdmin, renderWorktreeCleanupReport) w
 
 import Agent.CLI.Config (HarnessConfig(..), WorktreeConfig(..), loadHarnessConfig)
 import Agent.CLI.Options (WorktreeCommand(..))
-import Agent.CLI.SessionAdmin (managedPostgresConfigForHome)
 import Agent.CLI.Worktree.Provenance (WorktreeActivity, loadWorktreeActivity)
 import Agent.CLI.Worktree
     ( WorktreeCleanupReport(..)
     , enrollWorktree
-    , gcWorktreesWithActivity
+    , gcWorktreesManuallyWithActivity
     , isUnderWorktreeRoot
     , protectWorktree
     , restoreManagedWorktree
@@ -17,6 +16,7 @@ import Agent.CLI.Worktree
     )
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Store.Postgres.Connection (closeStorePool, defaultPoolConfig, openStorePool)
+import Agent.Store.Postgres (managedPostgresConfigFromEnv)
 import Control.Exception.Safe (bracket, tryAny)
 import Control.Monad (unless)
 import Data.Maybe (fromMaybe)
@@ -26,7 +26,7 @@ import qualified Data.Text.IO as Text
 import System.Directory.OsPath (getCurrentDirectory, getHomeDirectory, makeAbsolute)
 import System.Exit (exitFailure)
 import System.IO (stderr)
-import System.OsPath (OsPath)
+import System.OsPath (OsPath, decodeFS, unsafeEncodeUtf, (</>))
 
 runWorktreeAdmin :: WorktreeCommand -> IO ()
 runWorktreeAdmin command = do
@@ -43,7 +43,13 @@ runWorktreeAdmin command = do
             config <- loadHarnessConfig home >>= either failCommand pure
             cwd <- getCurrentDirectory
             let days = fromMaybe config.configWorktree.worktreeInactiveDays overrideDays
-            report <- gcWorktreesWithActivity (readExistingActivity home root) root days dryRun [cwd]
+            Text.hPutStrLn stderr $
+                (if dryRun then "Inspecting" else "Collecting")
+                <> " stale, merged, clean worktrees; unique work is retained."
+            report <- gcWorktreesManuallyWithActivity
+                (readExistingActivity home root) root days dryRun [cwd]
+                (\path -> Text.hPutStrLn stderr
+                    ("examining\t" <> Text.pack (show (unsafeToFilePath path))))
             Text.putStr (renderWorktreeCleanupReport dryRun days report)
             unless (null report.cleanupFailures) exitFailure
         WorktreeEnroll path ->
@@ -64,7 +70,8 @@ failCommand message = Text.hPutStrLn stderr ("worktree: " <> message) >> exitFai
 readExistingActivity :: OsPath -> OsPath -> IO (Either Text WorktreeActivity)
 readExistingActivity home root = do
     result <- tryAny do
-        config <- managedPostgresConfigForHome home
+        stateDirectory <- decodeFS (home </> unsafeEncodeUtf ".haskell-agent")
+        config <- managedPostgresConfigFromEnv stateDirectory
         bracket (openStorePool config defaultPoolConfig)
             (either (const (pure ())) closeStorePool)
             (either (const (pure unavailable)) (\pool -> loadWorktreeActivity pool root))
@@ -75,23 +82,28 @@ readExistingActivity home root = do
 renderWorktreeCleanupReport :: Bool -> Int -> WorktreeCleanupReport -> Text
 renderWorktreeCleanupReport dryRun days report = Text.unlines $
     [ (if dryRun then "Dry run" else "Collection pass")
-        <> " — inactivity expiry: " <> tshow days <> " days"
-    , "HEAD incorporated into the resolved default branch: 24 hours of inactivity."
-    , "Ignored untracked files are NOT backed up or restored."
+        <> " — minimum inactivity: " <> tshow (max 1 days) <> " days"
+    , "Only clean checkouts incorporated into another branch or a verified merged PR are collected."
+    , "Dirty, unmerged, protected and uncertain worktrees never expire solely because of age."
+    , "Only recognized, explicitly ignored build/cache directories may be discarded; they are NOT restored."
     , if dryRun then "Automatic adoption is simulated; no registry or snapshot is written."
         else "Verified existing agent worktrees are adopted using saved-session activity."
     ]
     <> [ "eligible\t" <> pathText path <> "\testimated bytes: " <> tshow bytes
+            <> maybe "" ("\t" <>) (lookup path report.cleanupEvidence)
        | (path, bytes) <- report.cleanupEligible ]
     <> [ "retained\t" <> pathText path <> "\t" <> reason
        | (path, reason) <- report.cleanupRetained ]
     <> [ "collected\t" <> pathText path | path <- report.cleanupRemoved ]
     <> [ "failed\t" <> pathText path <> "\t" <> reason
        | (path, reason) <- report.cleanupFailures ]
+    <> [ "not examined\t" <> pathText path <> "\t" <> reason
+       | (path, reason) <- report.cleanupNotExamined ]
     <> [ tshow (length report.cleanupEligible) <> " eligible, "
         <> tshow (length report.cleanupRemoved) <> " collected, "
         <> tshow (length report.cleanupRetained) <> " retained, "
-        <> tshow (length report.cleanupFailures) <> " failed."
+        <> tshow (length report.cleanupFailures) <> " failed, "
+        <> tshow (length report.cleanupNotExamined) <> " not examined."
        , "Eligible checkout gross apparent bytes: " <> tshow (sum (map snd report.cleanupEligible))
            <> " (excludes snapshot overhead and APFS sharing; not guaranteed net disk savings)."
        ]

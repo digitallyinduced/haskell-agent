@@ -32,6 +32,7 @@ import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs, grokRootChildModels)
 import Agent.Loop (TurnInput(..), LoopError(..))
 import Agent.Provider (Provider(..), TokenProvider, tokenProviderBillingMode)
 import Agent.Responses.Types (ResponseItem)
+import Agent.ResourceScope (logSlowCleanup)
 import Agent.Subagents
     ( RootTurnId, SubagentId, SubagentRegistry, SubagentConfig(..)
     , closeSubagentRegistry, defaultMaxConcurrent, defaultSubagentConfig
@@ -123,7 +124,7 @@ acquireCollaborationRuntime AgentToolsRequest
                 options.optMaxConcurrentAgents
                     <|> projectSettings.settingsMaxConcurrentAgents
                     <|> harnessConfig.configMaxConcurrentAgents
-        finalizeRegistry registry =
+        finalizeRegistry registry = logSlowCleanup "collaboration agents" $
             -- Persistence needs the interrupted agents' final state, but a
             -- failed snapshot must never leave their supervisors alive while
             -- the session releases dependent tool resources.

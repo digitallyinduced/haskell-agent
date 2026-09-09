@@ -220,7 +220,7 @@ import Agent.OpenRouter.Options (ClientOptions)
 import Agent.Provider
     (Credential(..), Provider(..), TokenProvider,
      tokenProviderBillingMode)
-import Agent.ResourceScope (ResourceScope, allocateAcquire)
+import Agent.ResourceScope (ResourceScope, allocateAcquire, logSlowCleanup)
 import Agent.Responses.GenericClient (GenericClientOptions)
 import Agent.Responses.Types
     (ResponseItem, ResponseCreateParams(model))
@@ -507,7 +507,7 @@ prepareSessionCodeRuntime AgentSessionRequest
         allocateAcquire codeModeResourceScope $
             mkAcquire initializeCodeMode \case
                 Left _ -> pure ()
-                Right runtime -> mapM_ (.codeModeClose) runtime
+                Right runtime -> logSlowCleanup "code mode runtime" $ mapM_ (.codeModeClose) runtime
     (sessionCodeModeRuntime, suppressDirectImageGeneration) <-
         case initializedCodeMode of
             Left err -> do

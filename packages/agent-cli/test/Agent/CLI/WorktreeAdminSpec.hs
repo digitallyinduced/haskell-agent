@@ -8,31 +8,38 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "worktree cleanup report" do
-    it "shows eligibility, estimates, retained reasons, failures and the ignored-file warning" do
-        let report = WorktreeCleanupReport
+    it "shows eligibility, estimates, evidence, retained reasons, failures and unexamined candidates" do
+        let report = mempty
                 { cleanupRemoved = []
                 , cleanupFailures = [(unsafeEncodeUtf "/broken", "snapshot verification failed")]
                 , cleanupEligible = [(unsafeEncodeUtf "/ready", 1234)]
                 , cleanupRetained = [(unsafeEncodeUtf "/legacy", "unknown saved-session activity")]
+                , cleanupNotExamined = [(unsafeEncodeUtf "/pending", "pass budget exhausted")]
+                , cleanupEvidence = [(unsafeEncodeUtf "/ready", "refs/heads/release")]
                 }
             rendered = renderWorktreeCleanupReport True 14 report
         mapM_ (\part -> rendered `shouldSatisfy` Text.isInfixOf part)
             [ "Dry run"
-            , "14 days"
-            , "HEAD incorporated into the resolved default branch: 24 hours of inactivity."
+            , "minimum inactivity: 14 days"
+            , "never expire solely because of age"
+            , "explicitly ignored build/cache directories"
             , "estimated bytes: 1234"
             , "unknown saved-session activity"
-            , "Automatic adoption is simulated; no registry or snapshot is written."
             , "Eligible checkout gross apparent bytes: 1234"
             , "snapshot verification failed"
-            , "Ignored untracked files are NOT backed up or restored."
-            , "1 eligible, 0 collected, 1 retained, 1 failed."
+            , "refs/heads/release"
+            , "pass budget exhausted"
+            , "1 eligible"
+            , "0 collected"
+            , "1 retained"
+            , "1 failed"
+            , "1 not examined"
             ]
     it "escapes newlines in filenames" do
         let report = mempty { cleanupRetained = [(unsafeEncodeUtf "/line\nbreak", "protected")] }
             rendered = renderWorktreeCleanupReport True 7 report
         rendered `shouldSatisfy` Text.isInfixOf "/line\\nbreak"
-        length (Text.lines rendered) `shouldBe` 7
+        rendered `shouldSatisfy` (not . Text.isInfixOf "/line\nbreak")
     it "sums only eligible estimates and does not describe estimates as recovered space" do
         let report = mempty
                 { cleanupEligible = [(unsafeEncodeUtf "/one", 1234), (unsafeEncodeUtf "/two", 4321)]
@@ -41,4 +48,4 @@ spec = describe "worktree cleanup report" do
             rendered = renderWorktreeCleanupReport True 7 report
         rendered `shouldSatisfy` Text.isInfixOf "Eligible checkout gross apparent bytes: 5555"
         rendered `shouldSatisfy` Text.isInfixOf "not guaranteed net disk savings"
-        rendered `shouldSatisfy` Text.isInfixOf "2 eligible, 0 collected, 1 retained, 0 failed."
+        rendered `shouldSatisfy` Text.isInfixOf "2 eligible, 0 collected, 1 retained, 0 failed"

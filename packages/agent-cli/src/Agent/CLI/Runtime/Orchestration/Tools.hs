@@ -113,6 +113,7 @@ import Agent.ResourceScope
     ( ResourceScope
     , allocateAcquire
     , registerResource
+    , logSlowCleanup
     )
 import Agent.CLI.Runtime.Orchestration.Tools.Resources
     ( SessionResourceScopes(..), withSessionResourceScopes )
@@ -198,7 +199,7 @@ runAgentTools request = withSessionResourceScopes \resources -> do
     -- The current lock changes on conversation reset. Drain the slot only
     -- after session activities stop; the preparation owner still protects
     -- the original resume lock before this boundary is established.
-    _ <- registerResource resources.sessionLockResources do
+    _ <- registerResource resources.sessionLockResources $ logSlowCleanup "session lock" do
         current <- atomicModifyIORef'
             collaborationRuntime.collaborationActiveSessionLock
             (\value -> (Nothing, value))
@@ -211,7 +212,7 @@ runAgentTools request = withSessionResourceScopes \resources -> do
                 toolStartup
                 toolModelRuntime
                 collaborationRuntime)
-            (.scratchCleanup)
+            (logSlowCleanup "session temporary resources" . (.scratchCleanup))
     integrationRuntime <- acquireSessionIntegrationRuntime request
     ( ((((_, mcpRuntime), (_, localToolRuntime)),
           ((_, webFetchRuntime), (_, lspStartup))),
@@ -228,7 +229,7 @@ runAgentTools request = withSessionResourceScopes \resources -> do
                                     request toolStartup toolModelRuntime
                                     collaborationRuntime scratchRuntime
                                     integrationRuntime)
-                                (.runtimeCloseMcp)
+                                (logSlowCleanup "session MCP resources" . (.runtimeCloseMcp))
                         )
                         ( allocateAcquire resources.codingResources
                             (acquireLocalToolRuntime
@@ -241,20 +242,20 @@ runAgentTools request = withSessionResourceScopes \resources -> do
                             mkAcquire
                                 (acquireWebFetchRuntime
                                     request toolStartup toolModelRuntime)
-                                (mapM_ closeWebFetchRuntime)
+                                (logSlowCleanup "web fetch runtime" . mapM_ closeWebFetchRuntime)
                         )
                         ( allocateAcquire resources.lspResources $
                             mkAcquire
                                 (acquireLspStartup
                                     request toolStartup toolModelRuntime)
-                                (mapM_ closeLspRuntime . (.lspStartupRuntime))
+                                (logSlowCleanup "language server runtime" . mapM_ closeLspRuntime . (.lspStartupRuntime))
                         )
                     )
                 )
                 ( allocateAcquire resources.computerUseResources $
                     mkAcquire
                         (acquireComputerUseRuntime toolModelRuntime)
-                        (mapM_ ComputerUse.closeComputerUseRuntime)
+                        (logSlowCleanup "computer use runtime" . mapM_ ComputerUse.closeComputerUseRuntime)
                 )
             )
             (prepareInitialContextPreload request toolModelRuntime)
@@ -367,7 +368,7 @@ acquireLocalToolRuntime AgentToolsRequest
             imageHooks
             multiCtx
             agentTypesRef)
-        (.codingClose)
+        (logSlowCleanup "local coding tools" . (.codingClose))
     let localInitialSkills = initialSkills
     pure LocalToolRuntime{..}
 
