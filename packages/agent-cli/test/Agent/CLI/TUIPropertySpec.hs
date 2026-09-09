@@ -676,6 +676,7 @@ applyAction action harness =
                                 , choiceAdjustmentIndices = []
                                 , choiceCloseOnTurnEnd = False
                                 , choiceDynamic = Nothing
+                                , choiceReply = Nothing
                                 }
                         , appTextPrompt = Nothing
                         }

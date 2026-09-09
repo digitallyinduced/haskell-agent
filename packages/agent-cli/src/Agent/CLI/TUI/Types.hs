@@ -9,6 +9,7 @@ module Agent.CLI.TUI.Types
     , DictationSession(..)
     , ChoicePresentation(..)
     , ChoiceOverlay(..)
+    , ChoiceReply(..)
     , DynamicChoice(..)
     , newDynamicChoice
     , refreshDynamicChoice
@@ -175,6 +176,8 @@ data AppEvent
         ![(Text, Text, Text, [Text], Int)]
     | AppCloseDynamicAdjustableFilterChoice
         !(TMVar (Maybe (Text, Int)))
+    | AppCloseChoice
+        !(TMVar (Maybe Int))
     | AppAskText
         !TextInputMode
         !Text
@@ -601,8 +604,21 @@ data ChoiceOverlay = ChoiceOverlay
     , choiceAdjustmentIndices :: ![Int]
     , choiceCloseOnTurnEnd :: !Bool
     , choiceDynamic :: !(Maybe DynamicChoice)
+    -- | Set for 'AppAskChoice' dialogs so a concurrent waiter can close this
+    -- overlay without cancelling a later dialog that reused the slot.
+    , choiceReply :: !(Maybe ChoiceReply)
     }
     deriving (Eq, Show)
+
+-- | Identity of an 'AppAskChoice' reply token. Equality is pointer equality
+-- of the underlying 'TMVar'.
+newtype ChoiceReply = ChoiceReply (TMVar (Maybe Int))
+
+instance Eq ChoiceReply where
+    ChoiceReply left == ChoiceReply right = left == right
+
+instance Show ChoiceReply where
+    show _ = "ChoiceReply"
 
 data DynamicChoice = DynamicChoice
     { dynamicChoiceReply :: !(TMVar (Maybe (Text, Int)))
@@ -629,6 +645,7 @@ newDynamicChoice title body initial rows reply = ChoiceOverlay
         [max 0 (min (max 0 (length values - 1)) index) | (_, _, _, values, index) <- rows]
     , choiceCloseOnTurnEnd = False
     , choiceDynamic = Just (DynamicChoice reply [key | (key, _, _, _, _) <- rows])
+    , choiceReply = Nothing
     }
 
 -- | Keep focus by model identity and adjustment by value, not by row index.

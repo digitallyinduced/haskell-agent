@@ -580,6 +580,46 @@ spec = do
             fmap (.dialogOverlay.choiceRows) updated.appChoice
                 `shouldBe` Just [("Current", "")]
 
+    describe "idle choice closure" do
+        it "closes the matching authorization dialog when the callback finishes" do
+            runtime <- newScriptRuntime initialUiState
+            reply <- newEmptyTMVarIO
+            let initial = initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, open) <- runFullscreenScriptWithState initial
+                [ FullscreenScriptApp
+                    (AppAskChoice ChoiceDialog "Authorize MCP server"
+                        "Complete sign-in" 0 [("Cancel", "Stop")] reply)
+                , FullscreenScriptHalt
+                ]
+            fmap (.dialogOverlay.choiceTitle) open.appChoice
+                `shouldBe` Just "Authorize MCP server"
+            (_, closed) <- runFullscreenScriptWithState open
+                [ FullscreenScriptApp (AppCloseChoice reply)
+                , FullscreenScriptHalt
+                ]
+            case closed.appChoice of
+                Nothing -> pure ()
+                Just _ -> expectationFailure "authorization dialog was not closed"
+            atomically (readTMVar reply) `shouldReturn` Nothing
+
+        it "does not close a later dialog that reused the overlay slot" do
+            runtime <- newScriptRuntime initialUiState
+            previous <- newEmptyTMVarIO
+            current <- newEmptyTMVarIO
+            let initial = initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, updated) <- runFullscreenScriptWithState initial
+                [ FullscreenScriptApp
+                    (AppAskChoice ChoiceDialog "Authorize MCP server"
+                        "Complete sign-in" 0 [("Cancel", "Stop")] previous)
+                , FullscreenScriptApp
+                    (AppAskChoice ChoiceDialog "MCP servers"
+                        "Select a server" 0 [("＋ Add MCP server", "Add")] current)
+                , FullscreenScriptApp (AppCloseChoice previous)
+                , FullscreenScriptHalt
+                ]
+            fmap (.dialogOverlay.choiceTitle) updated.appChoice
+                `shouldBe` Just "MCP servers"
+
     describe "durable chart previews" do
         it "queues history charts without rasterizing on reset or page load" do
             runtime <- newScriptRuntime initialUiState
@@ -4113,6 +4153,7 @@ choiceOverlay closeOnTurnEnd = ChoiceOverlay
     , choiceAdjustmentIndices = []
     , choiceCloseOnTurnEnd = closeOnTurnEnd
     , choiceDynamic = Nothing
+    , choiceReply = Nothing
     }
 
 keyboardEventsForReads :: [IO ByteString.ByteString] -> IO [V.Event]

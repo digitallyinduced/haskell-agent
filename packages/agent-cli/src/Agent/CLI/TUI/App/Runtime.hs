@@ -149,7 +149,7 @@ import Brick.Widgets.Border.Style (unicodeRounded)
 import Brick.Widgets.Center (center, centerLayer, hCenter)
 import Codec.Picture (pixelAt)
 import Control.Applicative ((<|>))
-import Control.Concurrent.Async (wait, waitCatch, withAsync)
+import Control.Concurrent.Async (race, wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forever, unless, void, when, (>=>))
 import Control.Concurrent.STM ( STM , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , writeTQueue , writeTVar )
@@ -1050,6 +1050,26 @@ requestFullscreenChoiceWithBody runtime title body initial rows = do
     enqueueAppEvent runtime
         (AppAskChoice ChoiceDialog title body initial rows reply)
     atomically (readTMVar reply)
+
+-- | Show a choice overlay while waiting for an independent result. If the
+-- waiter finishes first, the overlay is closed without cancelling a later
+-- dialog. The left side is the user's selection, including 'Nothing' for Esc.
+requestFullscreenChoiceUntil
+    :: FullscreenRuntime
+    -> Text
+    -> Text
+    -> Int
+    -> [(Text, Text)]
+    -> IO a
+    -> IO (Either (Maybe Int) a)
+requestFullscreenChoiceUntil runtime title body initial rows wait = do
+    reply <- newEmptyTMVarIO
+    enqueueAppEvent runtime
+        (AppAskChoice ChoiceDialog title body initial rows reply)
+    race
+        (atomically (readTMVar reply))
+        wait
+        `finally` enqueueAppEvent runtime (AppCloseChoice reply)
 
 -- | Open a read-only, scrollable Markdown document and wait for dismissal.
 requestFullscreenDocument

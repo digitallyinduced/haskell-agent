@@ -73,6 +73,7 @@ module Agent.CLI.TUI.App
     , requestFullscreenPermission
     , requestFullscreenChoice
     , requestFullscreenChoiceWithBody
+    , requestFullscreenChoiceUntil
     , requestFullscreenPlanningChoice
     , requestFullscreenPlanningText
     , requestFullscreenDocument
