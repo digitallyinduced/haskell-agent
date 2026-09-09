@@ -277,8 +277,8 @@ spec = do
                     ]
                 length pasted.appImagePreviews `shouldBe` 1
                 pasted.appUi.uiPrompt.promptAttachments `shouldBe` 1
-                pasted.appUi.uiDraft `shouldBe` "unfinished draft"
-                pasted.appUi.uiCursor `shouldBe` 4
+                pasted.appUi.uiDraft `shouldBe` "unfi [image 1] nished draft"
+                pasted.appUi.uiCursor `shouldBe` 15
                 prepared <- readIORef runtime.runtimeImagePreviews
                 map snd prepared == pasted.appImagePreviews `shouldBe` True
                 -- No REPL consumer is started: the captured image remains queued.
@@ -296,8 +296,8 @@ spec = do
                         refreshed.appImagePreviews == pasted.appImagePreviews
                             `shouldBe` True
                         refreshed.appUi.uiPrompt.promptAttachments `shouldBe` 1
-                        refreshed.appUi.uiDraft `shouldBe` "unfinished draft"
-                        refreshed.appUi.uiCursor `shouldBe` 4
+                        refreshed.appUi.uiDraft `shouldBe` "unfi [image 1] nished draft"
+                        refreshed.appUi.uiCursor `shouldBe` 15
 
         it "refreshes every other prompt field while preserving locally owned attachment counts" $
             withPastedImageFixtures \path _ -> do
@@ -323,8 +323,8 @@ spec = do
                     ]
                 pasted.appUi.uiPrompt
                     `shouldBe` incoming { promptAttachments = 1 }
-                pasted.appUi.uiDraft `shouldBe` "unfinished draft"
-                pasted.appUi.uiCursor `shouldBe` 4
+                pasted.appUi.uiDraft `shouldBe` "unfi [image 1] nished draft"
+                pasted.appUi.uiCursor `shouldBe` 15
                 let later = incoming
                         { promptModel = "subsequent-model"
                         , promptMode = "ask"
@@ -363,8 +363,8 @@ spec = do
                     ]
                 rejected.appImagePreviews == pasted.appImagePreviews `shouldBe` True
                 rejected.appUi.uiPrompt.promptAttachments `shouldBe` 1
-                rejected.appUi.uiDraft `shouldBe` "unfinished draft"
-                rejected.appUi.uiCursor `shouldBe` 4
+                rejected.appUi.uiDraft `shouldBe` "unfi [image 1] nished draft"
+                rejected.appUi.uiCursor `shouldBe` 15
                 after <- readIORef runtime.runtimeImagePreviews
                 after == before `shouldBe` True
                 readIORef runtime.runtimeImagePreviewRevision `shouldReturn` revision
@@ -485,14 +485,56 @@ spec = do
                     ]
                 rejected.appImagePreviews == pasted.appImagePreviews `shouldBe` True
                 rejected.appUi.uiPrompt.promptAttachments `shouldBe` 1
-                rejected.appUi.uiDraft `shouldBe` "unfinished draft"
-                rejected.appUi.uiCursor `shouldBe` 4
+                rejected.appUi.uiDraft `shouldBe` "unfi [image 1] nished draft"
+                rejected.appUi.uiCursor `shouldBe` 15
                 after <- readIORef runtime.runtimeImagePreviews
                 after == before `shouldBe` True
                 readIORef runtime.runtimeImagePreviewRevision `shouldReturn` revision
                 (.noticeText) <$> rejected.appUi.uiNotice
                     `shouldBe` Just
                         "Prompt queue is full; wait for a queued prompt to be consumed."
+
+        it "keeps pasted images addressable in the prompt the model will receive" $
+            withPastedImageFixtures \firstPath secondPath -> do
+                let running = reduceUi (UiSetDraft "here we should change that" 15) $
+                        reduceUi (UiLoop TurnStarted) initialUiState
+                runtime <- newScriptRuntime running
+                (_, pasted) <- runFullscreenScriptWithState
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    [ FullscreenScriptVty (V.EvPaste (encoded (Text.pack firstPath)))
+                    , FullscreenScriptApp (AppUi (UiSetDraft
+                        "here we should [image 1] change that" 36))
+                    , FullscreenScriptVty (V.EvPaste (encoded (Text.pack secondPath)))
+                    , FullscreenScriptHalt
+                    ]
+                pasted.appUi.uiDraft
+                    `shouldBe` "here we should [image 1] change that [image 2] "
+                pasted.appUi.uiCursor `shouldBe` 47
+                length pasted.appImagePreviews `shouldBe` 2
+                (_, removed) <- runFullscreenScriptWithState pasted
+                    [ FullscreenScriptMouseDown (ComposerImageRemove 0) V.BLeft (B.Location (0, 0))
+                    , FullscreenScriptMouseUp (ComposerImageRemove 0) (B.Location (0, 0))
+                    , FullscreenScriptHalt
+                    ]
+                removed.appUi.uiDraft
+                    `shouldBe` "here we should change that [image 1] "
+                length removed.appImagePreviews `shouldBe` 1
+
+        it "inserts image labels while the composer is idle and awaiting input" $
+            withPastedImageFixtures \path _ -> do
+                let idle = reduceUi (UiSetDraft "here we should change that" 15) $
+                        reduceUi (UiSetAwaitingInput True) initialUiState
+                runtime <- newScriptRuntime idle
+                (_, pasted) <- runFullscreenScriptWithState
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    [ FullscreenScriptVty (V.EvPaste (encoded (Text.pack path)))
+                    , FullscreenScriptHalt
+                    ]
+                pasted.appUi.uiDraft
+                    `shouldBe` "here we should [image 1] change that"
+                pasted.appUi.uiCursor `shouldBe` 25
+                length pasted.appImagePreviews `shouldBe` 1
+                pasted.appUi.uiAwaitingInput `shouldBe` True
 
     describe "dynamic model choice" do
         it "preserves filter, selected identity, and effort across reordered rows" do

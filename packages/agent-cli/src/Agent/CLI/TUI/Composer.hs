@@ -32,12 +32,15 @@ module Agent.CLI.TUI.Composer
     , handleEffortControlClick
     , handlePromptControlClick
     , handleImageRemoveClick
+    , imagePlaceholder
     , immediateBtwQuestion
     , immediateReplCommand
+    , insertImagePlaceholders
     , isKillKey
     , newFullscreenInputBuffer
     , prepareBracketedPaste
     , processComposerPaste
+    , removeImagePlaceholderAt
     , promoteFullscreenInput
     , queuedFullscreenInputDisplays
     , readFullscreenInputs
@@ -247,6 +250,12 @@ handleImageRemoveClick applyUiEvent index = do
                             applyUiEvent (UiSetNotice (Just (warningNotice message))) id
                         Right () -> do
                             let pending = before <> after
+                                (draft, cursor) =
+                                    removeImagePlaceholderAt
+                                        ui.uiDraft
+                                        ui.uiCursor
+                                        (index + 1)
+                                        (length previous)
                             liftIO do
                                 writeIORef state.appRuntime.runtimeImagePreviews pending
                                 modifyIORef' state.appRuntime.runtimeImagePreviewRevision (+ 1)
@@ -255,11 +264,18 @@ handleImageRemoveClick applyUiEvent index = do
                             applyUiEvent
                                 (UiSetPrompt ui.uiPrompt { promptAttachments = length pending })
                                 id
+                            modifyUiResetSlash applyUiEvent (UiSetDraft draft cursor)
                             applyUiEvent
                                 (UiSetNotice (Just (successNotice "attachment removed")))
                                 id
-        else handlePromptControlClick applyUiEvent
-            (\draft -> ReplRemovePendingImage draft index)
+        else handlePromptControlClick applyUiEvent \keptDraft ->
+            let (draft, _) =
+                    removeImagePlaceholderAt
+                        keptDraft
+                        ui.uiCursor
+                        (index + 1)
+                        ui.uiPrompt.promptAttachments
+            in ReplRemovePendingImage draft index
 
 handleEffortControlClick
     :: ApplyLocalUiEvent
@@ -548,7 +564,7 @@ handleComposerKey
                         case nonEmptyClipboardText clipboardText of
                             Just text -> insertPastedText applyUiEvent text
                             Nothing ->
-                                submitRaw applyUiEvent (ReplClipboardPaste ui.uiDraft Nothing)
+                                handleActiveComposerPaste applyUiEvent Nothing
         V.EvKey V.KDel [] ->
             deleteAfter applyUiEvent
         V.EvKey V.KLeft modifiers
@@ -573,27 +589,8 @@ handleComposerKey
             scrollConversationPage Down
         V.EvKey (V.KChar character) [] ->
             insertText applyUiEvent (Text.singleton character)
-        V.EvPaste bytes | ui.uiRunning ->
+        V.EvPaste bytes ->
             handleActiveComposerPaste applyUiEvent (Just (decodePaste bytes))
-        V.EvPaste bytes -> do
-            let pasted = decodePaste bytes
-                (pastedDraft, pastedCursor, clipboardInput) =
-                    prepareBracketedPaste
-                        ui.uiAwaitingInput
-                        ui.uiDraft
-                        ui.uiCursor
-                        pasted
-            case clipboardInput of
-                Nothing -> do
-                    modifyUiResetSlash applyUiEvent
-                        (UiSetDraft pastedDraft pastedCursor)
-                    modify' \current -> current { appPasted = True }
-                Just replLine -> do
-                    when (not (Text.null pasted)) $
-                        modifyUi applyUiEvent
-                            (UiSetNotice
-                                (Just (progressNotice "Reading clipboard…")))
-                    submitRaw applyUiEvent replLine
         _ -> pure ()
     -- Only a kill directly followed by another kill accumulates into the
     -- kill buffer; any other key breaks the chain.
@@ -684,7 +681,7 @@ queueComposerImages applyUiEvent images = do
                 queued <- liftIO $ atomically $
                     appendFullscreenInput state.appRuntime.runtimeInput FullscreenInput
                         { fullscreenInputLine = ReplClipboardPasteCaptured added
-                        , fullscreenInputQueued = True
+                        , fullscreenInputQueued = not state.appUi.uiAwaitingInput
                         , fullscreenInputDisplay = Nothing
                         , fullscreenInputFromInbox = False
                         }
@@ -693,6 +690,12 @@ queueComposerImages applyUiEvent images = do
                     Right () -> do
                         let pending = previous <> prepared
                             prompt = state.appUi.uiPrompt
+                            (draft, cursor) =
+                                insertImagePlaceholders
+                                    state.appUi.uiDraft
+                                    state.appUi.uiCursor
+                                    (length previous + 1)
+                                    (length added)
                         liftIO do
                             writeIORef state.appRuntime.runtimeImagePreviews pending
                             modifyIORef'
@@ -705,6 +708,7 @@ queueComposerImages applyUiEvent images = do
                         applyUiEvent
                             (UiSetPrompt prompt { promptAttachments = length pending })
                             id
+                        modifyUiResetSlash applyUiEvent (UiSetDraft draft cursor)
                         pure $ Right $
                             if rejected > 0
                                 then "image attached; some images exceeded the attachment limit"

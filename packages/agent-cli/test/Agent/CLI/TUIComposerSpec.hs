@@ -357,6 +357,34 @@ spec = describe "fullscreen composer" do
             (Just "/images/example.png")
             `shouldReturn` ComposerPasteFailed "attachment limit reached"
 
+    it "inserts numbered image labels at the paste caret" do
+        insertImagePlaceholders "here we should change that" 15 1 1
+            `shouldBe` ("here we should [image 1] change that", 25)
+        insertImagePlaceholders "here we should [image 1] change that" 36 2 1
+            `shouldBe` ("here we should [image 1] change that [image 2] ", 47)
+        insertImagePlaceholders "unfinished draft" 4 1 1
+            `shouldBe` ("unfi [image 1] nished draft", 15)
+        insertImagePlaceholders "" 0 1 2
+            `shouldBe` ("[image 1] [image 2] ", 20)
+
+    it "removes an image label and renumbers later labels" do
+        removeImagePlaceholderAt
+            "here we should [image 1] change that [image 2] "
+            25
+            1
+            2
+            `shouldBe` ("here we should change that [image 1] ", 15)
+        removeImagePlaceholderAt
+            "here we should [image 1] change that [image 2] "
+            47
+            2
+            2
+            `shouldBe` ("here we should [image 1] change that ", 37)
+        removeImagePlaceholderAt "see attached [image 10] now" 0 10 10
+            `shouldBe` ("see attached now", 0)
+        removeImagePlaceholderAt "plain draft" 4 1 1
+            `shouldBe` ("plain draft", 4)
+
     it "inserts dictation at the cursor with word-safe spacing" do
         insertDictation "please now" 6 "fix this"
             `shouldBe` ("please fix this now", 15)
