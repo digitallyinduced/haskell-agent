@@ -260,6 +260,33 @@ spec = do
                 `shouldBe` Right (Mcp (McpDisable "github"))
             parseArgs ["mcp", "login", "https://example.com/mcp"]
                 `shouldBe` Right (Mcp (McpLogin "https://example.com/mcp" []))
+            parseArgs
+                [ "mcp"
+                , "add"
+                , "--transport"
+                , "http"
+                , "sentry"
+                , "https://mcp.sentry.dev/mcp"
+                ]
+                `shouldBe`
+                    Right
+                        (Mcp
+                            (McpAdd McpAddCommand
+                                { mcpAddName = "sentry"
+                                , mcpAddTransport = Just McpAddTransportHttp
+                                , mcpAddTarget = "https://mcp.sentry.dev/mcp"
+                                , mcpAddArgs = []
+                                }))
+            parseArgs ["mcp", "add", "files", "npx", "pkg"]
+                `shouldBe`
+                    Right
+                        (Mcp
+                            (McpAdd McpAddCommand
+                                { mcpAddName = "files"
+                                , mcpAddTransport = Nothing
+                                , mcpAddTarget = "npx"
+                                , mcpAddArgs = ["pkg"]
+                                }))
             parseArgs ["mcp", "enable"] `shouldSatisfy` isLeft
             parseArgs ["mcp", "disable"] `shouldSatisfy` isLeft
             usage `shouldContain` "agent-cli mcp list [--json]"

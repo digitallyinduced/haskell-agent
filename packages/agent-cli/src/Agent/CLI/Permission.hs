@@ -127,6 +127,8 @@ applyApprovalPolicyKey key state = case key of
         "f" -> Left (ApprovalPolicySelected ApproveAll)
         _ -> Right state
     PickerKeyBackspace -> Right state
+    PickerKeyTab -> Right state
+    PickerKeyBackTab -> Right state
   where
     move delta current =
         current
@@ -187,6 +189,8 @@ applyPermissionKey key state = case key of
             "n" -> Left PermissionDeny
             _ -> Right state
     PickerKeyBackspace -> Right state
+    PickerKeyTab -> Right state
+    PickerKeyBackTab -> Right state
   where
     n = length permissionLabels
     move delta i = (i + delta) `mod` n

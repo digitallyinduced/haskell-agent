@@ -128,6 +128,8 @@ applyPlanEnterKey key state@(PlanEnterState reason index) = case key of
         Just PlanCancel -> Left PlanStayNormal
         _ -> Right state
     PickerKeyBackspace -> Right state
+    PickerKeyTab -> Right state
+    PickerKeyBackTab -> Right state
 
 renderPlanEnterFrame :: Bool -> PlanEnterState -> Text
 renderPlanEnterFrame color (PlanEnterState reason index) =
@@ -193,6 +195,8 @@ applyPlanExitKey key state@(PlanExitState index) = case key of
     PickerKeyChar c ->
         maybe (Right state) Left (planDecisionForKey c)
     PickerKeyBackspace -> Right state
+    PickerKeyTab -> Right state
+    PickerKeyBackTab -> Right state
 
 renderPlanExitFrame :: Bool -> PlanExitState -> Text
 renderPlanExitFrame color (PlanExitState index) =

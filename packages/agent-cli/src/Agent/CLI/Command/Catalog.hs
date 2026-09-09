@@ -58,7 +58,7 @@ slashCommands =
     , cmd "terminal" ["ghostty"] "/terminal" "Show detected terminal capabilities" False
     , cmd "changelog" [] "/changelog" "Show Haskell Agent release notes" False
     , cmd "agents" ["a"] "/agents [limit [N]]" "Browse agents, or show/set the concurrent subagent cap" True
-    , cmd "mcp" ["mcps"] "/mcp [prompt <server> <name> [key=value…]]" "Manage MCP servers or run a server prompt" False
+    , cmd "mcp" ["mcps"] "/mcp [prompt <server> <name> [key=value…]]" "Manage MCP servers, add a URL or command, or run a server prompt" False
     , grokToolCmd "scheduler_create" "loop" [] "/loop [interval] <prompt>" "Run a prompt on a recurring interval" True
     , grokToolCmd "update_goal" "goal" [] "/goal <objective> [--budget N] | status | pause | resume | clear" "Set, manage, or check an autonomous goal" True
     , grokToolCmd "workflow" "workflow" [] "/workflow runs | <name> [input]" "Launch a named workflow or list workflow runs" True

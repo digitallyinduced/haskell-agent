@@ -11,12 +11,14 @@ module Agent.CLI.McpOAuth
     , defaultLoginOptions
     , loginMcp
     , loginMcpWith
+    , loginMcpWithResult
     , logoutMcp
     , lookupServerOAuthConfig
     , registerAuthorizedMcpServer
     ) where
 
 import Agent.CLI.Config (HarnessConfig(..), McpOAuthConfig(..), McpServerConfig(..), loadHarnessConfig, modifyHarnessConfig)
+import Agent.CLI.Error (formatException)
 import Agent.CLI.McpOAuthStore (loadMcpOAuthRecord, mcpOAuthStorePath, saveMcpOAuthRecord)
 import Agent.MCP (McpProtocolPreference(..))
 import qualified Agent.MCP.OAuth as OAuth
@@ -76,6 +78,14 @@ defaultLoginOptions = LoginOptions { loginAdditionalScopes = [] }
 
 loginMcp :: Text -> IO ()
 loginMcp = loginMcpWith defaultLoginOptions
+
+-- | Same flow as 'loginMcpWith', returning the success message instead of
+-- throwing. Used by the TUI so authorization can stay inside the overlay.
+loginMcpWithResult :: LoginOptions -> Text -> IO (Either Text Text)
+loginMcpWithResult options serverUrl =
+    tryAny (loginMcpWith options serverUrl) >>= \case
+        Left err -> pure (Left (formatException err))
+        Right () -> pure (Right "MCP authorization saved.")
 
 -- | The @client_id@ chosen for this login and how it was obtained.
 data ResolvedClient = ResolvedClient

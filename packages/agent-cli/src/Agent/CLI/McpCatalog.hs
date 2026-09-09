@@ -4,6 +4,7 @@ module Agent.CLI.McpCatalog
     ( McpCatalogChange(..)
     , McpCatalogEntry(..)
     , McpCatalogError(..)
+    , addMcpCatalogServer
     , formatMcpCatalogChange
     , formatMcpCatalogHuman
     , formatMcpCatalogJSON
@@ -20,6 +21,14 @@ import Agent.CLI.Config
     , loadHarnessConfig
     , modifyHarnessConfig
     )
+import Agent.CLI.McpAdd
+    ( McpAddTarget(..)
+    , McpTransportOption(..)
+    , isHttpMcpUrl
+    , mcpServerForTarget
+    , parseMcpAddName
+    , parseMcpTargetWithTransport
+    )
 import Agent.CLI.McpOAuth
     ( LoginOptions(..)
     , defaultLoginOptions
@@ -27,7 +36,9 @@ import Agent.CLI.McpOAuth
     , logoutMcp
     )
 import Agent.CLI.Options
-    ( McpCommand(..)
+    ( McpAddCommand(..)
+    , McpAddTransport(..)
+    , McpCommand(..)
     , SessionOutputFormat(..)
     )
 import Data.Aeson ((.=))
@@ -73,6 +84,7 @@ runMcpCommand = \case
     McpList outputFormat -> runMcpList outputFormat
     McpEnable name -> runMcpSetEnabled True name
     McpDisable name -> runMcpSetEnabled False name
+    McpAdd command -> runMcpAdd command
 
 runMcpList :: SessionOutputFormat -> IO ()
 runMcpList outputFormat = do
@@ -90,6 +102,74 @@ runMcpSetEnabled enabled name = do
     setMcpCatalogEnabled home name enabled >>= \case
         Left err -> die (Text.unpack (catalogErrorText err))
         Right change -> Text.putStrLn (formatMcpCatalogChange enabled change)
+
+runMcpAdd :: McpAddCommand -> IO ()
+runMcpAdd command = do
+    home <- getHomeDirectory
+    addMcpCatalogServer home command >>= \case
+        Left err -> die (Text.unpack (catalogErrorText err))
+        Right entry ->
+            Text.putStrLn
+                ("Added MCP server " <> entry.mcpCatalogName
+                    <> " (" <> mcpCatalogTransport entry <> ")")
+
+addMcpCatalogServer
+    :: OsPath
+    -> McpAddCommand
+    -> IO (Either McpCatalogError McpCatalogEntry)
+addMcpCatalogServer home command =
+    case parseAddCommand command of
+        Left err -> pure (Left (McpCatalogInvalid err))
+        Right (name, target) ->
+            modifyHarnessConfig home (\_ config -> insertServer config name target)
+                >>= \case
+                    Left err
+                        | Just existing <- Text.stripPrefix alreadyExistsPrefix err ->
+                            pure (Left (McpCatalogInvalid
+                                ("MCP server " <> existing <> " already exists")))
+                        | otherwise ->
+                            pure (Left (McpCatalogInvalid err))
+                    Right (_, _, entry) -> pure (Right entry)
+  where
+    insertServer config name target
+        | Map.member name config.configMcpServers =
+            Left (alreadyExistsPrefix <> name)
+        | otherwise =
+            let server = mcpServerForTarget target
+                next =
+                    config
+                        { configMcpServers =
+                            Map.insert name server config.configMcpServers
+                        }
+            in Right (next, catalogEntry name server)
+
+parseAddCommand :: McpAddCommand -> Either Text (Text, McpAddTarget)
+parseAddCommand command = do
+    name <- parseMcpAddName command.mcpAddName
+    target <- case command.mcpAddTransport of
+        Just McpAddTransportHttp ->
+            if not (null command.mcpAddArgs)
+                then Left "HTTP MCP servers do not take command arguments"
+                else parseMcpTargetWithTransport
+                    (Just McpTransportHttp)
+                    command.mcpAddTarget
+        Just McpAddTransportStdio ->
+            if isHttpMcpUrl command.mcpAddTarget
+                then Left "stdio MCP servers require a local command, not a URL"
+                else Right
+                    (McpAddStdioCommand command.mcpAddTarget command.mcpAddArgs)
+        Nothing
+            | isHttpMcpUrl command.mcpAddTarget ->
+                if not (null command.mcpAddArgs)
+                    then Left "HTTP MCP servers do not take command arguments"
+                    else Right (McpAddHttpUrl (Text.strip command.mcpAddTarget))
+            | otherwise ->
+                Right
+                    (McpAddStdioCommand command.mcpAddTarget command.mcpAddArgs)
+    pure (name, target)
+
+alreadyExistsPrefix :: Text
+alreadyExistsPrefix = "already-exists:"
 
 listMcpCatalog :: OsPath -> IO (Either McpCatalogError [McpCatalogEntry])
 listMcpCatalog home =

@@ -98,6 +98,8 @@ toEvent = \case
     PickerKeyConfirm -> PickerConfirm
     PickerKeyCancel -> PickerCancel
     PickerKeyBackspace -> PickerBackspace
+    PickerKeyTab -> PickerType '\t'
+    PickerKeyBackTab -> PickerType '\t'
     PickerKeyChar c -> PickerType c
 
 -- | Open the picker when stdin is a TTY; otherwise print the catalog.
