@@ -1,7 +1,10 @@
 module Agent.CLI.TUIAppSpec (spec) where
 
+import qualified Agent.TUI.Theme as Theme
 import Agent.CLI.TUI.Keyboard (decodeKeyboardBody, classifyKeyboard, runKeyboardInput)
+import Agent.CLI.TUI.App (finishedMarkdownProseCaches)
 import Control.Monad (forM_, when)
+import Control.Monad.IO.Class (liftIO)
 import Graphics.Vty.Platform.Unix.Input.Classify.Types (KClass(..))
 
 import Agent.CLI.TUIAppSpec.AgentFixtures
@@ -142,6 +145,9 @@ import Brick
     , VScrollbarRenderer(..)
     , Widget
     , customMain
+    , cached
+    , getRenderState
+    , renderFinal
     , halt
     , hLimit
     , renderWidget
@@ -213,6 +219,51 @@ import Agent.Tools.RenderChart (renderChartResult)
 
 spec :: Spec
 spec = do
+    describe "streaming Markdown cache lifetime" do
+        let streaming =
+                reduceUi (UiLoop (TextDelta "one\n\ntwo\n\nTail")) $
+                    reduceUi (UiLoop TurnStarted) initialUiState
+            blockId = (Seq.index streaming.uiBlocks 0).blockId
+            expected target =
+                [MarkdownProseCache target blockId 1 1, MarkdownProseCache target blockId 1 2]
+        it "retires root prose on completion, cancellation, failure, and restart" do
+            forM_ [UiTurnEnded BlockComplete, UiTurnEnded BlockCancelled,
+                    UiTurnEnded BlockFailed, UiTurnRestarted,
+                    UiLoop (TurnFinished (emptyTurnOutput "" [] Nothing)),
+                    UiSetAwaitingInput True,
+                    UiLoop ResponseAttemptDiscarded, UiLoop ResponseAttemptFailed,
+                    UiLoop (ResponseRestarted "retry")] \event ->
+                finishedMarkdownProseCaches AgentRoot streaming (reduceUi event streaming)
+                    `shouldBe` expected AgentRoot
+        it "keeps caches live across append-only updates" do
+            finishedMarkdownProseCaches AgentRoot streaming
+                (reduceUi (UiLoop (TextDelta " grows")) streaming)
+                `shouldBe` []
+        it "scopes child completion and removal to the child's own keys" do
+            let target = AgentChild (SubagentId "worker")
+            finishedMarkdownProseCaches target streaming
+                (reduceUi (UiTurnEnded BlockComplete) streaming)
+                `shouldBe` expected target
+            finishedMarkdownProseCaches target streaming
+                (reduceUi UiConversationCleared streaming)
+                `shouldBe` expected target
+        it "does not evict already completed history again" do
+            let complete = reduceUi (UiTurnEnded BlockComplete) streaming
+            finishedMarkdownProseCaches AgentRoot complete complete `shouldBe` []
+        it "removes real Brick prose entries after terminal events" do
+            forM_ [UiTurnEnded BlockComplete, UiTurnEnded BlockCancelled,
+                    UiTurnEnded BlockFailed, UiSetAwaitingInput True,
+                    UiLoop ResponseAttemptDiscarded, UiLoop ResponseAttemptFailed,
+                    UiLoop (TurnFinished (emptyTurnOutput "" [] Nothing))] \event -> do
+                runtime <- newScriptRuntime streaming
+                let initial = initialFullscreenAppState runtime [] AgentRoot [] 0
+                    names = expected AgentRoot
+                _ <- runFullscreenScript initial $
+                    map (`FullscreenScriptCachePresent` True) names
+                    <> [FullscreenScriptApp (AppUi event)]
+                    <> map (`FullscreenScriptCachePresent` False) names
+                    <> [FullscreenScriptHalt]
+                pure ()
     describe "active-turn image paste" do
         it "shows a bracketed image paste before the REPL consumes it and survives delayed refreshes" $
             withPastedImageFixtures \path _ -> do
@@ -3089,6 +3140,7 @@ data FullscreenScriptEvent
     | FullscreenScriptMouseDown !Name !V.Button !B.Location
     | FullscreenScriptMouseRelease !Name !V.Button !B.Location
     | FullscreenScriptMouseUp !Name !B.Location
+    | FullscreenScriptCachePresent !Name !Bool
     | FullscreenScriptHalt
 
 data ReplacementScenario
@@ -3735,6 +3787,16 @@ runFullscreenScriptDetailedAt bounds initialState script = do
                         (MouseUp name Nothing location)
                 AppEvent FullscreenScriptHalt ->
                     halt
+                AppEvent (FullscreenScriptCachePresent name expected) -> do
+                    renderState <- getRenderState
+                    let (_, picture, _, _) =
+                            renderFinal Theme.terminalDefault
+                                [cached name (txt "CACHE_MISS_SENTINEL")]
+                                bounds (const Nothing) renderState
+                        present = not $
+                            "CACHE_MISS_SENTINEL" `Text.isInfixOf`
+                                renderedPictureTextAt bounds picture
+                    liftIO (present `shouldBe` expected)
                 VtyEvent event ->
                     fullscreenApp.appHandleEvent (VtyEvent event)
                 MouseDown name button modifiers location ->

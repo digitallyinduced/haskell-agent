@@ -18,6 +18,7 @@ module Agent.CLI.TUI.App
     , choiceRowColumns
     , filterChoiceRowLimit
     , choiceClosesOnUiTransition
+    , finishedMarkdownProseCaches
     , adjustChoiceValue
     , drawApp
     , drawBlock

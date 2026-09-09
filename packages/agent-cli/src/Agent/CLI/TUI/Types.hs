@@ -116,6 +116,7 @@ data Name
         !BlockId
         !Bool
     | CodeBlockCache !AgentTarget !BlockId !Int
+    | MarkdownProseCache !AgentTarget !BlockId !Int !Int
     | CodeCopy !AgentTarget !BlockId !Int
     | MarkdownLink !Text
     | ComposerArea

@@ -14,6 +14,10 @@ mkDerivation {
     agent-core agent-syntax base brick containers hspec QuickCheck text
     vty
   ];
+  benchmarkHaskellDepends = [
+    aeson aeson-pretty agent-core agent-json agent-syntax base brick
+    bytestring containers text vty
+  ];
   description = "Retained terminal UI for the universal agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";
 }
