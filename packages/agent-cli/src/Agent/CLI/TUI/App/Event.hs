@@ -140,7 +140,7 @@ import Control.Applicative ((<|>))
 import Control.Concurrent.Async (wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM_, forever, unless, void, when, (>=>))
-import Control.Concurrent.STM ( STM , TMVar , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , writeTQueue , writeTVar )
+import Control.Concurrent.STM ( STM , TMVar , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , tryPutTMVar , writeTQueue , writeTVar )
 import Agent.CLI.Recap ( autoRecapAwayThreshold , autoRecapIdleThreshold , autoRecapRetryInterval )
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
@@ -479,6 +479,8 @@ handleAppEvent = \case
                 , dynamic.dynamicChoiceReply == reply ->
                     state { appChoice = Nothing }
             _ -> state
+    AppCloseChoice reply ->
+        handleCloseChoiceEvent reply
     AppAskDynamicAdjustableFilterChoice title body initial rows reply -> do
         state <- get
         liftIO (state.appRuntime.runtimeNativeProgress False)
@@ -925,6 +927,22 @@ handleAskPermissionEvent summary reply = do
                 , appAgentHover = Nothing
                 }
 
+handleCloseChoiceEvent
+    :: TMVar (Maybe Int)
+    -> EventM Name AppState ()
+handleCloseChoiceEvent reply = do
+    liftIO $ atomically (void $ tryPutTMVar reply Nothing)
+    state <- get
+    let matching = case state.appChoice of
+            Just pending
+                | Just (ChoiceReply token) <- pending.dialogOverlay.choiceReply
+                , token == reply ->
+                    True
+            _ -> False
+    when matching do
+        modify' \current -> current { appChoice = Nothing }
+        resumeNativeProgressIfRunning
+
 handleAskChoiceEvent
     :: ChoicePresentation
     -> Text
@@ -953,6 +971,7 @@ handleAskChoiceEvent presentation title body initial rows reply = do
                 , choiceAdjustmentIndices = []
                 , choiceCloseOnTurnEnd = False
                 , choiceDynamic = Nothing
+                , choiceReply = Just (ChoiceReply reply)
                 }
             , appAgentHover = Nothing
             }
@@ -986,6 +1005,7 @@ handleAskFilterChoiceEvent title initial rows reply = do
                 , choiceAdjustmentIndices = []
                 , choiceCloseOnTurnEnd = False
                 , choiceDynamic = Nothing
+                , choiceReply = Nothing
                 }
             , appAgentHover = Nothing
             }
@@ -1033,6 +1053,7 @@ handleAskAdjustableFilterChoiceEvent title initial adjustableRows reply = do
                 , choiceAdjustmentIndices = adjustmentIndices
                 , choiceCloseOnTurnEnd = False
                 , choiceDynamic = Nothing
+                , choiceReply = Nothing
                 }
             , appAgentHover = Nothing
             }

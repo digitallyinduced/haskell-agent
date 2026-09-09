@@ -13,6 +13,7 @@ module Agent.CLI.McpManager
     , initialMcpManagerState
     , mcpEntryTransport
     , parseMcpCommand
+    , pendingHttpAuthorizationUrl
     , renderMcpManagerFrame
     , resolveMcpAddForm
     , runMcpManager
@@ -189,6 +190,13 @@ initialMcpManagerState config registrations warnings pending authorized notice =
         Just url ->
             maybe False isAuthFailure failed
                 || (Set.notMember url authorized && isJust failed)
+
+-- | HTTP servers that are not yet covered by a saved OAuth token record.
+pendingHttpAuthorizationUrl :: Set Text -> McpServerConfig -> Maybe Text
+pendingHttpAuthorizationUrl authorized server =
+    case server.mcpUrl of
+        Just url | Set.notMember url authorized -> Just url
+        _ -> Nothing
 
 authorizedMcpUrls :: OsPath -> HarnessConfig -> IO (Set Text)
 authorizedMcpUrls home config =
@@ -485,7 +493,7 @@ runMcpManager color home registrations warnings = do
                 Just McpManagerClose -> pure changed
                 Just McpManagerRestart -> pure True
                 Just (McpManagerSubmitAdd label server) ->
-                    persist
+                    persistThen
                         (config
                             { configMcpServers =
                                 Map.insert label server
@@ -493,6 +501,7 @@ runMcpManager color home registrations warnings = do
                             })
                         (Set.insert label pending)
                         ("Added " <> label)
+                        (authorizeAddedHttpServer label server)
                 Just (McpManagerToggle label) ->
                     case Map.lookup label config.configMcpServers of
                         Nothing ->
@@ -534,20 +543,13 @@ runMcpManager color home registrations warnings = do
                                             <> " is a local stdio server; OAuth is only used for HTTP servers"
                                         ))
                             Just url ->
-                                loginMcpWithResult defaultLoginOptions url >>= \case
-                                    Left err ->
-                                        loop revision config pending changed authorized
-                                            (Just (False, err))
-                                    Right message -> do
-                                        nextAuthorized <-
-                                            authorizedMcpUrls home config
-                                        loop revision config
-                                            (Set.insert label pending)
-                                            True
-                                            nextAuthorized
-                                            (Just (True, message))
+                                authorizeLabel label url revision config pending
+                                    changed False
       where
         persist updated pending' message =
+            persistThen updated pending' message loopAfterPersist
+
+        persistThen updated pending' message after =
             modifyHarnessConfig home
                 (\current _ ->
                     if current /= revision
@@ -559,7 +561,39 @@ runMcpManager color home registrations warnings = do
                         (Just (False, err))
                 Right (nextRevision, _, ()) -> do
                     nextAuthorized <- authorizedMcpUrls home updated
-                    loop nextRevision updated pending' True
+                    after
+                        nextRevision
+                        updated
+                        pending'
+                        nextAuthorized
+                        (Just (True, message))
+
+        loopAfterPersist nextRevision nextConfig nextPending nextAuthorized notice =
+            loop nextRevision nextConfig nextPending True nextAuthorized notice
+
+        authorizeAddedHttpServer label server nextRevision nextConfig nextPending nextAuthorized notice =
+            case pendingHttpAuthorizationUrl nextAuthorized server of
+                Nothing ->
+                    loop nextRevision nextConfig nextPending True nextAuthorized notice
+                Just url ->
+                    authorizeLabel label url nextRevision nextConfig nextPending
+                        True True
+
+        authorizeLabel label url nextRevision nextConfig nextPending nextChanged addedFirst =
+            loginMcpWithResult defaultLoginOptions url >>= \case
+                Left err ->
+                    loop nextRevision nextConfig nextPending nextChanged authorized
+                        (Just
+                            ( False
+                            , if addedFirst
+                                then "Added " <> label <> ". " <> err
+                                else err
+                            ))
+                Right message -> do
+                    nextAuthorized <- authorizedMcpUrls home nextConfig
+                    loop nextRevision nextConfig
+                        (Set.insert label nextPending)
+                        True
                         nextAuthorized
                         (Just (True, message))
 

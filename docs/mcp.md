@@ -45,10 +45,11 @@ next session (or `/mcp` `r` in a running one) picks up the change.
 
 In an interactive session, `/mcp` opens the server manager in the UI. Use the
 arrow keys or `j`/`k` to navigate, Enter to inspect tools, `a` to add a
-remote URL or local command, `i` to authorize an HTTP server with OAuth,
-Space to enable or disable it, `x` then `y` to remove it, and `r` to restart
-the MCP runtime. Saved changes restart the runtime while preserving the
-session. Environment variable values are never displayed.
+remote URL or local command (HTTP servers start OAuth immediately), `i` to
+re-authorize an HTTP server, Space to enable or disable it, `x` then `y` to
+remove it, and `r` to restart the MCP runtime. Saved changes restart the
+runtime while preserving the session. Environment variable values are never
+displayed.
 
 `mcpInitStrategy` accepts `auto`, `progressive`, or `blocking`. `auto` starts
 servers progressively for interactive sessions so the prompt is immediately

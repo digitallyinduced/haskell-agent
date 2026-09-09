@@ -234,6 +234,19 @@ spec = describe "Agent.CLI.McpManager" do
             body `shouldSatisfy` Text.isInfixOf url
             body `shouldSatisfy`
                 Text.isInfixOf "could not be opened automatically"
+            body `shouldSatisfy` Text.isInfixOf "redirects back"
+            body `shouldNotSatisfy` Text.isInfixOf "Continue"
+
+        it "starts HTTP OAuth after add when no token is stored" do
+            let remote = httpServer "https://mcp.example.test/mcp"
+            pendingHttpAuthorizationUrl Set.empty remote
+                `shouldBe` Just "https://mcp.example.test/mcp"
+            pendingHttpAuthorizationUrl
+                (Set.singleton "https://mcp.example.test/mcp")
+                remote
+                `shouldBe` Nothing
+            pendingHttpAuthorizationUrl Set.empty (server True "stdio-command")
+                `shouldBe` Nothing
 
 server :: Bool -> Text.Text -> McpServerConfig
 server enabled command =

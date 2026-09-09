@@ -32,6 +32,7 @@ import Agent.CLI.McpManager
     , authorizedMcpUrls
     , initialMcpManagerState
     , mcpEntryTransport
+    , pendingHttpAuthorizationUrl
     )
 import Agent.CLI.Login.Internal.Browser (openBrowser)
 import Agent.CLI.McpOAuth
@@ -43,12 +44,12 @@ import Agent.CLI.McpOAuth
 import Agent.CLI.TUI.App
     ( FullscreenRuntime
     , emitUiEvent
+    , requestFullscreenChoiceUntil
     , requestFullscreenChoiceWithBody
     , requestFullscreenText
     )
 import Agent.MCP (McpToolRegistration)
 import Agent.TUI.Model (UiEvent(UiSetNotice), progressNotice)
-import Control.Exception.Safe (bracket_)
 import System.Timeout (timeout)
 import Data.Char (isControl)
 import Data.Maybe (catMaybes)
@@ -205,11 +206,10 @@ runFullscreenMcpManager runtime home registrations warnings =
                                                         , snapshot
                                                         )
                                                 Right next ->
-                                                    pure
-                                                        ( Just (McpNotice True next.message)
-                                                        , next.persistedRevision
-                                                        , next.persistedSnapshot
-                                                        )
+                                                    authorizeAddedHttpServer
+                                                        next
+                                                        label
+                                                        (mcpServerForTarget target)
 
     serverMenu notice revision snapshot entry = do
         let actions = mcpServerMenuEntries entry
@@ -267,30 +267,13 @@ runFullscreenMcpManager runtime home registrations warnings =
                             snapshot
                             entry
                     Just url ->
-                        loginMcpWithHost
-                            (fullscreenMcpLoginHost runtime)
-                            defaultLoginOptions
+                        authorizeHttpServer
+                            False
+                            entry.mcpEntryName
                             url
-                            >>= \case
-                                Left err ->
-                                    serverMenu
-                                        (Just (McpNotice False err))
-                                        revision
-                                        snapshot
-                                        entry
-                                Right message -> do
-                                    nextAuthorized <-
-                                        authorizedMcpUrls home snapshot.snapshotConfig
-                                    dashboard
-                                        (Just (McpNotice True message))
-                                        revision
-                                        snapshot
-                                            { snapshotPending =
-                                                Set.insert entry.mcpEntryName
-                                                    snapshot.snapshotPending
-                                            , snapshotChanged = True
-                                            , snapshotAuthorized = nextAuthorized
-                                            }
+                            revision
+                            snapshot
+                            >>= continueDashboard
 
     afterPersist revision snapshot = \case
         Left err -> dashboard (Just (McpNotice False err)) revision snapshot
@@ -302,6 +285,53 @@ runFullscreenMcpManager runtime home registrations warnings =
 
     persist revision snapshot updated pending message =
         persistSnapshot home revision snapshot updated pending message
+
+    authorizeAddedHttpServer next label server =
+        case pendingHttpAuthorizationUrl
+            next.persistedSnapshot.snapshotAuthorized
+            server of
+            Nothing ->
+                pure
+                    ( Just (McpNotice True next.message)
+                    , next.persistedRevision
+                    , next.persistedSnapshot
+                    )
+            Just url ->
+                authorizeHttpServer
+                    True
+                    label
+                    url
+                    next.persistedRevision
+                    next.persistedSnapshot
+
+    authorizeHttpServer addedFirst label url revision snapshot = do
+        loginMcpWithHost
+            (fullscreenMcpLoginHost runtime)
+            defaultLoginOptions
+            url
+            >>= \case
+                Left err ->
+                    pure
+                        ( Just
+                            (McpNotice False $
+                                if addedFirst
+                                    then "Added " <> label <> ". " <> err
+                                    else err)
+                        , revision
+                        , snapshot
+                        )
+                Right message -> do
+                    nextAuthorized <-
+                        authorizedMcpUrls home snapshot.snapshotConfig
+                    pure
+                        ( Just (McpNotice True message)
+                        , revision
+                        , snapshot
+                            { snapshotPending = Set.insert label snapshot.snapshotPending
+                            , snapshotChanged = True
+                            , snapshotAuthorized = nextAuthorized
+                            }
+                        )
 
     confirmRemove name = do
         choice <-
@@ -527,33 +557,27 @@ fullscreenMcpLoginHost runtime =
             \message ->
                 emitUiEvent runtime
                     (UiSetNotice (Just (progressNotice message)))
-        , mcpLoginPresentAuthorization =
-            presentMcpAuthorizationFullscreen runtime
-        , mcpLoginAwaitCallback = \wait ->
-            withLoginProgress runtime "Waiting for MCP authorization…" $
-                timeout mcpOAuthCallbackTimeoutMicros wait
+        , mcpLoginAuthorize = authorizeMcpFullscreen runtime
         }
 
-presentMcpAuthorizationFullscreen
+authorizeMcpFullscreen
     :: FullscreenRuntime
     -> Text
-    -> IO (Either Text ())
-presentMcpAuthorizationFullscreen runtime url = do
+    -> IO a
+    -> IO (Either Text (Maybe a))
+authorizeMcpFullscreen runtime url wait = do
     opened <- openBrowser url
-    choice <-
-        requestFullscreenChoiceWithBody
+    outcome <-
+        requestFullscreenChoiceUntil
             runtime
             "Authorize MCP server"
             (mcpAuthorizationBody opened url)
             0
-            [ ( "Continue"
-              , "Finish browser authorization and continue"
-              )
-            , ("Cancel", "Stop without saving credentials")
-            ]
-    pure $ case choice of
-        Just 0 -> Right ()
-        _ -> Left "MCP authorization was cancelled."
+            [("Cancel", "Stop without saving credentials")]
+            (timeout mcpOAuthCallbackTimeoutMicros wait)
+    pure $ case outcome of
+        Left _ -> Left "MCP authorization was cancelled."
+        Right callback -> Right callback
 
 mcpAuthorizationBody :: Bool -> Text -> Text
 mcpAuthorizationBody opened url =
@@ -561,17 +585,10 @@ mcpAuthorizationBody opened url =
         [ "[Open the authorization page](" <> url <> ")."
         , if opened
             then
-                "A browser window was opened automatically. Complete the sign-in, then return here."
+                "A browser window was opened automatically. Complete the sign-in there. This view continues when the browser redirects back; you do not need to return here first."
             else
-                "The browser could not be opened automatically. Use the link above, then return here."
+                "The browser could not be opened automatically. Use the link above. This view continues when the browser redirects back."
         ]
-
-withLoginProgress :: FullscreenRuntime -> Text -> IO a -> IO a
-withLoginProgress runtime message =
-    bracket_
-        (emitUiEvent runtime
-            (UiSetNotice (Just (progressNotice message))))
-        (emitUiEvent runtime (UiSetNotice Nothing))
 
 markdownText :: Int -> Text -> Text
 markdownText limit =

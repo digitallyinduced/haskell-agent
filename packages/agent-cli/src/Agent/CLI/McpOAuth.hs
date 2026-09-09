@@ -27,14 +27,16 @@ import Agent.CLI.Login.Internal.Browser (openBrowser)
 import Agent.CLI.McpOAuthStore (loadMcpOAuthRecord, mcpOAuthStorePath, saveMcpOAuthRecord)
 import Agent.MCP (McpProtocolPreference(..))
 import qualified Agent.MCP.OAuth as OAuth
+import Control.Concurrent.Async (race, wait, waitCatch, withAsync)
 import Control.Concurrent.MVar
-    ( newEmptyMVar
+    ( MVar
+    , newEmptyMVar
     , putMVar
     , readMVar
     , tryPutMVar
     )
 import Network.URI (parseURI, uriAuthority, uriRegName, uriScheme, uriUserInfo, uriQuery)
-import Control.Exception.Safe (bracket, bracketOnError, finally, tryAny)
+import Control.Exception.Safe (bracket, bracketOnError, finally, throwIO, tryAny)
 import Control.Monad (forM_, unless, void, when)
 import Crypto.Hash (Digest, SHA256, hash)
 import Data.Char (isAsciiLower, isDigit)
@@ -89,10 +91,15 @@ data Callback = Callback
 
 -- | Host-owned presentation for MCP OAuth. The CLI prints to stdout; the
 -- fullscreen manager shows notices and the authorization URL in overlays.
+--
+-- 'mcpLoginAuthorize' is called only after the loopback callback server is
+-- already accepting connections, so the browser redirect can complete without
+-- a later confirmation step.
 data McpLoginHost = McpLoginHost
     { mcpLoginSay :: !(Text -> IO ())
-    , mcpLoginPresentAuthorization :: !(Text -> IO (Either Text ()))
-    , mcpLoginAwaitCallback :: !(IO Callback -> IO (Maybe Callback))
+    -- | Open the authorization URL and wait for the loopback callback. 'Left'
+    -- cancels the login; 'Right Nothing' is a timeout.
+    , mcpLoginAuthorize :: !(Text -> IO Callback -> IO (Either Text (Maybe Callback)))
     }
 
 mcpOAuthCallbackTimeoutMicros :: Int
@@ -102,14 +109,12 @@ defaultMcpLoginHost :: McpLoginHost
 defaultMcpLoginHost =
     McpLoginHost
         { mcpLoginSay = putStrLn . Text.unpack
-        , mcpLoginPresentAuthorization = \url -> do
+        , mcpLoginAuthorize = \url wait -> do
             opened <- openBrowser url
             unless opened $
                 putStrLn
                     "Could not launch a browser automatically; open the URL above."
-            pure (Right ())
-        , mcpLoginAwaitCallback =
-            timeout mcpOAuthCallbackTimeoutMicros
+            Right <$> timeout mcpOAuthCallbackTimeoutMicros wait
         }
 
 loginMcp :: Text -> IO ()
@@ -270,10 +275,13 @@ loginMcpWithHostThrow host options serverUrl = do
                 <> (if Text.null scopeText then "" else "&scope=" <> encode scopeText)
                 <> "&resource=" <> encode resourceUri
         host.mcpLoginSay ("Opening browser for MCP authorization: " <> authUrl)
-        host.mcpLoginPresentAuthorization authUrl >>= either failText (const (pure ()))
         callback <-
-            host.mcpLoginAwaitCallback (receiveCallback listener)
-                >>= maybe (failText "Timed out waiting for MCP OAuth callback") pure
+            withListeningCallback listener \awaitCallback ->
+                host.mcpLoginAuthorize authUrl awaitCallback >>= \case
+                    Left err -> failText err
+                    Right Nothing ->
+                        failText "Timed out waiting for MCP OAuth callback"
+                    Right (Just received) -> pure received
         -- RFC 9207: validate the issuer before acting on any other parameter,
         -- including error responses.
         either failText pure $ OAuth.validateAuthorizationResponseIssuer
@@ -445,14 +453,28 @@ callbackPort sock = do
     SockAddrInet port _ <- getSocketName sock
     pure (fromIntegral port)
 
-receiveCallback :: Socket -> IO Callback
-receiveCallback listener = do
+-- | Run the loopback HTTP server and invoke the action only after Warp is
+-- accepting connections, so the browser redirect cannot lose the race.
+withListeningCallback :: Socket -> (IO Callback -> IO a) -> IO a
+withListeningCallback listener action = do
+    readyVar <- newEmptyMVar
+    withAsync (receiveCallback listener readyVar) \callbackAsync -> do
+        race (waitCatch callbackAsync) (readMVar readyVar) >>= \case
+            Left (Left err) -> throwIO err
+            Left (Right _) ->
+                failText
+                    "MCP OAuth callback server exited before accepting connections"
+            Right () -> action (wait callbackAsync)
+
+receiveCallback :: Socket -> MVar () -> IO Callback
+receiveCallback listener readyVar = do
     resultVar <- newEmptyMVar
     shutdownVar <- newEmptyMVar
     let settings =
             Warp.setHost "127.0.0.1"
                 $ Warp.setMaxTotalHeaderLength 8_192
                 $ Warp.setInstallShutdownHandler (putMVar shutdownVar)
+                $ Warp.setBeforeMainLoop (void $ tryPutMVar readyVar ())
                     Warp.defaultSettings
         application request respond
             | Wai.requestMethod request /= methodGet =

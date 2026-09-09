@@ -15,8 +15,10 @@ agent-cli mcp login https://example.com/mcp --scope files:write
 agent-cli mcp logout https://example.com/mcp
 ```
 
-In an interactive session, `/mcp` can add the HTTP server and then authorize
-it with `i` without leaving the UI.
+In an interactive session, `/mcp` adds an HTTP server and starts the browser
+OAuth flow immediately. The local callback server is listening before the
+browser opens, so the provider redirect can complete without returning to the
+terminal first. `i` still re-authorizes a selected HTTP server.
 
 `--scope` (repeatable) requests additional scopes for step-up authorization;
 they are unioned with the scopes already granted for the same issuer. A `403`
@@ -57,11 +59,12 @@ error message.
    Previously granted scopes for the same issuer and any additional scopes
    requested for step-up authorization are unioned in. `offline_access` is
    added only when the authorization server advertises it.
-7. The browser is opened with `code_challenge`, `state`, `scope`, and the
-   canonical server URI as `resource`. On callback the `iss` parameter is
-   validated against the recorded issuer before anything else is inspected,
-   then `state` is verified and the code is exchanged (again with
-   `resource`, and `client_secret` for confidential pre-registered clients).
+7. A loopback callback server is started first, then the browser is opened
+   with `code_challenge`, `state`, `scope`, and the canonical server URI as
+   `resource`. On callback the `iss` parameter is validated against the
+   recorded issuer before anything else is inspected, then `state` is verified
+   and the code is exchanged (again with `resource`, and `client_secret` for
+   confidential pre-registered clients).
 
 The token record is written atomically with mode `0600` to
 `~/.haskell-agent/credentials/mcp/<hex(url)>.json` and is picked up by

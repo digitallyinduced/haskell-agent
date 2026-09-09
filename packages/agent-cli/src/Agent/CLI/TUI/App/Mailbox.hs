@@ -720,6 +720,7 @@ appEventLogicalBytes = \case
     AppUpdateDynamicAdjustableFilterChoice _ body rows ->
         dynamicChoiceLogicalBytes [body] rows
     AppCloseDynamicAdjustableFilterChoice _ -> 256
+    AppCloseChoice _ -> 256
     AppAskText _ title body draft _ ->
         saturatingAdd 256 (logicalTextsBytes [title, body, draft])
     AppAskResume browser _ _ _ _ ->
