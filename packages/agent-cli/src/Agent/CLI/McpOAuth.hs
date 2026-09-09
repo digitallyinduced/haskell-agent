@@ -26,7 +26,7 @@ import Control.Concurrent.MVar
     , readMVar
     , tryPutMVar
     )
-import Network.URI (parseURI, uriAuthority, uriRegName, uriScheme, uriUserInfo)
+import Network.URI (parseURI, uriAuthority, uriRegName, uriScheme, uriUserInfo, uriQuery)
 import Control.Exception.Safe (bracket, bracketOnError, finally, tryAny)
 import Control.Monad (forM_, void, when)
 import Crypto.Hash (Digest, SHA256, hash)
@@ -260,10 +260,8 @@ registerAuthorizedMcpServer home serverUrl =
     modifyHarnessConfig home (\_ -> authorizedMcpServerRegistration serverUrl)
         >>= pure . fmap (\(_, _, result) -> result)
 
--- | Endpoint matching deliberately follows the exact URL key used by the
--- credential store. Resource-URI canonicalization removes query parameters
--- and therefore cannot be used to decide which configured endpoint can use
--- this credential.
+-- | Preserve the configured server when the URL spelling changes. Its URL
+-- must be updated to the exact key under which login saved the credential.
 authorizedMcpServerRegistration
     :: Text -> HarnessConfig -> Either Text (HarnessConfig, (Text, Bool))
 authorizedMcpServerRegistration serverUrl config = do
@@ -273,8 +271,12 @@ authorizedMcpServerRegistration serverUrl config = do
         || not (null (uriUserInfo authority))
         then Left "MCP server URL must be an HTTP URL without user information"
         else case [(name, server) | (name, server) <- Map.toAscList config.configMcpServers,
-                    server.mcpUrl == Just serverUrl] of
-            (name, server) : _ -> Right (config, (name, server.mcpEnabled))
+                    maybe False (sameMcpEndpoint serverUrl) server.mcpUrl] of
+            (name, server) : _ -> Right
+                ( config { configMcpServers = Map.insert name
+                    (server { mcpUrl = Just serverUrl }) config.configMcpServers }
+                , (name, server.mcpEnabled)
+                )
             [] ->
                 let hostName = Text.toLower (Text.pack (uriRegName authority))
                     baseName = Text.map sanitize hostName
@@ -327,8 +329,18 @@ lookupServerOAuthConfig serverUrl harness =
         server : _ -> server.mcpOAuth
         [] -> Nothing
   where
-    canonical = OAuth.canonicalResourceUri serverUrl
-    matches server = maybe False ((== canonical) . OAuth.canonicalResourceUri) server.mcpUrl
+    matches server = maybe False (sameMcpEndpoint serverUrl) server.mcpUrl
+
+-- | Use the resource URI's spelling normalization, but retain the complete
+-- query: different queries can identify different accounts or MCP endpoints.
+-- Invalid URLs only match exactly, never through the resource URI fallback.
+sameMcpEndpoint :: Text -> Text -> Bool
+sameMcpEndpoint left right =
+    left == right || case (parseURI (Text.unpack left), parseURI (Text.unpack right)) of
+        (Just leftUri, Just rightUri) ->
+            OAuth.canonicalResourceUri left == OAuth.canonicalResourceUri right
+                && uriQuery leftUri == uriQuery rightUri
+        _ -> False
 
 data Callback = Callback
     { callbackCode :: Maybe Text

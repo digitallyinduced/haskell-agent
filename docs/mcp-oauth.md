@@ -72,6 +72,10 @@ when necessary to avoid overwriting another server. Existing server names,
 settings, and explicit disabled states are preserved. If the server is
 disabled, login prints the command needed to enable it.
 
+Equivalent URL spellings (such as a trailing slash or host capitalization)
+reuse the configured server. Its URL is updated to the spelling used for login
+so it uses the saved credential. Query parameters remain significant.
+
 Start a new session to connect the
 registered server. A failed authorization does not register a server.
 

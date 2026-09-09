@@ -2,15 +2,17 @@ module Agent.CLI.McpCatalogSpec (spec) where
 
 import Agent.CLI.Config
     ( HarnessConfig(..)
+    , McpOAuthConfig(..)
     , McpServerConfig(..)
     , defaultHarnessConfig
     , loadHarnessConfig
     , saveHarnessConfig
     )
 import Agent.CLI.McpCatalog
-import Agent.CLI.McpOAuth (registerAuthorizedMcpServer)
+import Agent.CLI.McpOAuth (lookupServerOAuthConfig, registerAuthorizedMcpServer)
 import Agent.MCP (McpProtocolPreference(..))
 import Control.Exception.Safe (bracket)
+import Control.Monad (forM_)
 import qualified Data.Aeson as Aeson
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
@@ -49,6 +51,42 @@ spec = describe "Agent.CLI.McpCatalog" do
                 registerAuthorizedMcpServer home "https://example.test/mcp"
                     `shouldReturn` Right ("billing", False)
                 loadHarnessConfig home `shouldReturn` Right configured
+
+        forM_ [False, True] \enabled ->
+            it ("reuses equivalent URL spellings with enabled = " <> show enabled) $
+                withTempDir \home -> do
+                    let oauth = McpOAuthConfig (Just "billing-client") Nothing Nothing ["billing"]
+                        server = remoteServer
+                            { mcpUrl = Just "https://EXAMPLE.test/mcp/?account=first"
+                            , mcpEnabled = enabled
+                            , mcpRequestTimeoutSeconds = 123
+                            , mcpOAuth = Just oauth
+                            }
+                        configured = catalogConfig
+                            { configMcpServers = Map.singleton "billing" server }
+                        loginUrl = "https://example.test/mcp?account=first"
+                    lookupServerOAuthConfig loginUrl configured `shouldBe` Just oauth
+                    saveHarnessConfig home configured `shouldReturn` Right ()
+                    registerAuthorizedMcpServer home loginUrl
+                        `shouldReturn` Right ("billing", enabled)
+                    registerAuthorizedMcpServer home loginUrl
+                        `shouldReturn` Right ("billing", enabled)
+                    loadHarnessConfig home `shouldReturn` Right configured
+                        { configMcpServers = Map.singleton "billing" server
+                            { mcpUrl = Just loginUrl } }
+
+        it "does not reuse OAuth settings from a different endpoint query" do
+            let oauth = McpOAuthConfig (Just "first-client") Nothing Nothing ["first"]
+                configured = catalogConfig
+                    { configMcpServers = Map.singleton "billing" remoteServer
+                        { mcpUrl = Just "https://example.test/mcp?account=first"
+                        , mcpOAuth = Just oauth
+                        }
+                    }
+            lookupServerOAuthConfig "https://example.test/mcp?account=second" configured
+                `shouldBe` Nothing
+            lookupServerOAuthConfig "https://example.test/mcp" configured
+                `shouldBe` Nothing
 
         it "allocates a stable unused name without overwriting other endpoints" $
             withTempDir \home -> do
