@@ -54,6 +54,7 @@ library
                     , Agent.Server.PrivateFile
                     , Agent.Server.Runtime
                     , Agent.Server.RepositoryCheckout
+                    , Agent.Server.SessionSetup
                     , Agent.Server.Runtime.TurnStore
                     , Agent.Server.Sandbox
                     , Agent.Server.Sandbox.Worker
@@ -136,6 +137,7 @@ test-suite agent-server-test
                     , Agent.Server.ConfigSpec
                     , Agent.Server.EventSpec
                     , Agent.Server.RepositoryCheckoutSpec
+                    , Agent.Server.SessionSetupSpec
                     , Agent.Server.SandboxSpec
                     , Agent.Server.SupervisorSpec
                     , Agent.Server.TenantSpec

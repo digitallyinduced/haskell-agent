@@ -1,5 +1,11 @@
 module Agent.Server.RepositoryCheckout
     ( RepositoryCheckout(..)
+    , PreparedRepositoryLayout(..)
+    , RepositoryCheckoutOperation(..)
+    , CheckoutOperationStatus(..)
+    , prepareRepositoryLayout
+    , repositoryCheckoutOperations
+    , completeRepositoryCheckout
     , prepareRepositoryCheckout
     , cleanupRepositoryCheckout
     , validateDescriptor
@@ -8,6 +14,7 @@ module Agent.Server.RepositoryCheckout
     ) where
 
 import Control.Exception.Safe (tryAny)
+import Control.Monad (forM_)
 import Data.Char (isAlphaNum, isAscii, isControl, isSpace)
 import Data.List (isPrefixOf)
 import Data.Text (Text)
@@ -40,12 +47,36 @@ data RepositoryCheckout = RepositoryCheckout
     , cleanupCheckout :: !(IO ())
     }
 
-prepareRepositoryCheckout
+-- | Credential files and the empty checkout directory, before any Git
+-- network operations. Session creation uses this so the working directory
+-- exists while clone and branch creation run in the background.
+data PreparedRepositoryLayout = PreparedRepositoryLayout
+    { layoutWorkspaceRoot :: !FilePath
+    , layoutRoot :: !FilePath
+    , layoutCheckoutPath :: !FilePath
+    , layoutHelperPath :: !FilePath
+    , layoutBranch :: !Text
+    , layoutCleanup :: !(IO ())
+    }
+
+data RepositoryCheckoutOperation = RepositoryCheckoutOperation
+    { checkoutOperationId :: !Text
+    , checkoutOperationCommand :: !Text
+    , checkoutOperationArguments :: ![String]
+    }
+
+data CheckoutOperationStatus
+    = CheckoutOperationRunning
+    | CheckoutOperationCompleted
+    | CheckoutOperationFailed
+    deriving (Eq, Show)
+
+prepareRepositoryLayout
     :: FilePath
     -> Text
     -> RepositoryDescriptor
-    -> IO (Either Text RepositoryCheckout)
-prepareRepositoryCheckout workspaceRoot correlation descriptor =
+    -> IO (Either Text PreparedRepositoryLayout)
+prepareRepositoryLayout workspaceRoot correlation descriptor =
     case validateDescriptor descriptor of
         Left err -> pure (Left err)
         Right () -> do
@@ -69,17 +100,6 @@ prepareRepositoryCheckout workspaceRoot correlation descriptor =
                 makeExecutable helper
                 writeFile ghWrapper ghWrapperScript
                 makeExecutable ghWrapper
-                runGit workspaceRoot
-                    [ "-c", "credential.helper=" <> helper
-                    , "-c", "credential.useHttpPath=true"
-                    , "clone", "--single-branch"
-                    , "--branch", Text.unpack descriptor.repositoryDefaultBranch
-                    , Text.unpack descriptor.repositoryCloneUrl
-                    , checkout
-                    ]
-                runGit workspaceRoot ["-C", checkout, "config", "credential.helper", helper]
-                runGit workspaceRoot ["-C", checkout, "config", "credential.useHttpPath", "true"]
-                runGit workspaceRoot ["-C", checkout, "switch", "-c", Text.unpack branch]
                 writeFile
                     (root </> "README")
                     ("GitHub CLI wrapper: " <> ghWrapper <> "\n")
@@ -88,7 +108,99 @@ prepareRepositoryCheckout workspaceRoot correlation descriptor =
                     _ <- tryAny cleanup
                     pure (Left "could not prepare repository checkout")
                 Right () ->
-                    pure (Right RepositoryCheckout{checkoutPath = checkout, checkoutBranch = branch, cleanupCheckout = cleanup})
+                    pure $
+                        Right
+                            PreparedRepositoryLayout
+                                { layoutWorkspaceRoot = workspaceRoot
+                                , layoutRoot = root
+                                , layoutCheckoutPath = checkout
+                                , layoutHelperPath = helper
+                                , layoutBranch = branch
+                                , layoutCleanup = cleanup
+                                }
+
+repositoryCheckoutOperations
+    :: PreparedRepositoryLayout
+    -> RepositoryDescriptor
+    -> [RepositoryCheckoutOperation]
+repositoryCheckoutOperations layout descriptor =
+    [ RepositoryCheckoutOperation
+        { checkoutOperationId = "clone"
+        , checkoutOperationCommand =
+            "git clone --single-branch --branch "
+                <> descriptor.repositoryDefaultBranch
+                <> " "
+                <> descriptor.repositoryCloneUrl
+        , checkoutOperationArguments =
+            [ "-c", "credential.helper=" <> layout.layoutHelperPath
+            , "-c", "credential.useHttpPath=true"
+            , "clone", "--single-branch"
+            , "--branch", Text.unpack descriptor.repositoryDefaultBranch
+            , Text.unpack descriptor.repositoryCloneUrl
+            , layout.layoutCheckoutPath
+            ]
+        }
+    , RepositoryCheckoutOperation
+        { checkoutOperationId = "credential-helper"
+        , checkoutOperationCommand =
+            "git config credential.helper git-credential-github-app"
+        , checkoutOperationArguments =
+            ["-C", layout.layoutCheckoutPath, "config", "credential.helper", layout.layoutHelperPath]
+        }
+    , RepositoryCheckoutOperation
+        { checkoutOperationId = "http-path"
+        , checkoutOperationCommand = "git config credential.useHttpPath true"
+        , checkoutOperationArguments =
+            ["-C", layout.layoutCheckoutPath, "config", "credential.useHttpPath", "true"]
+        }
+    , RepositoryCheckoutOperation
+        { checkoutOperationId = "switch-branch"
+        , checkoutOperationCommand = "git switch -c " <> layout.layoutBranch
+        , checkoutOperationArguments =
+            ["-C", layout.layoutCheckoutPath, "switch", "-c", Text.unpack layout.layoutBranch]
+        }
+    ]
+
+completeRepositoryCheckout
+    :: PreparedRepositoryLayout
+    -> RepositoryDescriptor
+    -> (RepositoryCheckoutOperation -> CheckoutOperationStatus -> IO ())
+    -> IO (Either Text RepositoryCheckout)
+completeRepositoryCheckout layout descriptor onStep = do
+    let operations = repositoryCheckoutOperations layout descriptor
+    outcome <- tryAny $
+        forM_ operations \operation -> do
+            onStep operation CheckoutOperationRunning
+            runGit layout.layoutWorkspaceRoot operation.checkoutOperationArguments
+            onStep operation CheckoutOperationCompleted
+    case outcome of
+        Left _ -> pure (Left "could not prepare repository checkout")
+        Right () ->
+            pure $
+                Right
+                    RepositoryCheckout
+                        { checkoutPath = layout.layoutCheckoutPath
+                        , checkoutBranch = layout.layoutBranch
+                        , cleanupCheckout = layout.layoutCleanup
+                        }
+
+-- | Create the layout and run every Git operation before returning. Callers
+-- that must not block on the network should use 'prepareRepositoryLayout'
+-- and 'completeRepositoryCheckout' separately.
+prepareRepositoryCheckout
+    :: FilePath
+    -> Text
+    -> RepositoryDescriptor
+    -> IO (Either Text RepositoryCheckout)
+prepareRepositoryCheckout workspaceRoot correlation descriptor =
+    prepareRepositoryLayout workspaceRoot correlation descriptor >>= \case
+        Left err -> pure (Left err)
+        Right layout ->
+            completeRepositoryCheckout layout descriptor (\_ _ -> pure ()) >>= \case
+                Left err -> do
+                    _ <- tryAny layout.layoutCleanup
+                    pure (Left err)
+                Right checkout -> pure (Right checkout)
 
 -- | Remove only checkouts created by 'prepareRepositoryCheckout'. The strict
 -- shape check prevents an arbitrary session cwd from becoming a deletion

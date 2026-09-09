@@ -14,9 +14,11 @@ import Agent.Server.Backend
 import Agent.Server.Config
 import Agent.Server.Runtime
     ( closeServerRuntime
+    , installSessionEventSink
     , openServerRuntime
     , serverRuntimeBackend
     )
+import Agent.Server.SessionSetup (SessionEventSink (..))
 import Agent.Server.Supervisor
 import Agent.Server.Tenant hiding (resolveTenantWorkspacePath)
 import Agent.Server.Types
@@ -82,6 +84,18 @@ runServer = do
                                     runTurn)
                                 closeSupervisor
                                 \supervisor -> do
+                                    installSessionEventSink ownedRuntime $
+                                        SessionEventSink
+                                            { emitSessionEvent =
+                                                \boundary sessionId eventType payload ->
+                                                    publishEvent
+                                                        supervisor
+                                                        boundary
+                                                        eventType
+                                                        Nothing
+                                                        (Just sessionId)
+                                                        payload
+                                            }
                                     application <-
                                         newApplication
                                             ApplicationConfig
