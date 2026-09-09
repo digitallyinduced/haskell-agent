@@ -481,6 +481,7 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appDictation = Nothing
         , appSlashCatalog = defaultSlashCatalog
         , appImagePreviews = []
+        , appComposerOwnsImagePreviews = False
         , appSubmittedImagePreviews = Map.empty
         , appAgentSelected = initialAgent
         , appAgentEntries = initialAgents

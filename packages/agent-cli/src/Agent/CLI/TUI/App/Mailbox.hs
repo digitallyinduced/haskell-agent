@@ -760,6 +760,8 @@ appEventLogicalBytes = \case
         either logicalTextBytes logicalTextBytes result
     AppSetImagePreviews previews ->
         imagePreviewPairsLogicalBytes previews
+    AppRefreshImagePreviews previews ->
+        imagePreviewPairsLogicalBytes previews
     AppCommitImagePreviews previews ->
         imagePreviewPairsLogicalBytes previews
     AppToolImage callId preview ->

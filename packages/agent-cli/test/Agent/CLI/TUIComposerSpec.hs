@@ -25,8 +25,10 @@ import Agent.CLI.Input
     )
 import Agent.CLI.TUI.Composer
 import Agent.CLI.TUI.Types
+import Agent.Loop (ImageAttachment(..))
 import Agent.TUI.Model
     ( NoticeKind(..)
+    , PromptState(..)
     , UiNotice(..)
     , UiState(..)
     , initialUiState
@@ -126,6 +128,17 @@ spec = describe "fullscreen composer" do
             "WHERE listings.agent_id = $1"
             `shouldBe` Just (True, "WHERE listings.agent_id = $1")
         steeringPrompt initialUiState True "not running"
+            `shouldBe` Nothing
+
+    it "keeps prompts with images out of text-only steering" do
+        let prompt = initialUiState.uiPrompt
+        steeringPrompt
+            initialUiState
+                { uiRunning = True
+                , uiPrompt = prompt { promptAttachments = 1 }
+                }
+            False
+            "describe the image"
             `shouldBe` Nothing
 
     it "dismisses slash completion or preserves the draft while idle" do
@@ -275,6 +288,74 @@ spec = describe "fullscreen composer" do
                 , 4
                 , Just (ReplClipboardPaste "next message" Nothing)
                 )
+
+    it "attaches clipboard images immediately without reading clipboard text" do
+        let image = ImageAttachment "image/png" "clipboard image"
+        attached <- newIORef []
+        result <- processComposerPaste
+            (pure (Right [image]))
+            (\_ -> expectationFailure "unexpected path read" >> pure Nothing)
+            (expectationFailure "unexpected text read" >> pure (Right ""))
+            (\images -> do
+                modifyIORef' attached (<> images)
+                pure (Right "attached"))
+            Nothing
+        result `shouldBe` ComposerPasteAttached "attached"
+        readIORef attached `shouldReturn` [image]
+
+    it "resolves an empty bracketed image paste without deferring to input" do
+        let image = ImageAttachment "image/png" "clipboard image"
+        processComposerPaste
+            (pure (Right [image]))
+            (const (pure Nothing))
+            (pure (Right ""))
+            (const (pure (Right "attached")))
+            (Just "")
+            `shouldReturn` ComposerPasteAttached "attached"
+
+    it "loads terminal image paths without consulting a different clipboard image" do
+        let image = ImageAttachment "image/png" "file image"
+        attached <- newIORef []
+        result <- processComposerPaste
+            (expectationFailure "unexpected clipboard read" >> pure (Right []))
+            (\path -> do
+                path `shouldBe` "/images/example.png"
+                pure (Just [image]))
+            (pure (Right ""))
+            (\images -> do
+                modifyIORef' attached (<> images)
+                pure (Right "attached"))
+            (Just "/images/example.png")
+        result `shouldBe` ComposerPasteAttached "attached"
+        readIORef attached `shouldReturn` [image]
+
+    it "preserves terminal text without reading potentially stale clipboard data" do
+        processComposerPaste
+            (expectationFailure "unexpected clipboard read" >> pure (Right []))
+            (const (pure Nothing))
+            (expectationFailure "unexpected clipboard text read" >> pure (Right ""))
+            (\_ -> expectationFailure "unexpected image attachment" >> pure (Right ""))
+            (Just " plain\ntext ")
+            `shouldReturn` ComposerPasteText " plain\ntext "
+
+    it "falls back to clipboard text when no clipboard image exists" do
+        processComposerPaste
+            (pure (Left "no image"))
+            (const (pure Nothing))
+            (pure (Right "copied text"))
+            (const (pure (Right "attached")))
+            Nothing
+            `shouldReturn` ComposerPasteText "copied text"
+
+    it "reports image attachment failures rather than inserting image paths" do
+        let image = ImageAttachment "image/png" "file image"
+        processComposerPaste
+            (pure (Right []))
+            (const (pure (Just [image])))
+            (pure (Right ""))
+            (const (pure (Left "attachment limit reached")))
+            (Just "/images/example.png")
+            `shouldReturn` ComposerPasteFailed "attachment limit reached"
 
     it "inserts dictation at the cursor with word-safe spacing" do
         insertDictation "please now" 6 "fix this"
@@ -485,6 +566,38 @@ spec = describe "fullscreen composer" do
                     "before/path.png"
                 , ReplText "urgent"
                 , ReplText "queued"
+                ]
+
+    it "retains captured images after older queued prompts" do
+        let image = ImageAttachment "image/png" "captured image"
+        buffer <- newFullscreenInputBuffer
+        atomically do
+            appendFullscreenInput buffer (input (ReplText "older prompt"))
+            appendFullscreenInput buffer
+                (input (ReplClipboardPasteCaptured [image]))
+            appendFullscreenInput buffer (input (ReplText "image prompt"))
+        queued <- atomically (readFullscreenInputs buffer)
+        map (.fullscreenInputLine) (toList queued)
+            `shouldBe`
+                [ ReplText "older prompt"
+                , ReplClipboardPasteCaptured [image]
+                , ReplText "image prompt"
+                ]
+
+    it "promotes captured image preludes with their draft rather than older prompts" do
+        let image = ImageAttachment "image/png" "captured image"
+        buffer <- newFullscreenInputBuffer
+        atomically do
+            appendFullscreenInput buffer (input (ReplText "older prompt"))
+            appendFullscreenInput buffer
+                (input (ReplClipboardPasteCaptured [image]))
+            promoteFullscreenInput buffer (input (ReplText "image prompt"))
+        queued <- atomically (readFullscreenInputs buffer)
+        map (.fullscreenInputLine) (toList queued)
+            `shouldBe`
+                [ ReplClipboardPasteCaptured [image]
+                , ReplText "image prompt"
+                , ReplText "older prompt"
                 ]
 
     it "only exposes displays for queued prompts" do

@@ -410,6 +410,10 @@ handleAppEvent = \case
         handleSetModelIdsEvent modelIds
     AppSetImagePreviews prepared ->
         handleSetImagePreviewsEvent prepared
+    AppRefreshImagePreviews prepared -> do
+        state <- get
+        unless state.appComposerOwnsImagePreviews $
+            handleSetImagePreviewsEvent prepared
     AppCommitImagePreviews prepared ->
         handleCommitImagePreviewsEvent prepared
     AppToolImage callId preview ->
@@ -596,6 +600,7 @@ handleSetImagePreviewsEvent prepared = do
     modify' \current ->
         current
             { appImagePreviews = map snd prepared
+            , appComposerOwnsImagePreviews = False
             }
 
 handleCommitImagePreviewsEvent
@@ -618,7 +623,7 @@ handleCommitImagePreviewsEvent prepared = do
             retainSubmittedImagePreviewsForBlocks
                 (nub (conversationBlockIds state <> [nextBlockId]))
                 submitted
-    liftIO do
+    liftIO $ when (not state.appComposerOwnsImagePreviews) do
         writeIORef state.appRuntime.runtimeImagePreviews []
         modifyIORef'
             state.appRuntime.runtimeImagePreviewRevision
@@ -626,7 +631,10 @@ handleCommitImagePreviewsEvent prepared = do
     clearSubmittedImagePlacements state.appRuntime
     modify' \current ->
         current
-            { appImagePreviews = []
+            { appImagePreviews =
+                if current.appComposerOwnsImagePreviews
+                    then current.appImagePreviews
+                    else []
             , appSubmittedImagePreviews = retained
             }
     queueConversationReflow

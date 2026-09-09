@@ -1,6 +1,7 @@
 -- | Fullscreen prompt composer rendering, editing, and input buffering.
 module Agent.CLI.TUI.Composer
     ( ComposerEscapeAction(..)
+    , ComposerPasteResult(..)
     , KillDirection(..)
     , activateSlashAt
     , appendFullscreenInput
@@ -35,6 +36,7 @@ module Agent.CLI.TUI.Composer
     , isKillKey
     , newFullscreenInputBuffer
     , prepareBracketedPaste
+    , processComposerPaste
     , promoteFullscreenInput
     , queuedFullscreenInputDisplays
     , readFullscreenInputs
@@ -49,7 +51,10 @@ module Agent.CLI.TUI.Composer
     ) where
 
 import Agent.CLI.Clipboard
-    ( nonEmptyClipboardText
+    ( appendBoundedImageAttachments
+    , loadImagesFromPastedText
+    , nonEmptyClipboardText
+    , readClipboardImagesImageFirst
     , readClipboardText
     )
 import Agent.CLI.Command
@@ -64,11 +69,16 @@ import Agent.CLI.Input
     , submissionPromptText
     )
 import Agent.CLI.Interrupt (CtrlCDecision)
+import Agent.Loop (ImageAttachment)
 import qualified Agent.CLI.TUI.Bridge as Bridge
 import Agent.CLI.TUI.Composer.Buffer
 import Agent.CLI.TUI.Composer.Edit
 import Agent.CLI.TUI.Composer.Logic
 import Agent.CLI.TUI.Composer.Render
+import Agent.CLI.TUI.ImagePreview
+    ( prepareNativeTuiImagePreview
+    , prepareTuiImagePreview
+    )
 import Agent.CLI.TUI.Types
 import Agent.TUI.Model
 import Agent.TUI.TextWidth
@@ -81,7 +91,7 @@ import Control.Concurrent.STM (atomically, writeTQueue)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
-import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (elemIndex)
 import Data.Maybe (fromMaybe)
 import qualified Data.Sequence as Seq
@@ -339,6 +349,7 @@ prepareBracketedPaste awaitingInput draft cursor pasted =
 steeringPrompt :: UiState -> Bool -> Text -> Maybe (Bool, Text)
 steeringPrompt ui pasted text
     | not ui.uiRunning = Nothing
+    | ui.uiPrompt.promptAttachments > 0 = Nothing
     | otherwise =
         case parseReplLine text of
             ReplPrompt prompt -> Just (pasted, prompt)
@@ -480,11 +491,14 @@ handleComposerKey
         V.EvKey (V.KChar 'v') modifiers
             | V.MCtrl `elem` modifiers
                 || V.MMeta `elem` modifiers -> do
-                clipboardText <- liftIO readClipboardText
-                case nonEmptyClipboardText clipboardText of
-                    Just text -> insertPastedText applyUiEvent text
-                    Nothing ->
-                        submitRaw applyUiEvent (ReplClipboardPaste ui.uiDraft Nothing)
+                if ui.uiRunning
+                    then handleActiveComposerPaste applyUiEvent Nothing
+                    else do
+                        clipboardText <- liftIO readClipboardText
+                        case nonEmptyClipboardText clipboardText of
+                            Just text -> insertPastedText applyUiEvent text
+                            Nothing ->
+                                submitRaw applyUiEvent (ReplClipboardPaste ui.uiDraft Nothing)
         V.EvKey V.KDel [] ->
             deleteAfter applyUiEvent
         V.EvKey V.KLeft modifiers
@@ -509,6 +523,8 @@ handleComposerKey
             scrollConversationPage Down
         V.EvKey (V.KChar character) [] ->
             insertText applyUiEvent (Text.singleton character)
+        V.EvPaste bytes | ui.uiRunning ->
+            handleActiveComposerPaste applyUiEvent (Just (decodePaste bytes))
         V.EvPaste bytes -> do
             let pasted = decodePaste bytes
                 (pastedDraft, pastedCursor, clipboardInput) =
@@ -532,6 +548,116 @@ handleComposerKey
     -- Only a kill directly followed by another kill accumulates into the
     -- kill buffer; any other key breaks the chain.
     modify' \current -> current { appKillChain = isKillKey event }
+
+-- | Resolve a paste independently of the REPL consumer, which cannot service
+-- clipboard actions while a provider turn is running. Terminal-supplied text
+-- is authoritative; only an explicit clipboard paste consults bitmap data.
+data ComposerPasteResult
+    = ComposerPasteText !Text
+    | ComposerPasteAttached !Text
+    | ComposerPasteFailed !Text
+    deriving (Eq, Show)
+
+processComposerPaste
+    :: Monad m
+    => m (Either Text [ImageAttachment])
+    -> (Text -> m (Maybe [ImageAttachment]))
+    -> m (Either Text Text)
+    -> ([ImageAttachment] -> m (Either Text Text))
+    -> Maybe Text
+    -> m ComposerPasteResult
+processComposerPaste readImages loadPaths readText attachImages terminalText =
+    case terminalText of
+        Just text | not (Text.null text) -> do
+            loadPaths text >>= \case
+                Just images@(_:_) -> attach images
+                _ -> pure (ComposerPasteText text)
+        _ -> do
+            imagesResult <- readImages
+            case imagesResult of
+                Right images@(_:_) -> attach images
+                _ -> do
+                    textResult <- readText
+                    pure $ case nonEmptyClipboardText textResult of
+                        Just text -> ComposerPasteText text
+                        Nothing -> ComposerPasteFailed $
+                            either id
+                                (const "no image found on the clipboard")
+                                imagesResult
+  where
+    attach images =
+        either ComposerPasteFailed ComposerPasteAttached
+            <$> attachImages images
+
+handleActiveComposerPaste
+    :: ApplyLocalUiEvent
+    -> Maybe Text
+    -> EventM Name AppState ()
+handleActiveComposerPaste applyUiEvent terminalText = do
+    result <-
+        processComposerPaste
+            (liftIO readClipboardImagesImageFirst)
+            (liftIO . loadImagesFromPastedText)
+            (liftIO readClipboardText)
+            (queueComposerImages applyUiEvent)
+            terminalText
+    case result of
+        ComposerPasteText text -> insertPastedText applyUiEvent text
+        ComposerPasteAttached message ->
+            modifyUi applyUiEvent
+                (UiSetNotice (Just (successNotice message)))
+        ComposerPasteFailed message ->
+            modifyUi applyUiEvent
+                (UiSetNotice (Just (warningNotice message)))
+
+queueComposerImages
+    :: ApplyLocalUiEvent
+    -> [ImageAttachment]
+    -> EventM Name AppState (Either Text Text)
+queueComposerImages applyUiEvent images = do
+    state <- get
+    previous <- liftIO (readIORef state.appRuntime.runtimeImagePreviews)
+    let (_, added, _, rejected) =
+            appendBoundedImageAttachments (map fst previous) images
+        prepare =
+            if state.appRuntime.runtimeNativeImagePreviews
+                then prepareNativeTuiImagePreview
+                else prepareTuiImagePreview
+    if null added
+        then pure $
+            if rejected > 0
+                then Left "image attachment limit reached"
+                else Right "image already attached"
+        else case traverse (\image -> (image,) <$> prepare image) added of
+            Left message -> pure (Left message)
+            Right prepared -> do
+                queued <- liftIO $ atomically $
+                    appendFullscreenInput state.appRuntime.runtimeInput FullscreenInput
+                        { fullscreenInputLine = ReplClipboardPasteCaptured added
+                        , fullscreenInputQueued = True
+                        , fullscreenInputDisplay = Nothing
+                        }
+                case queued of
+                    Left message -> pure (Left message)
+                    Right () -> do
+                        let pending = previous <> prepared
+                            prompt = state.appUi.uiPrompt
+                        liftIO do
+                            writeIORef state.appRuntime.runtimeImagePreviews pending
+                            modifyIORef'
+                                state.appRuntime.runtimeImagePreviewRevision
+                                (+ 1)
+                        modify' \current -> current
+                            { appImagePreviews = map snd pending
+                            , appComposerOwnsImagePreviews = True
+                            }
+                        applyUiEvent
+                            (UiSetPrompt prompt { promptAttachments = length pending })
+                            id
+                        pure $ Right $
+                            if rejected > 0
+                                then "image attached; some images exceeded the attachment limit"
+                                else "image attached — send with next message"
 
 startDictation :: ApplyLocalUiEvent -> EventM Name AppState ()
 startDictation applyUiEvent = do
@@ -691,6 +817,8 @@ sendNow applyUiEvent = do
                                     , appSlashDismissed = False
                                     , appUndo = []
                                     }
+                        when state.appComposerOwnsImagePreviews $
+                            clearComposerImagePreviews applyUiEvent
                         liftIO state.appRuntime.runtimeCancel
                         vScrollToEnd
                             (viewportScroll ConversationViewport)
@@ -738,7 +866,19 @@ enqueueInput applyUiEvent state replLine display clearDraft = do
             case event of
                 Nothing -> modify' update
                 Just uiEvent -> applyUiEvent uiEvent update
+            when (clearDraft && state.appComposerOwnsImagePreviews) $
+                clearComposerImagePreviews applyUiEvent
             pure True
+
+clearComposerImagePreviews :: ApplyLocalUiEvent -> EventM Name AppState ()
+clearComposerImagePreviews applyUiEvent = do
+    state <- get
+    liftIO do
+        writeIORef state.appRuntime.runtimeImagePreviews []
+        modifyIORef' state.appRuntime.runtimeImagePreviewRevision (+ 1)
+    let prompt = state.appUi.uiPrompt
+    modify' \current -> current { appImagePreviews = [] }
+    applyUiEvent (UiSetPrompt prompt { promptAttachments = 0 }) id
 
 cancelOrClear :: ApplyLocalUiEvent -> EventM Name AppState ()
 cancelOrClear applyUiEvent = do
