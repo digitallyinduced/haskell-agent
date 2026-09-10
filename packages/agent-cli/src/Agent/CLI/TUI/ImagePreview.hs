@@ -11,6 +11,11 @@ module Agent.CLI.TUI.ImagePreview
     , prepareTuiImagePreview
     , previewCountForWidth
     , previewCellSize
+    , completePreviewExtent
+    , submittedPreviewMaxColumns
+    , submittedPreviewMaxRows
+    , toolImageMaxColumns
+    , toolImageMaxRows
     , previewImageAt
     , renderTuiImagePreview
     ) where
@@ -282,6 +287,39 @@ previewCellSize :: Int -> Int -> TuiImagePreview -> (Int, Int)
 previewCellSize maxColumns maxRows preview =
     let (pixelWidth, pixelHeight) = previewPixelSize maxColumns maxRows preview
     in (pixelWidth, (pixelHeight + 1) `div` 2)
+
+-- | Thumbnails attached to a submitted prompt.
+submittedPreviewMaxColumns :: Int
+submittedPreviewMaxColumns = 36
+
+submittedPreviewMaxRows :: Int
+submittedPreviewMaxRows = 12
+
+-- | Agent-displayed images, including charts, occupy a larger canvas.
+toolImageMaxColumns :: Int
+toolImageMaxColumns = 72
+
+toolImageMaxRows :: Int
+toolImageMaxRows = 24
+
+-- | Whether a Brick-reported cell rectangle is still the complete preview.
+-- Conversation widgets size themselves with the submitted or tool-image caps;
+-- Brick then clamps extents to the visible viewport. Kitty placements must
+-- ignore those fragments, otherwise the terminal stretches the bitmap into
+-- the leftover cells while scrolling.
+completePreviewExtent :: TuiImagePreview -> (Int, Int) -> Bool
+completePreviewExtent preview size@(columns, rows) =
+    columns > 0
+        && rows > 0
+        && any (size ==)
+            [ previewCellSize capColumns maxRows preview
+            | (capColumns, maxRows) <-
+                [ (columns, submittedPreviewMaxRows)
+                , (columns, toolImageMaxRows)
+                , (submittedPreviewMaxColumns, submittedPreviewMaxRows)
+                , (toolImageMaxColumns, toolImageMaxRows)
+                ]
+            ]
 
 -- | Match the centered Brick overlay layout with zero-based terminal-cell
 -- placements for Kitty graphics. The caption occupies the row immediately

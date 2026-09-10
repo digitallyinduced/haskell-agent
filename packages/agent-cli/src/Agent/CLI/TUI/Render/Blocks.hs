@@ -26,7 +26,11 @@ import Agent.CLI.TUI.ImagePreview
     ( TuiImagePreview(previewBytes, previewMime, previewSourceWidth,
                       previewSourceHeight),
       previewCellSize,
-      renderTuiImagePreview )
+      renderTuiImagePreview,
+      submittedPreviewMaxColumns,
+      submittedPreviewMaxRows,
+      toolImageMaxColumns,
+      toolImageMaxRows )
 import Agent.CLI.TUI.LambdaArt ()
 import Agent.CLI.TUI.Motion
     ( motionModeForTerminalFocus, userActionPending )
@@ -424,7 +428,11 @@ submittedUserMessage state target block =
     nativePlaceholder index preview
         | not state.appRuntime.runtimeNativeImagePreviews = []
         | otherwise =
-            let (columns, rows) = previewCellSize 36 12 preview
+            let (columns, rows) =
+                    previewCellSize
+                        submittedPreviewMaxColumns
+                        submittedPreviewMaxRows
+                        preview
             in [ reportExtent
                     (ConversationImage block.blockId index) $
                     hLimit columns $
@@ -445,8 +453,10 @@ imagePreviewSummary preview =
 -- | Images the agent displayed with @show_image@ while this tool call ran.
 -- Only the root conversation carries previews; child viewports show the
 -- textual tool result alone. Native terminals get a placeholder extent that
--- the Kitty placement sync fills after each reflow; other terminals draw the
--- sampled bitmap directly.
+-- the Kitty placement sync fills after each reflow, and only while Brick
+-- still reports the complete cell rectangle. Cropped scrollback extents are
+-- left empty so the terminal cannot stretch the bitmap. Other terminals draw
+-- the sampled bitmap directly.
 toolImageSections :: AppState -> AgentTarget -> UiBlock -> [Widget Name]
 toolImageSections state target block =
     case target of
@@ -488,14 +498,6 @@ toolImageSections state target block =
                             maxColumns
                             toolImageMaxRows
                             preview
-
--- | Agent-displayed images are the point of the call, so they get a larger
--- canvas than the thumbnail attached to a submitted prompt.
-toolImageMaxColumns :: Int
-toolImageMaxColumns = 72
-
-toolImageMaxRows :: Int
-toolImageMaxRows = 24
 
 timestampedMessage :: AttrName -> Text -> Widget Name -> Widget Name
 timestampedMessage timestampAttr timestamp body
