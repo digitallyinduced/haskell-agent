@@ -18,6 +18,9 @@ module Agent.CLI.CodeModeRuntime
     , codexCatalogDefaultEffort
     , projectCodeModeTools
     , projectCodeModeToolsFor
+    , CodeModeRuntimePlan(..)
+    , codeModeRuntimePlan
+    , codeModeRuntimeFor
     , codeModeSessionRuntimeFor
     , imageGenerationCodeModeRuntimeFor
     , imageGenerationCodeModeProjection
@@ -126,6 +129,31 @@ data CodeModeProjectionStrategy
     = FullCodeModeProjection
     | ImageGenerationOnlyCodeModeProjection
     deriving (Eq, Show)
+
+-- | Which code-mode runtime to start after resolving catalog @tool_mode@.
+data CodeModeRuntimePlan
+    = PlanFullCodeMode
+    | PlanImageGenerationCodeMode
+    | PlanNoCodeMode
+    deriving (Eq, Show)
+
+-- | Codex resolves catalog @tool_mode@ first. @fallback@ applies only when
+-- the catalog omits a recognized selector. When full code mode is not
+-- allowed, catalog code-only models still wrap image generation in @exec@.
+codeModeRuntimePlan
+    :: Bool
+    -> ToolMode
+    -> Maybe ModelInfo
+    -> CodeModeRuntimePlan
+codeModeRuntimePlan allowFull fallback maybeInfo =
+    case resolved of
+        CodeOnlyToolMode
+            | allowFull -> PlanFullCodeMode
+            | otherwise -> PlanImageGenerationCodeMode
+        CodeToolMode -> PlanNoCodeMode
+        ConventionalToolMode -> PlanNoCodeMode
+  where
+    resolved = maybe fallback (toolModeForInfo fallback) maybeInfo
 
 data CodeModeSessionRuntime = CodeModeSessionRuntime
     { codeModeWireTools :: ![AppTool]
@@ -254,35 +282,47 @@ codexCatalogDefaultEffort info =
     reasoningEffortText
         <$> (info >>= defaultReasoningEffortForInfo)
 
--- | Build the code-mode session runtime when the catalog selects code mode.
+-- | Start the runtime selected by 'codeModeRuntimePlan'.
 -- 'Right Nothing' keeps conventional tools;
 -- 'Left' reports why code mode could not start (the caller should warn and
 -- fall back to direct tools rather than refuse to start the session).
-codeModeSessionRuntimeFor
-    :: Maybe ModelInfo
+codeModeRuntimeFor
+    :: CodeModeRuntimePlan
+    -> Maybe ModelInfo
     -> [AppTool]
     -> IO (Either Text (Maybe CodeModeSessionRuntime))
-codeModeSessionRuntimeFor maybeInfo tools =
-    case maybeInfo of
-        Nothing -> pure (Right Nothing)
-        Just info ->
-            case toolModeForInfo ConventionalToolMode info of
-                ConventionalToolMode -> pure (Right Nothing)
-                -- Mixed mode also augments every direct tool description with
-                -- its JavaScript invocation. Keep the established direct-mode
-                -- fallback until that provider projection is implemented.
-                CodeToolMode -> pure (Right Nothing)
-                CodeOnlyToolMode ->
-                    buildRuntime
-                        info
-                        CodeOnlyToolMode
-                        FullCodeModeProjection
-                        (projectCodeModeTools CodeOnlyToolMode tools)
+codeModeRuntimeFor plan maybeInfo tools =
+    case plan of
+        PlanNoCodeMode -> pure (Right Nothing)
+        PlanFullCodeMode ->
+            buildRuntime
+                (maybe ImageDetailVisible imageDetailVisibilityFor maybeInfo)
+                CodeOnlyToolMode
+                FullCodeModeProjection
+                (projectCodeModeTools CodeOnlyToolMode tools)
+        PlanImageGenerationCodeMode ->
+            imageGenerationCodeModeRuntimeFor maybeInfo tools
+
+-- | Build the full code-mode session runtime when the catalog or local
+-- fallback selects code-only mode.
+-- Mixed mode also augments every direct tool description with its JavaScript
+-- invocation; keep the established direct-mode fallback until that provider
+-- projection is implemented.
+codeModeSessionRuntimeFor
+    :: ToolMode
+    -> Maybe ModelInfo
+    -> [AppTool]
+    -> IO (Either Text (Maybe CodeModeSessionRuntime))
+codeModeSessionRuntimeFor fallback maybeInfo tools =
+    codeModeRuntimeFor
+        (codeModeRuntimePlan True fallback maybeInfo)
+        maybeInfo
+        tools
 
 -- | Catalog @code_mode_only@ models reserve @image_gen.imagegen@ but expect it
--- behind the @exec@ surface. When the user has not enabled full code mode,
--- project only image generation through @exec@ and leave every other tool
--- directly provider-visible.
+-- behind the @exec@ surface. When full code mode is disabled, project only
+-- image generation through @exec@ and leave every other tool directly
+-- provider-visible.
 imageGenerationCodeModeRuntimeFor
     :: Maybe ModelInfo
     -> [AppTool]
@@ -295,7 +335,7 @@ imageGenerationCodeModeRuntimeFor maybeInfo tools =
                     (toolModeForInfo ConventionalToolMode info)
                     tools ->
                 buildRuntime
-                    info
+                    (imageDetailVisibilityFor info)
                     CodeOnlyToolMode
                     ImageGenerationOnlyCodeModeProjection
                     projection
@@ -326,17 +366,17 @@ filterStartupUnavailableTools suppressDirectImageGeneration
     | otherwise = id
 
 buildRuntime
-    :: ModelInfo
+    :: ImageDetailVisibility
     -> ToolMode
     -> CodeModeProjectionStrategy
     -> CodeModeToolProjection
     -> IO (Either Text (Maybe CodeModeSessionRuntime))
-buildRuntime info mode strategy projection = do
+buildRuntime imageDetail mode strategy projection = do
     slot <- newCodeModeNestedSlot
     workerPath <- codeModeWorkerPath
     built <- newCodeModeToolSet
         mode
-        (imageDetailVisibilityFor info)
+        imageDetail
         workerPath
         (invokeThroughSlot slot)
         (map nestedSpecFor projection.nestedCodeModeTools)

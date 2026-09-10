@@ -8,6 +8,7 @@ module Agent.CLI.Options
     , McpAddCommand(..)
     , McpAddTransport(..)
     , McpCommand(..)
+    , CodeModeOption(..)
     , ScreenMode(..)
     , SessionOutputFormat(..)
     , SessionPageRequest(..)
@@ -124,6 +125,18 @@ data ScreenMode
     | ScreenMinimal
     deriving (Eq, Show)
 
+-- | How to start JavaScript code mode for a session.
+--
+-- Codex resolves catalog @tool_mode@ first. Local enablement is only the
+-- fallback when the catalog omits a recognized selector. Local disablement
+-- keeps conventional tools, wrapping only image generation for catalog
+-- code-only models.
+data CodeModeOption
+    = CodeModeCatalog
+    | CodeModeEnabled
+    | CodeModeDisabled
+    deriving (Eq, Show)
+
 data ApprovalAnswer
     = AllowOnce
     | AllowAlways
@@ -185,8 +198,9 @@ data CliOptions = CliOptions
     , optComputerUseExplicit :: !Bool
       -- ^ Whether a computer-use flag was supplied explicitly. This lets
       -- native clients opt in while non-interactive defaults stay safe.
-    , optCodeMode :: !Bool
-      -- ^ Honor catalog-selected JavaScript code mode (default: False).
+    , optCodeMode :: !CodeModeOption
+      -- ^ Whether to start JavaScript code mode. 'CodeModeCatalog' follows
+      -- the model catalog's @tool_mode@ (Codex default).
     , optScreenMode :: !ScreenMode
     , optMotionMode :: !MotionMode
     } deriving (Eq, Show)
@@ -216,7 +230,7 @@ defaultCliOptions = CliOptions
     , optBash = True
     , optComputerUse = True
     , optComputerUseExplicit = False
-    , optCodeMode = False
+    , optCodeMode = CodeModeCatalog
     , optScreenMode = ScreenAuto
     , optMotionMode = MotionFull
     }
@@ -615,10 +629,10 @@ optionUpdateParser = asum
             { optComputerUse = value
             , optComputerUseExplicit = True
             })
-    , boolFlagUpdate "code-mode" True "Enable catalog-selected code mode"
-        (\value options -> options { optCodeMode = value })
-    , boolFlagUpdate "no-code-mode" False "Use conventional tool calling"
-        (\value options -> options { optCodeMode = value })
+    , codeModeFlagUpdate "code-mode" CodeModeEnabled
+        "Enable JavaScript code mode when the catalog omits tool_mode"
+    , codeModeFlagUpdate "no-code-mode" CodeModeDisabled
+        "Disable full code mode even when the catalog selects it"
     , screenFlagUpdate "fullscreen" ScreenFullscreen
         "Use the retained full-screen TUI"
     , screenFlagUpdate "minimal" ScreenMinimal
@@ -668,6 +682,15 @@ screenFlagUpdate
 screenFlagUpdate name value description =
     flagUpdate name description
         (\options -> options { optScreenMode = value })
+
+codeModeFlagUpdate
+    :: String
+    -> CodeModeOption
+    -> String
+    -> Options.Parser OptionUpdate
+codeModeFlagUpdate name value description =
+    flagUpdate name description
+        (\options -> options { optCodeMode = value })
 
 textReader :: Options.ReadM Text
 textReader = Text.pack <$> Options.str

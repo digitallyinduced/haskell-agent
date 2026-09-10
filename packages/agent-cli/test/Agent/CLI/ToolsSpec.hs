@@ -5,12 +5,20 @@ import Agent.CLI.ChartImage (terminalChartTool)
 import Agent.CLI.ComputerUse (computerUseTool)
 import Agent.CLI.CodeModeRuntime
     ( CodeModeProjectionStrategy(..)
+    , CodeModeRuntimePlan(..)
     , CodeModeToolProjection(..)
+    , codeModeRuntimePlan
     , filterStartupUnavailableTools
     , imageGenerationCodeModeProjection
     , projectCodeModeTools
     , projectCodeModeToolsFor
     )
+import Agent.OpenAI.Models
+    ( ModelInfo(..)
+    , loadBundledModelsOrThrow
+    , modelInfoForSlug
+    )
+import qualified Agent.OpenAI.Models.Types as OpenAIModels
 import Agent.Tools.RenderChart (renderChartResult)
 import Agent.Tools.ShowImage (ImageDisplayHooks(..), ImageDisplayRequest(..))
 import Agent.Dialect
@@ -274,6 +282,47 @@ spec = describe "schemasFromAppTools" do
                     ]
         map (.appToolName) refreshTools
             `shouldBe` ["read_file", "computer"]
+
+    it "starts full code mode for catalog code_mode_only models by default" do
+        catalog <- loadBundledModelsOrThrow
+        let sol = modelInfoForSlug "gpt-5.6-sol" catalog
+            terra = modelInfoForSlug "gpt-5.6-terra" catalog
+            luna = modelInfoForSlug "gpt-5.6-luna" catalog
+            astra = modelInfoForSlug "gpt-6-astra" catalog
+            gpt55 = modelInfoForSlug "gpt-5.5" catalog
+        codeModeRuntimePlan True ConventionalToolMode (Just sol)
+            `shouldBe` PlanFullCodeMode
+        codeModeRuntimePlan True ConventionalToolMode (Just terra)
+            `shouldBe` PlanFullCodeMode
+        codeModeRuntimePlan True ConventionalToolMode (Just luna)
+            `shouldBe` PlanFullCodeMode
+        codeModeRuntimePlan True ConventionalToolMode (Just astra)
+            `shouldBe` PlanFullCodeMode
+        codeModeRuntimePlan True ConventionalToolMode (Just gpt55)
+            `shouldBe` PlanNoCodeMode
+        codeModeRuntimePlan True ConventionalToolMode Nothing
+            `shouldBe` PlanNoCodeMode
+
+    it "uses local --code-mode only when the catalog omits tool_mode" do
+        catalog <- loadBundledModelsOrThrow
+        let sol = modelInfoForSlug "gpt-5.6-sol" catalog
+            gpt55 = modelInfoForSlug "gpt-5.5" catalog
+            direct = sol { toolMode = Just OpenAIModels.ToolModeDirect }
+        codeModeRuntimePlan True CodeOnlyToolMode (Just gpt55)
+            `shouldBe` PlanFullCodeMode
+        codeModeRuntimePlan True CodeOnlyToolMode Nothing
+            `shouldBe` PlanFullCodeMode
+        codeModeRuntimePlan True CodeOnlyToolMode (Just direct)
+            `shouldBe` PlanNoCodeMode
+
+    it "wraps only image generation when full code mode is disabled" do
+        catalog <- loadBundledModelsOrThrow
+        let sol = modelInfoForSlug "gpt-5.6-sol" catalog
+            gpt55 = modelInfoForSlug "gpt-5.5" catalog
+        codeModeRuntimePlan False ConventionalToolMode (Just sol)
+            `shouldBe` PlanImageGenerationCodeMode
+        codeModeRuntimePlan False ConventionalToolMode (Just gpt55)
+            `shouldBe` PlanNoCodeMode
 
     it "nests only imagegen for code-only models when full code mode is off" do
         let tools = map testTool ["read_file", "imagegen", "shell_command"]

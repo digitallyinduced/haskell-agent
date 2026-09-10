@@ -494,14 +494,17 @@ spec = do
                 True
                 `shouldBe` True
 
-        it "uses conventional tool calling by default" do
-            defaultCliOptions.optCodeMode `shouldBe` False
+        it "follows catalog tool_mode by default" do
+            defaultCliOptions.optCodeMode `shouldBe` CodeModeCatalog
             parseArgs ["--code-mode"]
                 `shouldBe` Right (RunAgent defaultCliOptions
-                    { optCodeMode = True })
+                    { optCodeMode = CodeModeEnabled })
+            parseArgs ["--no-code-mode"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optCodeMode = CodeModeDisabled })
             parseArgs ["--code-mode", "--no-code-mode"]
                 `shouldBe` Right (RunAgent defaultCliOptions
-                    { optCodeMode = False })
+                    { optCodeMode = CodeModeDisabled })
 
         it "keeps ghci disabled by default and enables it explicitly" do
             parseArgs []

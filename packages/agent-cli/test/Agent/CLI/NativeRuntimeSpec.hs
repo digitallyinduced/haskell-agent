@@ -28,6 +28,7 @@ import Agent.CLI.GatewayClient (GatewayCredential(..))
 import Agent.CLI.IntegrationGateway (gatewayIntegrationMcpConfig)
 import Agent.CLI.Options
     ( CliOptions(..)
+    , CodeModeOption(..)
     , ScreenMode(..)
     , defaultCliOptions
     )
@@ -130,7 +131,7 @@ spec = describe "nativeTurnOptions" do
                 , optAgentsMd = False
                 , optSkills = False
                 , optComputerUse = False
-                , optCodeMode = False
+                , optCodeMode = CodeModeDisabled
                 }
         actual `shouldBe` expected
         applyNativeStartupPolicy restrictedNativeStartupPolicy cwd actual
@@ -305,7 +306,7 @@ conflictingOptions = defaultCliOptions
     , optAgentsMd = True
     , optSkills = True
     , optComputerUse = True
-    , optCodeMode = True
+    , optCodeMode = CodeModeEnabled
     , optPrompt = Just "preserve supplied input"
     , optResume = Just "preserve-session"
     }

@@ -51,6 +51,7 @@ import Agent.Loop
 import Agent.CLI.Options
     ( Command(..)
     , CliOptions(..)
+    , CodeModeOption(..)
     , ScreenMode(..)
     , defaultCliOptions
     , parseArgs
@@ -310,7 +311,7 @@ applyNativeStartupPolicy policy cwd = restrictContext . restrictFacilities
             , optPromptFile = Nothing
             , optManagedTurnFile = Nothing
             , optComputerUse = False
-            , optCodeMode = False
+            , optCodeMode = CodeModeDisabled
             }
 
 nativeGhciEnabled :: NativeShellMode -> Bool
