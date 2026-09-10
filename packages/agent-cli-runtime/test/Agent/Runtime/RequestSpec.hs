@@ -48,4 +48,5 @@ request = NativeTurnRequest
     , nativeTurnEffort = Nothing
     , nativeTurnInteractionMode = NativeAsk
     , nativeTurnShellMode = NativeShellNone
+    , nativeTurnMessageClock = Nothing
     }

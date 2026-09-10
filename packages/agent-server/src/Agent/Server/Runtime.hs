@@ -44,6 +44,7 @@ import Agent.CLI.NativeRuntime
     )
 import Agent.Runtime.Request
     ( NativeInteractionMode(..)
+    , NativeMessageClock(..)
     , NativeSessionTarget(..)
     , NativeShellMode(..)
     , NativeTurnRequest(..)
@@ -1394,6 +1395,9 @@ runTurn environment control spec =
                                                                     environment
                                                             , nativeTurnShellMode =
                                                                 tenantShellMode environment
+                                                            , nativeTurnMessageClock =
+                                                                fmap nativeClock
+                                                                    spec.turnSpecMessageClock
                                                             }
                                                         >>= \case
                                                             Left err -> pure (Left err)
@@ -1407,6 +1411,14 @@ runTurn environment control spec =
                                                                             ( Right
                                                                                 . turnExecutionOutput
                                                                             )
+
+nativeClock :: TurnMessageClock -> NativeMessageClock
+nativeClock clock =
+    NativeMessageClock
+        { nativeHourCycle = clock.turnHourCycle
+        , nativeTimeZoneName = clock.turnTimeZoneName
+        , nativeTimeZoneOffsetMinutes = clock.turnTimeZoneOffsetMinutes
+        }
 
 turnExecutionOutput :: Loop.TurnOutput -> TurnExecutionOutput
 turnExecutionOutput output =

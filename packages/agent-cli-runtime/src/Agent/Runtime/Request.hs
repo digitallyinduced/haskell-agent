@@ -8,6 +8,7 @@ module Agent.Runtime.Request
     , NativeShellMode(..)
     , NativeSessionTarget(..)
     , NativeTurnRequest(..)
+    , NativeMessageClock(..)
     , validateNativeTurnRequest
     ) where
 
@@ -44,6 +45,15 @@ data NativeSessionTarget
 -- | Native turns exclude CLI-only capabilities such as worktree creation,
 -- computer use, and prompt files. The executing adapter supplies approval
 -- and plan callbacks for the selected interaction mode.
+-- | Conversation starter's wall-clock. Cloud hosts are typically UTC; the
+-- client supplies the zone abbreviation, UTC offset, and 12/24-hour cycle.
+data NativeMessageClock = NativeMessageClock
+    { nativeHourCycle :: !Text
+    , nativeTimeZoneName :: !Text
+    , nativeTimeZoneOffsetMinutes :: !Int
+    }
+    deriving (Eq, Show)
+
 data NativeTurnRequest = NativeTurnRequest
     { nativeTurnPrompt :: !Text
     , nativeTurnImages :: ![ImageAttachment]
@@ -54,6 +64,7 @@ data NativeTurnRequest = NativeTurnRequest
     , nativeTurnEffort :: !(Maybe ReasoningEffort)
     , nativeTurnInteractionMode :: !NativeInteractionMode
     , nativeTurnShellMode :: !NativeShellMode
+    , nativeTurnMessageClock :: !(Maybe NativeMessageClock)
     }
     deriving (Eq, Show)
 

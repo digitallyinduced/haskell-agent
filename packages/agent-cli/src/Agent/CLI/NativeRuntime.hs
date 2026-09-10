@@ -11,6 +11,7 @@ module Agent.CLI.NativeRuntime
     , nativePreparedDiscovery
     , NativeSessionTarget(..)
     , NativeTurnRequest(..)
+    , NativeMessageClock(..)
     , StartupFailure(..)
     , closeNativeProcessRuntime
     , newNativeProcessRuntime
@@ -73,10 +74,12 @@ import Agent.CLI.Runtime.Orchestration.Types
     )
 import Agent.CLI.Runtime.Types (DevResult(..), StartupFailure(..))
 import Agent.Runtime.Request
-    ( NativeSessionTarget(..)
+    ( NativeMessageClock(..)
+    , NativeSessionTarget(..)
     , NativeTurnRequest(..)
     , validateNativeTurnRequest
     )
+import Agent.CLI.Timestamp (MessageClock, parseMessageClock)
 import Agent.TUI.Motion (MotionMode(..))
 import Agent.Tools.Types (defaultToolEnv)
 import qualified Agent.MCP as MCP
@@ -208,6 +211,7 @@ runNativeTurn runtime output hooks request =
 nativeTurnOptions :: NativeTurnRequest -> Either Text CliOptions
 nativeTurnOptions request = do
     validateNativeTurnRequest request
+    clock <- traverse parseNativeMessageClock request.nativeTurnMessageClock
     pure defaultCliOptions
             { optProvider = request.nativeTurnProvider
             , optModel = request.nativeTurnModel
@@ -228,7 +232,15 @@ nativeTurnOptions request = do
             , optComputerUse = False
             , optScreenMode = ScreenMinimal
             , optMotionMode = MotionOff
+            , optMessageClock = clock
             }
+
+parseNativeMessageClock :: NativeMessageClock -> Either Text MessageClock
+parseNativeMessageClock clock =
+    parseMessageClock
+        clock.nativeHourCycle
+        clock.nativeTimeZoneName
+        clock.nativeTimeZoneOffsetMinutes
 
 runNativeAgent
     :: NativeProcessRuntime

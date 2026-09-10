@@ -37,6 +37,7 @@ module Agent.Server.Types
     , PatchSessionRequest(..)
     , ForkSessionRequest(..)
     , CreateTurnRequest(..)
+    , TurnMessageClock(..)
     , FileAttachment(..)
     , ResolveRequest(..)
     , SessionArchiveFilter(..)
@@ -162,6 +163,16 @@ data TurnSpec = TurnSpec
     , turnSpecImages :: ![ImageAttachment]
     , turnSpecFiles :: ![FileAttachment]
     , turnSpecBoundary :: !AccessBoundary
+    , turnSpecMessageClock :: !(Maybe TurnMessageClock)
+    }
+    deriving (Eq, Show)
+
+-- | Conversation starter's wall-clock, forwarded onto native turns so stamps
+-- are not formatted in the UTC locale of a cloud host.
+data TurnMessageClock = TurnMessageClock
+    { turnHourCycle :: !Text
+    , turnTimeZoneName :: !Text
+    , turnTimeZoneOffsetMinutes :: !Int
     }
     deriving (Eq, Show)
 
@@ -431,6 +442,7 @@ data CreateTurnRequest = CreateTurnRequest
     , createTurnInput :: !Text
     , createTurnImages :: ![ImageAttachment]
     , createTurnFiles :: ![FileAttachment]
+    , createTurnMessageClock :: !(Maybe TurnMessageClock)
     }
     deriving (Eq, Show)
 
@@ -438,7 +450,14 @@ instance FromJSON CreateTurnRequest where
     parseJSON = withObject "CreateTurnRequest" \value -> do
         rejectUnknownFields
             "CreateTurnRequest"
-            ["clientRequestId", "input", "images", "files"]
+            [ "clientRequestId"
+            , "input"
+            , "images"
+            , "files"
+            , "hourCycle"
+            , "timeZoneName"
+            , "timeZoneOffsetMinutes"
+            ]
             value
         rawRequestId <- value .:? "clientRequestId"
         requestId <- case rawRequestId of
@@ -465,7 +484,21 @@ instance FromJSON CreateTurnRequest where
                 > maxTurnAttachmentBytesTotal
             )
             (fail "images and files are limited to 20 MiB decoded in total")
-        pure (CreateTurnRequest requestId input images files)
+        clock <- parseTurnMessageClock value
+        pure (CreateTurnRequest requestId input images files clock)
+
+parseTurnMessageClock :: Object -> Parser (Maybe TurnMessageClock)
+parseTurnMessageClock value = do
+    hourCycle <- value .:? "hourCycle"
+    zoneName <- value .:? "timeZoneName"
+    offset <- value .:? "timeZoneOffsetMinutes"
+    case (hourCycle, zoneName, offset) of
+        (Nothing, Nothing, Nothing) -> pure Nothing
+        (Just cycleText, Just name, Just minutes) ->
+            pure (Just (TurnMessageClock cycleText name minutes))
+        _ ->
+            fail
+                "hourCycle, timeZoneName, and timeZoneOffsetMinutes must be supplied together"
 
 data FileAttachment = FileAttachment
     { fileName :: !Text

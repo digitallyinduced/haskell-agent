@@ -27,6 +27,7 @@ main = withWorkspace \cwd -> do
             , turnSpecImages = []
             , turnSpecFiles = [FileAttachment "hello.txt" "text/plain" "hello"]
             , turnSpecBoundary = accessBoundary localPrincipal (GatewayBoundary Nothing)
+            , turnSpecMessageClock = Nothing
             }
         empty = do
             remaining <- listDirectory attachments

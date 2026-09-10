@@ -1130,6 +1130,7 @@ turnSpecFor boundary sessionId =
         , turnSpecImages = []
         , turnSpecFiles = []
         , turnSpecBoundary = boundary
+        , turnSpecMessageClock = Nothing
         }
 
 testOutput :: TurnExecutionOutput
