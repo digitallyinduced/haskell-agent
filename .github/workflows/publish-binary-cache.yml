@@ -221,7 +221,11 @@ jobs:
             # `nix build --keep-going --print-out-paths` does not print
             # after a failing Installable::build, even for realised
             # extras. Collect those outputs from the extra derivations.
-            mapfile -t extra_drvs < <(
+            # Apple /bin/bash is 3.2 and has no mapfile.
+            extra_drvs=()
+            while IFS= read -r line || [[ -n "$line" ]]; do
+              extra_drvs+=("$line")
+            done < <(
               "$nix_bin" path-info \
                 --derivation \
                 "${extra_targets[@]}"
@@ -236,7 +240,10 @@ jobs:
                 "${extra_drvs[@]}" |
                 sort -u > "$extra_all_outputs_file"
               if [[ -s "$extra_all_outputs_file" ]]; then
-                mapfile -t extra_outputs < "$extra_all_outputs_file"
+                extra_outputs=()
+                while IFS= read -r line || [[ -n "$line" ]]; do
+                  extra_outputs+=("$line")
+                done < "$extra_all_outputs_file"
                 set +e
                 "$nix_store_bin" \
                   --check-validity \
@@ -289,7 +296,10 @@ jobs:
             # otherwise rebuild that toolchain whenever the CLI source
             # changes. Publish every realised output in the target
             # derivations' build closure so hosted checks can substitute them.
-            mapfile -t target_drvs < <(
+            target_drvs=()
+            while IFS= read -r line || [[ -n "$line" ]]; do
+              target_drvs+=("$line")
+            done < <(
               "$nix_bin" path-info \
                 --derivation \
                 "${build_targets[@]}"
