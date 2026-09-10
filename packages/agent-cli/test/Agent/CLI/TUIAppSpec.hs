@@ -581,6 +581,27 @@ spec = do
                 `shouldBe` Just [("Current", "")]
 
     describe "idle choice closure" do
+        it "renders fresh approval details literally and denies on Escape" do
+            runtime <- newScriptRuntime initialUiState
+            reply <- newEmptyTMVarIO
+            let initial = initialFullscreenAppState runtime [] AgentRoot [] 0
+                command = "echo [visible](hidden) `whoami` **literal**"
+            (_, open) <- runFullscreenScriptWithState initial
+                [ FullscreenScriptApp
+                    (AppAskChoice ChoicePlainDialog "Fresh approval required"
+                        command 1 [("Allow once", ""), ("Deny", "")] reply)
+                , FullscreenScriptHalt
+                ]
+            renderedAppText (120, 40) open `shouldSatisfy` Text.isInfixOf command
+            (_, closed) <- runFullscreenScriptWithState open
+                [ FullscreenScriptVty (V.EvKey V.KEsc [])
+                , FullscreenScriptHalt
+                ]
+            atomically (readTMVar reply) `shouldReturn` Nothing
+            case closed.appChoice of
+                Nothing -> pure ()
+                Just _ -> expectationFailure "fresh approval dialog was not closed"
+
         it "closes the matching authorization dialog when the callback finishes" do
             runtime <- newScriptRuntime initialUiState
             reply <- newEmptyTMVarIO

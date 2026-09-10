@@ -9,6 +9,7 @@ import Agent.CLI.AgentViewport
 import Agent.CLI.Command (ReplAction(ReplCopyPath))
 import Agent.CLI.Dictation (DictationTarget(..))
 import Agent.CLI.Interrupt (CtrlCDecision(..))
+import Agent.CLI.Permission (PermissionChoice(..), approvalToolCallPromptOnceRelative)
 import Agent.CLI.TUI.App
     ( appEventLogicalBytes
     , closeAppEventMailbox
@@ -18,6 +19,7 @@ import Agent.CLI.TUI.App
     , newFullscreenInputBuffer
     , newFullscreenRuntime
     , newFullscreenRuntimeWithSyntaxLoader
+    , requestFullscreenPermissionOnce
     , setFullscreenSessionActions
     )
 import Agent.CLI.TUI.Bridge
@@ -26,6 +28,7 @@ import Agent.CLI.TUI.Types
     ( AppEvent(..)
     , AppEventMailbox(..)
     , AppEventMailboxState(..)
+    , ChoicePresentation(..)
     , FullscreenRuntime(..)
     , FullscreenSessionActions(..)
     , PendingAppEvent(..)
@@ -43,7 +46,7 @@ import Agent.Subagents (SubagentId(..))
 import Agent.ToolDispatch (ToolCall(..), ToolCallResult(..), ToolCallKind(..), ToolCallMode(..), functionToolCall)
 import Agent.TUI.Motion (MotionMode(..))
 import Control.Concurrent.Async (wait, withAsync)
-import Control.Concurrent.STM (atomically, readTVarIO)
+import Control.Concurrent.STM (atomically, readTVar, readTVarIO, retry, putTMVar)
 import Control.Exception (MaskingState(MaskedUninterruptible), getMaskingState)
 import Control.Exception.Safe (finally, throwString)
 import Control.Monad (replicateM_)
@@ -57,6 +60,32 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "fullscreen TUI bridge" do
+    describe "fresh approval" do
+        let call = functionToolCall "fresh-shell" "shell_command"
+                "{\"command\":\"swift build\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Nested sandbox blocked\"}"
+        mapM_ (\(label, selection, expected) ->
+            it label do
+                runtime <- newBridgeTestRuntime
+                result <- timeout 2000000 $
+                    withAsync (requestFullscreenPermissionOnce runtime "/workspace" call) \worker -> do
+                        let AppEventMailbox pendingRef = runtime.runtimeMailbox
+                        (body, initial, rows, reply) <- atomically do
+                            pending <- (.mailboxPendingEvents) <$> readTVar pendingRef
+                            case toList pending of
+                                [PendingEvent (AppAskChoice ChoicePlainDialog _ body initial rows reply)] ->
+                                    pure (body, initial, rows, reply)
+                                _ -> retry
+                        body `shouldBe` approvalToolCallPromptOnceRelative "/workspace" call
+                        initial `shouldBe` 1
+                        map fst rows `shouldBe` ["Allow once", "Deny"]
+                        atomically (putTMVar reply selection)
+                        wait worker
+                result `shouldBe` Just (Just expected))
+            [ ("grants only one invocation", Just 0, PermissionAllowOnce)
+            , ("denies explicitly", Just 1, PermissionDeny)
+            , ("denies cancellation", Nothing, PermissionDeny)
+            , ("rejects unknown choices", Just 2, PermissionDeny)
+            ]
     describe "pull request associations" do
         let url = "https://github.com/owner/repository/pull/42"
             previous = Just "https://github.com/owner/repository/pull/41"

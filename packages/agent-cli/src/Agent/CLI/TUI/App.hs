@@ -71,6 +71,7 @@ module Agent.CLI.TUI.App
     , resumeSearchCursorColumn
     , onboardingVisibleRowIndices
     , requestFullscreenPermission
+    , requestFullscreenPermissionOnce
     , requestFullscreenChoice
     , requestFullscreenChoiceWithBody
     , requestFullscreenChoiceUntil

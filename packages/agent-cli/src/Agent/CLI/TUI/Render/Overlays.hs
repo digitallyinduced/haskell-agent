@@ -70,7 +70,7 @@ import Agent.CLI.TUI.Types
       choiceVisibleRows,
       choiceOverlay,
       selectedChoiceIndex,
-      ChoicePresentation(ChoiceOnboarding, ChoiceDialog, ChoiceDocument,
+      ChoicePresentation(ChoiceOnboarding, ChoiceDialog, ChoicePlainDialog, ChoiceDocument,
                          ChoiceTheme, ChoicePlanning),
       AppState(appRuntime,
                appDictation, appTextPrompt, appMetaConsole,
@@ -276,6 +276,8 @@ drawFooter state =
                 "type to filter  │  ↑↓ navigate  │  Enter choose  │  Esc cancel"
             | choice.choicePresentation == ChoiceDocument ->
                 "↑↓ scroll  │  PgUp/PgDn pages  │  Esc back"
+            | choice.choicePresentation == ChoicePlainDialog ->
+                "↑↓ select  │  Enter choose  │  PgUp/PgDn details  │  Esc deny"
         (_, Nothing, Just _, _, _, _) ->
             if state.appUi.uiRunning
                 then "↑↓ select  │  Enter choose  │  Esc close  │  Ctrl+C cancel turn"
@@ -532,6 +534,7 @@ drawChoice appState choice
     | choice.choiceSearch = drawFilterChoice appState choice
     | otherwise = case choice.choicePresentation of
         ChoiceDialog -> drawDialogChoice appState choice
+        ChoicePlainDialog -> drawDialogChoice appState choice
         ChoicePlanning -> drawPlanningChoice appState choice
         ChoiceDocument -> drawDialogChoice appState choice
         ChoiceOnboarding -> drawOnboardingChoice appState choice
@@ -854,9 +857,11 @@ drawDialogChoice appState choice =
                                         else padBottom (Pad 1) $
                                             vLimitPercent 65 $
                                                 viewport OverlayViewport Vertical $
-                                                    markdownWidgetWithLinks
-                                                        MarkdownLink
-                                                        choice.choiceBody
+                                                    if choice.choicePresentation == ChoicePlainDialog
+                                                        then terminalTxtWrap choice.choiceBody
+                                                        else markdownWidgetWithLinks
+                                                            MarkdownLink
+                                                            choice.choiceBody
                                     , vBox $
                                         [ choiceRow
                                             appState

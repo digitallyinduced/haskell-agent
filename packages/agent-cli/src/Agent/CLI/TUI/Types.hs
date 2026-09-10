@@ -584,6 +584,8 @@ data AgentHover = AgentHover
 
 data ChoicePresentation
     = ChoiceDialog
+    -- | Literal, wrapped details: approval arguments must not become Markdown.
+    | ChoicePlainDialog
     | ChoicePlanning
     | ChoiceDocument
     | ChoiceOnboarding
