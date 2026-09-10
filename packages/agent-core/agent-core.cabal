@@ -106,8 +106,7 @@ library
                     , Agent.Tools.ViewImage
                     , Agent.Tools.RenderChart
                     , Agent.Transport.WebSocket
-    other-modules:    Agent.Image.File
-                    , Agent.Image.Normalize
+    other-modules:    Agent.Image.Normalize
                     , Agent.Loop.Backend
                     , Agent.Loop.DisplayJournal
                     , Agent.Loop.EventPump
