@@ -41,6 +41,7 @@ import Agent.CLI.MacOS.EngineHostRegistration ()
 import Agent.CLI.MacOS.EngineStaging ()
 import Agent.CLI.MacOS.EngineSubmission ()
 import Agent.CLI.MacOS.GatewayBridge (invokeGatewayCallbackOnce)
+import Agent.CLI.MacOS.MobileGatewayBridge ()
 import Agent.CLI.MacOS.InteractionState
 import Agent.CLI.MacOS.LearnedSkillsBridge ()
 import Agent.CLI.MacOS.McpConnectionBridge ()
