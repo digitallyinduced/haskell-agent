@@ -69,6 +69,7 @@ exerciseRestartFence config firstPool fence = do
                     "01999999-0000-7000-8000-000000000032"
                 , reserveServerTurnInputDigest =
                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                , reserveServerTurnInput = "hello world"
                 , reserveServerTurnOwnerInstanceId = instanceOne
                 , reserveServerTurnCreatedAt = createdAt
                 }

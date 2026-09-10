@@ -354,6 +354,7 @@ spec = describe "agent-server WAI application" do
                     , turnRecordStartedAt = Just createdAt
                     , turnRecordFinishedAt = Just createdAt
                     , turnRecordError = Nothing
+                    , turnRecordInput = ""
                     }
             backend =
                 fakeBackend
@@ -383,6 +384,63 @@ spec = describe "agent-server WAI application" do
             turnIds <- responseTurnIds listed
             length turnIds `shouldBe` 200
             turnIds `shouldSatisfy` elem localTurnId
+            LBS8.unpack listed.simpleBody
+                `shouldContain` "\"input\":\"hello\""
+            LBS8.unpack listed.simpleBody
+                `shouldContain` "\"userText\":\"hello\""
+
+    it "exposes the submitted prompt on a running turn" do
+        started <- newEmptyMVar
+        finished <- newEmptyMVar
+        let runner _ _ = do
+                putMVar started ()
+                takeMVar finished
+                pure (Right successfulOutput)
+            body =
+                "{\"clientRequestId\":\"01999999-1111-7111-8111-444444444444\",\"input\":\"what would you like to improve\"}"
+        withDurableApplication runner \application terminal -> do
+            created <-
+                perform
+                    application
+                    methodPost
+                    ["v1", "sessions", "session-a", "turns"]
+                    validHeaders
+                    body
+            created.simpleStatus `shouldBe` status202
+            LBS8.unpack created.simpleBody
+                `shouldContain` "\"input\":\"what would you like to improve\""
+            LBS8.unpack created.simpleBody
+                `shouldContain` "\"userText\":\"what would you like to improve\""
+            takeMVar started
+
+            listed <-
+                perform
+                    application
+                    methodGet
+                    ["v1", "turns"]
+                    validHeaders
+                    ""
+            listed.simpleStatus `shouldBe` status200
+            LBS8.unpack listed.simpleBody
+                `shouldContain` "\"input\":\"what would you like to improve\""
+            LBS8.unpack listed.simpleBody
+                `shouldContain` "\"userText\":\"what would you like to improve\""
+
+            history <-
+                perform
+                    application
+                    methodGet
+                    ["v1", "sessions", "session-a", "history"]
+                    validHeaders
+                    ""
+            history.simpleStatus `shouldBe` status200
+            LBS8.unpack history.simpleBody
+                `shouldContain` "\"userText\":\"what would you like to improve\""
+            LBS8.unpack history.simpleBody
+                `shouldContain` "\"status\":\"running\""
+
+            putMVar finished ()
+            takeMVar terminal
 
     it "distinguishes a remote turn from an unavailable agent snapshot" do
         createdAt <- getCurrentTime
@@ -400,6 +458,7 @@ spec = describe "agent-server WAI application" do
                     , turnRecordStartedAt = Just createdAt
                     , turnRecordFinishedAt = Nothing
                     , turnRecordError = Nothing
+                    , turnRecordInput = ""
                     }
             backend =
                 fakeBackend
@@ -439,6 +498,7 @@ spec = describe "agent-server WAI application" do
                     , turnRecordStartedAt = Nothing
                     , turnRecordFinishedAt = Nothing
                     , turnRecordError = Nothing
+                    , turnRecordInput = ""
                     }
             backend =
                 fakeBackend
@@ -894,6 +954,7 @@ spec = describe "agent-server WAI application" do
                     , turnRecordStartedAt = Nothing
                     , turnRecordFinishedAt = Nothing
                     , turnRecordError = Nothing
+                    , turnRecordInput = ""
                     }
         stored <- newMVar record
         let persistence =
@@ -970,6 +1031,7 @@ spec = describe "agent-server WAI application" do
                     , turnRecordStartedAt = Nothing
                     , turnRecordFinishedAt = Nothing
                     , turnRecordError = Nothing
+                    , turnRecordInput = ""
                     }
             runner _ _ =
                 (putMVar started () >> takeMVar never)
@@ -1054,6 +1116,7 @@ spec = describe "agent-server WAI application" do
                     , turnRecordStartedAt = Just createdAt
                     , turnRecordFinishedAt = Nothing
                     , turnRecordError = Nothing
+                    , turnRecordInput = ""
                     }
             backend =
                 fakeBackend
@@ -1263,7 +1326,7 @@ fakeBackend =
                         )
                     )
         , backendReserveTurn =
-            \boundary sessionId clientRequestId _ turnId createdAt ->
+            \boundary sessionId clientRequestId input turnId createdAt ->
                 pure . Right . TurnReservationCreated $
                     TurnRecord
                         { turnRecordId = turnId
@@ -1275,6 +1338,7 @@ fakeBackend =
                         , turnRecordStartedAt = Nothing
                         , turnRecordFinishedAt = Nothing
                         , turnRecordError = Nothing
+                        , turnRecordInput = input
                         }
         , backendLookupTurn = \_ _ -> pure (Right Nothing)
         , backendListTurns = \_ _ -> pure (Right [])
@@ -1348,6 +1412,7 @@ durableBackend ledger terminal runner =
                                         , turnRecordStartedAt = Nothing
                                         , turnRecordFinishedAt = Nothing
                                         , turnRecordError = Nothing
+                                        , turnRecordInput = input
                                         }
                                 entry =
                                     TestStoredTurn
