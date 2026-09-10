@@ -107,6 +107,26 @@ spec = describe "agent-server WAI application" do
         request.createTurnImages
             `shouldBe` [ImageAttachment "image/png" "\x89PNG\r\n\x1a\n"]
         request.createTurnFiles `shouldBe` []
+        request.createTurnMessageClock `shouldBe` Nothing
+
+    it "decodes a conversation clock on turn requests" do
+        let decode body = eitherDecode body :: Either String CreateTurnRequest
+        request <-
+            case decode
+                "{\"input\":\"hello\",\"hourCycle\":\"h24\",\"timeZoneName\":\"CEST\",\"timeZoneOffsetMinutes\":120}"
+            of
+                Left err -> expectationFailure err >> fail "unreachable"
+                Right decoded -> pure decoded
+        request.createTurnMessageClock
+            `shouldBe` Just
+                TurnMessageClock
+                    { turnHourCycle = "h24"
+                    , turnTimeZoneName = "CEST"
+                    , turnTimeZoneOffsetMinutes = 120
+                    }
+        decode
+            "{\"input\":\"hello\",\"hourCycle\":\"h24\",\"timeZoneName\":\"CEST\"}"
+            `shouldSatisfy` isLeft
 
     it "decodes opaque generic files and rejects unsafe names" do
         let decode body = eitherDecode body :: Either String CreateTurnRequest

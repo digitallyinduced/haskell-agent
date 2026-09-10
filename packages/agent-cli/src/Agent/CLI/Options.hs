@@ -44,6 +44,7 @@ import Agent.CLI.Runtime.Options
     , GatewayCommand(..)
     , defaultEffortFor
     )
+import Agent.CLI.Timestamp (MessageClock)
 import Agent.TUI.Motion (MotionMode(..))
 import Data.Char (toLower)
 import Data.Foldable (asum)
@@ -203,6 +204,8 @@ data CliOptions = CliOptions
       -- the model catalog's @tool_mode@ (Codex default).
     , optScreenMode :: !ScreenMode
     , optMotionMode :: !MotionMode
+    -- | Conversation starter's wall-clock. 'Nothing' uses the process locale.
+    , optMessageClock :: !(Maybe MessageClock)
     } deriving (Eq, Show)
 
 defaultCliOptions :: CliOptions
@@ -233,6 +236,7 @@ defaultCliOptions = CliOptions
     , optCodeMode = CodeModeCatalog
     , optScreenMode = ScreenAuto
     , optMotionMode = MotionFull
+    , optMessageClock = Nothing
     }
 
 -- | Drop provider-visible routing and conversation inputs when a gateway

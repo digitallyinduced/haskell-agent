@@ -1666,6 +1666,7 @@ buildSessionEnv
         , sessionOnPersisted =
             persistenceRuntime.persistenceOnPersisted
         , sessionReset = skillsRuntime.skillResetSession
+        , sessionMessageClock = options.optMessageClock
         }
 
 installSessionActions

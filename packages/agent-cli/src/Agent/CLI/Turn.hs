@@ -103,7 +103,7 @@ import Agent.CLI.Terminal
     , resolveColor
     )
 import Agent.CLI.Timestamp
-    ( stampTurnInputsSince
+    ( stampTurnInputsSinceWith
     , stripBracketedTimestamps
     )
 import Agent.CLI.TurnState
@@ -399,7 +399,8 @@ prepareBusyTurn request = do
     (conversationStartedAt, previousActivityAt) <-
         timestampConversationBounds env.sessionPersist
     stampedInputs <-
-        stampTurnInputsSince
+        stampTurnInputsSinceWith
+            env.sessionMessageClock
             conversationStartedAt
             previousActivityAt
             turnInputs0

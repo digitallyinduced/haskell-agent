@@ -4,6 +4,7 @@ import Agent.CLI.Timestamp
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime(..), addUTCTime, secondsToDiffTime)
 import Data.Time.LocalTime (TimeZone(..), minutesToTimeZone)
+import Data.Either (isLeft)
 import qualified Data.Text as Text
 import Test.Hspec
 
@@ -102,6 +103,23 @@ spec = do
                 `shouldBe` "Okay"
             stripBracketedTimestamps "Okay [2026-09-01 9:40pm EDT]"
                 `shouldBe` "Okay"
+            stripBracketedTimestamps "Okay [11:15 GMT+2]"
+                `shouldBe` "Okay"
+
+    describe "parseMessageClock" do
+        it "accepts a 24-hour European clock" do
+            parseMessageClock "h24" "CEST" 120
+                `shouldBe` Right (MessageClock Hour24 cest)
+
+        it "accepts GMT offset names" do
+            parseMessageClock "h12" "GMT+2" 120
+                `shouldBe` Right
+                    (MessageClock Hour12 (TimeZone 120 True "GMT+2"))
+
+        it "rejects incomplete clocks" do
+            parseMessageClock "h13" "CEST" 120 `shouldSatisfy` isLeft
+            parseMessageClock "h24" "Europe/Berlin" 120 `shouldSatisfy` isLeft
+            parseMessageClock "h24" "CEST" 900 `shouldSatisfy` isLeft
 
     describe "timeContextGuidance" do
         it "teaches the model about stamps and forbids echoing them" do

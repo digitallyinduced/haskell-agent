@@ -5,6 +5,7 @@ import Agent.CLI.NativeRuntime
     , NativeInteractionMode(..)
     , NativeSessionTarget(..)
     , NativeShellMode(..)
+    , NativeMessageClock(..)
     , NativeTurnRequest(..)
     , NativeWorkspaceDiscovery(..)
     , nativeLoadsHostWorkspaceContext
@@ -38,7 +39,9 @@ import Agent.Provider (Provider(..))
 import Agent.Loop (ImageAttachment(..))
 import Agent.CLI.Project (defaultProjectSettings)
 import Agent.ReasoningEffort (ReasoningEffort(..))
+import Agent.CLI.Timestamp (HourCycle(..), MessageClock(..))
 import Agent.TUI.Motion (MotionMode(..))
+import Data.Time.LocalTime (TimeZone(..))
 import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
 
@@ -196,6 +199,7 @@ spec = describe "nativeTurnOptions" do
                 , nativeTurnEffort = Just EffortHigh
                 , nativeTurnInteractionMode = NativeAsk
                 , nativeTurnShellMode = NativeShellNone
+                , nativeTurnMessageClock = Nothing
                 }
         options <- shouldReturnRight (nativeTurnOptions request)
         options.optPrompt `shouldBe` Just "fix the tests"
@@ -213,6 +217,7 @@ spec = describe "nativeTurnOptions" do
         options.optBash `shouldBe` False
         options.optScreenMode `shouldBe` ScreenMinimal
         options.optMotionMode `shouldBe` MotionOff
+        options.optMessageClock `shouldBe` Nothing
 
     it "maps resume and shell mode without parsing argv" do
         let request = baseRequest
@@ -223,6 +228,34 @@ spec = describe "nativeTurnOptions" do
         options.optResume `shouldBe` Just "session-123"
         options.optGhci `shouldBe` True
         options.optBash `shouldBe` True
+
+    it "lowers a conversation clock onto CLI options" do
+        let request = baseRequest
+                { nativeTurnMessageClock =
+                    Just
+                        NativeMessageClock
+                            { nativeHourCycle = "h24"
+                            , nativeTimeZoneName = "CEST"
+                            , nativeTimeZoneOffsetMinutes = 120
+                            }
+                }
+        options <- shouldReturnRight (nativeTurnOptions request)
+        options.optMessageClock
+            `shouldBe` Just (MessageClock Hour24 (TimeZone 120 True "CEST"))
+
+    it "rejects an invalid conversation clock before admission" do
+        nativeTurnOptions
+            (baseRequest
+                { nativeTurnMessageClock =
+                    Just
+                        NativeMessageClock
+                            { nativeHourCycle = "h24"
+                            , nativeTimeZoneName = "Europe/Berlin"
+                            , nativeTimeZoneOffsetMinutes = 120
+                            }
+                })
+            `shouldBe` Left
+                "timeZoneName must be a short zone abbreviation such as CEST or GMT+2"
 
     it "rejects an empty resume id before runtime admission" do
         nativeTurnOptions
@@ -293,6 +326,7 @@ baseRequest = NativeTurnRequest
     , nativeTurnEffort = Nothing
     , nativeTurnInteractionMode = NativeAsk
     , nativeTurnShellMode = NativeShellNone
+    , nativeTurnMessageClock = Nothing
     }
 
 conflictingOptions :: CliOptions

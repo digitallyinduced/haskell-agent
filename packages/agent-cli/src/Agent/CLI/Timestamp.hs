@@ -6,7 +6,9 @@
 -- the model echoes a stamp.
 module Agent.CLI.Timestamp
     ( HourCycle(..)
+    , MessageClock(..)
     , currentShortMessageTimestamp
+    , parseMessageClock
     , renderMessageTimestamp
     , renderContextualMessageTimestamp
     , renderShortMessageTimestamp
@@ -14,6 +16,7 @@ module Agent.CLI.Timestamp
     , stampUserTextAt
     , stampTurnInputs
     , stampTurnInputsSince
+    , stampTurnInputsSinceWith
     , shouldShowMessageTimestamp
     , stripBracketedTimestamps
     , timeContextGuidance
@@ -27,7 +30,7 @@ import qualified Data.Text as Text
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import Data.Time.LocalTime
-    ( TimeZone
+    ( TimeZone(..)
     , getCurrentTimeZone
     , getZonedTime
     , localDay
@@ -41,6 +44,40 @@ import System.Process (readProcessWithExitCode)
 
 data HourCycle = Hour12 | Hour24
     deriving (Eq, Show)
+
+-- | Explicit wall-clock used instead of the process locale. Cloud agent
+-- servers run in UTC; the conversation starter's timezone and 12/24-hour
+-- preference have to be supplied by the client.
+data MessageClock = MessageClock
+    { messageHourCycle :: !HourCycle
+    , messageTimeZone :: !TimeZone
+    }
+    deriving (Eq, Show)
+
+-- | Parse a client-supplied clock. Offset is minutes east of UTC.
+parseMessageClock :: Text -> Text -> Int -> Either Text MessageClock
+parseMessageClock hourCycleText zoneName offsetMinutes = do
+    hourCycle <- case Text.toLower (Text.strip hourCycleText) of
+        "h12" -> Right Hour12
+        "h24" -> Right Hour24
+        _ -> Left "hourCycle must be h12 or h24"
+    name <- parseTimeZoneName zoneName
+    if offsetMinutes < -14 * 60 || offsetMinutes > 14 * 60
+        then Left "timeZoneOffsetMinutes must be between -840 and 840"
+        else
+            Right
+                MessageClock
+                    { messageHourCycle = hourCycle
+                    , messageTimeZone =
+                        TimeZone offsetMinutes (offsetMinutes /= 0) (Text.unpack name)
+                    }
+
+parseTimeZoneName :: Text -> Either Text Text
+parseTimeZoneName raw =
+    let name = Text.strip raw
+    in if validTimeZoneName name
+        then Right name
+        else Left "timeZoneName must be a short zone abbreviation such as CEST or GMT+2"
 
 -- | Format @utc@ in @tz@ as @[YYYY-MM-DD HH:MM TZ]@.
 renderMessageTimestamp :: TimeZone -> UTCTime -> Text
@@ -126,13 +163,28 @@ stampTurnInputsSince
     -- ^ Previous conversation activity.
     -> [TurnInput]
     -> IO [TurnInput]
-stampTurnInputsSince startedAt previousAt inputs = do
+stampTurnInputsSince = stampTurnInputsSinceWith Nothing
+
+-- | Like 'stampTurnInputsSince', but an explicit clock wins over the process
+-- locale. Cloud agent-server uses this so stamps follow the conversation
+-- starter rather than the UTC host.
+stampTurnInputsSinceWith
+    :: Maybe MessageClock
+    -> UTCTime
+    -- ^ Conversation start.
+    -> Maybe UTCTime
+    -- ^ Previous conversation activity.
+    -> [TurnInput]
+    -> IO [TurnInput]
+stampTurnInputsSinceWith clock startedAt previousAt inputs = do
     now <- getCurrentTime
     if not (shouldShowMessageTimestamp previousAt now)
         then pure inputs
         else do
-            tz <- getCurrentTimeZone
-            hourCycle <- systemHourCycle
+            (hourCycle, tz) <- case clock of
+                Just MessageClock{messageHourCycle, messageTimeZone} ->
+                    pure (messageHourCycle, messageTimeZone)
+                Nothing -> (,) <$> systemHourCycle <*> getCurrentTimeZone
             let stamp = renderContextualMessageTimestamp hourCycle tz startedAt now
             pure (map (mapTurnInputUserText (appendStamp stamp)) inputs)
 
@@ -232,10 +284,32 @@ matchTimestamp s = do
     afterSpace <- case Text.uncons afterTime of
         Just (' ', rest) -> Just rest
         _ -> Nothing
-    let (tz, rest1) = Text.span isAsciiUpper afterSpace
+    (tz, rest1) <- matchTimeZoneName afterSpace
     case Text.uncons rest1 of
         Just (']', rest2) | not (Text.null tz) -> Just rest2
         _ -> Nothing
+
+matchTimeZoneName :: Text -> Maybe (Text, Text)
+matchTimeZoneName s =
+    let (letters, rest) = Text.span isAsciiUpper s
+    in if Text.null letters
+        then Nothing
+        else case Text.uncons rest of
+            Just (sign, afterSign)
+                | sign == '+' || sign == '-' ->
+                    let (digits, rest2) = Text.span isDigit afterSign
+                        width = Text.length digits
+                    in if width >= 1 && width <= 4
+                        then Just (letters <> Text.cons sign digits, rest2)
+                        else Nothing
+            _ -> Just (letters, rest)
+
+validTimeZoneName :: Text -> Bool
+validTimeZoneName name =
+    case matchTimeZoneName name of
+        Just (matched, leftover) ->
+            Text.null leftover && matched == name && Text.length name <= 10
+        Nothing -> False
 
 matchClock :: Text -> Maybe Text
 matchClock s =

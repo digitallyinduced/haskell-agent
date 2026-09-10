@@ -30,6 +30,7 @@ import Agent.Runtime.SessionState (SessionState)
 import Agent.CLI.Session.Workspace (WorkspaceContext)
 import Agent.CLI.SessionTitle (SessionTitleManager)
 import Agent.CLI.Terminal (TerminalCapabilities)
+import Agent.CLI.Timestamp (MessageClock)
 import Agent.CLI.SteeringInputs (SteeringInputs)
 import Agent.CLI.TUI.App (FullscreenRuntime)
 import Agent.Dialect (Dialect)
@@ -149,4 +150,6 @@ data SessionEnv = SessionEnv
     , sessionSetConcurrentLimit :: !(Int -> IO Text)
     , sessionOnPersisted :: !(SessionHandle -> IO ())
     , sessionReset :: !(IO ())
+    -- | Conversation starter's wall-clock. 'Nothing' uses the process locale.
+    , sessionMessageClock :: !(Maybe MessageClock)
     }

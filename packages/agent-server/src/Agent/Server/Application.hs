@@ -723,6 +723,7 @@ createTurn backend supervisor boundary sessionId request
                 , turnSpecImages = request.createTurnImages
                 , turnSpecFiles = request.createTurnFiles
                 , turnSpecBoundary = boundary
+                , turnSpecMessageClock = request.createTurnMessageClock
                 }
             validateSession =
                 fmap (fmap (const ())) $
