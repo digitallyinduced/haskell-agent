@@ -1,8 +1,12 @@
--- | Model-facing tools for scoped, user-defined PostgreSQL data.
+-- | Model-facing tools for scoped PostgreSQL data.
 --
--- The storage package owns PostgreSQL connections, roles, schema isolation,
--- transactions, and result bounds.  This module deliberately depends only on
--- callbacks so the provider-neutral tool surface remains easy to test.
+-- Custom scopes (@user@, @repository@, @checkout@) are agent-created memory.
+-- The local CLI also exposes the runtime @harness@ catalog as a read-only
+-- query surface so the model can inspect durable sessions after compaction.
+-- Multi-tenant @agent-server@ embeddings omit that catalog.  The storage
+-- package owns connections, roles, isolation, transactions, and result
+-- bounds.  This module depends only on callbacks so the tool surface stays
+-- easy to test.
 module Agent.CLI.Database
     ( DatabaseScope(..)
     , databaseScopeDecoder
@@ -27,20 +31,31 @@ data DatabaseScope
     = DatabaseUserScope
     | DatabaseRepositoryScope
     | DatabaseCheckoutScope
+    | DatabaseHarnessScope
     deriving (Eq, Show)
 
+-- | Custom-data scopes used by learned skills and the native data browser.
+-- The runtime @harness@ catalog is not a provisioned custom scope.
 databaseScopeDecoder :: Hermes.Decoder DatabaseScope
-databaseScopeDecoder = Hermes.withText \case
+databaseScopeDecoder = databaseScopeDecoderWithHarness False
+
+databaseScopeDecoderWithHarness :: Bool -> Hermes.Decoder DatabaseScope
+databaseScopeDecoderWithHarness exposeHarness = Hermes.withText \case
         "user" -> pure DatabaseUserScope
         "repository" -> pure DatabaseRepositoryScope
         "checkout" -> pure DatabaseCheckoutScope
+        "harness"
+            | exposeHarness -> pure DatabaseHarnessScope
+            | otherwise ->
+                fail "the harness catalog is not available in this session"
         value ->
             fail
                 ("unknown database scope "
                     <> show value
-                    <> "; expected user, repository, or checkout")
+                    <> "; expected "
+                    <> expectedScopes exposeHarness)
 
--- | Storage callbacks for the three model-facing database operations.
+-- | Storage callbacks for the model-facing database operations.
 --
 -- Database and conversation-search results are rendered as labeled text because
 -- they are read by the model and humans rather than consumed as an API.
@@ -55,28 +70,36 @@ data DatabaseToolsEnv = DatabaseToolsEnv
         :: !(DatabaseScope -> Text -> Text -> IO (Either Text Text))
     , databaseSearchConversations
         :: !(Text -> Int -> IO (Either Text [ConversationSearchMatch]))
+    -- | Local CLI and personal native embeddings expose the runtime catalog.
+    -- @agent-server@ leaves this false so tenant agents cannot query harness
+    -- tables through model-authored SQL.
+    , databaseHarnessCatalogEnabled :: !Bool
+    -- | Stable session key for the current conversation, when reserved.
+    -- Included in harness-catalog tool text so the model can filter SQL after
+    -- compaction without guessing identifiers.
+    , databaseHarnessSessionId :: !(Maybe Text)
     }
 
 data SchemaArgs = SchemaArgs !DatabaseScope
 
-schemaArgsDecoder :: Hermes.Decoder SchemaArgs
-schemaArgsDecoder = Hermes.object $
-    SchemaArgs <$> Hermes.atKey "scope" databaseScopeDecoder
+schemaArgsDecoder :: Bool -> Hermes.Decoder SchemaArgs
+schemaArgsDecoder exposeHarness = Hermes.object $
+    SchemaArgs <$> Hermes.atKey "scope" (databaseScopeDecoderWithHarness exposeHarness)
 
 data QueryArgs = QueryArgs !DatabaseScope !Text
 
-queryArgsDecoder :: Hermes.Decoder QueryArgs
-queryArgsDecoder = Hermes.object $
+queryArgsDecoder :: Bool -> Hermes.Decoder QueryArgs
+queryArgsDecoder exposeHarness = Hermes.object $
         QueryArgs
-            <$> Hermes.atKey "scope" databaseScopeDecoder
+            <$> Hermes.atKey "scope" (databaseScopeDecoderWithHarness exposeHarness)
             <*> Hermes.atKey "sql" Hermes.text
 
 data ExecuteArgs = ExecuteArgs !DatabaseScope !Text !Text
 
-executeArgsDecoder :: Hermes.Decoder ExecuteArgs
-executeArgsDecoder = Hermes.object $
+executeArgsDecoder :: Bool -> Hermes.Decoder ExecuteArgs
+executeArgsDecoder exposeHarness = Hermes.object $
         ExecuteArgs
-            <$> Hermes.atKey "scope" databaseScopeDecoder
+            <$> Hermes.atKey "scope" (databaseScopeDecoderWithHarness exposeHarness)
             <*> Hermes.atKey "sql" Hermes.text
             <*> Hermes.atKey "purpose" Hermes.text
 
@@ -103,32 +126,30 @@ databaseTools env =
 schemaTool :: DatabaseToolsEnv -> AppTool
 schemaTool env = jsonTool
     "database_schema"
-    ( "Inspect the user-defined PostgreSQL tables visible in one durable "
-        <> "scope. Returns tables, columns, keys, constraints, indexes, and "
-        <> "comments. Inspect this before querying or creating tables; "
-        <> "harness-internal schemas are never exposed."
-    )
-    [scopeProperty]
+    (schemaToolDescription env)
+    [scopeProperty env]
     True
     ParallelSafe
-    (typedTool "database_schema" schemaArgsDecoder \(SchemaArgs scope) ->
-        env.databaseDescribeScope scope)
+    (typedTool
+        "database_schema"
+        (schemaArgsDecoder env.databaseHarnessCatalogEnabled)
+        \(SchemaArgs scope) ->
+            env.databaseDescribeScope scope)
 
 queryTool :: DatabaseToolsEnv -> AppTool
 queryTool env = jsonTool
     "database_query"
-    ( "Run one read-only PostgreSQL query against user-defined tables in one "
-        <> "durable scope. The database enforces a read-only transaction, "
-        <> "timeouts, row limits, and scope isolation. Inspect the schema "
-        <> "first rather than guessing table or column names."
-    )
-    [ scopeProperty
+    (queryToolDescription env)
+    [ scopeProperty env
     , PropertySchema "sql" PropertyString True $ Just
         "One read-only PostgreSQL query. Do not include transaction control."
     ]
     True
     ParallelSafe
-    (typedTool "database_query" queryArgsDecoder \(QueryArgs scope sql) ->
+    (typedTool
+        "database_query"
+        (queryArgsDecoder env.databaseHarnessCatalogEnabled)
+        \(QueryArgs scope sql) ->
         if Text.null (Text.strip sql)
             then pure (Left "database query must not be empty")
             else env.databaseRunQuery scope sql)
@@ -136,16 +157,8 @@ queryTool env = jsonTool
 executeTool :: DatabaseToolsEnv -> AppTool
 executeTool env = jsonTool
     "database_execute"
-    ( "Execute a transactional PostgreSQL DDL/DML batch against user-defined "
-        <> "tables in one durable scope. Use this to create or alter structured "
-        <> "memory such as todos and to insert, update, or delete its rows. "
-        <> "Choose the narrowest correct scope, prefer existing suitable "
-        <> "tables, and add UUIDv7 primary keys using "
-        <> "`uuid PRIMARY KEY DEFAULT uuidv7()`, timestamps, constraints, "
-        <> "indexes, and comments when creating a schema. This is a mutating tool and "
-        <> "requires approval unless the active policy auto-approves it."
-    )
-    [ scopeProperty
+    (executeToolDescription env)
+    [ scopeProperty env
     , PropertySchema "sql" PropertyString True $ Just
         "Transactional PostgreSQL DDL/DML batch for the selected custom scope."
     , PropertySchema "purpose" PropertyString True $ Just
@@ -153,12 +166,17 @@ executeTool env = jsonTool
     ]
     False
     TurnSequential
-    (typedTool "database_execute" executeArgsDecoder \(ExecuteArgs scope sql purpose) ->
-        if Text.null (Text.strip sql)
-            then pure (Left "database SQL must not be empty")
-            else if Text.null (Text.strip purpose)
-                then pure (Left "database change purpose must not be empty")
-                else env.databaseRunExecute scope purpose sql)
+    (typedTool
+        "database_execute"
+        (executeArgsDecoder env.databaseHarnessCatalogEnabled)
+        \(ExecuteArgs scope sql purpose) ->
+        if scope == DatabaseHarnessScope
+            then pure (Left harnessCatalogReadOnlyError)
+            else if Text.null (Text.strip sql)
+                then pure (Left "database SQL must not be empty")
+                else if Text.null (Text.strip purpose)
+                    then pure (Left "database change purpose must not be empty")
+                    else env.databaseRunExecute scope purpose sql)
 
 conversationSearchTool :: DatabaseToolsEnv -> AppTool
 conversationSearchTool env = jsonTool
@@ -184,15 +202,92 @@ conversationSearchTool env = jsonTool
                 else fmap (fmap renderConversationSearchResult) $
                     env.databaseSearchConversations query limit)
 
-scopeProperty :: PropertySchema
-scopeProperty = PropertySchema
+scopeProperty :: DatabaseToolsEnv -> PropertySchema
+scopeProperty env = PropertySchema
     "scope"
-    (PropertyEnum ["user", "repository", "checkout"])
+    (PropertyEnum (scopeNames env.databaseHarnessCatalogEnabled))
     True
-    (Just
-        ( "Durable data scope: user for cross-project personal data, repository "
-            <> "for data shared by clones/worktrees, or checkout for this worktree."
-        ))
+    (Just (scopePropertyDescription env.databaseHarnessCatalogEnabled))
+
+scopeNames :: Bool -> [Text]
+scopeNames exposeHarness =
+    ["user", "repository", "checkout"]
+        <> ["harness" | exposeHarness]
+
+expectedScopes :: Bool -> String
+expectedScopes exposeHarness =
+    if exposeHarness
+        then "user, repository, checkout, or harness"
+        else "user, repository, or checkout"
+
+scopePropertyDescription :: Bool -> Text
+scopePropertyDescription exposeHarness =
+    "Durable data scope: user for cross-project personal data, repository "
+        <> "for data shared by clones/worktrees, or checkout for this worktree."
+        <> if exposeHarness
+            then
+                " harness is the local runtime catalog (sessions, turns, messages, "
+                    <> "tool calls). It is read-only and survives compaction."
+            else ""
+
+schemaToolDescription :: DatabaseToolsEnv -> Text
+schemaToolDescription env
+    | env.databaseHarnessCatalogEnabled =
+        "Inspect PostgreSQL tables visible in one durable scope. user, "
+            <> "repository, and checkout are agent-created memory. harness is "
+            <> "the local runtime catalog. Returns tables, columns, keys, "
+            <> "constraints, indexes, and comments. Inspect this before querying "
+            <> "or creating tables."
+    | otherwise =
+        "Inspect the user-defined PostgreSQL tables visible in one durable "
+            <> "scope. Returns tables, columns, keys, constraints, indexes, and "
+            <> "comments. Inspect this before querying or creating tables; "
+            <> "harness-internal schemas are never exposed."
+
+queryToolDescription :: DatabaseToolsEnv -> Text
+queryToolDescription env
+    | env.databaseHarnessCatalogEnabled =
+        "Run one read-only PostgreSQL query against one durable scope. The "
+            <> "database enforces a read-only transaction, timeouts, row limits, "
+            <> "and scope isolation. Inspect the schema first rather than guessing "
+            <> "table or column names."
+            <> harnessQueryGuidance env.databaseHarnessSessionId
+    | otherwise =
+        "Run one read-only PostgreSQL query against user-defined tables in one "
+            <> "durable scope. The database enforces a read-only transaction, "
+            <> "timeouts, row limits, and scope isolation. Inspect the schema "
+            <> "first rather than guessing table or column names."
+
+executeToolDescription :: DatabaseToolsEnv -> Text
+executeToolDescription env =
+    "Execute a transactional PostgreSQL DDL/DML batch against user-defined "
+        <> "tables in one durable scope. Use this to create or alter structured "
+        <> "memory such as todos and to insert, update, or delete its rows. "
+        <> "Choose the narrowest correct scope, prefer existing suitable "
+        <> "tables, and add UUIDv7 primary keys using "
+        <> "`uuid PRIMARY KEY DEFAULT uuidv7()`, timestamps, constraints, "
+        <> "indexes, and comments when creating a schema. This is a mutating tool and "
+        <> "requires approval unless the active policy auto-approves it."
+        <> if env.databaseHarnessCatalogEnabled
+            then " The harness catalog is read-only; do not use this tool to change it."
+            else ""
+
+harnessQueryGuidance :: Maybe Text -> Text
+harnessQueryGuidance sessionId =
+    " The harness scope is the runtime catalog: sessions, session_turns, "
+        <> "session_messages, session_function_calls, and related item tables. "
+        <> "Compaction replaces model context only; earlier turns remain queryable. "
+        <> "Filter on session_key (not the internal UUID) and turn_index. "
+        <> maybe
+            ""
+            (\value -> " This session's key is `" <> value <> "`. ")
+            sessionId
+        <> "Prefer targeted columns and WHERE clauses over selecting large "
+        <> "tool-output columns."
+
+harnessCatalogReadOnlyError :: Text
+harnessCatalogReadOnlyError =
+    "the harness catalog is read-only; use user, repository, or checkout to change agent-created tables"
 
 renderConversationSearchResult :: [ConversationSearchMatch] -> Text
 renderConversationSearchResult matches =

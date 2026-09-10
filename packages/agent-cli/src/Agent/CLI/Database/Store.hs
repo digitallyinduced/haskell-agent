@@ -37,8 +37,10 @@ import Agent.Store.Postgres.Custom
     , defaultQueryLimits
     , executeCustom
     , inspectCustomSchema
+    , inspectSchema
     , queryCustom
     , queryCustomJson
+    , querySchema
     )
 import Agent.Store.Postgres.Session
     ( ConversationSearchResult(..)
@@ -156,31 +158,60 @@ databaseToolsEnvForStore
     -- ^ Current root session id, when persistence has started.
     -> Maybe Text
     -- ^ Identity of the connected gateway credential, if any.
+    -> Bool
+    -- ^ Whether the local runtime catalog is queryable as @harness@.
+    -> Maybe Text
+    -- ^ Current session key to advertise in harness tool text.
     -> DatabaseToolsEnv
 databaseToolsEnvForStore
-        store scopes currentSessionId gatewayIdentity = DatabaseToolsEnv
+        store scopes currentSessionId gatewayIdentity
+        exposeHarnessCatalog harnessSessionId = DatabaseToolsEnv
     { databaseDescribeScope = \selected ->
-        withScopeDatabase store (scopeForDatabase scopes selected) \database pool ->
-            fmap formatCatalog <$> inspectCustomSchema pool database
+        case selected of
+            DatabaseHarnessScope ->
+                fmap formatCatalog
+                    <$> inspectSchema (storePool (trustedPool store)) "harness"
+            _ ->
+                withScopeDatabase store (scopeForDatabase scopes selected)
+                    \database pool ->
+                        fmap formatCatalog <$> inspectCustomSchema pool database
     , databaseRunQuery = \selected sql ->
-        withScopeDatabase store (scopeForDatabase scopes selected) \database pool ->
-            queryCustom pool database defaultQueryLimits sql >>= \case
-                Left err -> pure (Left err)
-                Right result -> pure (Right (formatQueryResult result))
+        case selected of
+            DatabaseHarnessScope ->
+                querySchema
+                    (storePool (trustedPool store))
+                    "harness"
+                    defaultQueryLimits
+                    sql >>= \case
+                    Left err -> pure (Left err)
+                    Right result -> pure (Right (formatQueryResult result))
+            _ ->
+                withScopeDatabase store (scopeForDatabase scopes selected)
+                    \database pool ->
+                        queryCustom pool database defaultQueryLimits sql >>= \case
+                            Left err -> pure (Left err)
+                            Right result ->
+                                pure (Right (formatQueryResult result))
     , databaseRunExecute = \selected purpose sql ->
-        withScopeDatabase store (scopeForDatabase scopes selected) \database pool -> do
-            sessionId <- currentSessionId
-            fmap formatExecutionResult <$> executeCustom
-                (storePool (trustedPool store))
-                pool
-                database
-                CustomAuditContext
-                    { customAuditSessionId = sessionId
-                    , customAuditAgentId = Nothing
-                    }
-                defaultQueryLimits
-                purpose
-                sql
+        case selected of
+            DatabaseHarnessScope ->
+                pure $ Left
+                    "the harness catalog is read-only; use user, repository, or checkout to change agent-created tables"
+            _ ->
+                withScopeDatabase store (scopeForDatabase scopes selected)
+                    \database pool -> do
+                        sessionId <- currentSessionId
+                        fmap formatExecutionResult <$> executeCustom
+                            (storePool (trustedPool store))
+                            pool
+                            database
+                            CustomAuditContext
+                                { customAuditSessionId = sessionId
+                                , customAuditAgentId = Nothing
+                                }
+                            defaultQueryLimits
+                            purpose
+                            sql
     , databaseSearchConversations = \query limit ->
         searchConversationTurnsForBoundary
             (trustedPool store)
@@ -191,6 +222,8 @@ databaseToolsEnvForStore
             Left err -> pure (Left (renderStoreError err))
             Right results ->
                 pure (Right (map searchResultValue results))
+    , databaseHarnessCatalogEnabled = exposeHarnessCatalog
+    , databaseHarnessSessionId = harnessSessionId
     }
 
 -- | List the table-like objects exposed by one existing user-defined scope.
@@ -421,6 +454,8 @@ scopeForDatabase scopes = \case
     DatabaseUserScope -> scopes.userScope
     DatabaseRepositoryScope -> scopes.repositoryScope
     DatabaseCheckoutScope -> scopes.checkoutScope
+    DatabaseHarnessScope ->
+        error "scopeForDatabase: harness is the runtime catalog, not a custom scope"
 
 applicableDatabaseScopes :: DatabaseScopes -> [Scope]
 applicableDatabaseScopes scopes =

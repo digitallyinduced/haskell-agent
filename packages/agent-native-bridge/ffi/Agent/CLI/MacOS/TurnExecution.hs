@@ -136,6 +136,7 @@ runNativeTurn
             , nativeHome = Nothing
             , nativeDatabaseStore = Nothing
             , nativeDatabaseScopeNamespace = Nothing
+            , nativeExposeHarnessCatalog = True
             , nativeWorkspaceDiscovery = DiscoverHostWorkspace
             , nativeCapabilities = fullNativeRunCapabilities
             , nativeStartupPolicy = hostNativeStartupPolicy

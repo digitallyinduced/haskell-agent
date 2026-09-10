@@ -115,6 +115,39 @@ spec = describe "custom PostgreSQL SQL normalization" do
                                                             database
                                                     sequentialCatalog
                                                         `shouldBe` catalog
+                                                    harnessCatalog <- inspectSchema
+                                                        (storePool (trustedPool store))
+                                                        "harness"
+                                                    _ <- harnessCatalog
+                                                        `shouldSatisfyRight`
+                                                            (any
+                                                                (\object ->
+                                                                    object.catalogObjectKind
+                                                                        == "table"
+                                                                        && object.catalogObjectName
+                                                                            == "sessions"))
+                                                    harnessQuery <- querySchema
+                                                        (storePool (trustedPool store))
+                                                        "harness"
+                                                        defaultQueryLimits
+                                                        "SELECT count(*)::bigint AS session_count FROM sessions"
+                                                    _ <- harnessQuery
+                                                        `shouldSatisfyRight`
+                                                            (\queryResult ->
+                                                                not
+                                                                    queryResult.customQueryTruncated
+                                                                    && "session_count:"
+                                                                        `Text.isInfixOf`
+                                                                            queryResult.customQueryOutput)
+                                                    deniedHarness <- querySchema
+                                                        rawScope
+                                                        "harness"
+                                                        defaultQueryLimits
+                                                        "SELECT 1"
+                                                    deniedHarness
+                                                        `shouldBe`
+                                                            Left
+                                                                "the connected PostgreSQL role cannot use that schema"
                                                     result <- queryCustom
                                                         rawScope
                                                         database
