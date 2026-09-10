@@ -285,8 +285,7 @@ spec = describe "systemPrompt" do
             "Use show_image to present an image file"
         withImages `shouldSatisfy` Text.isInfixOf
             "not added to your own context"
-        withImages `shouldSatisfy` Text.isInfixOf
-            "Use read_file on a local image file"
+        withImages `shouldNotSatisfy` Text.isInfixOf "view_image"
         withoutImages `shouldNotSatisfy` Text.isInfixOf "show_image"
 
     it "adds view_image inspection guidance when that tool is registered" do
@@ -309,9 +308,9 @@ spec = describe "systemPrompt" do
         withView `shouldSatisfy` Text.isInfixOf
             "Use view_image to load a local image file"
         withView `shouldSatisfy` Text.isInfixOf
-            "read_file also attaches"
+            "Do not use read_file for images"
         withoutView `shouldNotSatisfy` Text.isInfixOf "view_image"
-        withoutView `shouldSatisfy` Text.isInfixOf
+        withoutView `shouldNotSatisfy` Text.isInfixOf
             "Use read_file on a local image file"
 
     it "adds reusable-memory guidance only when learned-skill tools are registered" do

@@ -61,8 +61,8 @@ data GrokToolSet = GrokToolSet
 -- Core upstream parity: file tools, terminal/background lifecycle, progress,
 -- monitor, subagents, and plan-mode interaction.
 -- Local extensions: run_ghci (persistent GHCi with per-call purity approval)
--- and view_image (explicit model-facing image inspection; upstream Grok Build
--- embeds images through read_file, which this dialect also does).
+-- and view_image (model-facing local image inspection). Image files stay on
+-- view_image; read_file remains text-only.
 grokTools
     :: GrokSession
     -> GhciSession

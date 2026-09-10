@@ -3,7 +3,6 @@ module Agent.Tools.FileSystem.ReadFileSpec (spec) where
 import Agent.ToolDispatch
     ( ToolCallResult(..)
     , ToolDispatchConfig(..)
-    , ToolResultImage(..)
     , dispatchToolCall
     , functionToolCall
     )
@@ -123,16 +122,12 @@ spec = describe "formatReadFile" do
                 result.output `shouldBe` "1\8594hello"
                 result.toolResultImages `shouldBe` []
 
-        it "attaches a PNG to the model-facing result" do
+        it "rejects image files as binary rather than attaching them" do
             withTool \workspace tool -> do
                 BS.writeFile (workspace </> "shot.png") pngBytes
                 result <- runReadTool tool "{\"target_file\":\"shot.png\"}"
-                case result of
-                    ToolCallResult{output, toolResultImages = [image]} -> do
-                        output `shouldBe` "Viewed image file: shot.png"
-                        image.imageUrl `shouldSatisfy`
-                            Text.isPrefixOf "data:image/png;base64,"
-                    _ -> expectationFailure ("expected image result, got " <> show result)
+                result.output `shouldSatisfy` Text.isInfixOf "Cannot read binary file"
+                result.toolResultImages `shouldBe` []
 
         it "still rejects non-image binary files" do
             withTool \workspace tool -> do

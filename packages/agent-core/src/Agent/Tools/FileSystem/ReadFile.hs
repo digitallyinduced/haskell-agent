@@ -7,17 +7,15 @@ module Agent.Tools.FileSystem.ReadFile
     , streamReadFile
     ) where
 
-import Agent.Image.File (readImageFileResult, supportedImageMime)
 import Agent.Json.Decode (Decoder)
 import Agent.OsPath (fromText, unsafeToFilePath)
 import Agent.ToolArgs (objectArgs, optInt, optText, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch
     ( ToolCall(..)
-    , ToolHandlerResult(..)
     , decodeToolArguments
     , toolArgumentsValue
-    , typedRichToolWithCall
+    , typedTool
     )
 import Agent.Tools.IO (displayPathInWorkspace, resolveForRead)
 import Agent.Tools.Scheduling
@@ -72,8 +70,7 @@ readFileTool env = withSharedToolResourceClaims env (readFileClaims env) $
     ]
     True
     ParallelSafe
-    (typedRichToolWithCall "read_file" readFileArgsDecoder
-        (runReadFile env))
+    (typedTool "read_file" readFileArgsDecoder (runReadFile env))
 
 readFileClaims
     :: ToolEnv
@@ -98,9 +95,7 @@ readFileDescription =
     \- The target_file parameter can be relative to the workspace or an absolute path in an allowed filesystem root\n\
     \- By default, it reads up to 1000 lines starting from the beginning of the file\n\
     \- offset is 1-based. Negative offsets count from the end of the file (-1 is the last line).\n\
-    \- Line numbers (1-based) appear as anchors in the format LINE_NUMBER\8594LINE_CONTENT on the first returned line and on every 10th line of the file; the lines in between show content only. Count from the nearest anchor when referring to a specific line\n\
-    \- This tool can read image files (PNG, JPEG, WebP, non-animated GIF). When reading an image file the contents are presented visually.\n\
-    \- offset and limit are ignored for image files."
+    \- Line numbers (1-based) appear as anchors in the format LINE_NUMBER\8594LINE_CONTENT on the first returned line and on every 10th line of the file; the lines in between show content only. Count from the nearest anchor when referring to a specific line"
 
 maxReadLines :: Int
 maxReadLines = 1000
@@ -108,12 +103,8 @@ maxReadLines = 1000
 maxReadTokens :: Int
 maxReadTokens = 25000
 
-runReadFile
-    :: ToolEnv
-    -> ToolCall
-    -> ReadFileArgs
-    -> IO (Either Text ToolHandlerResult)
-runReadFile env _call args = resolveForRead env (fromText args.targetFile) >>= \case
+runReadFile :: ToolEnv -> ReadFileArgs -> IO (Either Text Text)
+runReadFile env args = resolveForRead env (fromText args.targetFile) >>= \case
     Left err -> pure (Left err)
     Right path
         | ".pdf" `Text.isSuffixOf` Text.toLower args.targetFile ->
@@ -125,31 +116,9 @@ runReadFile env _call args = resolveForRead env (fromText args.targetFile) >>= \
                 pure $ Left $ "File not found: " <> display
             True -> do
                 _ <- pure (args.pages, args.format)
-                try @_ @SomeException (looksLikeImage path) >>= \case
-                    Left err ->
-                        pure $ Left $
-                            "Failed to read file: " <> Text.pack (show err)
-                    Right True -> do
-                        display <- displayPathInWorkspace env path
-                        readImageFileResult path display
-                    Right False ->
-                        try @_ @SomeException (streamReadFile path args) >>= \case
-                            Left err ->
-                                pure $ Left $
-                                    "Failed to read file: " <> Text.pack (show err)
-                            Right result ->
-                                pure $ fmap textFileResult result
-
-textFileResult :: Text -> ToolHandlerResult
-textFileResult text = ToolHandlerResult text []
-
--- | Cheap prefix sniff so ordinary text reads still stream. A matching prefix
--- is re-validated when the full file is loaded.
-looksLikeImage :: OsPath -> IO Bool
-looksLikeImage path =
-    withBinaryFile (unsafeToFilePath path) ReadMode \handle -> do
-        prefix <- BS.hGet handle 12
-        pure (supportedImageMime prefix /= Nothing)
+                try @_ @SomeException (streamReadFile path args) >>= \case
+                    Left err -> pure $ Left $ "Failed to read file: " <> Text.pack (show err)
+                    Right result -> pure result
 
 -- | Bounded, incremental implementation used by the tool.  The first pass
 -- counts lines (needed for negative offsets and stable out-of-range errors);

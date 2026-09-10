@@ -550,9 +550,9 @@ WezTerm, and iTerm2 draw the bitmap natively, other terminals get a
 true-colour text approximation. The image is shown to the user only; it is
 not added to the model context.
 
-To inspect a local image, Codex exposes `view_image`, and Grok Build uses
-both `view_image` and `read_file`. Those tools attach PNG, JPEG, WebP, and
-non-animated GIF files to the next model request.
+To inspect a local image, Codex and Grok Build expose `view_image`. That
+tool attaches PNG, JPEG, WebP, and non-animated GIF files to the next
+model request. `read_file` remains text-only.
 
 ### Inline charts
 

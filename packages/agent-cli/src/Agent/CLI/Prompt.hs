@@ -374,14 +374,9 @@ imageInspectionGuidance available
             [ "Image inspection:"
             , "- Use view_image to load a local image file into your own context when visual inspection is needed."
             ]
-                <> [ "- read_file also attaches PNG, JPEG, WebP, and non-animated GIF files to your context."
+                <> [ "- Do not use read_file for images; it only reads text."
                    | "read_file" `Set.member` available
                    ]
-    | "read_file" `Set.member` available =
-        Text.unlines
-            [ "Image inspection:"
-            , "- Use read_file on a local image file (PNG, JPEG, WebP, non-animated GIF) to load it into your own context."
-            ]
     | otherwise = ""
 
 imagePresentationGuidance :: Set Text -> Text
