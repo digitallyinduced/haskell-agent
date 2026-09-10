@@ -259,6 +259,7 @@ spec = describe "Agent.CLI.Dialects" do
                             forM_
                                 [ "run_ghci"
                                 , "read_file"
+                                , "view_image"
                                 , shellName
                                 , "read_tool_output"
                                 , "search_tool_output"

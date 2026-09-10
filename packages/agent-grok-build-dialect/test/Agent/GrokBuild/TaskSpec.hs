@@ -401,13 +401,14 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
     it "filters explore tools to the Grok Build read-only set" do
         let tools =
                 [ fake "read_file"
+                , fake "view_image"
                 , fake "search_replace"
                 , fake "task"
                 , fake "grep"
                 , fake "run_terminal_cmd"
                 ]
             names = map (.appToolName) (filterGrokToolsForType "explore" tools)
-        names `shouldBe` ["read_file", "grep"]
+        names `shouldBe` ["read_file", "view_image", "grep"]
         names `shouldNotContain` ["search_replace"]
         names `shouldNotContain` ["task"]
 

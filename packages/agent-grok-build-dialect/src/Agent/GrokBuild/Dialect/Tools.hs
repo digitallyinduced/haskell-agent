@@ -16,6 +16,7 @@ import Agent.Tools.Ghci (GhciSession, runGhciTool)
 import Agent.Tools.FileSystem.Grep (grepTool)
 import Agent.Tools.FileSystem.ListDir (listDirTool)
 import Agent.Tools.FileSystem.ReadFile (readFileTool)
+import Agent.Tools.ViewImage (viewImageTool)
 import Agent.GrokBuild.Dialect.Goal (GoalRuntime, updateGoalTool)
 import Agent.GrokBuild.Dialect.Monitor (monitorTool)
 import Agent.GrokBuild.Dialect.Scheduler
@@ -59,7 +60,9 @@ data GrokToolSet = GrokToolSet
 
 -- Core upstream parity: file tools, terminal/background lifecycle, progress,
 -- monitor, subagents, and plan-mode interaction.
--- Local extension: run_ghci (persistent GHCi with per-call purity approval).
+-- Local extensions: run_ghci (persistent GHCi with per-call purity approval)
+-- and view_image (explicit model-facing image inspection; upstream Grok Build
+-- embeds images through read_file, which this dialect also does).
 grokTools
     :: GrokSession
     -> GhciSession
@@ -75,6 +78,7 @@ grokTools
     let env = session.grokEnv
         executionBase =
             [ runGhciTool ghci
+            , viewImageTool env
             , readFileTool env
             , grepTool env
             , listDirTool env

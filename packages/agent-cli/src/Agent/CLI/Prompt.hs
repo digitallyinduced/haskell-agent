@@ -349,7 +349,8 @@ secretInputGuidance available
             , "- Never read, print, summarize, or otherwise expose the secret file contents."
             ]
 
--- | Point the model at inline image display when the host can present one.
+-- | Point the model at inline image display when the host can present one,
+-- and at model-facing inspection when a local image can be attached.
 imageDisplayGuidance :: Set Text -> Text
 imageDisplayGuidance available
     | "render_chart" `Set.member` available =
@@ -359,6 +360,32 @@ imageDisplayGuidance available
             , "- The host displays charts in the conversation, with a text fallback where graphics are unavailable. Do not promise hover or zoom."
             , imageDisplayGuidance (Set.delete "render_chart" available)
             ]
+    | otherwise =
+        Text.intercalate "\n" $
+            filter (not . Text.null)
+                [ imageInspectionGuidance available
+                , imagePresentationGuidance available
+                ]
+
+imageInspectionGuidance :: Set Text -> Text
+imageInspectionGuidance available
+    | "view_image" `Set.member` available =
+        Text.unlines $
+            [ "Image inspection:"
+            , "- Use view_image to load a local image file into your own context when visual inspection is needed."
+            ]
+                <> [ "- read_file also attaches PNG, JPEG, WebP, and non-animated GIF files to your context."
+                   | "read_file" `Set.member` available
+                   ]
+    | "read_file" `Set.member` available =
+        Text.unlines
+            [ "Image inspection:"
+            , "- Use read_file on a local image file (PNG, JPEG, WebP, non-animated GIF) to load it into your own context."
+            ]
+    | otherwise = ""
+
+imagePresentationGuidance :: Set Text -> Text
+imagePresentationGuidance available
     | "show_image" `Set.notMember` available = ""
     | otherwise =
         Text.unlines
