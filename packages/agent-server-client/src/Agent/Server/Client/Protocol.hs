@@ -428,6 +428,12 @@ parseAgentServerSseFrame rawFrame = do
                                     )
                             _ -> Right fields
 
+parseTurnUserText :: Object -> Parser Text
+parseTurnUserText value = do
+    userText <- fromMaybe "" <$> value .:? "userText"
+    input <- fromMaybe "" <$> value .:? "input"
+    pure (if Text.null userText then input else userText)
+
 parseTurn :: Object -> Parser AgentServerTurn
 parseTurn value =
     AgentServerTurn
@@ -441,7 +447,7 @@ parseTurn value =
         <*> value .: "startedAt"
         <*> value .: "finishedAt"
         <*> value .: "error"
-        <*> (fromMaybe "" <$> value .:? "input")
+        <*> parseTurnUserText value
 
 parseEventPayload :: Text -> Value -> Parser AgentServerEventPayload
 parseEventPayload eventType eventData =

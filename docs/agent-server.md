@@ -253,9 +253,12 @@ queued -> running -> waiting_for_input -> running
 
 Only one turn may be active for a session. The process runs up to three turns
 from different sessions concurrently by default. Turn records include the
-submitted `input` prompt, including while the turn is still queued or running.
-Turn execution state is process-local; the most recent 1,000 terminal turn
-records are retained, while conversation history is durable.
+submitted prompt as both `input` (the create-turn request field) and
+`userText` (the same field as persisted `SessionTurn` history, the TUI, and
+native observation). The latest history page also overlays a queued or running
+turn as a `SessionTurn` with `userText` and `status`. Turn execution state is
+process-local; the most recent 1,000 terminal turn records are retained, while
+conversation history is durable.
 
 When a mutating tool, root access, or plan interaction needs a decision:
 

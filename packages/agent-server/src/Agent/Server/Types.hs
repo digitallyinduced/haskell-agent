@@ -202,6 +202,7 @@ instance ToJSON TurnRecord where
             , "finishedAt" .= turn.turnRecordFinishedAt
             , "error" .= turn.turnRecordError
             , "input" .= turn.turnRecordInput
+            , "userText" .= turn.turnRecordInput
             ]
 
 data TurnReservation

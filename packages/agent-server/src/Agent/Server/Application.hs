@@ -36,6 +36,7 @@ import Agent.Server.Supervisor
     , withSessionCleanup
     , withSessionMutation
     )
+import Agent.Server.Runtime.SessionCodec (overlayInProgressHistoryTurns)
 import Agent.Server.Types
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (race)
@@ -260,7 +261,8 @@ dispatchBoundary
             deleteSessionResponse
                 backend supervisor boundary sessionId headers
         ("GET", ["v1", "sessions", sessionId, "history"]) ->
-            sessionHistoryResponse backend boundary sessionId headers request
+            sessionHistoryResponse
+                backend supervisor boundary sessionId headers request
         ("POST", ["v1", "sessions", sessionId, "fork"]) ->
             forkSessionResponse
                 config backend supervisor boundary sessionId headers request
@@ -415,12 +417,13 @@ deleteSessionResponse backend supervisor boundary sessionId headers =
 
 sessionHistoryResponse
     :: Backend
+    -> Supervisor
     -> AccessBoundary
     -> Text
     -> [Header]
     -> Request
     -> IO (Either ApiError Response)
-sessionHistoryResponse backend boundary sessionId headers request = do
+sessionHistoryResponse backend supervisor boundary sessionId headers request = do
     let before =
             queryOptionalInteger "cursor" request >>= \case
                 Nothing ->
@@ -429,13 +432,33 @@ sessionHistoryResponse backend boundary sessionId headers request = do
         limit = queryLimit "limit" 50 100 request
     case (before, limit) of
         (Right cursor, Right pageLimit) ->
-            fmap
-                (fmap (jsonResponse status200 headers))
-                (backend.backendSessionHistory
-                    boundary
-                    sessionId
-                    cursor
-                    pageLimit)
+            backend.backendSessionHistory
+                boundary
+                sessionId
+                cursor
+                pageLimit
+                >>= \case
+                    Left err -> pure (Left err)
+                    Right history -> do
+                        overlaid <-
+                            case cursor of
+                                Just _ -> pure history
+                                Nothing ->
+                                    listKnownTurns
+                                        backend
+                                        supervisor
+                                        boundary
+                                        (Just sessionId)
+                                        >>= \case
+                                            Left _ -> pure history
+                                            Right turns ->
+                                                pure
+                                                    ( overlayInProgressHistoryTurns
+                                                        history
+                                                        turns
+                                                    )
+                        pure . Right $
+                            jsonResponse status200 headers overlaid
         _ -> pure $
             Left $
                 firstQueryError

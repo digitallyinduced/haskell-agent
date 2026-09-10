@@ -5,6 +5,7 @@ module Agent.Server.Runtime.SessionCodec
     ( sessionValue
     , modelOptionValue
     , historyValue
+    , overlayInProgressHistoryTurns
     , storeArchiveFilter
     , encodeCursor
     , decodeCursor
@@ -12,14 +13,28 @@ module Agent.Server.Runtime.SessionCodec
     ) where
 
 import Agent.CLI.Models (ModelOption(..), ModelTarget(..))
-import Agent.CLI.Session (SessionMeta(..), SessionTurnPage(..))
+import Agent.CLI.Session
+    ( SessionMeta(..)
+    , SessionTurn(..)
+    , SessionTurnPage(..)
+    , TranscriptEffect(..)
+    )
 import Agent.Dialect (dialectSlug)
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider (providerSlug)
 import Agent.Server.Event (projectPublicValue)
-import Agent.Server.Types (ApiError(..), SessionArchiveFilter(..))
+import Agent.Server.Types
+    ( ApiError(..)
+    , SessionArchiveFilter(..)
+    , TurnRecord(..)
+    , TurnStatus(..)
+    , turnStatusText
+    )
 import Agent.Store.Postgres.Session qualified as StoreSession
-import Data.Aeson (Value, object, toJSON, (.=))
+import Data.Aeson (Result (..), Value (..), fromJSON, object, toJSON, (.=))
+import Data.Aeson.Key qualified as Key
+import Data.Aeson.KeyMap qualified as KeyMap
+import Data.Foldable (toList)
 import Data.Int (Int64)
 import Data.Maybe (listToMaybe)
 import Data.Text (Text)
@@ -80,6 +95,78 @@ historyValue meta archived page = object
             then fst <$> listToMaybe page.pageTurns
             else Nothing
     ]
+
+-- | Append queued or running execution turns onto the latest history page as
+-- SessionTurn values. The prompt is @userText@, matching persisted history,
+-- the TUI, and native observation.
+overlayInProgressHistoryTurns :: Value -> [TurnRecord] -> Value
+overlayInProgressHistoryTurns history turns =
+    case history of
+        Object fields ->
+            let entries = case KeyMap.lookup (Key.fromText "data") fields of
+                    Just (Array values) -> toList values
+                    _ -> []
+                extras =
+                    zipWith inProgressEntry [baseIndex + 1 ..] active
+                active = filter inProgressTurn turns
+                baseIndex = case KeyMap.lookup (Key.fromText "total") fields of
+                    Just value
+                        | Just total <- integerToInt64Maybe value ->
+                            total
+                    _ -> fromIntegral (length entries)
+                fields' =
+                    KeyMap.insert
+                        (Key.fromText "data")
+                        (toJSON (entries <> extras))
+                        $ KeyMap.insert
+                            (Key.fromText "total")
+                            (toJSON (baseIndex + fromIntegral (length extras)))
+                            fields
+             in Object fields'
+        _ -> history
+  where
+    inProgressTurn turn =
+        turn.turnRecordStatus
+            `elem` [TurnQueued, TurnRunning, TurnWaitingForInput]
+            && not (Text.null (Text.strip turn.turnRecordInput))
+
+    inProgressEntry index turn =
+        object
+            [ "index" .= index
+            , "turn" .= inProgressTurnValue turn
+            ]
+
+inProgressTurnValue :: TurnRecord -> Value
+inProgressTurnValue turn =
+    case projectPublicValue (toJSON (inProgressSessionTurn turn)) of
+        Object fields ->
+            Object $
+                KeyMap.insert
+                    (Key.fromText "status")
+                    (toJSON (turnStatusText turn.turnRecordStatus))
+                    fields
+        other -> other
+
+inProgressSessionTurn :: TurnRecord -> SessionTurn
+inProgressSessionTurn turn =
+    SessionTurn
+        { turnAt = turn.turnRecordCreatedAt
+        , turnUserText = turn.turnRecordInput
+        , turnAssistantText = Nothing
+        , turnError = turn.turnRecordError
+        , turnResponseId = Nothing
+        , turnEffect = TranscriptAppend
+        , turnItems = []
+        , turnDisplayItems = []
+        , turnUsage = Nothing
+        , turnProviderTelemetry = []
+        }
+
+integerToInt64Maybe :: Value -> Maybe Int64
+integerToInt64Maybe value =
+    case fromJSON value of
+        Success n -> Just n
+        Error _ -> Nothing
 
 storeArchiveFilter
     :: SessionArchiveFilter

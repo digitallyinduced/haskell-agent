@@ -706,7 +706,7 @@
                 "index": { "type": "integer" },
                 "turn": {
                   "type": "object",
-                  "description": "items is canonical history; displayItems is rendering-only failed partial output."
+                  "description": "A SessionTurn. userText is the submitted prompt. items is canonical history; displayItems is rendering-only failed partial output. An in-progress turn includes status queued, running, or waiting_for_input."
                 }
               },
               "required": ["index", "turn"]
@@ -778,9 +778,10 @@
           "startedAt": { "type": ["string", "null"], "format": "date-time" },
           "finishedAt": { "type": ["string", "null"], "format": "date-time" },
           "error": { "type": ["string", "null"] },
-          "input": { "type": "string" }
+          "input": { "type": "string" },
+          "userText": { "type": "string" }
         },
-        "required": ["id", "sessionId", "clientRequestId", "status", "createdAt", "startedAt", "finishedAt", "error", "input"]
+        "required": ["id", "sessionId", "clientRequestId", "status", "createdAt", "startedAt", "finishedAt", "error", "input", "userText"]
       },
       "TurnCompletion": {
         "type": "object",

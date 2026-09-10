@@ -386,6 +386,8 @@ spec = describe "agent-server WAI application" do
             turnIds `shouldSatisfy` elem localTurnId
             LBS8.unpack listed.simpleBody
                 `shouldContain` "\"input\":\"hello\""
+            LBS8.unpack listed.simpleBody
+                `shouldContain` "\"userText\":\"hello\""
 
     it "exposes the submitted prompt on a running turn" do
         started <- newEmptyMVar
@@ -407,6 +409,8 @@ spec = describe "agent-server WAI application" do
             created.simpleStatus `shouldBe` status202
             LBS8.unpack created.simpleBody
                 `shouldContain` "\"input\":\"what would you like to improve\""
+            LBS8.unpack created.simpleBody
+                `shouldContain` "\"userText\":\"what would you like to improve\""
             takeMVar started
 
             listed <-
@@ -419,6 +423,21 @@ spec = describe "agent-server WAI application" do
             listed.simpleStatus `shouldBe` status200
             LBS8.unpack listed.simpleBody
                 `shouldContain` "\"input\":\"what would you like to improve\""
+            LBS8.unpack listed.simpleBody
+                `shouldContain` "\"userText\":\"what would you like to improve\""
+
+            history <-
+                perform
+                    application
+                    methodGet
+                    ["v1", "sessions", "session-a", "history"]
+                    validHeaders
+                    ""
+            history.simpleStatus `shouldBe` status200
+            LBS8.unpack history.simpleBody
+                `shouldContain` "\"userText\":\"what would you like to improve\""
+            LBS8.unpack history.simpleBody
+                `shouldContain` "\"status\":\"running\""
 
             putMVar finished ()
             takeMVar terminal

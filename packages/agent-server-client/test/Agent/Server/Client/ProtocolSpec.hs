@@ -106,7 +106,8 @@ spec = describe "agent-server client protocol" do
                     <> "\"status\":\"queued\","
                     <> "\"createdAt\":\"2026-09-03T00:00:00Z\","
                     <> "\"startedAt\":null,\"finishedAt\":null,\"error\":null,"
-                    <> "\"input\":\"what would you like to improve\"}"
+                    <> "\"input\":\"what would you like to improve\","
+                    <> "\"userText\":\"what would you like to improve\"}"
         case Aeson.eitherDecodeStrict' payload of
             Left message -> expectationFailure message
             Right (turn :: AgentServerTurn) -> do
@@ -114,6 +115,21 @@ spec = describe "agent-server client protocol" do
                     `shouldBe` AgentServerTurnQueued
                 turn.agentServerTurnClientRequestId
                     `shouldBe` "01991f6d-7200-7000-8000-000000000003"
+                turn.agentServerTurnInput
+                    `shouldBe` "what would you like to improve"
+
+    it "decodes SessionTurn userText when input is omitted" do
+        let payload =
+                "{\"id\":\"01991f6d-7200-7000-8000-000000000001\","
+                    <> "\"sessionId\":\"2026-09-04-deadbeef\","
+                    <> "\"clientRequestId\":\"01991f6d-7200-7000-8000-000000000003\","
+                    <> "\"status\":\"running\","
+                    <> "\"createdAt\":\"2026-09-03T00:00:00Z\","
+                    <> "\"startedAt\":null,\"finishedAt\":null,\"error\":null,"
+                    <> "\"userText\":\"what would you like to improve\"}"
+        case Aeson.eitherDecodeStrict' payload of
+            Left message -> expectationFailure message
+            Right (turn :: AgentServerTurn) ->
                 turn.agentServerTurnInput
                     `shouldBe` "what would you like to improve"
 
