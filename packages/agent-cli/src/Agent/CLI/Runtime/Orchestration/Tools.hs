@@ -680,12 +680,17 @@ assembleSessionToolsRuntime AgentToolsRequest
                                     artifactDirectory
                                     mcpFleet)
                         <> MCP.mcpFleetResourceTools mcpFleet
+    sessionId <- readIORef persistSlotRef >>= reservedSessionId
+    let exposeHarnessCatalog =
+            maybe True (.nativeExposeHarnessCatalog) startup.startupNativeHooks
         databaseToolsEnv =
             databaseToolsEnvForStore
                 startup.startupDatabaseStore
                 databaseScopes
                 (readIORef persistSlotRef >>= currentSessionId)
                 gatewayIdentity
+                exposeHarnessCatalog
+                sessionId
         learnedSkillToolsEnv =
             learnedSkillToolsEnvForStore
                 startup.startupDatabaseStore

@@ -1470,6 +1470,7 @@ nativeHooks environment control sessionId cwd dialect = NativeRunHooks
     , nativeDatabaseScopeNamespace =
         renderTenantId environment.environmentTenantId
             <$ environment.environmentSandbox
+    , nativeExposeHarnessCatalog = False
     , nativeWorkspaceDiscovery =
         case environment.environmentSandbox of
             Nothing -> DiscoverHostWorkspace

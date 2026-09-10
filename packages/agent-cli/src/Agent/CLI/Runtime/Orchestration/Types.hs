@@ -151,6 +151,10 @@ data NativeRunHooks = NativeRunHooks
     -- scope. Multi-tenant callers use the tenant id here because PostgreSQL
     -- roles are cluster-global even when each tenant has its own database.
     , nativeDatabaseScopeNamespace :: !(Maybe Text)
+    -- | When true, model-facing database tools can inspect the runtime
+    -- @harness@ catalog. The local CLI defaults to true when no native hooks
+    -- are present. @agent-server@ must leave this false.
+    , nativeExposeHarnessCatalog :: !Bool
     , nativeWorkspaceDiscovery :: !NativeWorkspaceDiscovery
     , nativeCapabilities :: !NativeRunCapabilities
     -- | Startup permissions owned by the embedding, not an options callback.

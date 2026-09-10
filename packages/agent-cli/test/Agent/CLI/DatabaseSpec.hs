@@ -4,6 +4,7 @@ import Agent.CLI.Database
 import Agent.CLI.Database.Storage
 import Agent.CLI.Database.Store
     ( DatabaseBrowsePage(..)
+    , databaseToolsEnvForStore
     , deriveDatabaseScopes
     , listDatabaseObjects
     , loadDatabaseRows
@@ -42,7 +43,8 @@ import Agent.ToolDispatch
     , functionToolCall
     )
 import Agent.Tools.Types
-    ( appToolHandlers
+    ( AppTool(..)
+    , appToolHandlers
     )
 import Agent.ToolDispatch (dispatchToolCall)
 import Control.Exception.Safe (displayException, finally, onException)
@@ -99,6 +101,51 @@ spec = do
                 (functionToolCall "call-3" "database_schema"
                     "{\"scope\":\"organization\"}")
             result.output `shouldContainText` "expected user, repository, or checkout"
+
+        it "omits the harness catalog unless the embedding enables it" do
+            result <- dispatchToolCall dispatchConfig
+                (appToolHandlers (databaseTools testEnv))
+                (functionToolCall "call-6" "database_schema"
+                    "{\"scope\":\"harness\"}")
+            result.output `shouldContainText`
+                "the harness catalog is not available in this session"
+            schemaToolDescriptionFromEnv testEnv
+                `shouldContainText` "harness-internal schemas are never exposed."
+
+        it "exposes the harness catalog and session key when enabled" do
+            seen <- newIORef Nothing
+            let env = testEnv
+                    { databaseDescribeScope = \scope -> do
+                        writeIORef seen (Just scope)
+                        pure (Right "table sessions")
+                    , databaseHarnessCatalogEnabled = True
+                    , databaseHarnessSessionId = Just "2026-09-10-abc"
+                    }
+            result <- dispatchToolCall dispatchConfig
+                (appToolHandlers (databaseTools env))
+                (functionToolCall "call-7" "database_schema"
+                    "{\"scope\":\"harness\"}")
+            readIORef seen `shouldReturn` Just DatabaseHarnessScope
+            result.output `shouldContainText` "table sessions"
+            queryToolDescription env
+                `shouldContainText` "This session's key is `2026-09-10-abc`."
+            queryToolDescription env
+                `shouldContainText` "Compaction replaces model context only"
+
+        it "rejects mutating SQL against the harness catalog" do
+            called <- newIORef False
+            let env = testEnv
+                    { databaseRunExecute = \_ _ _ -> do
+                        writeIORef called True
+                        pure (Right "ok")
+                    , databaseHarnessCatalogEnabled = True
+                    }
+            result <- dispatchToolCall dispatchConfig
+                (appToolHandlers (databaseTools env))
+                (functionToolCall "call-8" "database_execute"
+                    "{\"scope\":\"harness\",\"sql\":\"delete from sessions\",\"purpose\":\"wipe\"}")
+            readIORef called `shouldReturn` False
+            result.output `shouldContainText` "the harness catalog is read-only"
 
         it "dispatches full-text search over past conversations" do
             seen <- newIORef Nothing
@@ -286,6 +333,25 @@ exerciseDataBrowser store stateDirectory =
                                 1
                                 >>= assertOffsetDataPage
 
+                            let harnessEnv =
+                                    databaseToolsEnvForStore
+                                        store
+                                        scopes
+                                        (pure Nothing)
+                                        Nothing
+                                        True
+                                        (Just "session-test")
+                            schemaResult <- dispatchToolCall dispatchConfig
+                                (appToolHandlers (databaseTools harnessEnv))
+                                (functionToolCall "call-9" "database_schema"
+                                    "{\"scope\":\"harness\"}")
+                            schemaResult.output `shouldContainText` "sessions"
+                            queryResult <- dispatchToolCall dispatchConfig
+                                (appToolHandlers (databaseTools harnessEnv))
+                                (functionToolCall "call-10" "database_query"
+                                    "{\"scope\":\"harness\",\"sql\":\"select count(*)::bigint as session_count from sessions\"}")
+                            queryResult.output `shouldContainText` "session_count:"
+
 seedBrowserTable
     :: Store
     -> StorePool
@@ -375,7 +441,21 @@ testEnv = DatabaseToolsEnv
     , databaseRunExecute = \_ _ _ -> pure (Right "ok")
     , databaseSearchConversations = \_ _ ->
         pure (Right [])
+    , databaseHarnessCatalogEnabled = False
+    , databaseHarnessSessionId = Nothing
     }
+
+queryToolDescription :: DatabaseToolsEnv -> Text
+queryToolDescription = toolDescription "database_query"
+
+schemaToolDescriptionFromEnv :: DatabaseToolsEnv -> Text
+schemaToolDescriptionFromEnv = toolDescription "database_schema"
+
+toolDescription :: Text -> DatabaseToolsEnv -> Text
+toolDescription name env =
+    case [tool.appToolDescription | tool <- databaseTools env, tool.appToolName == name] of
+        description : _ -> description
+        [] -> ""
 
 dispatchConfig :: ToolDispatchConfig
 dispatchConfig = ToolDispatchConfig

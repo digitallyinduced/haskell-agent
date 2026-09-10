@@ -4,10 +4,13 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Direct, scope-isolated PostgreSQL access for agent-created structured data.
+-- | Direct, scope-isolated PostgreSQL access for agent-created structured data,
+-- plus confined read-only inspection of named schemas such as @harness@.
 --
--- The caller supplies a pool connected as the selected scope role.  PostgreSQL
--- privileges isolate that role from harness-owned and sibling scope schemas.
+-- Custom-scope callers supply a pool connected as the selected scope role.
+-- PostgreSQL privileges isolate that role from harness-owned and sibling
+-- scope schemas. Named-schema reads ('inspectSchema', 'querySchema') instead
+-- require USAGE on the target schema for the already-connected role.
 module Agent.Store.Postgres.Custom
     ( QueryLimits(..)
     , defaultQueryLimits
@@ -21,8 +24,10 @@ module Agent.Store.Postgres.Custom
     , CustomExecutionResult(..)
     , inspectCustomSchema
     , inspectCustomSchemaSequential
+    , inspectSchema
     , queryCustom
     , queryCustomJson
+    , querySchema
     , executeCustom
     , normalizeCustomQuery
     , normalizeCustomExecution
@@ -127,6 +132,29 @@ catalogSchemaRowsSequential schema = do
     indexes <- Session.statement schema catalogIndexesStatement
     pure (objects, columns, constraints, indexes)
 
+-- | Inspect any schema the connected role has USAGE on. Unlike
+-- 'inspectCustomSchema', this does not require a generated scope role; the
+-- CLI harness catalog uses it against @ha_runtime@ and @harness@.
+inspectSchema
+    :: Pool
+    -> Text
+    -> IO (Either Text [CatalogObject])
+inspectSchema pool schema =
+    runPool pool session >>= \case
+        Left err -> pure (Left err)
+        Right (Left err) -> pure (Left err)
+        Right (Right value) -> pure (Right value)
+  where
+    session = do
+        allowed <- Session.statement schema schemaUsageStatement
+        if not allowed
+            then pure (Left schemaUsageError)
+            else do
+                (objects, columns, constraints, indexes) <-
+                    catalogSchemaRowsPipelined schema
+                pure $ Right $
+                    assembleCatalog objects columns constraints indexes
+
 queryCustom
     :: Pool
     -> ScopeDatabase
@@ -146,6 +174,24 @@ queryCustomJson
     -> IO (Either Text CustomQueryResult)
 queryCustomJson = queryCustomWith customJsonQueryStatement
 
+-- | Read-only query confined to one schema the connected role can use.
+-- Search path is that schema plus @pg_catalog@, matching custom-scope queries.
+querySchema
+    :: Pool
+    -> Text
+    -> QueryLimits
+    -> Text
+    -> IO (Either Text CustomQueryResult)
+querySchema pool schema limits rawQuery =
+    runBoundedQuery pool limits rawQuery \query -> do
+        allowed <- Tx.statement schema schemaUsageStatement
+        if not allowed
+            then pure (Left schemaUsageError)
+            else do
+                Tx.sql (confinementSqlForSchema schema limits)
+                Right <$> Tx.statement ()
+                    (customQueryStatement limits.queryMaxRows query)
+
 queryCustomWith
     :: (Int64 -> Text -> Statement () CustomQueryResult)
     -> Pool
@@ -154,26 +200,33 @@ queryCustomWith
     -> Text
     -> IO (Either Text CustomQueryResult)
 queryCustomWith statementFor scopePool database limits rawQuery =
+    runBoundedQuery scopePool limits rawQuery \query -> do
+        expectedIdentity <- Tx.statement
+            database.scopeDatabaseRole
+            scopeIdentityStatement
+        if not expectedIdentity
+            then pure (Left scopeIdentityError)
+            else do
+                Tx.sql (confinementSqlForSchema database.scopeDatabaseSchema limits)
+                Right <$> Tx.statement ()
+                    (statementFor limits.queryMaxRows query)
+
+runBoundedQuery
+    :: Pool
+    -> QueryLimits
+    -> Text
+    -> (Text -> Tx.Transaction (Either Text CustomQueryResult))
+    -> IO (Either Text CustomQueryResult)
+runBoundedQuery pool limits rawQuery runQuery =
     case validateLimits limits *> normalizeCustomQuery rawQuery of
         Left err -> pure (Left err)
-        Right query -> do
-            let statement =
-                    statementFor limits.queryMaxRows query
-                transaction = do
-                    expectedIdentity <- Tx.statement
-                        database.scopeDatabaseRole
-                        scopeIdentityStatement
-                    if not expectedIdentity
-                        then pure (Left scopeIdentityError)
-                        else do
-                            Tx.sql (confinementSql database limits)
-                            Right <$> Tx.statement () statement
-                session =
+        Right query ->
+            let session =
                     TxSessions.transactionNoRetry
                         TxSessions.ReadCommitted
                         TxSessions.Read
-                        transaction
-            runPool scopePool session >>= \case
+                        (runQuery query)
+            in runPool pool session >>= \case
                 Left err -> pure (Left err)
                 Right (Left err) -> pure (Left err)
                 Right (Right result)
@@ -242,7 +295,9 @@ executeCustom trustedPool scopePool database audit limits purpose rawSql
                                             then pure (Left scopeIdentityError)
                                             else do
                                                 Tx.sql
-                                                    (confinementSql database limits)
+                                                    (confinementSqlForSchema
+                                                        database.scopeDatabaseSchema
+                                                        limits)
                                                 Tx.sql (Text.encodeUtf8 sql)
                                                 pure (Right ())
                             case executionResult of
@@ -459,6 +514,19 @@ scopeIdentityStatement = mkStatement
 scopeIdentityError :: Text
 scopeIdentityError =
     "custom database pool is not authenticated directly as the selected scope role"
+
+schemaUsageError :: Text
+schemaUsageError =
+    "the connected PostgreSQL role cannot use that schema"
+
+schemaUsageStatement :: Statement Text Bool
+schemaUsageStatement = mkStatement
+    "select session_user = current_user\
+    \ and pg_catalog.has_schema_privilege(session_user, $1, 'USAGE')"
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.singleRow $
+        Decoders.column (Decoders.nonNullable Decoders.bool))
+    True
 
 replaceCatalogProjection
     :: Pool
@@ -874,11 +942,11 @@ auditFinishedStatement = mkStatement
     (fmap (> 0) Decoders.rowsAffected)
     True
 
-confinementSql :: ScopeDatabase -> QueryLimits -> ByteString.ByteString
-confinementSql database limits =
+confinementSqlForSchema :: Text -> QueryLimits -> ByteString.ByteString
+confinementSqlForSchema schema limits =
     Text.encodeUtf8 $
         "set local search_path = "
-            <> quoteIdentifier database.scopeDatabaseSchema
+            <> quoteIdentifier schema
             <> ", pg_catalog;"
             <> " set local standard_conforming_strings = on;"
             <> " set local statement_timeout = "
