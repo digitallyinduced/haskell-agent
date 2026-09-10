@@ -988,7 +988,7 @@ buildSessionApprovalRuntime host controls SessionRequest{..} =
                 controls.controlToolRegistry
                 planMode
                 call
-        -- Existing external/fullscreen protocols do not carry once-only
+        -- Existing managed protocols do not carry once-only
         -- approval semantics. Do not silently downgrade a fresh request to
         -- their generic permission dialog.
         requestFreshApproval requested =
@@ -997,7 +997,9 @@ buildSessionApprovalRuntime host controls SessionRequest{..} =
                 Nothing -> case promptRequest of
                     Just _ -> pure Nothing
                     Nothing -> case host.hostFullscreen of
-                        Just _ -> pure Nothing
+                        Just runtime ->
+                            requestFullscreenPermissionOnce runtime
+                                (toText workspace.cwd) requested
                         Nothing ->
                             withStdinPaused stdinControl do
                                 color <- resolveColor host.hostStderrHandle

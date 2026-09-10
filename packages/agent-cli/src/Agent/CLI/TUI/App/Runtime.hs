@@ -47,6 +47,7 @@ import Agent.CLI.Command
 import Agent.CLI.Permission
     ( PermissionChoice(..)
     , approvalToolCallPromptRelative
+    , approvalToolCallPromptOnceRelative
     )
 import Agent.CLI.Resume ( ResumeBrowser(..)
     , ResumeEntry(..)
@@ -961,6 +962,26 @@ requestFullscreenPermission runtime workspace call = do
     notifyAttention stderr PermissionRequested
     enqueueAppEvent runtime (AppAskPermission summary reply)
     atomically (readTMVar reply)
+
+-- | Fresh approval must never offer a persistent permission grant.
+requestFullscreenPermissionOnce
+    :: FullscreenRuntime
+    -> Text
+    -> ToolCall
+    -> IO (Maybe PermissionChoice)
+requestFullscreenPermissionOnce runtime workspace call = do
+    reply <- newEmptyTMVarIO
+    let summary = approvalToolCallPromptOnceRelative workspace call
+    notifyAttention stderr PermissionRequested
+    enqueueAppEvent runtime
+        (AppAskChoice ChoicePlainDialog "Fresh approval required" summary 1
+            [("Allow once", "Approve only this invocation"), ("Deny", "Do not run")]
+            reply)
+    selected <- atomically (readTMVar reply)
+        `finally` enqueueAppEvent runtime (AppCloseChoice reply)
+    pure $ Just case selected of
+        Just 0 -> PermissionAllowOnce
+        _ -> PermissionDeny
 
 -- | Updates belong to this reply token, never to whichever dialog happens to
 -- be open later. The refresh worker is cancelled and joined when it closes.
