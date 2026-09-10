@@ -144,6 +144,7 @@ exerciseTurnStoreWithOwners pool ownerOne ownerTwo = do
                     "01999999-0000-7000-8000-000000000002"
                 , reserveServerTurnInputDigest =
                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                , reserveServerTurnInput = "hello world"
                 , reserveServerTurnOwnerInstanceId = instanceOne
                 , reserveServerTurnCreatedAt = createdAt
                 }
@@ -232,6 +233,7 @@ exerciseTurnStoreWithOwners pool ownerOne ownerTwo = do
         Right (ServerTurnReserved stored) ->
             stored.storedServerTurnId == request.reserveServerTurnId
                 && stored.storedServerTurnStatus == ServerTurnQueued
+                && stored.storedServerTurnInput == "hello world"
         _ -> False
 
     reserveServerSessionMutation pool mutation

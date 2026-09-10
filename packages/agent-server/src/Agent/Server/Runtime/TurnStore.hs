@@ -996,6 +996,7 @@ reserveTurn store tenantId instanceId boundary sessionId clientRequestId prompt 
                         clientRequestId.unClientRequestId
                     , ServerTurnStore.reserveServerTurnInputDigest =
                         turnInputDigest prompt
+                    , ServerTurnStore.reserveServerTurnInput = prompt
                     , ServerTurnStore.reserveServerTurnOwnerInstanceId =
                         instanceId
                     , ServerTurnStore.reserveServerTurnCreatedAt = now
@@ -1199,6 +1200,7 @@ storedTurnRecord boundary stored =
         , turnRecordStartedAt = stored.storedServerTurnStartedAt
         , turnRecordFinishedAt = stored.storedServerTurnFinishedAt
         , turnRecordError = stored.storedServerTurnError
+        , turnRecordInput = stored.storedServerTurnInput
         }
 
 storedTurnStatus :: ServerTurnStore.ServerTurnStatus -> TurnStatus

@@ -777,9 +777,10 @@
           "createdAt": { "type": "string", "format": "date-time" },
           "startedAt": { "type": ["string", "null"], "format": "date-time" },
           "finishedAt": { "type": ["string", "null"], "format": "date-time" },
-          "error": { "type": ["string", "null"] }
+          "error": { "type": ["string", "null"] },
+          "input": { "type": "string" }
         },
-        "required": ["id", "sessionId", "clientRequestId", "status", "createdAt", "startedAt", "finishedAt", "error"]
+        "required": ["id", "sessionId", "clientRequestId", "status", "createdAt", "startedAt", "finishedAt", "error", "input"]
       },
       "TurnCompletion": {
         "type": "object",

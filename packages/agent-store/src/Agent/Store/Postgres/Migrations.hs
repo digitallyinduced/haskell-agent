@@ -495,6 +495,14 @@ coreMigrations =
         , migrationName = "persistent gateway model catalog cache"
         , migrationStatements = modelCatalogCacheSchemaStatements
         }
+    , Migration
+        { migrationVersion = 117
+        , migrationName = "durable server turn input text"
+        , migrationStatements =
+            [ "ALTER TABLE harness.server_turns\
+              \ ADD COLUMN IF NOT EXISTS input_text text NOT NULL DEFAULT ''"
+            ]
+        }
     ]
 
 -- | Specialize all runtime grants for a validated cluster-global role.

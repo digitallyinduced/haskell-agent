@@ -392,6 +392,7 @@ submitTurn supervisor spec = do
             , turnRecordStartedAt = Nothing
             , turnRecordFinishedAt = Nothing
             , turnRecordError = Nothing
+            , turnRecordInput = spec.turnSpecPrompt
             }
 
 -- | Validate a session while holding the same per-boundary reservation that
@@ -503,6 +504,7 @@ enqueueTurn supervisor reservationHeld spec = do
             , turnRecordStartedAt = Nothing
             , turnRecordFinishedAt = Nothing
             , turnRecordError = Nothing
+            , turnRecordInput = spec.turnSpecPrompt
             }
 
 enqueueTurnRecord ::
@@ -521,9 +523,10 @@ enqueueTurnRecord supervisor reservationHeld spec record
     | record.turnRecordStatus /= TurnQueued =
         fail "only a queued reserved turn can be admitted"
     | otherwise =
-        atomically do
+        let admitted = record{turnRecordInput = spec.turnSpecPrompt}
+         in atomically do
             state <- readTVar supervisor.supervisorState
-            let now = record.turnRecordCreatedAt
+            let now = admitted.turnRecordCreatedAt
                 key = (spec.turnSpecBoundary, spec.turnSpecSessionId)
                 reserved = Set.member key state.stateActiveSessions
             if state.stateClosed
@@ -557,11 +560,11 @@ enqueueTurnRecord supervisor reservationHeld spec record
                                                     > maximumQueuedAttachmentBytesPerTenant
                                                 then pure (Left SubmitTenantQueueFull)
                                                 else do
-                                                    let turnId = record.turnRecordId
+                                                    let turnId = admitted.turnRecordId
                                                         slot =
                                                             TurnSlot
                                                                 { turnSlotSpec = spec
-                                                                , turnSlotRecord = record
+                                                                , turnSlotRecord = admitted
                                                                 , turnSlotCancelling = False
                                                                 , turnSlotCancel = Nothing
                                                                 , turnSlotAgents = pure toJSONEmptyArray
@@ -587,7 +590,7 @@ enqueueTurnRecord supervisor reservationHeld spec record
                                                                 withTurn
                                                     writeTVar supervisor.supervisorState state'
                                                     publishToSubscribers state' event
-                                                    pure (Right record)
+                                                    pure (Right admitted)
 
 cancelTurn ::
     Supervisor ->

@@ -178,6 +178,7 @@ spec = describe "turn supervisor" do
                         , turnRecordStartedAt = Nothing
                         , turnRecordFinishedAt = Nothing
                         , turnRecordError = Nothing
+                        , turnRecordInput = ""
                         }
             admission <-
                 async $

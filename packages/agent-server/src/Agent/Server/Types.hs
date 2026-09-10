@@ -185,6 +185,7 @@ data TurnRecord = TurnRecord
     , turnRecordStartedAt :: !(Maybe UTCTime)
     , turnRecordFinishedAt :: !(Maybe UTCTime)
     , turnRecordError :: !(Maybe Text)
+    , turnRecordInput :: !Text
     }
     deriving (Eq, Show)
 
@@ -200,6 +201,7 @@ instance ToJSON TurnRecord where
             , "startedAt" .= turn.turnRecordStartedAt
             , "finishedAt" .= turn.turnRecordFinishedAt
             , "error" .= turn.turnRecordError
+            , "input" .= turn.turnRecordInput
             ]
 
 data TurnReservation

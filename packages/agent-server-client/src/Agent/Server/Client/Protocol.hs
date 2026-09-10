@@ -142,6 +142,7 @@ data AgentServerTurn = AgentServerTurn
     , agentServerTurnStartedAt :: !(Maybe UTCTime)
     , agentServerTurnFinishedAt :: !(Maybe UTCTime)
     , agentServerTurnError :: !(Maybe Text)
+    , agentServerTurnInput :: !Text
     }
     deriving (Eq, Show)
 
@@ -440,6 +441,7 @@ parseTurn value =
         <*> value .: "startedAt"
         <*> value .: "finishedAt"
         <*> value .: "error"
+        <*> (fromMaybe "" <$> value .:? "input")
 
 parseEventPayload :: Text -> Value -> Parser AgentServerEventPayload
 parseEventPayload eventType eventData =

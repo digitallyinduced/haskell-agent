@@ -90,6 +90,7 @@ data StoredServerTurn = StoredServerTurn
     , storedServerTurnSessionId :: !Text
     , storedServerTurnClientRequestId :: !Text
     , storedServerTurnInputDigest :: !Text
+    , storedServerTurnInput :: !Text
     , storedServerTurnOwnerInstanceId :: !Text
     , storedServerTurnStatus :: !ServerTurnStatus
     , storedServerTurnCreatedAt :: !UTCTime
@@ -110,6 +111,7 @@ data ReserveServerTurn = ReserveServerTurn
     , reserveServerTurnSessionId :: !Text
     , reserveServerTurnClientRequestId :: !Text
     , reserveServerTurnInputDigest :: !Text
+    , reserveServerTurnInput :: !Text
     , reserveServerTurnOwnerInstanceId :: !Text
     , reserveServerTurnCreatedAt :: !UTCTime
     }
@@ -732,6 +734,7 @@ data RawServerTurn = RawServerTurn
     , rawSessionId :: !Text
     , rawClientRequestId :: !Text
     , rawInputDigest :: !Text
+    , rawInput :: !Text
     , rawOwnerInstanceId :: !Text
     , rawStatus :: !Text
     , rawCreatedAt :: !UTCTime
@@ -757,6 +760,7 @@ decodeServerTurn raw =
         , storedServerTurnSessionId = raw.rawSessionId
         , storedServerTurnClientRequestId = raw.rawClientRequestId
         , storedServerTurnInputDigest = raw.rawInputDigest
+        , storedServerTurnInput = raw.rawInput
         , storedServerTurnOwnerInstanceId = raw.rawOwnerInstanceId
         , storedServerTurnStatus = decodeStatus raw.rawStatus
         , storedServerTurnCreatedAt = raw.rawCreatedAt
@@ -803,7 +807,7 @@ isTerminal = not . isActive
 serverTurnColumns :: Text
 serverTurnColumns =
     "turn_id::text, tenant_id, gateway_identity,\
-    \ session_key, client_request_id::text, input_digest,\
+    \ session_key, client_request_id::text, input_digest, input_text,\
     \ owner_instance_id::text, status, server_turn.created_at,\
     \ started_at, finished_at, assistant_text, assistant_text_truncated,\
     \ response_id,\
@@ -816,6 +820,7 @@ serverTurnDecoder =
                 <$> Decoders.column (Decoders.nonNullable Decoders.text)
                 <*> Decoders.column (Decoders.nonNullable Decoders.text)
                 <*> Decoders.column (Decoders.nullable Decoders.text)
+                <*> Decoders.column (Decoders.nonNullable Decoders.text)
                 <*> Decoders.column (Decoders.nonNullable Decoders.text)
                 <*> Decoders.column (Decoders.nonNullable Decoders.text)
                 <*> Decoders.column (Decoders.nonNullable Decoders.text)
@@ -1065,9 +1070,9 @@ insertServerTurnStatement =
     mkStatement
         ( "INSERT INTO harness.server_turns AS server_turn\
           \ (turn_id, tenant_id, gateway_identity, session_key,\
-          \ client_request_id, input_digest, owner_instance_id, status, created_at)\
+          \ client_request_id, input_digest, input_text, owner_instance_id, status, created_at)\
           \ SELECT $1::uuid, $2, $3, session.session_key,\
-          \ $5::uuid, $6, $7::uuid, 'queued', $8\
+          \ $5::uuid, $6, $7, $8::uuid, 'queued', $9\
           \ FROM harness.sessions session\
           \ WHERE session.session_key = $4 AND session.deleted_at IS NULL\
           \ AND session.gateway_identity IS NOT DISTINCT FROM $3\
@@ -1086,6 +1091,9 @@ insertServerTurnStatement =
                     >$< Encoders.param (Encoders.nonNullable Encoders.text)
                )
             <> ( (.reserveServerTurnInputDigest)
+                    >$< Encoders.param (Encoders.nonNullable Encoders.text)
+               )
+            <> ( (.reserveServerTurnInput)
                     >$< Encoders.param (Encoders.nonNullable Encoders.text)
                )
             <> ( (.reserveServerTurnOwnerInstanceId)
