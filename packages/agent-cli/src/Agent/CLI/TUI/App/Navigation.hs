@@ -97,6 +97,7 @@ import Agent.CLI.TUI.Motion ( advanceCompletionFlashes , appMotionTiming , compl
 import Agent.CLI.TUI.Render ( agentEntryWindow , agentPaneEntryLimit , agentPaneVisible , applyChildConversationUiEvent , choiceRowColumns , conversationUiForTarget , conversationScrollbarRenderer , drawApp , fullscreenBounds , fullscreenSurface , onboardingVisibleRowIndices , normalizeTextOverlayInsertion , maskedSecretText , quickStartRows , quickStartVisible , repositoryHeaderText , resumeSearchCursorColumn , selectedAgentConversation , textOverlayDisplayText )
 import Agent.CLI.TUI.ImagePreview ( NativePreviewPlacement(..)
     , TuiImagePreview(..)
+    , completePreviewExtent
     , nativePreviewPlacements
     , prepareTuiImagePreview
     , previewCountForWidth
@@ -717,9 +718,10 @@ placementFor
 placementFor state viewportBounds ordinal blockId index preview =
     lookupExtent (ConversationImage blockId index) >>= \case
         Just imageBounds
-            | extentInside viewportBounds imageBounds ->
+            | extentInside viewportBounds imageBounds
+            , let (columns, rows) = imageBounds.extentSize
+            , completePreviewExtent preview (columns, rows) ->
                 let Location (column, row) = imageBounds.extentUpperLeft
-                    (columns, rows) = imageBounds.extentSize
                     imageId =
                         submittedImageId
                             state.appRuntime.runtimeImagePreviewIdBase

@@ -3,6 +3,7 @@ module Agent.CLI.TUIImagePreviewSpec (spec) where
 import Agent.CLI.TUI.ImagePreview
     ( NativePreviewPlacement(..)
     , TuiImagePreview(..)
+    , completePreviewExtent
     , imageDimensions
     , nativePreviewPlacements
     , prepareNativeTuiImagePreview
@@ -11,6 +12,10 @@ import Agent.CLI.TUI.ImagePreview
     , previewCellSize
     , previewImageAt
     , sameNativePreviewLayout
+    , submittedPreviewMaxColumns
+    , submittedPreviewMaxRows
+    , toolImageMaxColumns
+    , toolImageMaxRows
     )
 import Agent.CLI.TUI.App
     ( previewLogicalEncodedBytes
@@ -124,6 +129,58 @@ spec = do
                 Right preview -> do
                     previewCellSize 72 23 preview `shouldBe` (72, 20)
                     previewCellSize 48 12 preview `shouldBe` (42, 12)
+
+        it "rejects Brick extents cropped while scrolling a conversation image" do
+            let chartSource =
+                    generateImage
+                        (\_ _ -> PixelRGB8 10 20 30)
+                        960
+                        600
+                tallSource =
+                    generateImage
+                        (\_ _ -> PixelRGB8 10 20 30)
+                        100
+                        1000
+                attachment source = ImageAttachment
+                    { imageMime = "image/png"
+                    , imageBytes = LBS.toStrict (encodePng source)
+                    }
+            case (prepareTuiImagePreview (attachment chartSource)
+                , prepareTuiImagePreview (attachment tallSource)) of
+                (Right chart, Right tall) -> do
+                    let chartSize =
+                            previewCellSize
+                                toolImageMaxColumns
+                                toolImageMaxRows
+                                chart
+                        narrowChartSize =
+                            previewCellSize 50 toolImageMaxRows chart
+                        submittedSize =
+                            previewCellSize
+                                submittedPreviewMaxColumns
+                                submittedPreviewMaxRows
+                                chart
+                        tallSize =
+                            previewCellSize
+                                toolImageMaxColumns
+                                toolImageMaxRows
+                                tall
+                    completePreviewExtent chart chartSize
+                        `shouldBe` True
+                    completePreviewExtent chart narrowChartSize
+                        `shouldBe` True
+                    completePreviewExtent chart submittedSize
+                        `shouldBe` True
+                    completePreviewExtent tall tallSize
+                        `shouldBe` True
+                    completePreviewExtent chart
+                        (fst chartSize, snd chartSize `div` 2)
+                        `shouldBe` False
+                    completePreviewExtent chart
+                        (fst narrowChartSize, 8)
+                        `shouldBe` False
+                (Left err, _) -> expectationFailure (show err)
+                (_, Left err) -> expectationFailure (show err)
 
         it "does not force the ANSI sample when sizing native previews" do
             let attachment = ImageAttachment
