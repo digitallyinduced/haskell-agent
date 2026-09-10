@@ -4,6 +4,8 @@
 -- private modules; this facade preserves the API used by CLI and native hosts.
 module Agent.CLI.GatewayClient
     ( GatewayCredential(..)
+    , GatewayAccount(..)
+    , fetchGatewayAccount
     , GatewayModel(..)
     , GatewayModelCatalogResponse(..)
     , GatewayModelProtocol(..)
@@ -74,6 +76,7 @@ module Agent.CLI.GatewayClient
     ) where
 
 import Agent.CLI.Gateway.Catalog
+import Agent.CLI.Gateway.Account
 import Agent.CLI.Gateway.Credentials
 import Agent.CLI.Gateway.OAuth
 import Agent.CLI.Gateway.OAuth.Protocol

@@ -6,6 +6,8 @@ module Agent.CLI.MacOS.GatewayBridge (invokeGatewayCallbackOnce) where
 
 import Agent.CLI.GatewayClient
     ( GatewayCredential(..)
+    , GatewayAccount(..)
+    , fetchGatewayAccount
     , GatewayDeviceAuthorization(..)
     , GatewayPollResult(..)
     , exchangeNativeGatewayAuthorizationCodeWith
@@ -20,6 +22,7 @@ import Control.Concurrent (forkIO)
 import Control.Exception.Safe (tryAny)
 import Control.Monad (void)
 import Data.Maybe (fromMaybe)
+import Data.ByteString qualified as BS
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Word (Word8)
@@ -32,6 +35,42 @@ type GatewayStatusCallback =
     -> CString -> CSize
     -> CString -> CSize
     -> IO ()
+
+type GatewayAccountCallback =
+    Ptr () -> CInt
+    -> CString -> CSize
+    -> CString -> CSize
+    -> CString -> CSize
+    -> CString -> CSize
+    -> CString -> CSize
+    -> IO ()
+
+foreign import ccall "dynamic"
+    invokeGatewayAccountCallback :: FunPtr GatewayAccountCallback -> GatewayAccountCallback
+
+foreign export ccall ha_gateway_account
+    :: FunPtr GatewayAccountCallback -> Ptr () -> IO CInt
+
+ha_gateway_account :: FunPtr GatewayAccountCallback -> Ptr () -> IO CInt
+ha_gateway_account callback context
+    | callback == nullFunPtr = pure 1
+    | otherwise = do
+        _ <- forkIO do
+            result <- tryAny fetchGatewayAccount
+            case result of
+                Right (Right (Just account)) ->
+                    withText account.organizationId \orgId orgIdLength ->
+                    withText account.organizationName \orgName orgNameLength ->
+                    withText account.userName \name nameLength ->
+                    BS.useAsCStringLen account.iconPng \(icon, iconLength) ->
+                        invokeGatewayAccountCallback callback context 0
+                            orgId orgIdLength orgName orgNameLength name nameLength
+                            icon (fromIntegral iconLength) nullPtr 0
+                Right (Right Nothing) ->
+                    invokeGatewayAccountCallback callback context 1 nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
+                _ -> withText "The gateway account could not be loaded." \message length ->
+                    invokeGatewayAccountCallback callback context (-1) nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 message length
+        pure 0
 
 type GatewayConnectStartCallback =
     Ptr () -> CInt

@@ -42,6 +42,22 @@ typedef void (*ha_event_callback)(
 );
 
 /*
+ * Account status: 0 = profile, 1 = disconnected/unsupported, -1 = error.
+ * Icon is PNG bytes, or length 0 if absent. All buffers are callback-scoped;
+ * NULL is valid only with length 0. Copy them before returning.
+ * Runs on a worker thread. Returns 0 when accepted, 1 for a NULL callback.
+ */
+typedef void (*ha_gateway_account_callback)(
+    void *context, int32_t status,
+    const uint8_t *organization_id, size_t organization_id_length,
+    const uint8_t *organization_name, size_t organization_name_length,
+    const uint8_t *user_name, size_t user_name_length,
+    const uint8_t *icon_png, size_t icon_png_length,
+    const uint8_t *error, size_t error_length
+);
+int32_t ha_gateway_account(ha_gateway_account_callback callback, void *context);
+
+/*
  * Remote MCP connections have immutable IDs independent of display names and
  * endpoint URLs. Identical endpoints may have independently authorized accounts.
  * No credentials are exposed by this interface.

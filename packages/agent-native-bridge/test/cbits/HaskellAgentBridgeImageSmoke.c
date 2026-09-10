@@ -62,6 +62,10 @@ int ha_image_attachment_abi_smoke(void) {
  * credential-store access.
  */
 int ha_gateway_abi_smoke(void) {
+    ha_gateway_account_callback account_callback = NULL;
+    if (ha_gateway_account(account_callback, NULL) != 1) {
+        return 28;
+    }
     ha_gateway_status_callback status_callback = NULL;
     ha_gateway_connect_start_callback start_callback = NULL;
     ha_gateway_poll_callback poll_callback = NULL;
