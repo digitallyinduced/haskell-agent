@@ -1,10 +1,18 @@
 module Agent.Tools.FileSystem.ReadFileSpec (spec) where
 
+import Agent.ToolDispatch
+    ( ToolCallResult(..)
+    , ToolDispatchConfig(..)
+    , dispatchToolCall
+    , functionToolCall
+    )
 import Agent.Tools.FileSystem.ReadFile
     ( ReadFileArgs(..)
     , formatReadFile
+    , readFileTool
     , streamReadFile
     )
+import Agent.Tools.Types (AppTool(..), defaultToolEnv, setToolSessionTmp)
 import qualified Data.ByteString as BS
 import Data.Either (isLeft)
 import qualified Data.Text as Text
@@ -106,6 +114,28 @@ spec = describe "formatReadFile" do
                 streamReadFile (unsafeEncodeUtf path) (readArgs Nothing Nothing)
                     >>= (`shouldSatisfy` isLeft)
 
+    describe "readFileTool" do
+        it "still returns numbered text for ordinary files" do
+            withTool \workspace tool -> do
+                writeFile (workspace </> "notes.txt") "hello\n"
+                result <- runReadTool tool "{\"target_file\":\"notes.txt\"}"
+                result.output `shouldBe` "1\8594hello"
+                result.toolResultImages `shouldBe` []
+
+        it "rejects image files as binary rather than attaching them" do
+            withTool \workspace tool -> do
+                BS.writeFile (workspace </> "shot.png") pngBytes
+                result <- runReadTool tool "{\"target_file\":\"shot.png\"}"
+                result.output `shouldSatisfy` Text.isInfixOf "Cannot read binary file"
+                result.toolResultImages `shouldBe` []
+
+        it "still rejects non-image binary files" do
+            withTool \workspace tool -> do
+                BS.writeFile (workspace </> "blob.bin") "prefix\0suffix"
+                result <- runReadTool tool "{\"target_file\":\"blob.bin\"}"
+                result.output `shouldSatisfy` Text.isInfixOf "Cannot read binary file"
+                result.toolResultImages `shouldBe` []
+
 readArgs :: Maybe Int -> Maybe Int -> ReadFileArgs
 readArgs offset limit =
     ReadFileArgs
@@ -126,3 +156,43 @@ withBytes bytes action = do
         let path = dir </> "input.txt"
         BS.writeFile path bytes
         action path
+
+pngBytes :: BS.ByteString
+pngBytes = BS.pack
+    [ 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
+    , 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52
+    , 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01
+    , 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xde
+    , 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54
+    , 0x08, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0x00, 0x00
+    , 0x03, 0x01, 0x01, 0x00, 0x18, 0xdd, 0x8d, 0xb0
+    , 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44
+    , 0xae, 0x42, 0x60, 0x82
+    ]
+
+withTool :: (FilePath -> AppTool -> IO a) -> IO a
+withTool action = do
+    root <- getTemporaryDirectory
+    bracket
+        (mkdtemp (root </> "agent-read-file-tool-"))
+        removeDirectoryRecursive
+        \workspace -> do
+            temp <- mkdtemp (workspace </> "session-tmp-")
+            env <- defaultToolEnv (unsafeEncodeUtf workspace)
+            setToolSessionTmp env (Just (unsafeEncodeUtf temp))
+            action workspace (readFileTool env)
+
+runReadTool :: AppTool -> Text.Text -> IO ToolCallResult
+runReadTool tool arguments =
+    dispatchToolCall testDispatchConfig [tool.appToolHandler]
+        (functionToolCall "read-1" "read_file" arguments)
+
+testDispatchConfig :: ToolDispatchConfig
+testDispatchConfig = ToolDispatchConfig
+    { toolDispatchUnknownTool = \name -> "unknown:" <> name
+    , toolDispatchFormatResult = either ("ERR " <>) id
+    , toolDispatchFormatException = \name _ -> "EX " <> name
+    , toolDispatchOnException = \_ _ -> pure ()
+    , toolDispatchOnOutput = \_ _ -> pure ()
+    , toolDispatchFinalizeOutput = \_ output -> pure output
+    }

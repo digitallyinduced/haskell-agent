@@ -266,8 +266,8 @@ taskDescription allowedModels =
     "Start a subagent that works on a task independently and reports back.\n\n\
     \Agent types:\n\n\
     \- **general-purpose**: General purpose agent for multi-step tasks. Can delegate further work with spawn_subagent while below the harness nesting limit.\n\
-    \- **explore**: Fast, read-only agent specialized for codebase exploration. Read-only — has access to: read_file, list_dir, grep.\n\
-    \- **plan**: Software architect for planning implementation strategies. Read-only — has access to: read_file, list_dir, grep, todo_write, web_search, enter_plan_mode, exit_plan_mode, ask_user_question.\n\n\
+    \- **explore**: Fast, read-only agent specialized for codebase exploration. Read-only — has access to: read_file, view_image, list_dir, grep.\n\
+    \- **plan**: Software architect for planning implementation strategies. Read-only — has access to: read_file, view_image, list_dir, grep, todo_write, web_search, enter_plan_mode, exit_plan_mode, ask_user_question.\n\n\
     \## Usage notes\n\
     \- When the agent is done, it returns a single message with its agent ID. Use that ID to resume the agent later for follow-up work.\n\
     \- background: Returns immediately with a subagent_id. Use get_command_or_subagent_output to retrieve results. This is set to true by default.\n\
@@ -700,12 +700,14 @@ filterGrokToolsForType agentType tools = case agentType of
     exploreNames :: [Text]
     exploreNames =
         [ "read_file"
+        , "view_image"
         , "list_dir"
         , "grep"
         ]
     planNames :: [Text]
     planNames =
         [ "read_file"
+        , "view_image"
         , "list_dir"
         , "grep"
         , "todo_write"

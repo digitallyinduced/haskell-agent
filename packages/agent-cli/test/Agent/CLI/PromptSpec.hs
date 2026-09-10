@@ -285,7 +285,33 @@ spec = describe "systemPrompt" do
             "Use show_image to present an image file"
         withImages `shouldSatisfy` Text.isInfixOf
             "not added to your own context"
+        withImages `shouldNotSatisfy` Text.isInfixOf "view_image"
         withoutImages `shouldNotSatisfy` Text.isInfixOf "show_image"
+
+    it "adds view_image inspection guidance when that tool is registered" do
+        let withView =
+                systemPromptForTools
+                    genericResponsesDialect
+                    ["view_image", "read_file"]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    (fromGregorian 2026 8 19)
+                    False
+            withoutView =
+                systemPromptForTools
+                    genericResponsesDialect
+                    ["read_file"]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    (fromGregorian 2026 8 19)
+                    False
+        withView `shouldSatisfy` Text.isInfixOf
+            "Use view_image to load a local image file"
+        withView `shouldSatisfy` Text.isInfixOf
+            "Do not use read_file for images"
+        withoutView `shouldNotSatisfy` Text.isInfixOf "view_image"
+        withoutView `shouldNotSatisfy` Text.isInfixOf
+            "Use read_file on a local image file"
 
     it "adds reusable-memory guidance only when learned-skill tools are registered" do
         let withSkills =

@@ -234,8 +234,9 @@ spec = describe "Grok Build dialect" do
                 , "todo_write"
                 , "monitor"
                 , "exit_plan_mode"
+                , "view_image"
                 ]
-                `shouldBe` replicate 7 True
+                `shouldBe` replicate 8 True
             names `shouldNotContain` ["shell_command", "apply_patch"]
             coding.grokClose
 
