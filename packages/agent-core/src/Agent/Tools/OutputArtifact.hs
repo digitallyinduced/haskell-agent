@@ -125,13 +125,13 @@ artifactTools env analysis =
     [ jsonTool "read_tool_output"
         "Read oversized tool output. Defaults to a lossless character page; pass next_cursor as cursor to continue, including within single-line JSON. Explicit offset/limit selects legacy line previews."
         [ PropertySchema "handle" PropertyString True Nothing
-        , PropertySchema "offset" PropertyNumber False
+        , PropertySchema "offset" PropertyInteger False
             (Just "1-based line offset; defaults to 1.")
-        , PropertySchema "limit" PropertyNumber False
+        , PropertySchema "limit" PropertyInteger False
             (Just "Maximum 1000 lines; defaults to 200.")
-        , PropertySchema "cursor" PropertyNumber False
+        , PropertySchema "cursor" PropertyInteger False
             (Just "Zero-based Unicode character offset; defaults to 0. Use next_cursor from the previous page. Do not combine with offset/limit.")
-        , PropertySchema "max_chars" PropertyNumber False
+        , PropertySchema "max_chars" PropertyInteger False
             (Just "Maximum characters per page, up to 4096; defaults to 4096. Do not combine with offset/limit.")
         ]
         True ParallelSafe
@@ -141,11 +141,11 @@ artifactTools env analysis =
         [ PropertySchema "handle" PropertyString True Nothing
         , PropertySchema "pattern" PropertyString True Nothing
         , PropertySchema "case_insensitive" PropertyBoolean False Nothing
-        , PropertySchema "head_limit" PropertyNumber False
+        , PropertySchema "head_limit" PropertyInteger False
             (Just "Maximum occurrences per page, up to 200; defaults to 50. The byte budget may return fewer.")
-        , PropertySchema "cursor" PropertyNumber False
+        , PropertySchema "cursor" PropertyInteger False
             (Just "Zero-based Unicode character offset; defaults to 0. Continue with next_cursor.")
-        , PropertySchema "context_chars" PropertyNumber False
+        , PropertySchema "context_chars" PropertyInteger False
             (Just "Characters of context before and after each match; defaults to 200.")
         ]
         True ParallelSafe

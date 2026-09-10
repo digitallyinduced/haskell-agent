@@ -472,11 +472,11 @@ waitTool host =
         waitDescription
         [ PropertySchema "cell_id" PropertyString True $ Just
             "Identifier of the running exec cell."
-        , PropertySchema "max_tokens" PropertyNumber False $ Just
+        , PropertySchema "max_tokens" PropertyInteger False $ Just
             "Output token budget for this wait call. Defaults to 10000 tokens."
         , PropertySchema "terminate" PropertyBoolean False $ Just
             "True stops the running exec cell; false or omitted waits for output."
-        , PropertySchema "yield_time_ms" PropertyNumber False $ Just
+        , PropertySchema "yield_time_ms" PropertyInteger False $ Just
             "Wait before yielding more output. Defaults to 10000 ms."
         ]
         AlwaysReadOnly

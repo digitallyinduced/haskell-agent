@@ -11,7 +11,9 @@ module Agent.Codex.Dialect.Tools
     ) where
 
 import Agent.OsPath (fromText)
+import Control.Applicative ((<|>))
 import qualified Agent.Json.Decode as Json
+import Agent.ToolArgs (jsonInt)
 import Agent.ToolDSL
     ( PropertySchema(..)
     , PropertyType(..)
@@ -299,7 +301,7 @@ data WriteStdinArgs = WriteStdinArgs
 writeStdinArgsDecoder :: Json.Decoder WriteStdinArgs
 writeStdinArgsDecoder = Json.object $
     WriteStdinArgs
-        <$> Json.atKey "session_id" Json.int
+        <$> Json.atKey "session_id" jsonInt
         <*> optionalText "chars"
         <*> optionalIntOrString "yield_time_ms"
 
@@ -547,14 +549,13 @@ optionalIntOrString key =
     Json.optionalKey key intOrString
 
 intOrString :: Json.Decoder Int
-intOrString = Json.withType \case
-    Json.VNumber -> Json.int
-    Json.VString -> Json.withText \value ->
-        case Text.signed Text.decimal (Text.strip value) of
-            Right (number, rest)
-                | Text.null rest -> pure number
-            _ -> fail "expected integer"
-    _ -> fail "expected integer"
+intOrString =
+    jsonInt
+        <|> Json.withText \value ->
+            case Text.signed Text.decimal (Text.strip value) of
+                Right (number, rest)
+                    | Text.null rest -> pure number
+                _ -> fail "expected integer"
 
 firstPresentText :: [Text] -> Json.FieldsDecoder Text
 firstPresentText keys = do
