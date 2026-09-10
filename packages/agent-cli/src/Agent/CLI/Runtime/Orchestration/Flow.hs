@@ -39,6 +39,7 @@ import Agent.CLI.Options
       CliOptions(optMotionMode, optManagedTurnFile, optScreenMode,
                  optProvider, optModel, optWorktree, optEffort, optPrompt,
                  optPromptFile, optResume, optCwd, optCodeMode, optYolo),
+      CodeModeOption(CodeModeEnabled),
       ScreenMode(ScreenMinimal) )
 import Agent.CLI.Provider.Switch
     ( continueAutomaticFallback, reportProviderUnavailable )
@@ -318,7 +319,7 @@ runAgentWithRuntime processRuntime runMode options = do
             RunEnableCodeMode sessionId ->
                 let nextOptions =
                         (restartSessionOptions current sessionId)
-                            { optCodeMode = True }
+                            { optCodeMode = CodeModeEnabled }
                 in go fullscreenInputs sessionState nextOptions Nothing
             RunProviderStartFailed apiError ->
                 case transition of

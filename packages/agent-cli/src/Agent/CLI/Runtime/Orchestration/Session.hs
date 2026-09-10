@@ -30,12 +30,17 @@ import Agent.CLI.Claude
     , newClaudeSessionRuntimeSlot
     )
 import Agent.CLI.CodeModeRuntime
-    ( CodeModeSessionRuntime(..),
-      CodexCatalogSession(..),
-      codeModeSessionRuntimeFor,
-      filterStartupUnavailableTools,
-      imageGenerationCodeModeRuntimeFor,
-      loadCodexCatalogModelInfo )
+    ( CodeModeRuntimePlan(..)
+    , CodeModeSessionRuntime(..)
+    , CodexCatalogSession(..)
+    , codeModeRuntimeFor
+    , codeModeRuntimePlan
+    , filterStartupUnavailableTools
+    , loadCodexCatalogModelInfo
+    )
+import Agent.Tools.CodeMode.Tool
+    ( ToolMode(CodeOnlyToolMode, ConventionalToolMode)
+    )
 import Agent.CLI.Compaction
     ( AutomaticCompactionBoundary
     , CompactOutcome
@@ -66,6 +71,7 @@ import Agent.CLI.ModelConfig
 import Agent.CLI.Models (ModelTarget(targetConnectionId))
 import Agent.CLI.Options
     ( ApprovalPolicy
+    , CodeModeOption(..)
     , isOneShot
     , CliOptions(optCodeMode, optCompactThreshold, optShowRawReasoning)
     )
@@ -463,9 +469,9 @@ prepareSessionCodeRuntime AgentSessionRequest
     , mcpInstructions
     } = do
     today <- utctDay <$> getCurrentTime
-    -- Catalog models provide the per-model instructions template. Full code
-    -- mode remains opt-in, while code_mode_only models still route the
-    -- reserved image-generation tool through exec.
+    -- Catalog models provide the per-model instructions template. Codex
+    -- catalog @tool_mode@ selects full code mode; local --code-mode is only
+    -- the fallback when the catalog omits a recognized selector.
     sessionModelInfo <-
         loadCodexCatalogModelInfo
             stateDirectory
@@ -488,20 +494,28 @@ prepareSessionCodeRuntime AgentSessionRequest
                 startup.startupNativeHooks
         includeHostedSearch =
             nativeCapabilities.nativeProviderHostedTools
+        allowFullCodeMode = options.optCodeMode /= CodeModeDisabled
+        codeModeFallback = case options.optCodeMode of
+            CodeModeEnabled -> CodeOnlyToolMode
+            _ -> ConventionalToolMode
+        codeModePlan =
+            codeModeRuntimePlan
+                allowFullCodeMode
+                codeModeFallback
+                sessionModelInfo
         initializeCodeMode
             | not nativeCapabilities.nativeHostExtensions =
                 pure (Right Nothing)
-            | options.optCodeMode =
-                codeModeSessionRuntimeFor sessionModelInfo tools
             | otherwise =
-                imageGenerationCodeModeRuntimeFor sessionModelInfo tools
-        codeModeFallbackWarning
-            | options.optCodeMode =
-                "code mode unavailable; falling back to compatible \
-                \direct tools: "
-            | otherwise =
-                "image generation code mode unavailable; \
-                \disabling image generation: "
+                codeModeRuntimeFor codeModePlan sessionModelInfo tools
+        codeModeFallbackWarning =
+            case codeModePlan of
+                PlanImageGenerationCodeMode ->
+                    "image generation code mode unavailable; \
+                    \disabling image generation: "
+                _ ->
+                    "code mode unavailable; falling back to compatible \
+                    \direct tools: "
     -- Attach cleanup during acquisition, before warnings or subsequent startup
     -- work can throw. The enclosing session owns this scope.
     (_, initializedCodeMode) <-
