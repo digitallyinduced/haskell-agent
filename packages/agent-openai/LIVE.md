@@ -13,7 +13,8 @@ in locally with ChatGPT for direct mode. Use headphones and submit `/voice` in a
 CLI or embedded desktop session. Wait for the connected status before speaking.
 Ctrl-C in the CLI or Stop in the desktop ends the call and delegated work.
 Tool approvals still require the usual on-screen approval; speech cannot grant
-them. Dictation remains separate. The CLI requires `ffmpeg` and `ffplay` on PATH;
+them. Dictation remains separate. CLI voice uses in-process GStreamer devices
+(CoreAudio on macOS, PulseAudio/PipeWire's PulseAudio service on Linux);
 the desktop uses AVAudioEngine and asks for microphone permission.
 
 ## Reference
@@ -78,10 +79,12 @@ seconds (both also have a 100-chunk cap). Playback overrun fails the call rather
 than blocking its receive loop. Hangup discards pending audio and joins workers.
 
 Hosts must stop their actual devices on all exit paths and cancel/join the call
-on session switching and application shutdown. A CLI ffmpeg/ffplay adapter is
+on session switching and application shutdown. A CLI GStreamer device adapter is
 implemented in `Agent.CLI.Voice.Audio`; it initializes capture during signaling,
-preserves partial PCM samples across pipe reads, and scopes both process groups
-to the call. It requires headphones (no acoustic echo cancellation). Call
+passes PCM directly without subprocesses, and scopes both devices
+to the call. Interrupting playback flushes and closes its device while capture
+continues. Each device queue is bounded to half a second. It requires headphones
+(no acoustic echo cancellation). Call
 controls use the existing session cancellation path. The native audio adapter
 uses a typed, callback-scoped C bridge, not UI event payloads for PCM.
 Audio is signed PCM16 little-endian, mono, 24 kHz. Playback interruption is

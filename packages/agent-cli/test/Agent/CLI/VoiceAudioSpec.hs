@@ -1,28 +1,68 @@
 module Agent.CLI.VoiceAudioSpec (spec) where
 
-import Agent.CLI.Voice.Audio (playbackHeader, playbackSamples)
+import Agent.CLI.Voice.Audio
+import Agent.OpenAI.Live
+import Agent.OpenAI.Live.Call
+import Control.Concurrent.MVar
+import Control.Concurrent.STM
+import Control.Exception.Safe (bracket_, finally)
 import Data.ByteString qualified as BS
-import Data.ByteString.Builder qualified as B
-import Data.ByteString.Lazy qualified as LBS
-import Data.Int (Int16)
+import Data.IORef
+import Data.Either (isLeft)
+import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
-spec = describe "Live playback framing" do
-    it "preserves every PCM16 value in little-endian IEEE float" do
-        let samples = [minBound .. maxBound] :: [Int16]
-            packed = LBS.toStrict . B.toLazyByteString . mconcat
-            pcm = packed (map B.int16LE samples)
-            floats = packed (map (B.floatLE . (/ 32768) . fromIntegral) samples)
-        playbackSamples pcm `shouldBe` Just floats
-    it "does not buffer complete samples between chunks" do
-        playbackSamples (BS.pack [0, 128]) `shouldBe` Just (BS.pack [0, 0, 128, 191])
-        playbackSamples BS.empty `shouldBe` Just BS.empty
-    it "rejects incomplete samples" do
-        playbackSamples (BS.pack [0]) `shouldBe` Nothing
-    it "declares float mono 24 kHz and unknown stream lengths" do
-        BS.length playbackHeader `shouldBe` 44
-        BS.take 12 playbackHeader `shouldBe` BS.pack [82,73,70,70,255,255,255,255,87,65,86,69]
-        BS.take 16 (BS.drop 20 playbackHeader) `shouldBe`
-            BS.pack [3,0,1,0,192,93,0,0,0,119,1,0,4,0,32,0]
-        BS.drop 36 playbackHeader `shouldBe` BS.pack [100,97,116,97,255,255,255,255]
+spec = describe "In-process voice devices" do
+    it "keeps capture alive while joining and replacing interrupted playback" do
+        captureInput <- newTQueueIO
+        written <- newTQueueIO
+        opened <- newTQueueIO
+        captureClosed <- newIORef False
+        playbackCount <- newIORef (0 :: Int)
+        playbackClosed <- newIORef ([] :: [Int])
+        let devices = VoiceDevices
+                { captureDevice = \use -> use (atomically (readTQueue captureInput))
+                    `finally` writeIORef captureClosed True
+                , playbackDevice = \use -> do
+                    index <- atomicModifyIORef' playbackCount (\n -> (n + 1, n + 1))
+                    bracket_ (atomically (writeTQueue opened index))
+                        (modifyIORef' playbackClosed (<> [index]))
+                        (use (\bytes -> atomically (writeTQueue written (index, bytes))))
+                }
+            connect next receive = do
+                receive LiveStarted
+                atomically (writeTQueue captureInput (BS.pack [1,0]))
+                next `shouldReturn` LiveInputAudio (BS.pack [1,0])
+                atomically (readTQueue opened) `shouldReturn` 1
+                receive (LiveTranscript LiveAssistant False "first")
+                receive (LiveAudio (BS.pack [2,0]))
+                atomically (readTQueue written) `shouldReturn` (1, BS.pack [2,0])
+                receive (LiveTranscript LiveUser False "interrupt")
+                atomically (readTQueue opened) `shouldReturn` 2
+                readIORef playbackClosed `shouldReturn` [1]
+                readIORef captureClosed `shouldReturn` False
+                atomically (writeTQueue captureInput (BS.pack [3,0]))
+                next `shouldReturn` LiveInputAudio (BS.pack [3,0])
+                receive (LiveTranscript LiveAssistant True "first")
+                receive (LiveTranscript LiveUser True "interrupt")
+                receive (LiveTranscript LiveAssistant False "second")
+                receive (LiveAudio (BS.pack [4,0]))
+                atomically (readTQueue written) `shouldReturn` (2, BS.pack [4,0])
+                pure (Right ())
+        timeout 2_000_000 (runLiveCallWith connect (\_ _ -> pure "") (const (pure ())) (runVoiceAudioWith devices))
+            `shouldReturn` Just (Right ())
+        readIORef captureClosed `shouldReturn` True
+        readIORef playbackClosed `shouldReturn` [1,2]
+
+    it "joins capture when opening playback fails" do
+        first <- newMVar (BS.pack [1,0])
+        closed <- newIORef False
+        let devices = VoiceDevices
+                { captureDevice = \use -> use (takeMVar first) `finally` writeIORef closed True
+                , playbackDevice = \_ -> fail "device unavailable"
+                }
+            connect next receive = receive LiveStarted >> next >> next >> pure (Right ())
+        result <- timeout 2_000_000 (runLiveCallWith connect (\_ _ -> pure "") (const (pure ())) (runVoiceAudioWith devices))
+        result `shouldSatisfy` maybe False isLeft
+        readIORef closed `shouldReturn` True
