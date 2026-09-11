@@ -6,6 +6,7 @@
 module Agent.Loop
     ( Backend(Backend, submitTurn, submitTurnWithCallbacks)
     , BackendCallbacks(..)
+    , BackendCancellationMode(..)
     , BackendMiddleware
     , BackendContinuation(..)
     , BackendRevision(..)

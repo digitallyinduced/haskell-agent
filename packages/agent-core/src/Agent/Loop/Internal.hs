@@ -98,7 +98,7 @@ import Data.IntMap.Strict (IntMap)
 import qualified Data.IntSet as IntSet
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.List (sortOn)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -555,26 +555,31 @@ submitLoopTurn
 submitLoopTurn runtime cursor = do
     let config = runtime.loopRuntimeConfig
     visibleAttempts <- newIORef (False, False)
+    cancellationMode <- newIORef InterruptThenCancel
     -- The callback belongs to this submission, not to the backend process.
     -- Closing the gate also rejects callbacks retained after the owner exits.
-    recovery <- newMVar (True, Nothing)
-    let checkpoint text = modifyMVar_ recovery \(active, previous) ->
+    recovery <- newMVar (True, Nothing, [])
+    let checkpoint text = modifyMVar_ recovery \(active, previous, items) ->
             if active
                 then let bounded = Text.copy (Text.take 32768 text)
-                     in bounded `seq` pure (active, Just bounded)
-                else pure (active, previous)
-        clearRecovery = modifyMVar_ recovery \(active, _) ->
-            pure (active, Nothing)
-        closeRecovery = modifyMVar recovery \(_, summary) ->
-            pure ((False, Nothing), summary)
+                     in bounded `seq` pure (active, Just bounded, items)
+                else pure (active, previous, items)
+        completedItem item call = modifyMVar_ recovery \(active, summary, items) ->
+            pure (active, summary, if active then (item, call) : items else items)
+        clearRecovery = modifyMVar_ recovery \(active, _, _) ->
+            pure (active, Nothing, [])
+        closeRecovery = modifyMVar recovery \(_, summary, items) ->
+            pure ((False, Nothing, []), (summary, reverse items))
         publishRecovery = do
-            summary <- closeRecovery
+            (summary, items) <- closeRecovery
             current <- config.loopBackendState.readBackendState
             -- A compaction/reset owns its newer checkpoint. Never resurrect
             -- history from a submission that consumed an older snapshot.
-            case summary of
-                Just text
-                    | not (Text.null (Text.strip text))
+            let summaryText = fromMaybe "" summary
+                hasSummary = not (Text.null (Text.strip summaryText))
+            case () of
+                _
+                    | hasSummary || not (null items)
                     , current == cursor.cursorState -> do
                         let note = Text.unlines
                                 [ "<turn_aborted>"
@@ -583,7 +588,7 @@ submitLoopTurn runtime cursor = do
                                 , "External side effects may already exist. Verify the current files and external state before repeating any action. Unfinished operations have unknown outcomes."
                                 , "Resume this work only if the user asks."
                                 , "<interrupted_work>"
-                                , text
+                                , summaryText
                                 , "</interrupted_work>"
                                 , "</turn_aborted>"
                                 ]
@@ -591,14 +596,17 @@ submitLoopTurn runtime cursor = do
                                 current
                                 (current.backendItems
                                     <> turnInputsToItems cursor.cursorInputs
-                                    <> turnInputsToItems [UserMessage note])
+                                    <> map fst items
+                                    <> if hasSummary
+                                        then turnInputsToItems [UserMessage note]
+                                        else [])
                                 Nothing
                         committed <-
                             config.loopBackendState.commitBackendState candidate
                         acknowledgeManagedTools
                             (asyncToolManager runtime)
                             cursor.cursorInputs
-                            []
+                            (catMaybes (map snd items))
                         writeIORef runtime.loopRuntimeProgressRef
                             (committed, ResponseCommitted)
                         writeIORef runtime.loopRuntimePendingRef []
@@ -640,12 +648,16 @@ submitLoopTurn runtime cursor = do
                     BackendCallbacks
                         { onLoopEvent = onBackendEvent
                         , onAsyncToolCall = \call ->
-                            withMVar recovery \(active, _) ->
+                            withMVar recovery \(active, _, _) ->
                                 when active $
                                     admitAsyncToolCall
                                         (asyncToolManager runtime)
                                         call
                         , onRecoveryCheckpoint = checkpoint
+                        , onCompletedResponseItem = completedItem
+                        , onCancellationMode = \mode ->
+                            withMVar recovery \(active, _, _) ->
+                                when active (writeIORef cancellationMode mode)
                         })
             \submission -> do
                 result <- restore $ race
@@ -656,10 +668,13 @@ submitLoopTurn runtime cursor = do
                         -- Give structured providers a chance to preserve their
                         -- subprocess/session invariants before withAsync
                         -- force-cancels an unresponsive submission.
-                        _ <- restore $
-                            timeout 2000000 (tryAny config.loopInterrupt)
-                        _ <- restore $
-                            timeout 2000000 (waitCatch submission)
+                        mode <- readIORef cancellationMode
+                        when (mode == InterruptThenCancel) do
+                            _ <- restore $
+                                timeout 2000000 (tryAny config.loopInterrupt)
+                            _ <- restore $
+                                timeout 2000000 (waitCatch submission)
+                            pure ()
                         pure (Left ())
                     Right (Left exception) ->
                         -- Preserve the provider thread's asynchronous-exception

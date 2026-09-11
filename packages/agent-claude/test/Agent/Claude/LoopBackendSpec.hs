@@ -1316,6 +1316,8 @@ spec = do
                                             _ -> pure ()
                                         , Loop.onAsyncToolCall = \_ -> pure ()
                                         , Loop.onRecoveryCheckpoint = writeIORef recovery
+                                        , Loop.onCompletedResponseItem = \_ _ -> pure ()
+                                        , Loop.onCancellationMode = const (pure ())
                                         }
                                 result <- timeout 5_000_000
                                     (backend.submitTurnWithCallbacks emptyBackendSnapshot Nothing

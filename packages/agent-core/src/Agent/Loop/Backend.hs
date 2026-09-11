@@ -4,6 +4,7 @@
 module Agent.Loop.Backend
     ( Backend(Backend, submitTurn, submitTurnWithCallbacks)
     , BackendCallbacks(..)
+    , BackendCancellationMode(..)
     , BackendResult(..)
     , BackendRevision(..)
     , BackendContinuation(..)
@@ -107,6 +108,12 @@ type CallbackSubmitTurn =
     -> BackendCallbacks
     -> IO (Either ApiError BackendResult)
 
+-- | Subprocess-backed providers may need a protocol interrupt and a grace
+-- period. Streaming HTTP/WebSocket providers stop by cancelling the submission
+-- itself, which releases the response transport.
+data BackendCancellationMode = InterruptThenCancel | CancelSubmission
+    deriving (Eq, Show)
+
 data BackendCallbacks = BackendCallbacks
     { onLoopEvent :: !(LoopEvent -> IO ())
     , onAsyncToolCall :: !(ToolCall -> IO ())
@@ -115,6 +122,16 @@ data BackendCallbacks = BackendCallbacks
     -- channel: partial deltas, reasoning and raw protocol data do not belong
     -- here. The loop publishes the bounded summary only if submission fails.
     , onRecoveryCheckpoint :: !(Text -> IO ())
+    -- | Journal an independently completed output item for interruption
+    -- recovery. Providers must not send partial deltas here. This does not
+    -- commit a response ID or execute a blocking tool call; successful turns
+    -- still use the authoritative BackendResult instead of this journal.
+    -- The optional tool call must be the decoded call represented by the item.
+    , onCompletedResponseItem :: !(ResponseItem -> Maybe ToolCall -> IO ())
+    -- | Select cancellation for this submission before starting provider I/O.
+    -- A callback keeps this policy intact through backend middleware and
+    -- dynamic provider switching. The default is InterruptThenCancel.
+    , onCancellationMode :: !(BackendCancellationMode -> IO ())
     }
 
 data Backend = BackendInternal
@@ -144,6 +161,8 @@ backendWithCallbacks callbackSubmit =
             { onLoopEvent = onEvent
             , onAsyncToolCall = const (pure ())
             , onRecoveryCheckpoint = const (pure ())
+            , onCompletedResponseItem = \_ _ -> pure ()
+            , onCancellationMode = const (pure ())
             }
 
 data BackendStateStore = BackendStateStore
