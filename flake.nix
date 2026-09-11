@@ -640,12 +640,12 @@
                             {
                                 src = agentIntegrationApiSource;
                             });
-                        agent-webrtc = localPackage (pkgs.haskell.lib.overrideSrc
+                        agent-webrtc = (localPackage (pkgs.haskell.lib.overrideSrc
                             (final.callPackage ./packages/agent-webrtc/package.nix {
                                 gstreamer-app = pkgs.gst_all_1.gst-plugins-base;
                                 gstreamer-sdp = pkgs.gst_all_1.gst-plugins-base;
                                 gstreamer-webrtc = pkgs.gst_all_1.gst-plugins-bad;
-                            }) { src = agentWebRTCSource; }).overrideAttrs (_: {
+                            }) { src = agentWebRTCSource; })).overrideAttrs (_: {
                                 # GStreamer's propagated dependency closure otherwise
                                 # exceeds Linux's exec environment limit during Cabal's
                                 # foreign-library probe (reported as missing libraries).
