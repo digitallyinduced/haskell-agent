@@ -3,6 +3,7 @@ module Agent.CLI.Session.Runner.Execution
     ( AgentStepCache(..)
     , SessionRunnerContinuation(..)
     , runSession
+    , applyNativeInteractionMode
     ) where
 import qualified Agent.CLI.Session.Activity as Activity
 import Agent.CLI.Session.Request
@@ -65,6 +66,7 @@ import Agent.CLI.Runtime.Orchestration.Types
     ( NativeDiscoveryContext(..)
     , NativeRunCapabilities(..)
     , NativeRunHooks(..)
+    , NativeInteractionMode(..)
     , fullNativeRunCapabilities
     , nativePreparedDiscovery
     )
@@ -114,6 +116,7 @@ import Agent.CLI.Input (ReplLine(ReplText))
 import Agent.TUI.Model
 import Agent.TUI.Motion
 import Agent.CLI.WindowTitle
+import Agent.CLI.Voice.Session (runSessionVoiceCall)
 import Agent.CLI.Turn
 import Agent.Cancel
 import Agent.Loop
@@ -211,8 +214,24 @@ data SessionHostRuntime = SessionHostRuntime
     , hostFullscreen :: !(Maybe FullscreenRuntime)
     }
 
+-- | Change only turn-local policy. Pending human decisions remain untouched.
+applyNativeInteractionMode :: IORef ApprovalPolicy -> PlanModeEnv -> NativeInteractionMode -> IO ()
+applyNativeInteractionMode policyRef planMode = \case
+    NativeAsk -> do
+        writeIORef policyRef PromptMutating
+        deactivatePlanMode planMode
+    NativePlan -> do
+        writeIORef policyRef PromptMutating
+        activatePlanMode planMode
+    NativeYolo -> do
+        deactivatePlanMode planMode
+        writeIORef policyRef ApproveAll
+
 newSessionHostRuntime :: SessionRequest -> IO SessionHostRuntime
 newSessionHostRuntime SessionRequest{..} = do
+    forM_ startup.startupNativeHooks \hooks ->
+        forM_ hooks.nativeRegisterInteractionMode \register ->
+            register (applyNativeInteractionMode policyRef planMode)
     initialPrevious <- readLivePreviousResponseId conversationRef
     runtimeState <- RuntimeState.newSessionStateWith
         conversationRef startupContext usageRef automaticCompactionRef
@@ -1811,7 +1830,14 @@ runSessionInteraction
     -> SessionEnv
     -> IO RunResult
 runSessionInteraction
-        callbacks host skillsRuntime SessionRequest{..} env = do
+        callbacks host skillsRuntime SessionRequest{..} env
+  | Just (devices, announce) <- startup.startupNativeHooks >>= (.nativeVoiceCall) = do
+    _ <- skillsRuntime.skillInitialize
+    result <- runSessionVoiceCall env devices announce
+    case result of
+        Left _ -> startupDie startup "Voice call failed. Check OpenAI Live access and microphone permission."
+        Right () -> pure RunQuit
+  | otherwise = do
     learnedSkills <- skillsRuntime.skillInitialize
     case pendingTurn of
         Just pending ->

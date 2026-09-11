@@ -9,6 +9,7 @@ import qualified Agent.OpenAI.ErrorSpec as ErrorSpec
 import qualified Agent.OpenAI.FunctionalSpec as FunctionalSpec
 import qualified Agent.OpenAI.ImageGenerationSpec as ImageGenerationSpec
 import qualified Agent.OpenAI.LoginSpec as LoginSpec
+import qualified Agent.OpenAI.LiveSpec as LiveSpec
 import qualified Agent.OpenAI.LoopBackendSpec as LoopBackendSpec
 import qualified Agent.OpenAI.ModelsClientSpec as ModelsClientSpec
 import qualified Agent.OpenAI.ModelsManagerSpec as ModelsManagerSpec
@@ -28,6 +29,7 @@ main = hspec do
     FunctionalSpec.spec
     ImageGenerationSpec.spec
     LoginSpec.spec
+    LiveSpec.spec
     LoopBackendSpec.spec
     ModelsClientSpec.spec
     ModelsManagerSpec.spec

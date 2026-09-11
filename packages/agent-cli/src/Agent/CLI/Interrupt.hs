@@ -10,6 +10,7 @@ module Agent.CLI.Interrupt
     , newInterruptState
     , withCtrlCHandler
     , withTurnCancel
+    , resetIdleTurnCancel
     , noteIdleCtrlC
     , isWrappedUserInterrupt
     , catchUserInterrupt
@@ -17,7 +18,7 @@ module Agent.CLI.Interrupt
     , noteFullscreenCtrlC
     ) where
 
-import Agent.Cancel (CancelFlag, isCancelled, requestCancel)
+import Agent.Cancel (CancelFlag, isCancelled, requestCancel, resetCancel)
 import Control.Concurrent (ThreadId, myThreadId, throwTo)
 import Control.Exception
     ( AsyncException(UserInterrupt)
@@ -129,11 +130,23 @@ withCtrlCHandler state action = do
             (const continuation)
 
 -- | Mark @cancel@ as the in-flight turn target for soft Ctrl-C.
+-- Nested work (for example voice delegations) must not erase a parent hangup.
+resetIdleTurnCancel :: InterruptState -> CancelFlag -> IO ()
+resetIdleTurnCancel state cancel = do
+    active <- readIORef state.interruptActiveCancel
+    case active of
+        Nothing -> resetCancel cancel
+        Just _ -> pure ()
+
 withTurnCancel :: InterruptState -> CancelFlag -> IO a -> IO a
-withTurnCancel state cancel =
-    bracket_
-        (writeIORef state.interruptActiveCancel (Just cancel))
-        (writeIORef state.interruptActiveCancel Nothing)
+withTurnCancel state cancel action =
+    bracket
+        (do
+            previous <- readIORef state.interruptActiveCancel
+            writeIORef state.interruptActiveCancel (Just cancel)
+            pure previous)
+        (writeIORef state.interruptActiveCancel)
+        (const action)
 
 -- | Apply idle Ctrl-C policy from the inline editor.
 noteIdleCtrlC :: InterruptState -> IO IdleCtrlCResult

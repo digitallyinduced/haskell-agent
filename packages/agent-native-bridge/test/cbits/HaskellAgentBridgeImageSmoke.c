@@ -4,6 +4,16 @@
 #include <stdatomic.h>
 #include <unistd.h>
 
+int ha_voice_abi_smoke(void) {
+    ha_voice_audio_callback callback = NULL;
+    const uint8_t pcm[] = {0, 0};
+    const uint8_t turn[] = "voice-test";
+    if (ha_engine_stage_voice(NULL, turn, sizeof(turn) - 1,
+                              callback, NULL) != 1) return 1;
+    if (ha_voice_submit_audio(NULL, pcm, sizeof(pcm)) != 1) return 2;
+    return 0;
+}
+
 static void restart_result_callback(void *context, int32_t status,
                                     uint64_t revision, const uint8_t *error,
                                     size_t error_length) {
@@ -1052,6 +1062,19 @@ int ha_native_turn_options_stage_smoke(void) {
     }
     int32_t status = ha_engine_set_interaction_callback(
         engine, interaction_callback, NULL);
+    if (status == 0 && (
+            ha_engine_set_turn_interaction_mode(NULL, turn_id,
+                sizeof(turn_id) - 1, HA_INTERACTION_MODE_ASK) != 1
+            || ha_engine_set_turn_interaction_mode(engine, NULL,
+                1, HA_INTERACTION_MODE_ASK) != 2
+            || ha_engine_set_turn_interaction_mode(engine, turn_id,
+                0, HA_INTERACTION_MODE_ASK) != 2
+            || ha_engine_set_turn_interaction_mode(engine, turn_id,
+                sizeof(turn_id) - 1, 99) != 4
+            || ha_engine_set_turn_interaction_mode(engine, turn_id,
+                sizeof(turn_id) - 1, HA_INTERACTION_MODE_YOLO) != 5)) {
+        status = 15;
+    }
     for (size_t mode_index = 0;
             status == 0
                 && mode_index

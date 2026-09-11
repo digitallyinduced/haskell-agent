@@ -1,6 +1,7 @@
 module Agent.CLI.InterruptSpec (spec) where
 
 import Agent.CLI.Interrupt
+import Agent.Cancel (newCancelFlag, isCancelled, requestCancel)
 import qualified Control.Exception as Base
 import Control.Exception (AsyncException(ThreadKilled, UserInterrupt))
 import Control.Exception.Safe (bracket, finally, throwIO, toSyncException)
@@ -11,6 +12,25 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "nested cancellation scopes" do
+        it "does not erase hangup when preparing a delegated turn" do
+            state <- newInterruptState (const (pure ()))
+            flag <- newCancelFlag
+            withTurnCancel state flag do
+                requestCancel flag
+                resetIdleTurnCancel state flag
+                isCancelled flag `shouldReturn` True
+            resetIdleTurnCancel state flag
+            isCancelled flag `shouldReturn` False
+        it "restores the call's cancellation after a delegated turn" do
+            state <- newInterruptState (const (pure ()))
+            outer <- newCancelFlag
+            inner <- newCancelFlag
+            withTurnCancel state outer do
+                withTurnCancel state inner (pure ())
+                noteFullscreenCtrlC state `shouldReturn` SoftCancel
+                isCancelled outer `shouldReturn` True
+                isCancelled inner `shouldReturn` False
     describe "decideCtrlC" do
         it "warns on first idle Ctrl-C" do
             decideCtrlC Idle False `shouldBe` WarnExit

@@ -9,7 +9,7 @@ module Agent.CLI.MacOS.TurnExecution
 import Agent.CLI.MacOS.EngineEvents
 import Agent.CLI.MacOS.EngineMailbox (EngineMailbox, acceptEngineCommand)
 import Agent.CLI.MacOS.EngineState (EngineCommand(..))
-import Agent.CLI.MacOS.InteractionState (InteractionRuntime)
+import Agent.CLI.MacOS.InteractionState (InteractionRuntime(..))
 import Agent.CLI.MacOS.NativeInteraction
     ( nativePlanModeHooks, requestApproval, requestFreshApproval
     , requestRootAccessFromClient )
@@ -18,6 +18,7 @@ import Agent.CLI.MacOS.NativeRequest (TurnStart(..))
 import Agent.CLI.MacOS.TurnEvents (nativeLoopEvent)
 import Agent.CLI.MacOS.TurnInputs
 import Agent.CLI.MacOS.TurnState
+import Agent.CLI.MacOS.Voice (runNativeVoiceAudio)
 import Agent.CLI.NativeRuntime
     ( NativeProcessRuntime
     , NativeRunHooks(..)
@@ -32,7 +33,9 @@ import Agent.Runtime.StartupPolicy (hostNativeStartupPolicy)
 import Agent.ToolDispatch (ToolCall(..))
 import Agent.Tools.Types (AppTool(..), AppToolGroup(..), appToolsFromGroups)
 import Control.Concurrent.STM (atomically, writeTVar)
-import Control.Exception.Safe (SomeException, fromException, tryAny)
+import Control.Exception.Safe (SomeException, fromException, tryAny, finally)
+import Control.Concurrent.MVar (modifyMVar_)
+import qualified Data.Map.Strict as Map
 import Control.Monad (forM_, void)
 import qualified Data.Aeson as Aeson
 import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef', atomicModifyIORef')
@@ -99,6 +102,11 @@ runNativeTurn
                         forM_ (nativeLoopEvent control.turnControlId event)
                             (sendEvent callback context)
             , nativeInitialTurnInputs = Nothing
+            , nativeVoiceCall = fmap (\audio ->
+                ( runNativeVoiceAudio audio
+                , \message -> forM_ (encodeNativeLoopEventWithChartCalls Set.empty control.turnControlId (ActivityUpdated message))
+                    (sendBinaryEvent callback context)
+                )) turnOptions.nativeTurnVoice
             , nativeOnSessionId = \sessionId -> do
                 writeIORef sessionIdRef (Just sessionId)
                 atomically do
@@ -132,6 +140,9 @@ runNativeTurn
                 nativePlanModeHooks control interactions
             , nativeInteractionMode =
                 turnOptions.nativeTurnInteractionMode
+            , nativeRegisterInteractionMode = Just $ \setter ->
+                modifyMVar_ interactions.interactionModeSetters $
+                    pure . Map.insert control.turnControlId setter
             , nativeShellMode = turnOptions.nativeTurnShellMode
             , nativeHome = Nothing
             , nativeDatabaseStore = Nothing
@@ -142,7 +153,9 @@ runNativeTurn
             , nativeStartupPolicy = hostNativeStartupPolicy
             }
         args = nativeTurnArguments start
-    result <- tryAny $
+    result <- tryAny $ flip finally
+        (modifyMVar_ interactions.interactionModeSetters $
+            pure . Map.delete control.turnControlId) $
         withTurnImages start.turnStartPrompt images \managedFile ->
             withFile "/dev/null" WriteMode \output ->
                 runNativeAgent
@@ -163,7 +176,7 @@ runNativeTurn
                 Left exception -> Just (nativeExceptionMessage exception)
                 Right (Left err) -> Just err
                 Right (Right ())
-                    | completed -> Nothing
+                    | completed || maybe False (const True) turnOptions.nativeTurnVoice -> Nothing
                     | otherwise ->
                         Just
                             "turn ended without a completion event"

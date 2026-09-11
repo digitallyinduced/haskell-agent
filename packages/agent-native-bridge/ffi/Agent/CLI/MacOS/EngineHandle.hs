@@ -48,10 +48,12 @@ ha_engine_create callback context
             interactionTarget <- newTVarIO Nothing
             interactionLock <- newMVar ()
             pendingInteractions <- newTVarIO Map.empty
+            modeSetters <- newMVar Map.empty
             let interactions = InteractionRuntime
                     { interactionCallbackTarget = interactionTarget
                     , interactionCallbackLock = interactionLock
                     , interactionPending = pendingInteractions
+                    , interactionModeSetters = modeSetters
                     }
             mask \_ -> do
                 -- Keep worker creation and stable-pointer publication in one

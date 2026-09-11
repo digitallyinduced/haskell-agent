@@ -1449,6 +1449,7 @@ nativeHooks environment control sessionId cwd dialect = NativeRunHooks
         let (eventType, value) = projectLoopEvent event
         in control.turnControlEmit eventType value
     , nativeInitialTurnInputs = Nothing
+    , nativeVoiceCall = Nothing
     , nativeOnSessionId = \_ -> pure ()
     , nativeRegisterCancel = control.turnControlRegisterCancel
     , nativeRegisterAgentSnapshot = \snapshot ->
@@ -1473,6 +1474,7 @@ nativeHooks environment control sessionId cwd dialect = NativeRunHooks
                 composeSandboxTools sandbox sessionId cwd dialect
     , nativePlanHooks = planHooks control
     , nativeInteractionMode = serverInteractionMode environment
+    , nativeRegisterInteractionMode = Nothing
     , nativeShellMode = tenantShellMode environment
     , nativeHome =
         case environment.environmentSandbox of
