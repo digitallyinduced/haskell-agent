@@ -1,6 +1,7 @@
 -- | Pending-turn execution and turn-completion transitions.
 module Agent.CLI.Session.Lifecycle
     ( SessionContinuation(..)
+    , exitFailedTurn
     , finishTurn
     , retryFailedTurn
     , runPendingTurn
@@ -72,6 +73,15 @@ data SessionContinuation = SessionContinuation
     { resumeSession :: SessionEnv -> IO RunResult
     , resumeSessionWithDraft :: SessionEnv -> Text -> IO RunResult
     }
+
+-- | Embedded turns must return the same actionable error as the transcript,
+-- rather than terminating their host or replacing the failure with a summary.
+-- Foreground one-shot invocations have already printed the error to stderr.
+exitFailedTurn :: Bool -> Text -> IO a
+exitFailedTurn background message =
+    if background
+        then throwIO (StartupFailure message)
+        else exitFailure
 
 runPendingTurn
     :: SessionContinuation
@@ -180,15 +190,11 @@ finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \cas
         if shouldQuitAfterTurn env exitAfter
             then pure RunQuit
             else continuation.resumeSession env
-    TurnFailed pending -> do
+    TurnFailed message pending -> do
         writeIORef env.sessionLastFailedTurn
             (Just (setPendingExitAfter exitAfter pending))
         if exitAfter
-            then
-                if env.sessionBackground
-                    then
-                        throwIO (StartupFailure "agent turn failed")
-                    else exitFailure
+            then exitFailedTurn env.sessionBackground message
             else do
                 case env.sessionFullscreen of
                     Nothing -> putTrailingNewline env.sessionRender

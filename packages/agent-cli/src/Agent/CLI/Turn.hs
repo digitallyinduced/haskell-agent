@@ -809,6 +809,7 @@ finishGeneralFailureTurn executed err = do
         fullscreen = env.sessionFullscreen
         finishedAt = executed.executedFinishedAt
         failureMessage = formatLoopErrorAt finishedAt err
+        persistedFailureMessage = formatLoopErrorPersistedAt finishedAt err
     restorePlanStateAfterIncomplete
         env.sessionPlanMode
         executed.executedPreparation.preparedInitialPlanState
@@ -849,11 +850,11 @@ finishGeneralFailureTurn executed err = do
     persistIncompleteTurn
         executed
         retained
-        (formatLoopErrorPersistedAt finishedAt err)
+        persistedFailureMessage
         maybeIncompleteTurn
         (uncommittedAssistantText executed.executedLoop)
     planState <- readIORef env.sessionPlanMode.planStateRef
-    pure $ TurnFailed PendingTurn
+    pure $ TurnFailed persistedFailureMessage PendingTurn
         { pendingPromptText = request.busyPromptText
         -- The live transcript checkpoints the exact stamped inputs, including
         -- attachments, so do not retain a second potentially large copy.

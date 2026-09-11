@@ -8,6 +8,7 @@ import Agent.CLI.Turn
     , takeGrokFirstTurnContext
     )
 import Agent.CLI.TurnState
+import Agent.CLI.NativeRuntime (StartupFailure(..), exitFailedTurn)
 import Agent.CLI.Compaction (AutomaticCompactionBoundary(..))
 import Agent.Error (ApiError(..))
 import Agent.Loop
@@ -54,6 +55,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
 import System.OsPath (unsafeEncodeUtf)
+import System.Exit (ExitCode(..))
 import Test.Hspec
 import Test.QuickCheck (elements, forAll, listOf, property, (===))
 
@@ -89,6 +91,23 @@ displayAttemptEvents =
 
 spec :: Spec
 spec = do
+    describe "exitFailedTurn" do
+        it "preserves the complete background failure and recovery guidance" do
+            let message =
+                    "The request is too large.\n"
+                        <> "Remove large attachments or run /compact, then retry."
+            exitFailedTurn True message `shouldThrow`
+                (\(StartupFailure actual) -> actual == message)
+
+        it "preserves non-ASCII failure details without escaping them" do
+            let message = "Provider unavailable: Überlastung — retry later."
+            exitFailedTurn True message `shouldThrow`
+                (\(StartupFailure actual) -> actual == message)
+
+        it "retains the foreground one-shot failure exit status" do
+            exitFailedTurn False "The request is too large." `shouldThrow`
+                (== ExitFailure 1)
+
     describe "turnInputsWithContext" do
         it "orders plan-mode, task-plan, startup, and submitted inputs" do
             turnInputsWithContext

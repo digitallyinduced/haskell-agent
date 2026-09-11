@@ -23,7 +23,8 @@ import Agent.CLI.GatewayClient
     , registerGatewayCredentialInvalidatorAt
     , saveGatewayCredentialAt
     )
-import Agent.CLI.NativeRuntime (StartupFailure(..))
+import Agent.CLI.NativeRuntime (StartupFailure(..), exitFailedTurn)
+import Agent.CLI.MacOS.TurnEvents (turnFailedEvent)
 import Control.Concurrent
     ( newEmptyMVar
     , newMVar
@@ -40,6 +41,7 @@ import Control.Exception.Safe
     , displayException
     , throwString
     , toException
+    , tryAny
     )
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy.Char8 as LBS8
@@ -362,6 +364,21 @@ nativeTurnBoundarySpec =
 nativeFailureSpec :: Spec
 nativeFailureSpec =
     describe "native turn failures" do
+        it "delivers background turn failure guidance in the terminal event" do
+            let message =
+                    "The request is too large.\n"
+                        <> "Remove large attachments or run /compact, then retry."
+            result <- tryAny (exitFailedTurn True message :: IO ())
+            case result of
+                Right () -> expectationFailure "expected a turn failure"
+                Left exception ->
+                    turnFailedEvent "failed-turn" (nativeExceptionMessage exception)
+                        `shouldBe` Aeson.object
+                            [ "event" Aeson..= ("turn.failed" :: String)
+                            , "turnId" Aeson..= ("failed-turn" :: String)
+                            , "error" Aeson..= message
+                            ]
+
         it "displays a startup failure without its constructor wrapper" do
             displayException
                 (StartupFailure
