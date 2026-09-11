@@ -645,7 +645,13 @@
                                 gstreamer-app = pkgs.gst_all_1.gst-plugins-base;
                                 gstreamer-sdp = pkgs.gst_all_1.gst-plugins-base;
                                 gstreamer-webrtc = pkgs.gst_all_1.gst-plugins-bad;
-                            }) { src = agentWebRTCSource; });
+                            }) { src = agentWebRTCSource; }).overrideAttrs (_: {
+                                # GStreamer's propagated dependency closure otherwise
+                                # exceeds Linux's exec environment limit during Cabal's
+                                # foreign-library probe (reported as missing libraries).
+                                __structuredAttrs = true;
+                                strictDeps = true;
+                            });
                         agent-process = localPackage (pkgs.haskell.lib.overrideSrc
                             (final.callPackage ./packages/agent-process/package.nix { })
                             {
