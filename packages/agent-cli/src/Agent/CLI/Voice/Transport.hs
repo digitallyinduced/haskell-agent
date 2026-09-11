@@ -12,8 +12,6 @@ import Control.Concurrent.STM
 import Control.Exception.Safe (tryAny)
 import Control.Monad (forever)
 import System.Timeout (timeout)
-import GHC.Clock (getMonotonicTimeNSec)
-import Debug.Trace (traceIO)
 
 runCodexVoiceConversation
     :: TokenProvider -> LiveConfig -> IO LiveInput -> (LiveEvent -> IO ())
@@ -33,21 +31,15 @@ runVoiceConversationWith
     :: (IO Text -> (Text -> (IO () -> IO LiveInput -> (LiveEvent -> IO ()) -> IO ()) -> IO ()) -> IO (Either ApiError ()))
     -> IO LiveInput -> (LiveEvent -> IO ()) -> IO (Either ApiError ())
 runVoiceConversationWith signaling next receive = do
-        start <- getMonotonicTimeNSec
-        let stage name = do
-                now <- getMonotonicTimeNSec
-                traceIO ("Voice setup: " <> name <> " at " <> show ((now - start) `div` 1_000_000) <> " ms")
         outcome <- tryAny $ Media.withPeer \peer -> do
-            stage "peer created"
-            signaling (Media.createOffer peer >>= \offer -> stage "offer gathered" >> pure offer) \answer sideband -> do
-                stage "answer received"
+            signaling (Media.createOffer peer) \answer sideband -> do
                 Media.setRemoteAnswer peer answer
                 context <- newTBQueueIO 8
                 ready <- newEmptyTMVarIO
                 let onSideband LiveStarted = pure ()
                     onSideband (LiveAudio _) = pure () -- audio is exclusively WebRTC
                     onSideband event = receive event
-                    control = sideband (stage "sideband ready" >> atomically (putTMVar ready ()))
+                    control = sideband (atomically (putTMVar ready ()))
                         (atomically (readTBQueue context)) onSideband
                     input = next >>= \case
                         LiveHangUp -> pure ()
@@ -59,7 +51,7 @@ runVoiceConversationWith signaling next receive = do
                             Media.awaitConnected peer
                         case connected of
                             Nothing -> fail "Voice connection timed out"
-                            Just () -> stage "media connected" >> receive LiveStarted
+                            Just () -> receive LiveStarted
                         race_ input (forever (Media.pullAudio peer >>= receive . LiveAudio))
                 -- A failure/hangup in either plane joins all other workers.
                 race_ control media

@@ -70,8 +70,7 @@ runSessionVoiceCall env devices announce = do
         Right (transport, label) -> do
             let cancel = env.sessionLoop.loopCancel
             resetCancel cancel
-            announce ("Voice account: " <> label)
-            announce "Connecting voice call. Use headphones. Cancel/Stop ends the call and its delegated work; tool approvals remain in this window."
+            announce ("Connecting voice via " <> label <> "…")
             result <- withTurnCancel env.sessionInterrupt cancel $
                 runLiveCallWith transport delegate notify
                     (\call -> race_ (waitCancel cancel >> stopLiveCall call) (devices call))
@@ -83,9 +82,7 @@ runSessionVoiceCall env devices announce = do
                 Left _ -> announce "Voice call failed. Check OpenAI Live model access, microphone permission, and audio device availability."
                 Right () -> announce "Voice call ended."
             pure result
-    notify LiveStarted = announce "Voice connected — starting microphone. Cancel/Stop to hang up."
-    notify (LiveTranscript LiveUser True _) = announce "Voice: user speech recognized."
-    notify (LiveTranscript LiveAssistant True _) = announce "Voice: assistant response generated."
+    notify LiveStarted = announce "Voice connected. Use headphones; Ctrl-C or Stop to hang up."
     notify _ = pure ()
     delegate :: Text -> (Text -> IO ()) -> IO Text
     delegate task progress = do

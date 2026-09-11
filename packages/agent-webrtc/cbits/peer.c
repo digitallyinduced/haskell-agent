@@ -39,6 +39,18 @@ AgentPeer *agent_peer_new(void) {
         "! rtpopuspay pt=111 ! application/x-rtp,media=audio,encoding-name=OPUS,payload=111,clock-rate=48000 ! rtc.", &error);
     if (error || !p->pipeline) goto failed;
     p->rtc = gst_bin_get_by_name(GST_BIN(p->pipeline), "rtc");
+    /* Use ICE connectivity checks, not router port mappings. Optional UPnP
+     * discovery otherwise starts local HTTP listeners on every interface and
+     * emits warnings where listening is unavailable. Configure only this
+     * peer, before gathering; do not suppress GLib or transport diagnostics. */
+    GObject *ice = NULL, *agent = NULL;
+    g_object_get(p->rtc, "ice-agent", &ice, NULL);
+    if (ice && g_object_class_find_property(G_OBJECT_GET_CLASS(ice), "agent"))
+        g_object_get(ice, "agent", &agent, NULL);
+    if (agent && g_object_class_find_property(G_OBJECT_GET_CLASS(agent), "upnp"))
+        g_object_set(agent, "upnp", FALSE, NULL);
+    g_clear_object(&agent);
+    g_clear_object(&ice);
     p->source = gst_bin_get_by_name(GST_BIN(p->pipeline), "source");
     p->receiver = gst_parse_bin_from_description(
         "queue max-size-buffers=50 max-size-bytes=96000 max-size-time=2000000000 "

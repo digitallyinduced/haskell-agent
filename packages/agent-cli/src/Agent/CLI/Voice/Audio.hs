@@ -8,7 +8,6 @@ import Control.Concurrent.Async (race, race_)
 import Control.Exception.Safe qualified as Safe
 import Control.Monad (unless, when)
 import Data.ByteString qualified as BS
-import Debug.Trace (traceIO)
 
 -- | Scoped operations also permit device-independent lifecycle tests.
 data VoiceDevices = VoiceDevices
@@ -31,7 +30,6 @@ runVoiceAudioWith VoiceDevices{captureDevice, playbackDevice} call = captureDevi
     -- after receiving the first capture buffer, not merely creating the device.
     first <- readSamples
     submit first
-    traceIO "Voice: microphone capture started."
     race_ (captureLoop readSamples) do
         ready <- awaitLiveStarted call
         when ready (playbackGenerationLoop 0)
@@ -43,7 +41,6 @@ runVoiceAudioWith VoiceDevices{captureDevice, playbackDevice} call = captureDevi
     playbackGenerationLoop generation = do
         _ <- race (awaitLivePlaybackReset call generation) $
             playbackDevice \writeSamples -> do
-                traceIO "Voice: playback device started."
                 playbackLoop generation writeSamples
         -- Closing the old device flushes its buffers and joins its streaming
         -- threads before a replacement opens. Capture has a separate scope.
