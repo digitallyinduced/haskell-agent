@@ -28,6 +28,7 @@ import Agent.Tools.IO
     , sessionTempProcessEnv
     , sessionSandboxProfile
     , startShellCommand
+    , startShellCommandWithCompletion
     , startShellCommandWithInput
     , stopShellCommand
     , writeShellCommandInput
@@ -44,9 +45,11 @@ import Agent.Tools.Types
     , setToolSessionTmp
     )
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
-import Control.Concurrent.MVar (readMVar)
-import Control.Exception.Safe (bracket, tryIO)
-import Control.Monad (replicateM)
+import Control.Concurrent.MVar (readMVar, tryPutMVar)
+import Control.Concurrent.Async (poll, waitCatch, withAsync)
+import Control.Exception.Safe (bracket, finally, tryIO)
+import qualified Control.Exception as Exception
+import Control.Monad (replicateM, void)
 import qualified Data.ByteString.Lazy.Char8 as LBS8
 import Data.Either (isLeft, isRight)
 import Data.IORef
@@ -75,6 +78,7 @@ import System.Info (os)
 import System.Posix.Temp (mkdtemp)
 import System.Posix.Files (deviceID, fileID, getFileStatus)
 import System.Process (readProcessWithExitCode)
+import System.Timeout (timeout)
 import Test.Hspec
 
 fromFilePath = unsafeEncodeUtf
@@ -696,6 +700,34 @@ spec = describe "Agent.Tools.IO" do
             writeShellCommandInput running "hello\n" `shouldReturn` Right ()
             result <- readMVar running.runningResult
             result.commandStdout `shouldBe` "got:hello"
+
+    it "bounds supervisor shutdown from an uninterruptible finalizer" do
+        withTempDir \dir -> do
+            let osDir = fromFilePath dir
+            env <- defaultToolEnv osDir
+            callbackStarted <- newEmptyMVar
+            releaseCallback <- newEmptyMVar
+            cleanupMask <- newEmptyMVar
+            Right running <- startShellCommandWithCompletion env osDir "true" \_ -> do
+                putMVar callbackStarted ()
+                readMVar releaseCallback
+            let unblock = void (tryPutMVar releaseCallback ())
+                release = unblock >> stopShellCommand running
+            (do
+                timeout 3000000 (readMVar callbackStarted) `shouldReturn` Just ()
+                let cleanup = do
+                        Exception.getMaskingState >>= putMVar cleanupMask
+                        stopShellCommand running
+                withAsync (pure () `finally` cleanup) \stopping ->
+                    (do
+                        readMVar cleanupMask `shouldReturn` Exception.MaskedUninterruptible
+                        completed <- timeout 3000000 (waitCatch stopping)
+                        completed `shouldSatisfy` maybe False isRight
+                        poll running.runningSupervisor >>= (`shouldSatisfy` maybe False (const True)))
+                    -- Release the blocked callback before joining a regressed
+                    -- shutdown, so a test failure cannot hang the test suite.
+                    `finally` unblock)
+                `finally` release
 
     it "caps live and final background output" do
         withTempDir checkBackgroundOutputCap

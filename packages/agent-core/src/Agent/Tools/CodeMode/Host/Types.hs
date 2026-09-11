@@ -15,6 +15,7 @@ import qualified Data.Map.Strict as Map
 import Data.IORef (IORef)
 import Data.Text (Text)
 import System.IO (Handle)
+import System.Posix.Types (ProcessGroupID)
 import System.Process (ProcessHandle)
 
 type CodeModeToolHandler =
@@ -93,12 +94,18 @@ data CellObservation
     | CellTerminating
     | CellClosed
 
+-- Capture the group identity at acquisition: getPid can return Nothing after
+-- the direct child has exited while descendants still retain its pipes.
+data WorkerProcessHandle = WorkerProcessHandle
+    !ProcessHandle
+    !(Maybe ProcessGroupID)
+
 data Cell = Cell
     { cellIdentifier :: !Text
     , cellInput :: !Handle
     , cellOutput :: !Handle
     , cellErrorOutput :: !Handle
-    , cellProcess :: !ProcessHandle
+    , cellProcess :: !WorkerProcessHandle
     , cellWriterLock :: !(MVar ())
     , cellResult :: !(TMVar (Either CodeModeError CellOutcome))
     , cellYields :: !(TQueue Value)
@@ -113,7 +120,7 @@ data IdleWorker = IdleWorker
     !Handle
     !Handle
     !Handle
-    !ProcessHandle
+    !WorkerProcessHandle
     !(MVar ())
     !(Async Text)
 

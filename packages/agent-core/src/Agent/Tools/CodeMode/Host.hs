@@ -33,6 +33,7 @@ import Agent.Tools.CodeMode.Protocol
     , encodeToolSuccess
     )
 import Agent.Json (RawJson)
+import Agent.Process (terminateProcessGroup)
 import Agent.Tools.CodeMode.Host.Types
     ( Cell(..)
     , CellObservation(..)
@@ -45,6 +46,7 @@ import Agent.Tools.CodeMode.Host.Types
     , ImageDetailVisibility(..)
     , IdleWorker(..)
     , WorkerPool(..)
+    , WorkerProcessHandle(..)
     , defaultCodeModeConfig
     )
 import Agent.Tools.CodeMode.Host.Availability
@@ -124,11 +126,10 @@ import System.IO
     )
 import System.Process
     ( CreateProcess(..)
-    , ProcessHandle
     , StdStream(..)
     , createProcess
+    , getPid
     , proc
-    , terminateProcess
     , waitForProcess
     )
 newCodeModeHost :: CodeModeConfig -> IO CodeModeHost
@@ -400,7 +401,7 @@ spawnIdleWorker config =
                         "code-mode worker script was not found: "
                             <> Text.pack config.workerScript
                 Just worker -> do
-                    started <- try @_ @SomeException $ createProcess $
+                    started <- try @_ @SomeException $ createWorkerProcess $
                         (proc executable
                             [ "--smol"
                             , "--no-install"
@@ -412,6 +413,7 @@ spawnIdleWorker config =
                             , std_out = CreatePipe
                             , std_err = CreatePipe
                             , env = Just []
+                            , create_group = True
                             }
                     case started of
                         Left err ->
@@ -457,12 +459,26 @@ spawnIdleWorker config =
                             pure $ Left $ CodeModeStartupError
                                 "failed to create all code-mode worker pipes"
 
+createWorkerProcess
+    :: CreateProcess
+    -> IO (Maybe Handle, Maybe Handle, Maybe Handle, WorkerProcessHandle)
+createWorkerProcess specification =
+    bracketOnError
+        (createProcess specification)
+        (\(input, output, stderr, processHandle) -> do
+            groupId <- getPid processHandle
+            stopIncompleteProcessMaybe input output stderr
+                (WorkerProcessHandle processHandle groupId))
+        \(input, output, stderr, processHandle) -> do
+            groupId <- getPid processHandle
+            pure (input, output, stderr, WorkerProcessHandle processHandle groupId)
+
 startCellFromProcess
     :: CodeModeHost
     -> Text
     -> [CodeModeToolMetadata]
     -> Bool
-    -> (Handle, Handle, Handle, ProcessHandle, Maybe (MVar ()), Maybe (Async Text))
+    -> (Handle, Handle, Handle, WorkerProcessHandle, Maybe (MVar ()), Maybe (Async Text))
     -> IO (Either CodeModeError Cell)
 startCellFromProcess host identifier tools alreadyReady
         (input, output, stderr, processHandle, existingWriter, existingStderr) = do
@@ -906,7 +922,7 @@ releaseCell host cell = do
 
 stopCell :: Cell -> IO ()
 stopCell cell = do
-    terminateQuietly cell.cellProcess
+    terminateWorkerProcess cell.cellProcess
     cancel cell.cellMonitor
     cancelCellCallbacks cell
     closeQuietly cell.cellInput
@@ -915,17 +931,17 @@ stopCell cell = do
     void $ waitCatch cell.cellStderr
     closeQuietly cell.cellOutput
     closeQuietly cell.cellErrorOutput
-    void $ try @_ @SomeException $ waitForProcess cell.cellProcess
+    reapWorkerProcess cell.cellProcess
 
 stopIdleWorker :: IdleWorker -> IO ()
 stopIdleWorker (IdleWorker input output errOut process _ stderrReader) = do
-    terminateQuietly process
+    terminateWorkerProcess process
     closeQuietly input
     cancel stderrReader
     void $ waitCatch stderrReader
     closeQuietly output
     closeQuietly errOut
-    void $ try @_ @SomeException $ waitForProcess process
+    reapWorkerProcess process
 
 cancelCellCallbacks :: Cell -> IO ()
 cancelCellCallbacks cell = do
@@ -937,12 +953,12 @@ stopIncomplete
     :: Handle
     -> Handle
     -> Handle
-    -> ProcessHandle
+    -> WorkerProcessHandle
     -> Async ()
     -> Async Text
     -> IO ()
 stopIncomplete input output stderr processHandle monitor stderrReader = do
-    terminateQuietly processHandle
+    terminateWorkerProcess processHandle
     closeQuietly input
     cancel monitor
     cancel stderrReader
@@ -950,45 +966,45 @@ stopIncomplete input output stderr processHandle monitor stderrReader = do
     void $ waitCatch stderrReader
     closeQuietly output
     closeQuietly stderr
-    void $ try @_ @SomeException $ waitForProcess processHandle
+    reapWorkerProcess processHandle
 
 stopIncompleteProcess
     :: Handle
     -> Handle
     -> Handle
-    -> ProcessHandle
+    -> WorkerProcessHandle
     -> IO ()
 stopIncompleteProcess input output stderr processHandle = do
-    terminateQuietly processHandle
+    terminateWorkerProcess processHandle
     mapM_ closeQuietly [input, output, stderr]
-    void $ try @_ @SomeException $ waitForProcess processHandle
+    reapWorkerProcess processHandle
 
 stopIncompleteProcessMaybe
     :: Maybe Handle
     -> Maybe Handle
     -> Maybe Handle
-    -> ProcessHandle
+    -> WorkerProcessHandle
     -> IO ()
 stopIncompleteProcessMaybe input output stderr processHandle = do
-    terminateQuietly processHandle
+    terminateWorkerProcess processHandle
     mapM_ (mapM_ closeQuietly) [input, output, stderr]
-    void $ try @_ @SomeException $ waitForProcess processHandle
+    reapWorkerProcess processHandle
 
 stopIncompleteReader
     :: Handle
     -> Handle
     -> Handle
-    -> ProcessHandle
+    -> WorkerProcessHandle
     -> Async Text
     -> IO ()
 stopIncompleteReader input output stderr processHandle stderrReader = do
-    terminateQuietly processHandle
+    terminateWorkerProcess processHandle
     closeQuietly input
     cancel stderrReader
     void $ waitCatch stderrReader
     closeQuietly output
     closeQuietly stderr
-    void $ try @_ @SomeException $ waitForProcess processHandle
+    reapWorkerProcess processHandle
 
 lookupCell :: CodeModeHost -> Text -> IO (Maybe Cell)
 lookupCell host identifier =
@@ -1032,9 +1048,17 @@ readAll handle =
         (\_ _ -> Just '\xfffd')
         <$> BS.hGetContents handle
 
-terminateQuietly :: ProcessHandle -> IO ()
-terminateQuietly processHandle =
-    void $ try @_ @SomeException $ terminateProcess processHandle
+-- Escalate before joining pipe readers or reaping the process. A TERM-only
+-- shutdown can wait forever, including inside Safe.onException's
+-- uninterruptible release handler. The shared policy polls one bounded signal
+-- sequence rather than nesting timeout/race cleanup threads.
+terminateWorkerProcess :: WorkerProcessHandle -> IO ()
+terminateWorkerProcess (WorkerProcessHandle processHandle groupId) =
+    terminateProcessGroup groupId processHandle
+
+reapWorkerProcess :: WorkerProcessHandle -> IO ()
+reapWorkerProcess (WorkerProcessHandle processHandle _) =
+    void $ try @_ @SomeException $ waitForProcess processHandle
 
 closeQuietly :: Handle -> IO ()
 closeQuietly handle =
