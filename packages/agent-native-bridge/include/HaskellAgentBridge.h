@@ -970,6 +970,50 @@ int32_t ha_data_rows_load(
 );
 
 /*
+ * Installed filesystem skills (read-only).
+ *
+ * Uses session discovery, including bundled, home and workspace skill roots,
+ * precedence, depth limits and validation. No row limit or pagination is
+ * applied here. Discovery warnings are emitted so omitted invalid files are
+ * not silently presented as a complete successful catalog.
+ *
+ * cwd and identity must be absolute UTF-8 paths without NUL, 1..32768 bytes,
+ * and non-NULL. Inputs are copied before return. Identity is the absolute
+ * SKILL.md path emitted by list; read only resolves identities in the current
+ * workspace catalog, never arbitrary files. Source: 0 bundled, 1 personal,
+ * 2 project. Name is the invocation name; description is its full description.
+ * List omits instructions; read returns the complete SKILL.md text.
+ *
+ * Return: 0 accepted, 1 missing callback, 2 invalid input. Rejected calls never
+ * invoke the callback. Accepted calls run on a dedicated Haskell worker,
+ * off the calling thread. Callbacks for one request are serial; requests may
+ * overlap. Status 0 is an item, 2 a nonterminal discovery warning (error text),
+ * 1 successful completion, -1 failure, -2 read identity not found. Exactly one
+ * terminal callback (1 or negative) occurs unless the process exits. A read
+ * emits one item on success followed by completion. There is no cancellation.
+ *
+ * All callback buffers are UTF-8, callback-scoped and must be copied before
+ * return. Omitted buffers may be NULL with zero length and must not be
+ * dereferenced. Source is -1 on non-item callbacks. context may be NULL and
+ * is returned unchanged. Caller retains callback/context until terminal event.
+ */
+typedef void (*ha_installed_skill_callback)(
+    void *context, int32_t status, int32_t source,
+    const char *identity, size_t identity_length,
+    const char *name, size_t name_length,
+    const char *description, size_t description_length,
+    const char *instructions, size_t instructions_length,
+    const char *error, size_t error_length);
+
+int32_t ha_installed_skill_list(
+    const uint8_t *cwd, size_t cwd_length,
+    ha_installed_skill_callback callback, void *context);
+int32_t ha_installed_skill_read(
+    const uint8_t *cwd, size_t cwd_length,
+    const uint8_t *identity, size_t identity_length,
+    ha_installed_skill_callback callback, void *context);
+
+/*
  * Typed Skills / Memory administration.
  *
  * A learned skill is the durable, versioned memory resource used by future

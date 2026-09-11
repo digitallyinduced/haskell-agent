@@ -54,6 +54,7 @@ import Agent.CLI.MacOS.RepositoryChecks
 import Agent.CLI.MacOS.RepositoryDeliveryBridge ()
 import Agent.CLI.MacOS.RepositoryReviewBridge ()
 import Agent.CLI.MacOS.ResourceAdmin ()
+import Agent.CLI.MacOS.InstalledSkills ()
 import Agent.CLI.MacOS.SessionTransferBridge ()
 import Agent.CLI.MacOS.SessionObservationBridge ()
 import Agent.CLI.MacOS.TurnExecution (composeNativeTools, nativeExceptionMessage)
