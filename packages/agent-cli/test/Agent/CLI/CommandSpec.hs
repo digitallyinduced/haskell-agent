@@ -200,6 +200,7 @@ spec = do
                 `shouldBe` ReplCommandError "usage: /session-info"
 
         it "opens the current conversation in the desktop app" do
+            parseReplLine "/voice" `shouldBe` ReplVoice
             parseReplLine "/desktop" `shouldBe` ReplDesktop
             parseReplLine "  /Desktop  " `shouldBe` ReplDesktop
             parseReplLine "/desktop now"
@@ -492,6 +493,7 @@ spec = do
                     , "session"
                     , "session-info"
                     , "desktop"
+                    , "voice"
                     , "afk"
                     , "worktree"
                     , "rename"

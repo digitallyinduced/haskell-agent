@@ -116,6 +116,7 @@ import Agent.CLI.Input (ReplLine(ReplText))
 import Agent.TUI.Model
 import Agent.TUI.Motion
 import Agent.CLI.WindowTitle
+import Agent.CLI.Voice.Session (runSessionVoiceCall)
 import Agent.CLI.Turn
 import Agent.Cancel
 import Agent.Loop
@@ -1829,7 +1830,14 @@ runSessionInteraction
     -> SessionEnv
     -> IO RunResult
 runSessionInteraction
-        callbacks host skillsRuntime SessionRequest{..} env = do
+        callbacks host skillsRuntime SessionRequest{..} env
+  | Just (devices, announce) <- startup.startupNativeHooks >>= (.nativeVoiceCall) = do
+    _ <- skillsRuntime.skillInitialize
+    result <- runSessionVoiceCall env devices announce
+    case result of
+        Left _ -> startupDie startup "Voice call failed. Check OpenAI Live access and microphone permission."
+        Right () -> pure RunQuit
+  | otherwise = do
     learnedSkills <- skillsRuntime.skillInitialize
     case pendingTurn of
         Just pending ->

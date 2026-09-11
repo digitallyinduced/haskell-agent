@@ -8,6 +8,8 @@ module Agent.OpenAI.LoopBackend
     , openAiBackendReconnecting
     , openAiAuxiliaryResponseSenderReconnecting
     , openAiAuxiliaryResponseSenderWithConnectionRecovery
+    , openAiCompactionResponseSenderReconnecting
+    , openAiCompactionResponseSenderWithConnectionRecovery
     , openAiResponseSenderReconnecting
     , openAiResponseSenderWithConnectionRecoveryWhen
     , openAiResponseSenderWithConnectionRecovery
@@ -205,6 +207,49 @@ openAiAuxiliaryResponseSenderReconnecting provider currentCredential
             currentCredential
             connectionHealthy
             conn)
+
+-- | Compaction has no streaming consumer: partial checkpoints are discarded,
+-- and only a successful response can be installed by the caller. Retrying an
+-- interrupted request can incur additional provider usage, but cannot repeat
+-- a tool execution or install two checkpoints. Keep this separate from the
+-- general auxiliary sender, whose callbacks may already have consumed output.
+openAiCompactionResponseSenderReconnecting
+    :: TokenProvider
+    -> Credential
+    -> IORef Bool
+    -> CodexConn
+    -> ResponseCreateParams
+    -> IO (Either ApiError Response)
+openAiCompactionResponseSenderReconnecting provider credential healthy conn request =
+    openAiResponseSenderWithRetryPolicy
+        transientStreamingResultPolicy
+        (const False)
+        (openAiResponseSenderReconnectingWhen
+            sendWsRequestWithEventsPreservingTurnState
+            (const False)
+            id
+            provider credential healthy conn)
+        request Nothing (const (pure ()))
+
+-- | Injectable compaction recovery. No event callback is exposed, so failed
+-- attempts cannot publish partial output before the request is replayed.
+openAiCompactionResponseSenderWithConnectionRecovery
+    :: IORef Bool
+    -> (ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> (Maybe ApiError
+        -> ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> ResponseCreateParams
+    -> IO (Either ApiError Response)
+openAiCompactionResponseSenderWithConnectionRecovery healthy sendCurrent sendFresh request =
+    openAiResponseSenderWithConnectionRecoveryUsing
+        (const False) id healthy sendCurrent sendFresh
+        request Nothing (const (pure ()))
 
 openAiResponseSenderReconnectingWhen
     :: (CodexConn

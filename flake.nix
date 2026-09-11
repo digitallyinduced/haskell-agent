@@ -132,6 +132,11 @@
                     ];
                 };
 
+                agentWebRTCSource = nix-filter.lib {
+                    root = ./packages/agent-webrtc;
+                    include = [ "src" "cbits" "test" "agent-webrtc.cabal" ];
+                };
+
                 agentProcessSource = nix-filter.lib {
                     root = ./packages/agent-process;
                     include = [
@@ -504,7 +509,7 @@
                 skylightingSyntaxDirectory =
                     "${skylightingSyntaxes}/share/skylighting/xml";
 
-                mkHaskellPackages = baseHaskellPackages: packageMode:
+                mkHaskellPackages = foreignPackages: baseHaskellPackages: packageMode:
                     baseHaskellPackages.extend (
                     final: previous:
                     let
@@ -634,6 +639,21 @@
                             (final.callPackage ./packages/agent-integration-api/package.nix { })
                             {
                                 src = agentIntegrationApiSource;
+                            });
+                        agent-webrtc = (localPackage (pkgs.haskell.lib.overrideSrc
+                            (pkgs.haskell.lib.overrideCabal (final.callPackage ./packages/agent-webrtc/package.nix {
+                                gstreamer-app = pkgs.gst_all_1.gst-plugins-base;
+                                gstreamer-sdp = pkgs.gst_all_1.gst-plugins-base;
+                                gstreamer-webrtc = pkgs.gst_all_1.gst-plugins-bad;
+                            }) (old: pkgs.lib.optionalAttrs foreignPackages.stdenv.hostPlatform.isStatic {
+                                configureFlags = (old.configureFlags or [ ]) ++ [ "-fmedia-helper" ];
+                                libraryPkgconfigDepends = [ ];
+                            })) { src = agentWebRTCSource; })).overrideAttrs (_: {
+                                # GStreamer's propagated dependency closure otherwise
+                                # exceeds Linux's exec environment limit during Cabal's
+                                # foreign-library probe (reported as missing libraries).
+                                __structuredAttrs = true;
+                                strictDeps = true;
                             });
                         agent-process = localPackage (pkgs.haskell.lib.overrideSrc
                             (final.callPackage ./packages/agent-process/package.nix { })
@@ -884,14 +904,15 @@
                 );
 
                 haskellPackages =
-                    mkHaskellPackages pkgs.haskellPackages "check";
+                    mkHaskellPackages pkgs pkgs.haskellPackages "check";
                 developmentHaskellPackages =
-                    mkHaskellPackages pkgs.haskellPackages "development";
+                    mkHaskellPackages pkgs pkgs.haskellPackages "development";
                 productionHaskellPackages =
-                    mkHaskellPackages pkgs.haskellPackages "production";
+                    mkHaskellPackages pkgs pkgs.haskellPackages "production";
                 staticHaskellPackages =
                     if pkgs.stdenv.hostPlatform.isLinux then
                         mkHaskellPackages
+                            pkgs.pkgsStatic
                             pkgs.pkgsStatic.haskellPackages
                             "production"
                     else
@@ -956,13 +977,14 @@
                 agentCliGstreamerCorePlugins =
                     pkgs.lib.getLib pkgs.gst_all_1.gstreamer;
                 agentCliGstreamerPlugins =
-                    pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                    [
                         # Core elements supplies filesink, which terminates
                         # the Wayland portal screenshot pipeline.
                         agentCliGstreamerCorePlugins
                         pkgs.gst_all_1.gst-plugins-base
                         pkgs.gst_all_1.gst-plugins-good
                         pkgs.gst_all_1.gst-plugins-bad
+                        (pkgs.lib.getLib pkgs.libnice)
                     ];
                 agentCliLinuxComputerUseTools =
                     pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
@@ -1020,7 +1042,7 @@
                                     haskellPackages.ghc
                                     (old.disallowedRequisites or [ ]);
                             });
-                wrapAgentCli = package:
+                wrapAgentCli = mediaHelper: package:
                     package.overrideAttrs
                         (old: {
                             nativeBuildInputs =
@@ -1031,9 +1053,10 @@
                                 + ''
                                     computerUseWrapperArgs=()
                                 ''
-                                + pkgs.lib.optionalString
-                                    pkgs.stdenv.hostPlatform.isLinux
-                                    ''
+                                + pkgs.lib.optionalString mediaHelper ''
+                                    computerUseWrapperArgs+=(--set AGENT_MEDIA_HELPER ${agentMediaHelper}/bin/agent-media-helper)
+                                ''
+                                + ''
                                         computerUseWrapperArgs+=(
                                             --prefix GST_PLUGIN_SYSTEM_PATH_1_0 :
                                             "${pkgs.lib.makeSearchPath
@@ -1057,13 +1080,31 @@
                         (pkgs.haskell.lib.justStaticExecutables agentCliPackage);
                 agentCliStaticExecutable =
                     if pkgs.stdenv.hostPlatform.isLinux then
-                        wrapAgentCli
+                        wrapAgentCli true
                             (pkgs.haskell.lib.justStaticExecutables
                                 staticHaskellPackages.agent-cli)
                     else
                         agentCliExecutable;
                 agentCliExecutable =
-                    wrapAgentCli agentCliBareExecutable;
+                    wrapAgentCli false agentCliBareExecutable;
+                agentMediaHelper = pkgs.stdenv.mkDerivation {
+                    pname = "agent-media-helper";
+                    version = "0.1.0";
+                    src = agentWebRTCSource;
+                    nativeBuildInputs = [ pkgs.pkg-config ];
+                    buildInputs = with pkgs.gst_all_1; [ gstreamer gst-plugins-base gst-plugins-bad ];
+                    strictDeps = true;
+                    __structuredAttrs = true;
+                    buildPhase = ''
+                        $CC -O2 -Wall -Wextra -Werror -Icbits \
+                            cbits/helper.c cbits/peer.c cbits/audio.c \
+                            -o agent-media-helper \
+                            $(pkg-config --cflags --libs gstreamer-webrtc-1.0 gstreamer-sdp-1.0 gstreamer-app-1.0)
+                    '';
+                    installPhase = ''
+                        install -Dm755 agent-media-helper "$out/bin/agent-media-helper"
+                    '';
+                };
                 agentCliMacosRelease =
                     if pkgs.stdenv.hostPlatform.isDarwin then
                         import ./nix/macos-bundle.nix {
@@ -1081,6 +1122,29 @@
                 agentRuntimeDaemonExecutable =
                     pkgs.haskell.lib.justStaticExecutables
                         agentRuntimeDaemonPackage;
+                agentMediaHelperCheck = pkgs.runCommand "agent-media-helper-check" {
+                    nativeBuildInputs = [ pkgs.pkgsStatic.stdenv.cc ];
+                } ''
+                    $CC -O2 -Wall -Wextra -Werror -static \
+                        -I${agentWebRTCSource}/cbits \
+                        ${agentWebRTCSource}/cbits/helper-client.c \
+                        ${agentWebRTCSource}/test/helper-smoke.c -o "$TMPDIR/helper-smoke"
+                    export AGENT_MEDIA_HELPER=${agentMediaHelper}/bin/agent-media-helper
+                    export HOME="$TMPDIR/home"
+                    mkdir -p "$HOME"
+                    export GST_PLUGIN_SYSTEM_PATH_1_0=${pkgs.lib.makeSearchPath "lib/gstreamer-1.0" agentCliGstreamerPlugins}
+                    export GST_REGISTRY_1_0="$TMPDIR/registry.bin"
+                    "$TMPDIR/helper-smoke"
+                    mkdir -p "$out/bin"
+                    cp "$TMPDIR/helper-smoke" "$out/bin/helper-smoke"
+                    cat > "$out/bin/check-connected" <<EOF
+                    #!${pkgs.runtimeShell}
+                    export AGENT_MEDIA_HELPER=$AGENT_MEDIA_HELPER
+                    export GST_PLUGIN_SYSTEM_PATH_1_0=$GST_PLUGIN_SYSTEM_PATH_1_0
+                    exec "$out/bin/helper-smoke" --connected
+                    EOF
+                    chmod +x "$out/bin/check-connected"
+                '';
                 agentCliStaticRuntimeCheck =
                     pkgs.runCommand "agent-cli-static-runtime"
                         { }
@@ -1102,6 +1166,7 @@
                             trap cleanup EXIT
 
                             wrapper="${agentCliStaticExecutable}/bin/agent-cli"
+                            ${pkgs.gnugrep}/bin/grep -F "AGENT_MEDIA_HELPER" "$wrapper"
                             for dependency in \
                                 ${pkgs.gst_all_1.gstreamer} \
                                 ${pkgs.maim} \
@@ -1455,6 +1520,7 @@
                         packages.agent-integration-api
                         packages.agent-json
                         packages.agent-process
+                        packages.agent-webrtc
                         packages.agent-connectivity
                         packages.agent-runtime-daemon
                         packages.agent-codex-dialect
@@ -1479,6 +1545,7 @@
                     shellHook = ''
                         export AGENT_SYNTAX_DIR=${skylightingSyntaxDirectory}
                         export AGENT_POSTGRES_BIN=${pkgs.postgresql_18}/bin
+                        export GST_PLUGIN_SYSTEM_PATH_1_0=${pkgs.lib.makeSearchPath "lib/gstreamer-1.0" agentCliGstreamerPlugins}
                         # Development builds embed the nix-fetched Codex catalog
                         # at compile time; provision it into the checkout.
                         if [ -d packages/agent-openai ]; then
@@ -1558,6 +1625,7 @@
                         haskellPackages.claude-agent-sdk-haskell;
                     agent-claude = haskellPackages.agent-claude;
                 } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+                    agent-media-helper = agentMediaHelperCheck;
                     agent-cli-static-runtime = agentCliStaticRuntimeCheck;
                     agent-sandbox-runner = agentSandboxRunner;
                     agent-server-nixos-module = import ./nix/tests/agent-server-module.nix {

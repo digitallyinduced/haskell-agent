@@ -1449,6 +1449,7 @@ nativeHooks environment control sessionId cwd dialect = NativeRunHooks
         let (eventType, value) = projectLoopEvent event
         in control.turnControlEmit eventType value
     , nativeInitialTurnInputs = Nothing
+    , nativeVoiceCall = Nothing
     , nativeOnSessionId = \_ -> pure ()
     , nativeRegisterCancel = control.turnControlRegisterCancel
     , nativeRegisterAgentSnapshot = \snapshot ->

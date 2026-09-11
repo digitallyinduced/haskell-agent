@@ -13,10 +13,9 @@ module Agent.CLI.Turn
 import Agent.CLI.Session.Request
     ( withPersistentSessionRequest
     )
-import Agent.Cancel (resetCancel)
 import Agent.CLI.CancelWatch (withEscCancel)
 import Agent.CLI.Compaction (AutomaticCompactionBoundary)
-import Agent.CLI.Interrupt (withTurnCancel)
+import Agent.CLI.Interrupt (withTurnCancel, resetIdleTurnCancel)
 import Agent.CLI.Plan (extractProposedPlan, planDecisionFollowUp)
 import Agent.CLI.ProviderFallback (isProviderUnavailable)
 import Agent.CLI.ProviderTransition
@@ -250,7 +249,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv{}
           }
   -- Clear the prior turn before publishing this flag to Ctrl-C / Esc.
   -- Resetting inside runLoopInputs could erase the one-shot Esc signal.
-  resetCancel config.loopCancel
+  resetIdleTurnCancel env.sessionInterrupt config.loopCancel
   writeIORef env.sessionRestartEffort Nothing
   withTurnCancel env.sessionInterrupt config.loopCancel $
     (if isJust fullscreen || env.sessionBackground
@@ -810,6 +809,7 @@ finishGeneralFailureTurn executed err = do
         fullscreen = env.sessionFullscreen
         finishedAt = executed.executedFinishedAt
         failureMessage = formatLoopErrorAt finishedAt err
+        persistedFailureMessage = formatLoopErrorPersistedAt finishedAt err
     restorePlanStateAfterIncomplete
         env.sessionPlanMode
         executed.executedPreparation.preparedInitialPlanState
@@ -850,11 +850,11 @@ finishGeneralFailureTurn executed err = do
     persistIncompleteTurn
         executed
         retained
-        (formatLoopErrorPersistedAt finishedAt err)
+        persistedFailureMessage
         maybeIncompleteTurn
         (uncommittedAssistantText executed.executedLoop)
     planState <- readIORef env.sessionPlanMode.planStateRef
-    pure $ TurnFailed PendingTurn
+    pure $ TurnFailed persistedFailureMessage PendingTurn
         { pendingPromptText = request.busyPromptText
         -- The live transcript checkpoints the exact stamped inputs, including
         -- attachments, so do not retain a second potentially large copy.

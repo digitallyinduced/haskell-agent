@@ -499,7 +499,9 @@ waitAgentArgsDecoder = objectArgsLenient \object_ -> do
 
 waitAgentTool :: MultiAgentContext -> AppTool
 waitAgentTool ctx = jsonTool "wait_agent" waitAgentDescription
-    [ PropertySchema "timeout_ms" PropertyInteger False $ Just
+    -- OpenAI reserves collaboration.wait_agent and requires type "number"
+    -- exactly, even though the runtime decodes whole milliseconds as Int.
+    [ PropertySchema "timeout_ms" PropertyNumber False $ Just
         "Timeout in milliseconds. Defaults to 30000 ms."
     ]
     True

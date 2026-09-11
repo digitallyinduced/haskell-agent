@@ -58,7 +58,9 @@ data ProviderTransition = ProviderTransition
 data TurnResult
     = TurnSucceeded
     | TurnCancelled
-    | TurnFailed !PendingTurn
+    | TurnFailed !Text !PendingTurn
+      -- ^ User-facing failure text and the checkpoint retained for retry.
+      -- Carry the text even when session persistence is disabled.
     | TurnRestartRequested !Text !PendingTurn
     | TurnProviderUnavailable !ApiError !PendingTurn
 

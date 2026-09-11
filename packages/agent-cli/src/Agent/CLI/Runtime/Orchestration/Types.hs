@@ -23,6 +23,7 @@ import Agent.Connectivity.NetworkPath ( NetworkRecovery )
 import Agent.Integration.API ( IntegrationSupervisor )
 import Agent.CLI.Permission ( PermissionChoice )
 import Agent.Loop ( LoopEvent, TurnInput )
+import qualified Agent.OpenAI.Live.Call
 import Agent.Provider ( Credential, TokenProvider )
 import Agent.Runtime.Request (NativeInteractionMode(..), NativeShellMode(..))
 import Agent.Runtime.StartupPolicy (NativeStartupPolicy)
@@ -127,6 +128,8 @@ fullNativeRunCapabilities = NativeRunCapabilities
 data NativeRunHooks = NativeRunHooks
     { nativeOnLoopEvent :: !(LoopEvent -> IO ())
     , nativeInitialTurnInputs :: !(Maybe [TurnInput])
+    -- | Explicitly admitted voice call, replacing the initial text turn.
+    , nativeVoiceCall :: !(Maybe (Agent.OpenAI.Live.Call.LiveCall -> IO (), Text -> IO ()))
     , nativeOnSessionId :: !(Text -> IO ())
     , nativeRegisterCancel :: !(IO () -> IO ())
     , nativeRegisterAgentSnapshot :: !(IO [AgentEntry] -> IO ())

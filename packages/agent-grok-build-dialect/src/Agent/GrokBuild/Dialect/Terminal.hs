@@ -72,7 +72,7 @@ runTerminalCmdTool session =
     , PropertySchema "background" PropertyBoolean False $ Just
         "Set to true for long-running commands that should run in the background (e.g., dev servers, long builds). Returns a task id immediately while the command keeps running in the background; you are notified on completion, so do not poll or sleep-wait for it."
     , PropertySchema "sandbox_permissions" PropertyString False $ Just
-        "use_default (default) or require_escalated. Escalation requires fresh user approval for this exact command."
+        "use_default (default) or require_escalated. Full access (--yolo) auto-approves escalation; otherwise fresh user approval is required for this exact command."
     , PropertySchema "justification" PropertyString False $ Just
         "Required nonblank explanation when sandbox_permissions is require_escalated."
     ]
@@ -104,7 +104,7 @@ terminalResourceClaims call =
 terminalDescription :: Text
 terminalDescription =
     "Run a bash command and return its output.\n\
-    \- If a command fails because of the sandbox (for example SwiftPM sandbox_apply: Operation not permitted), request require_escalated with a justification; never silently retry outside the sandbox. Approval is per command, even with auto-approval enabled.\n\
+    \- If a command fails because of the sandbox (for example SwiftPM sandbox_apply: Operation not permitted), request require_escalated with a justification; never silently retry outside the sandbox. Full access (--yolo) auto-approves this request; otherwise fresh user approval is required per command.\n\
     \- Escalated commands run from the turn cwd with a fresh shell, without replaying or updating persistent terminal cwd/environment. Use an explicit cd in the approved command if needed.\n\
     \- Always set a timeout for commands that may hang.\n\
     \- Use `$TMPDIR` as the only temporary-file root. Put task-specific subdirectories there; do not create alternate scratch directories in the home directory or workspace. Literal `/tmp` and `/private/tmp` paths are rejected.\n\

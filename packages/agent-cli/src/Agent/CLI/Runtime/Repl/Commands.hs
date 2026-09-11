@@ -13,6 +13,7 @@ import Agent.CLI.AgentViewport
                        viewportSelected) )
 import Agent.CLI.Approval ( setApprovalPolicy, toggleAlwaysApprove )
 import Agent.CLI.Changelog (loadReleaseNotes)
+import Agent.CLI.Voice.Session (runTerminalVoiceCall)
 import Agent.CLI.Clipboard ( loadImagesFromPastedText )
 import Agent.CLI.Command
     ( AttachmentAction(ReplRemoveAttachment),
@@ -438,6 +439,9 @@ submitReplLine handlerContext finishTurn retryPendingTurn slashCatalog skillInvo
                         handleTranscriptAction handlerContext CopySessionId
                     ReplDesktop ->
                         openDesktopSession handlerContext continue
+                    ReplVoice -> do
+                        runTerminalVoiceCall env
+                        continue
                     ReplShowTerminal ->
                         showTerminalCapabilities handlerContext continue color
                     ReplChangelog ->

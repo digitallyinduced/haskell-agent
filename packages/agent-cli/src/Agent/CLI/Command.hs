@@ -274,6 +274,7 @@ simpleSlashCommands =
         , ("session", ReplSession ReplShowSession)
         , ("session-info", ReplSession ReplShowSessionInfo)
         , ("desktop", ReplDesktop)
+        , ("voice", ReplVoice)
         , ("worktree", ReplSession ReplWorktree)
         , ("login", ReplLogin)
         , ("home", ReplSession ReplHome)

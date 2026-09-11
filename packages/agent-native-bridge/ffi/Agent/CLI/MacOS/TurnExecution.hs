@@ -18,6 +18,7 @@ import Agent.CLI.MacOS.NativeRequest (TurnStart(..))
 import Agent.CLI.MacOS.TurnEvents (nativeLoopEvent)
 import Agent.CLI.MacOS.TurnInputs
 import Agent.CLI.MacOS.TurnState
+import Agent.CLI.MacOS.Voice (runNativeVoiceAudio)
 import Agent.CLI.NativeRuntime
     ( NativeProcessRuntime
     , NativeRunHooks(..)
@@ -101,6 +102,11 @@ runNativeTurn
                         forM_ (nativeLoopEvent control.turnControlId event)
                             (sendEvent callback context)
             , nativeInitialTurnInputs = Nothing
+            , nativeVoiceCall = fmap (\audio ->
+                ( runNativeVoiceAudio audio
+                , \message -> forM_ (encodeNativeLoopEventWithChartCalls Set.empty control.turnControlId (ActivityUpdated message))
+                    (sendBinaryEvent callback context)
+                )) turnOptions.nativeTurnVoice
             , nativeOnSessionId = \sessionId -> do
                 writeIORef sessionIdRef (Just sessionId)
                 atomically do
@@ -170,7 +176,7 @@ runNativeTurn
                 Left exception -> Just (nativeExceptionMessage exception)
                 Right (Left err) -> Just err
                 Right (Right ())
-                    | completed -> Nothing
+                    | completed || maybe False (const True) turnOptions.nativeTurnVoice -> Nothing
                     | otherwise ->
                         Just
                             "turn ended without a completion event"
