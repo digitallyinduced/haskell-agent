@@ -18,6 +18,64 @@ import Agent.OpenAI.LoopBackendSpec.Fixtures
 
 spec :: Spec
 spec = do
+    describe "compaction connection recovery" do
+        it "discards an interrupted checkpoint and reconnects with the original request" do
+            healthy <- newIORef True
+            requests <- newIORef []
+            let failure = ConnectionError "WebSocket receive idle timeout"
+                checkpoint = CompactionItemValue CompactionItem
+                    { itemId = Just "checkpoint-interrupted"
+                    , encryptedContent = Just "interrupted"
+                    }
+                response = testResponse "resp-recovered" [assistantItem "complete"]
+                sendCurrent request previous onEvent = do
+                    modifyIORef' requests (<> [(request, previous)])
+                    onEvent ResponseOutputItemDoneEvent
+                        { item = checkpoint
+                        , outputIndex = Just 0
+                        , sequenceNumber = Nothing
+                        }
+                    pure (Left failure)
+                sendFresh previousFailure request previous _onEvent = do
+                    previousFailure `shouldBe` Just failure
+                    readIORef healthy `shouldReturn` False
+                    modifyIORef' requests (<> [(request, previous)])
+                    pure (Right response)
+            openAiCompactionResponseSenderWithConnectionRecovery
+                healthy sendCurrent sendFresh baseParams
+                `shouldReturn` Right response
+            readIORef requests `shouldReturn`
+                [(baseParams, Nothing), (baseParams, Nothing)]
+
+        it "preserves connection errors after a fresh compaction also fails" do
+            healthy <- newIORef False
+            let failure = ConnectionError "WebSocket receive idle timeout"
+                sendCurrent _ _ _ = do
+                    expectationFailure "reused a failed connection"
+                    pure (Left failure)
+                sendFresh _ _ _ onEvent = do
+                    onEvent ResponseOutputItemDoneEvent
+                        { item = assistantItem "partial"
+                        , outputIndex = Just 0
+                        , sequenceNumber = Nothing
+                        }
+                    pure (Left failure)
+            openAiCompactionResponseSenderWithConnectionRecovery
+                healthy sendCurrent sendFresh baseParams
+                `shouldReturn` Left failure
+
+        it "does not reconnect for a rejected compaction request" do
+            healthy <- newIORef True
+            let failure = ProviderError InvalidRequestError "invalid request" Nothing
+                sendCurrent _ _ _ = pure (Left failure)
+                sendFresh _ _ _ _ = do
+                    expectationFailure "retried a permanent error"
+                    pure (Left failure)
+            openAiCompactionResponseSenderWithConnectionRecovery
+                healthy sendCurrent sendFresh baseParams
+                `shouldReturn` Left failure
+            readIORef healthy `shouldReturn` True
+
     describe "openAiBackendWithConnectionRecovery" do
         it "keeps auxiliary requests on the healthy reusable connection" do
             currentCalls <- newIORef (0 :: Int)

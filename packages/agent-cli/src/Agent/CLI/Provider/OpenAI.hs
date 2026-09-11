@@ -21,9 +21,8 @@ import Agent.Loop
     )
 import qualified Agent.OpenAI.Client as OpenAIClient
 import Agent.OpenAI.LoopBackend
-    ( isOpenAiReplayUnsafeWebSocketTransportFailure
-    , isOpenAiWebSocketTransportFailure
-    , openAiAuxiliaryResponseSenderReconnecting
+    ( isOpenAiWebSocketTransportFailure
+    , openAiCompactionResponseSenderReconnecting
     , openAiBackendWithReasoningVisibility
     , openAiBackendWithTransportFallback
     , openAiResponseSenderReconnecting
@@ -94,20 +93,18 @@ lockedOpenAiSession networkRecovery gatewayOnly compactThreshold
                 request
                 previousResponseId
                 onEvent
-        sendAuxiliary request previousResponseId onEvent = do
+        sendCompaction request = do
             OpenAiPersistentConnection
                 credential
                 connectionHealthy
                 conn <-
                     readIORef activeConnection
-            openAiAuxiliaryResponseSenderReconnecting
+            openAiCompactionResponseSenderReconnecting
                 provider
                 credential
                 connectionHealthy
                 conn
                 request
-                previousResponseId
-                onEvent
         getTurnState = do
             OpenAiPersistentConnection _credential _connectionHealthy conn <-
                 readIORef activeConnection
@@ -148,17 +145,9 @@ lockedOpenAiSession networkRecovery gatewayOnly compactThreshold
                 then sendHttpCompaction request
                 else do
                     result <-
-                        sendAuxiliary request Nothing (const (pure ()))
+                        sendCompaction request
                     case result of
                         Left err
-                            | not gatewayOnly
-                            , isOpenAiReplayUnsafeWebSocketTransportFailure err -> do
-                                -- The socket is dead, so route later work over
-                                -- HTTP. Do not replay this compaction: an
-                                -- opaque checkpoint already arrived and the
-                                -- provider may have committed/billed it.
-                                writeIORef fallbackActive True
-                                pure result
                             | not gatewayOnly
                             , isOpenAiWebSocketTransportFailure err -> do
                                 writeIORef fallbackActive True
