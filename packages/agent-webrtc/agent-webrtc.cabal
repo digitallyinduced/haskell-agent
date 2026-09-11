@@ -1,0 +1,25 @@
+cabal-version: 2.2
+name: agent-webrtc
+version: 0.1.0.0
+synopsis: Scoped WebRTC PCM audio transport
+license: MIT
+author: digitally induced GmbH
+maintainer: marc@digitallyinduced.com
+build-type: Simple
+extra-source-files: cbits/peer.h test/peer-smoke.c
+
+library
+    default-language: Haskell2010
+    ghc-options: -Wall
+    hs-source-dirs: src
+    exposed-modules: Agent.WebRTC
+    c-sources: cbits/peer.c
+    include-dirs: cbits
+    cc-options: -Wall -Wextra
+    pkgconfig-depends: gstreamer-webrtc-1.0 >= 1.26
+                    , gstreamer-sdp-1.0 >= 1.26
+                    , gstreamer-app-1.0 >= 1.26
+    build-depends: base >= 4.14 && < 5
+                 , bytestring
+                 , safe-exceptions
+                 , text

@@ -2,6 +2,7 @@
 -- The supervisor remains the owner of worker creation, cancellation, and join.
 module Agent.CLI.MacOS.TurnState
     ( NativeTurnOptions(..)
+    , VoiceAudioCallback
     , defaultNativeTurnOptions
     , TurnControl(..)
     , TurnOutcome(..)
@@ -32,6 +33,9 @@ import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq)
 import qualified Data.Set as Set
 import Data.Text (Text)
+import Data.Word (Word8)
+import Foreign.Ptr (Ptr, FunPtr)
+import Foreign.C.Types (CInt, CSize)
 
 discardStagedTurn
     :: Text
@@ -54,15 +58,19 @@ discardStagedTurnById turnId stagedImages stagedOptions = do
     modifyTVar' stagedImages (Map.delete turnId)
     modifyTVar' stagedOptions (Map.delete turnId)
 
+type VoiceAudioCallback = Ptr () -> CInt -> Ptr () -> Ptr Word8 -> CSize -> IO CInt
+
 data NativeTurnOptions = NativeTurnOptions
     { nativeTurnInteractionMode :: !NativeInteractionMode
     , nativeTurnShellMode :: !NativeShellMode
+    , nativeTurnVoice :: !(Maybe (FunPtr VoiceAudioCallback, Ptr ()))
     } deriving (Eq, Show)
 
 defaultNativeTurnOptions :: NativeTurnOptions
 defaultNativeTurnOptions = NativeTurnOptions
     { nativeTurnInteractionMode = NativeAsk
     , nativeTurnShellMode = NativeShellBash
+    , nativeTurnVoice = Nothing
     }
 
 data TurnControl = TurnControl

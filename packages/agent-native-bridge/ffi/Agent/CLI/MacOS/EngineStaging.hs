@@ -116,6 +116,7 @@ ha_engine_stage_turn_options pointer turnID turnIDLength rawMode rawShell
                                             { nativeTurnInteractionMode =
                                                 interactionMode
                                             , nativeTurnShellMode = shellMode
+                                            , nativeTurnVoice = Nothing
                                             })
                                 pure True
                 pure $ case accepted of

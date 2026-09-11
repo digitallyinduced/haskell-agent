@@ -1,6 +1,7 @@
 packages:
     packages/agent-connectivity
     packages/agent-process
+    packages/agent-webrtc
     packages/agent-mail
     packages/agent-integration-api
     packages/agent-cli-runtime

@@ -68,6 +68,7 @@ data ReplAction
     | ReplRetry
     -- ^ Retry the last failed turn with its original attachments.
     | ReplDesktop
+    | ReplVoice
     -- ^ Open the current persisted conversation in the native macOS app.
     | ReplLogin
     | ReplReloadAuth

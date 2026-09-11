@@ -76,6 +76,7 @@ foreign-library haskell-agent-bridge
                    , Agent.CLI.MacOS.EngineHostRegistration
                    , Agent.CLI.MacOS.EngineLifecycle
                    , Agent.CLI.MacOS.EngineStaging
+                   , Agent.CLI.MacOS.Voice
                    , Agent.CLI.MacOS.EngineState
                    , Agent.CLI.MacOS.EngineStore
                    , Agent.CLI.MacOS.EngineSubmission
@@ -215,6 +216,7 @@ test-suite agent-native-bridge-test
                      , Agent.CLI.MacOS.EngineHostRegistration
                      , Agent.CLI.MacOS.EngineLifecycle
                      , Agent.CLI.MacOS.EngineStaging
+                     , Agent.CLI.MacOS.Voice
                      , Agent.CLI.MacOS.EngineState
                      , Agent.CLI.MacOS.EngineStore
                      , Agent.CLI.MacOS.EngineSubmission

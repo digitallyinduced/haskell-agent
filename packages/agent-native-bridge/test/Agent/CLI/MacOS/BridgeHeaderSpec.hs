@@ -15,6 +15,9 @@ import Test.Hspec (Spec, describe, it, shouldReturn)
 foreign import ccall "ha_image_attachment_abi_smoke"
     imageAttachmentAbiSmoke :: IO CInt
 
+foreign import ccall "ha_voice_abi_smoke"
+    voiceAbiSmoke :: IO CInt
+
 foreign import ccall "ha_gateway_abi_smoke"
     gatewayAbiSmoke :: IO CInt
 
@@ -67,6 +70,8 @@ spec = do
                     connectionSecretStore callback nullPtr "scope"
                         `shouldReturn` Left "The native secure store is unavailable."
     describe "native bridge struct ABI" do
+        it "validates voice handles and typed audio callbacks without opening devices" do
+            voiceAbiSmoke `shouldReturn` 0
         it "marshals connection fields and items in the layout consumed by C" do
             let snapshot = ConnectionSnapshot ConnectionChallenge "session"
                     "Authorization" "Enter the code" "" 2500

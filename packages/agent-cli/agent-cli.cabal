@@ -201,6 +201,9 @@ library
                     , Agent.CLI.Desktop
                     , Agent.CLI.Dictation
                     , Agent.CLI.Dictation.Capture
+                    , Agent.CLI.Voice.Audio
+                    , Agent.CLI.Voice.Transport
+                    , Agent.CLI.Voice.Session
                     , Agent.CLI.Dialects
                     , Agent.CLI.ExternalProgram
                     , Agent.CLI.FileUri
@@ -329,6 +332,7 @@ library
                     , agent-syntax >= 0.1 && < 0.2
                     , agent-tui >= 0.1 && < 0.2
                     , agent-openai >= 0.1 && < 0.2
+                    , agent-webrtc >= 0.1 && < 0.2
                     , agent-openrouter >= 0.1 && < 0.2
                     , agent-gemini >= 0.1 && < 0.2
                     , agent-claude >= 0.1 && < 0.2
@@ -600,6 +604,7 @@ test-suite agent-cli-test
                     , Agent.CLI.ChartImageSpec
                     , Agent.CLI.InputSpec
                     , Agent.CLI.InterruptSpec
+                    , Agent.CLI.VoiceAudioSpec
                     , Agent.CLI.LoginSpec
                     , Agent.CLI.LearnedSkillsSpec
                     , Agent.CLI.MarkdownSpec

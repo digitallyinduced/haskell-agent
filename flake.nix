@@ -132,6 +132,11 @@
                     ];
                 };
 
+                agentWebRTCSource = nix-filter.lib {
+                    root = ./packages/agent-webrtc;
+                    include = [ "src" "cbits" "test" "agent-webrtc.cabal" ];
+                };
+
                 agentProcessSource = nix-filter.lib {
                     root = ./packages/agent-process;
                     include = [
@@ -635,6 +640,12 @@
                             {
                                 src = agentIntegrationApiSource;
                             });
+                        agent-webrtc = localPackage (pkgs.haskell.lib.overrideSrc
+                            (final.callPackage ./packages/agent-webrtc/package.nix {
+                                gstreamer-app = pkgs.gst_all_1.gst-plugins-base;
+                                gstreamer-sdp = pkgs.gst_all_1.gst-plugins-base;
+                                gstreamer-webrtc = pkgs.gst_all_1.gst-plugins-bad;
+                            }) { src = agentWebRTCSource; });
                         agent-process = localPackage (pkgs.haskell.lib.overrideSrc
                             (final.callPackage ./packages/agent-process/package.nix { })
                             {
@@ -956,13 +967,14 @@
                 agentCliGstreamerCorePlugins =
                     pkgs.lib.getLib pkgs.gst_all_1.gstreamer;
                 agentCliGstreamerPlugins =
-                    pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                    [
                         # Core elements supplies filesink, which terminates
                         # the Wayland portal screenshot pipeline.
                         agentCliGstreamerCorePlugins
                         pkgs.gst_all_1.gst-plugins-base
                         pkgs.gst_all_1.gst-plugins-good
                         pkgs.gst_all_1.gst-plugins-bad
+                        (pkgs.lib.getLib pkgs.libnice)
                     ];
                 agentCliLinuxComputerUseTools =
                     pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
@@ -1031,9 +1043,7 @@
                                 + ''
                                     computerUseWrapperArgs=()
                                 ''
-                                + pkgs.lib.optionalString
-                                    pkgs.stdenv.hostPlatform.isLinux
-                                    ''
+                                + ''
                                         computerUseWrapperArgs+=(
                                             --prefix GST_PLUGIN_SYSTEM_PATH_1_0 :
                                             "${pkgs.lib.makeSearchPath
@@ -1455,6 +1465,7 @@
                         packages.agent-integration-api
                         packages.agent-json
                         packages.agent-process
+                        packages.agent-webrtc
                         packages.agent-connectivity
                         packages.agent-runtime-daemon
                         packages.agent-codex-dialect
@@ -1479,6 +1490,7 @@
                     shellHook = ''
                         export AGENT_SYNTAX_DIR=${skylightingSyntaxDirectory}
                         export AGENT_POSTGRES_BIN=${pkgs.postgresql_18}/bin
+                        export GST_PLUGIN_SYSTEM_PATH_1_0=${pkgs.lib.makeSearchPath "lib/gstreamer-1.0" agentCliGstreamerPlugins}
                         # Development builds embed the nix-fetched Codex catalog
                         # at compile time; provision it into the checkout.
                         if [ -d packages/agent-openai ]; then

@@ -4,6 +4,16 @@
 #include <stdatomic.h>
 #include <unistd.h>
 
+int ha_voice_abi_smoke(void) {
+    ha_voice_audio_callback callback = NULL;
+    const uint8_t pcm[] = {0, 0};
+    const uint8_t turn[] = "voice-test";
+    if (ha_engine_stage_voice(NULL, turn, sizeof(turn) - 1,
+                              callback, NULL) != 1) return 1;
+    if (ha_voice_submit_audio(NULL, pcm, sizeof(pcm)) != 1) return 2;
+    return 0;
+}
+
 static void restart_result_callback(void *context, int32_t status,
                                     uint64_t revision, const uint8_t *error,
                                     size_t error_length) {

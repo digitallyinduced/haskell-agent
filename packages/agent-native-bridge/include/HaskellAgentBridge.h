@@ -1583,6 +1583,34 @@ int32_t ha_engine_stage_turn_images(
  * when accepted, 1 for a null engine, 2 for an invalid turn ID, 3 for an
  * internal failure, and 4 for an unknown mode code.
  */
+/* Voice calls: stage after ha_engine_stage_turn_options and before turn.start.
+ * Staging opts into voice instead of the initial text prompt. Return values:
+ * 0 success, 1 invalid argument, 2 missing options/invalid UTF-8, 3 internal error.
+ * Callback/context are borrowed until turn completion, staging discard, or
+ * engine destruction. Callbacks are serialized on a non-main worker:
+ * event 0=start (after server acknowledgement), 1=PCM playback, 2=stop,
+ * 3=discard scheduled playback without stopping microphone capture.
+ * Audio is signed little-endian PCM16, mono, 24000Hz. Buffers are borrowed only
+ * during callbacks. Return 0 on success, nonzero to fail the call.
+ * Stop is delivered even after a failed start. Before returning from stop,
+ * join capture work and cease ALL use of call_handle; it is freed immediately.
+ * Do not synchronously wait for engine/turn completion inside any callback.
+ * Callbacks must finish promptly; start may wait boundedly for device setup.
+ */
+typedef int32_t (*ha_voice_audio_callback)(
+    void *context, int32_t event, void *call_handle,
+    const uint8_t *bytes, size_t length);
+int32_t ha_engine_stage_voice(
+    void *engine, const uint8_t *turn_id, size_t turn_id_length,
+    ha_voice_audio_callback callback, void *context);
+/* Thread-safe, nonblocking copy into a bounded queue. Valid only between start
+ * and the return from stop; never call with a stale handle. 0=accepted,
+ * 1=invalid argument, 2=closed/overrun (call stopped), 3=internal error.
+ * Submit 1..24000 bytes, an even length. Never queue unboundedly on rejection.
+ */
+int32_t ha_voice_submit_audio(
+    void *call_handle, const uint8_t *bytes, size_t length);
+
 int32_t ha_engine_stage_turn_options(
     void *engine,
     const uint8_t *turn_id,
