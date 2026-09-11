@@ -1062,6 +1062,19 @@ int ha_native_turn_options_stage_smoke(void) {
     }
     int32_t status = ha_engine_set_interaction_callback(
         engine, interaction_callback, NULL);
+    if (status == 0 && (
+            ha_engine_set_turn_interaction_mode(NULL, turn_id,
+                sizeof(turn_id) - 1, HA_INTERACTION_MODE_ASK) != 1
+            || ha_engine_set_turn_interaction_mode(engine, NULL,
+                1, HA_INTERACTION_MODE_ASK) != 2
+            || ha_engine_set_turn_interaction_mode(engine, turn_id,
+                0, HA_INTERACTION_MODE_ASK) != 2
+            || ha_engine_set_turn_interaction_mode(engine, turn_id,
+                sizeof(turn_id) - 1, 99) != 4
+            || ha_engine_set_turn_interaction_mode(engine, turn_id,
+                sizeof(turn_id) - 1, HA_INTERACTION_MODE_YOLO) != 5)) {
+        status = 15;
+    }
     for (size_t mode_index = 0;
             status == 0
                 && mode_index
