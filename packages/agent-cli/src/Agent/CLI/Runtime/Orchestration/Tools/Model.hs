@@ -283,7 +283,11 @@ resolveToolModel AgentToolsRequest
     toolClaudeBypassEnabled =
         case startup.startupNativeHooks of
             Just hooks ->
-                hooks.nativeInteractionMode == NativeYolo
+                -- A live native mode must always pass through the host's
+                -- mutable approval policy, even when initially in Yolo.
+                case hooks.nativeRegisterInteractionMode of
+                    Just _ -> False
+                    Nothing -> hooks.nativeInteractionMode == NativeYolo
             Nothing ->
                 not options.optNoYolo
                     && (options.optYolo

@@ -12,9 +12,12 @@ module Agent.CLI.MacOS.InteractionState
     , cancelledInteractionResolution
     , InteractionCallbackTarget(..)
     , InteractionRuntime(..)
+    , setTurnInteractionMode
     ) where
 
 import Control.Concurrent (MVar)
+import Control.Concurrent.MVar (withMVar)
+import Agent.Runtime.Request (NativeInteractionMode)
 import Control.Concurrent.STM
 import Control.Monad (forM_, void, when)
 import Data.Map.Strict (Map)
@@ -120,4 +123,14 @@ data InteractionRuntime = InteractionRuntime
     , interactionCallbackLock :: !(MVar ())
     , interactionPending
         :: !(TVar (Map (Text, Text) PendingInteraction))
+    , interactionModeSetters
+        :: !(MVar (Map Text (NativeInteractionMode -> IO ())))
     }
+
+-- | Serialize updates with registration and teardown without touching waiters.
+setTurnInteractionMode :: InteractionRuntime -> Text -> NativeInteractionMode -> IO Bool
+setTurnInteractionMode runtime identifier mode =
+    withMVar runtime.interactionModeSetters $ \setters ->
+        case Map.lookup identifier setters of
+            Nothing -> pure False
+            Just setter -> setter mode >> pure True

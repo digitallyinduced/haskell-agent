@@ -3,6 +3,7 @@ module Agent.CLI.Session.Runner.Execution
     ( AgentStepCache(..)
     , SessionRunnerContinuation(..)
     , runSession
+    , applyNativeInteractionMode
     ) where
 import qualified Agent.CLI.Session.Activity as Activity
 import Agent.CLI.Session.Request
@@ -65,6 +66,7 @@ import Agent.CLI.Runtime.Orchestration.Types
     ( NativeDiscoveryContext(..)
     , NativeRunCapabilities(..)
     , NativeRunHooks(..)
+    , NativeInteractionMode(..)
     , fullNativeRunCapabilities
     , nativePreparedDiscovery
     )
@@ -211,8 +213,24 @@ data SessionHostRuntime = SessionHostRuntime
     , hostFullscreen :: !(Maybe FullscreenRuntime)
     }
 
+-- | Change only turn-local policy. Pending human decisions remain untouched.
+applyNativeInteractionMode :: IORef ApprovalPolicy -> PlanModeEnv -> NativeInteractionMode -> IO ()
+applyNativeInteractionMode policyRef planMode = \case
+    NativeAsk -> do
+        writeIORef policyRef PromptMutating
+        deactivatePlanMode planMode
+    NativePlan -> do
+        writeIORef policyRef PromptMutating
+        activatePlanMode planMode
+    NativeYolo -> do
+        deactivatePlanMode planMode
+        writeIORef policyRef ApproveAll
+
 newSessionHostRuntime :: SessionRequest -> IO SessionHostRuntime
 newSessionHostRuntime SessionRequest{..} = do
+    forM_ startup.startupNativeHooks \hooks ->
+        forM_ hooks.nativeRegisterInteractionMode \register ->
+            register (applyNativeInteractionMode policyRef planMode)
     initialPrevious <- readLivePreviousResponseId conversationRef
     runtimeState <- RuntimeState.newSessionStateWith
         conversationRef startupContext usageRef automaticCompactionRef

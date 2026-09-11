@@ -1473,6 +1473,7 @@ nativeHooks environment control sessionId cwd dialect = NativeRunHooks
                 composeSandboxTools sandbox sessionId cwd dialect
     , nativePlanHooks = planHooks control
     , nativeInteractionMode = serverInteractionMode environment
+    , nativeRegisterInteractionMode = Nothing
     , nativeShellMode = tenantShellMode environment
     , nativeHome =
         case environment.environmentSandbox of

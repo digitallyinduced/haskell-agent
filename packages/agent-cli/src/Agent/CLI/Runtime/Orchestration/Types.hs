@@ -140,6 +140,9 @@ data NativeRunHooks = NativeRunHooks
     , nativeComposeTools :: !([AppToolGroup] -> [AppTool])
     , nativePlanHooks :: !PlanModeHooks
     , nativeInteractionMode :: !NativeInteractionMode
+    -- | Register a turn-local mode setter. The host must stop calling it when
+    -- the turn ends. Setters do not resolve already pending human input.
+    , nativeRegisterInteractionMode :: !(Maybe ((NativeInteractionMode -> IO ()) -> IO ()))
     , nativeShellMode :: !NativeShellMode
     -- | Optional home override while performing ordinary host discovery.
     -- Prepared discovery carries its required home in its context instead.

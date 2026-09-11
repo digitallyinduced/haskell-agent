@@ -21,12 +21,14 @@ module Agent.CLI.NativeRuntime
     , acquireNativeLocalIntegrationRuntime
     , nativeTurnOptions
     , applyNativeStartupPolicy
+    , applyNativeInteractionMode
     , restartNativeMcpRuntime
     , runNativeAgent
     , runNativeTurn
     ) where
 
 import qualified Agent.CLI.NativeProcess as NativeProcess
+import Agent.CLI.Session.Runner.Execution (applyNativeInteractionMode)
 import Agent.Integration.API
     ( IntegrationSupervisor
     , IntegrationRuntime(..)

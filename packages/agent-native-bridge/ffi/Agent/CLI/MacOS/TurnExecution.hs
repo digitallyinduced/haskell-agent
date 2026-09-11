@@ -9,7 +9,7 @@ module Agent.CLI.MacOS.TurnExecution
 import Agent.CLI.MacOS.EngineEvents
 import Agent.CLI.MacOS.EngineMailbox (EngineMailbox, acceptEngineCommand)
 import Agent.CLI.MacOS.EngineState (EngineCommand(..))
-import Agent.CLI.MacOS.InteractionState (InteractionRuntime)
+import Agent.CLI.MacOS.InteractionState (InteractionRuntime(..))
 import Agent.CLI.MacOS.NativeInteraction
     ( nativePlanModeHooks, requestApproval, requestFreshApproval
     , requestRootAccessFromClient )
@@ -32,7 +32,9 @@ import Agent.Runtime.StartupPolicy (hostNativeStartupPolicy)
 import Agent.ToolDispatch (ToolCall(..))
 import Agent.Tools.Types (AppTool(..), AppToolGroup(..), appToolsFromGroups)
 import Control.Concurrent.STM (atomically, writeTVar)
-import Control.Exception.Safe (SomeException, fromException, tryAny)
+import Control.Exception.Safe (SomeException, fromException, tryAny, finally)
+import Control.Concurrent.MVar (modifyMVar_)
+import qualified Data.Map.Strict as Map
 import Control.Monad (forM_, void)
 import qualified Data.Aeson as Aeson
 import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef', atomicModifyIORef')
@@ -132,6 +134,9 @@ runNativeTurn
                 nativePlanModeHooks control interactions
             , nativeInteractionMode =
                 turnOptions.nativeTurnInteractionMode
+            , nativeRegisterInteractionMode = Just $ \setter ->
+                modifyMVar_ interactions.interactionModeSetters $
+                    pure . Map.insert control.turnControlId setter
             , nativeShellMode = turnOptions.nativeTurnShellMode
             , nativeHome = Nothing
             , nativeDatabaseStore = Nothing
@@ -142,7 +147,9 @@ runNativeTurn
             , nativeStartupPolicy = hostNativeStartupPolicy
             }
         args = nativeTurnArguments start
-    result <- tryAny $
+    result <- tryAny $ flip finally
+        (modifyMVar_ interactions.interactionModeSetters $
+            pure . Map.delete control.turnControlId) $
         withTurnImages start.turnStartPrompt images \managedFile ->
             withFile "/dev/null" WriteMode \output ->
                 runNativeAgent

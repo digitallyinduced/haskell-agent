@@ -4,6 +4,7 @@
 module Agent.CLI.MacOS.EngineStaging () where
 
 import Agent.CLI.MacOS.EngineState (Engine(..))
+import Agent.CLI.MacOS.InteractionState (setTurnInteractionMode)
 import Agent.CLI.MacOS.TurnState
     (NativeTurnOptions(..), discardStagedTurnById)
 import Agent.CLI.NativeRuntime (NativeInteractionMode(..), NativeShellMode(..))
@@ -23,6 +24,9 @@ foreign export ccall ha_engine_stage_turn_images
 
 foreign export ccall ha_engine_stage_turn_options
     :: Ptr () -> Ptr Word8 -> CSize -> CInt -> CInt -> IO CInt
+
+foreign export ccall ha_engine_set_turn_interaction_mode
+    :: Ptr () -> Ptr Word8 -> CSize -> CInt -> IO CInt
 
 foreign export ccall ha_engine_discard_turn_staging
     :: Ptr () -> Ptr Word8 -> CSize -> IO CInt
@@ -149,6 +153,29 @@ ha_engine_discard_turn_staging pointer turnID turnIDLength
             Left _ -> 3
             Right False -> 2
             Right True -> 0
+
+-- | The registry lock serializes updates with registration and turn teardown.
+-- A setter only updates turn-local policy/plan refs, never calls the host or
+-- touches any pending approval waiter.
+ha_engine_set_turn_interaction_mode
+    :: Ptr () -> Ptr Word8 -> CSize -> CInt -> IO CInt
+ha_engine_set_turn_interaction_mode pointer turnID turnIDLength rawMode
+    | pointer == nullPtr = pure 1
+    | turnID == nullPtr || not (validNativeTurnIDLength turnIDLength) = pure 2
+    | otherwise = case interactionModeFromCode rawMode of
+        Nothing -> pure 4
+        Just mode -> do
+            result <- tryAny do
+                engine <- deRefStablePtr
+                    (castPtrToStablePtr pointer :: StablePtr Engine)
+                bytes <- BS.packCStringLen
+                    (castPtr turnID, fromIntegral turnIDLength)
+                case TextEncoding.decodeUtf8' bytes of
+                    Left _ -> pure 2
+                    Right identifier -> do
+                        applied <- setTurnInteractionMode engine.engineInteractions identifier mode
+                        pure $ if applied then 0 else 5
+            pure $ either (const 3) id result
 
 maxNativeTurnIDBytes :: Integer
 maxNativeTurnIDBytes = 1_024

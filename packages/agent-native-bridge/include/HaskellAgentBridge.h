@@ -1624,6 +1624,29 @@ int32_t ha_engine_discard_turn_staging(
     size_t turn_id_length
 );
 /*
+ * Change the interaction mode of a running, initialized turn. This synchronous
+ * call updates only future authorization checks; it does not approve, cancel,
+ * or otherwise resolve pending human input, nor change shell configuration.
+ * Plan activates read-only planning immediately; Ask/Yolo exit plan mode.
+ * Already authorized actions are not interrupted.
+ *
+ * turn_id is a borrowed, non-NULL UTF-8 buffer of 1..1024 bytes, copied before
+ * return. interaction_mode uses HA_INTERACTION_MODE_*. No ownership transfers.
+ * Safe concurrently with turn execution. Updates serialize with each other
+ * and turn teardown; no host callback is invoked. Serialize with destroy.
+ *
+ * Returns 0 applied, 1 null engine, 2 invalid turn ID, 3 internal failure,
+ * 4 unknown mode, 5 turn not initialized or no longer running. A nonzero result
+ * must not be presented as an applied mode change.
+ */
+int32_t ha_engine_set_turn_interaction_mode(
+    void *engine,
+    const uint8_t *turn_id,
+    size_t turn_id_length,
+    int32_t interaction_mode
+);
+
+/*
  * Install or replace the engine's interactive callback. Passing NULL clears
  * it; future interaction requests then use safe decline/cancel defaults.
  * Replacing or clearing waits for an in-flight callback to return, cancels all

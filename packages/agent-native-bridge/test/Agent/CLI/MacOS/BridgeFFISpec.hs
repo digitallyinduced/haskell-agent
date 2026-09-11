@@ -18,20 +18,25 @@ import Agent.CLI.MacOS.Bridge
     )
 import Agent.CLI.MacOS.RepositoryWorkers (withRepositoryCallbackThread)
 import Agent.CLI.MacOS.EngineEvents (EventCallback)
-import Agent.CLI.MacOS.InteractionState (InteractionRuntime(..))
+import Agent.CLI.MacOS.InteractionState (InteractionRuntime(..), setTurnInteractionMode)
 import Agent.CLI.MacOS.NativeInteraction (requestFreshApproval, resolveApproval)
 import Agent.CLI.MacOS.NativeRequest (BridgeRequest(..))
 import Agent.CLI.MacOS.TurnState (TurnControl(..), newTurnControl)
 import Agent.CLI.Permission (PermissionChoice(..))
+import Agent.CLI.Options (ApprovalPolicy(..))
+import Agent.CLI.NativeRuntime (NativeInteractionMode(..), applyNativeInteractionMode)
+import Agent.Tools.PlanMode (newPlanModeEnv, isPlanModeActive)
+import qualified System.OsPath as OsPath
 import Agent.ToolDispatch (ToolCall(..), ToolCallKind(..))
 import Control.Concurrent.Async (concurrently, withAsync)
-import Control.Concurrent.MVar (newEmptyMVar, newMVar, putMVar, readMVar)
+import Control.Concurrent.MVar (newEmptyMVar, newMVar, putMVar, readMVar, modifyMVar_)
 import Control.Concurrent.STM
     ( atomically
     , newEmptyTMVarIO
     , newTVarIO
     , readTMVar
     , readTVarIO
+    , isEmptyTMVar
     , writeTVar
     )
 import Control.Exception.Safe (bracket, finally, tryAny)
@@ -94,9 +99,42 @@ import Test.Hspec (Spec, describe, it, pendingWith, shouldReturn)
 spec :: Spec
 spec = describe "native bridge FFI" do
 #ifdef darwin_HOST_OS
+    it "changes the turn-local approval and planning policies in both directions" do
+        policy <- newIORef PromptMutating
+        directory <- OsPath.encodeUtf "."
+        plan <- newPlanModeEnv directory Nothing
+        let check mode expectedPolicy expectedPlan = do
+                applyNativeInteractionMode policy plan mode
+                readIORef policy `shouldReturn` expectedPolicy
+                isPlanModeActive plan `shouldReturn` expectedPlan
+        check NativeYolo ApproveAll False
+        check NativeAsk PromptMutating False
+
+        check NativePlan PromptMutating True
+        check NativeYolo ApproveAll False
+        check NativePlan PromptMutating True
+        check NativeAsk PromptMutating False
+
+    it "targets only the registered turn and leaves pending approvals unanswered" do
+        calls <- newIORef []
+        waiter <- newEmptyTMVarIO
+        pending <- newTVarIO $ Map.singleton ("running", "approval") (PendingInteraction 2 waiter)
+        setters <- newMVar $ Map.singleton "running" (\mode -> modifyIORef' calls (<> [mode]))
+        runtime <- InteractionRuntime <$> newTVarIO Nothing <*> newMVar () <*> pure pending <*> pure setters
+        setTurnInteractionMode runtime "other" NativeYolo `shouldReturn` False
+        readIORef calls `shouldReturn` []
+        setTurnInteractionMode runtime "running" NativeYolo `shouldReturn` True
+        setTurnInteractionMode runtime "running" NativeAsk `shouldReturn` True
+        readIORef calls `shouldReturn` [NativeYolo, NativeAsk]
+        atomically (isEmptyTMVar waiter) `shouldReturn` True
+        Map.size <$> readTVarIO pending `shouldReturn` 1
+        modifyMVar_ setters (pure . Map.delete "running")
+        setTurnInteractionMode runtime "running" NativePlan `shouldReturn` False
+
     it "requests fresh approvals despite remembered tool grants and rejects broad decisions" $ withinApprovalDeadline do
         interactions <- InteractionRuntime
             <$> newTVarIO Nothing <*> newMVar () <*> newTVarIO Map.empty
+            <*> newMVar Map.empty
         control <- newTurnControl "fresh-approval-test" Nothing Nothing interactions
         atomically $
             writeTVar control.turnControlAllowedTools (Set.singleton "shell_command")
