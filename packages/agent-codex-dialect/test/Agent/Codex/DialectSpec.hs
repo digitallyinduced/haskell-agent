@@ -100,14 +100,14 @@ spec = describe "Codex dialect" do
                         ]
                     _ -> expectationFailure "missing shell tool"
 
-    it "requires fresh approval for escalation and rejects unapproved dispatch" do
+    it "requires exact-invocation authorization for escalation and rejects unapproved dispatch" do
         withTempDir \dir -> do
             env <- defaultToolEnv (unsafeEncodeUtf dir)
             bracket (newCodexCodingTools env Nothing Nothing) (.codexClose) \coding -> do
                 let call = functionToolCall "escalate" "shell_command"
                         "{\"command\":\"printf approved\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Test exact command approval\",\"timeout_ms\":1000}"
                 case filter ((== "shell_command") . (.appToolName)) coding.codexAppTools of
-                    [tool] -> toolApprovalRequirement tool call `shouldReturn` FreshApprovalRequired
+                    [tool] -> toolApprovalRequirement tool call `shouldReturn` SandboxEscalationApprovalRequired
                     _ -> expectationFailure "missing shell tool"
                 denied <- dispatchToolCall testDispatchConfig (appToolHandlers coding.codexAppTools) call
                 denied.output `shouldSatisfy` Text.isInfixOf "fresh user approval"
@@ -147,7 +147,7 @@ spec = describe "Codex dialect" do
                                 ("{\"session_id\":" <> Text.pack (show sessionId) <> ",\"chars\":\"approved input\\n\",\"yield_time_ms\":1}")
                         case filter ((== "write_stdin") . (.appToolName)) coding.codexAppTools of
                             [tool] -> do
-                                toolApprovalRequirement tool input `shouldReturn` FreshApprovalRequired
+                                toolApprovalRequirement tool input `shouldReturn` SandboxEscalationApprovalRequired
                                 toolApprovalRequirement tool
                                     (functionToolCall "snapshot" "write_stdin"
                                         ("{\"session_id\":" <> Text.pack (show sessionId) <> "}"))
@@ -155,7 +155,7 @@ spec = describe "Codex dialect" do
                                 toolApprovalRequirement tool
                                     (functionToolCall "mixed-cancel" "write_stdin"
                                         ("{\"session_id\":" <> Text.pack (show sessionId) <> ",\"chars\":\"\\u0003whoami\\n\"}"))
-                                    `shouldReturn` FreshApprovalRequired
+                                    `shouldReturn` SandboxEscalationApprovalRequired
                             _ -> expectationFailure "missing stdin tool"
                         denied <- dispatchToolCall testDispatchConfig handlers input
                         denied.output `shouldSatisfy` Text.isInfixOf "fresh user approval"

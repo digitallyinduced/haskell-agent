@@ -130,6 +130,8 @@ data ToolAsyncCapability
 data ApprovalRequirement
     = ApprovalNotRequired
     | ApprovalPromptRequired
+    -- | Exact-invocation authorization; full-access policy may approve it.
+    | SandboxEscalationApprovalRequired
     | FreshApprovalRequired
     deriving (Eq, Show)
 
@@ -570,14 +572,15 @@ dispatchRegisteredToolCall config registry call =
         call
 
 -- | Dispatch after the host approval callback has accepted this exact call.
--- Only freshly confirmed tools receive an invocation capability.
+-- Fresh-confirmation and sandbox-escalation tools receive an invocation
+-- capability; the latter may be approved by the host's full-access policy.
 dispatchApprovedRegisteredToolCall
     :: ToolDispatchConfig -> ToolRegistry -> ToolCall -> IO ToolCallResult
 dispatchApprovedRegisteredToolCall config registry call =
     case lookupRegisteredTool call.name registry of
         Just tool -> do
             requirement <- toolApprovalRequirement tool call
-            if requirement == FreshApprovalRequired
+            if requirement `elem` [FreshApprovalRequired, SandboxEscalationApprovalRequired]
                 then dispatchApprovedToolHandler config (acceptedHandler registry call) call
                 else dispatchRegisteredToolCall config registry call
         Nothing -> dispatchRegisteredToolCall config registry call
@@ -661,11 +664,12 @@ toolRequiresExplicitApproval tool = requiresExplicit tool.appToolApproval
         AutoApprove original -> requiresExplicit original
         _ -> False
 
--- | Whether this invocation requires a fresh parent-user confirmation.
+-- | Whether this invocation requires exact-call authorization (fresh parent
+-- confirmation, or full-access policy approval for sandbox escalation).
 -- Unlike 'toolRequiresExplicitApproval', this evaluates call-sensitive rules.
 toolCallRequiresExplicitApproval :: AppTool -> ToolCall -> IO Bool
 toolCallRequiresExplicitApproval tool call =
-    (== FreshApprovalRequired) <$> toolApprovalRequirement tool call
+    (`elem` [FreshApprovalRequired, SandboxEscalationApprovalRequired]) <$> toolApprovalRequirement tool call
 
 toolAutoApproves :: AppTool -> Bool
 toolAutoApproves tool = case tool.appToolApproval of

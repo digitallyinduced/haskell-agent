@@ -74,7 +74,7 @@ spec = describe "dispatchToolCall" do
                 `shouldReturn` ApprovalPromptRequired
             approval "{\"command\":\"touch file\"}" `shouldReturn` ApprovalPromptRequired
             approval "{\"command\":\"ls\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Inspect outside sandbox\"}"
-                `shouldReturn` FreshApprovalRequired
+                `shouldReturn` SandboxEscalationApprovalRequired
             approval "{\"command\":\"ls\",\"sandbox_permissions\":\"unknown\"}"
                 `shouldReturn` FreshApprovalRequired
 

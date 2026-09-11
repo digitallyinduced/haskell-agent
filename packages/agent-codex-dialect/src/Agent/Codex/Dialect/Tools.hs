@@ -184,7 +184,7 @@ shellCommandTool env session =
             , PropertySchema "yield_time_ms" PropertyInteger False $ Just
                 "Wait before returning a session_id for a command that is still running. Defaults to 10000 ms when neither timing control is set. Completion is reported automatically; do not repeatedly poll. Mutually exclusive with timeout_ms."
             , PropertySchema "sandbox_permissions" PropertyString False $ Just
-                "use_default (default), or require_escalated to request fresh approval to run this exact command outside the sandbox."
+                "use_default (default), or require_escalated to request authorization to run this exact command outside the sandbox. Full access (--yolo) auto-approves escalation; otherwise fresh user approval is required."
             , PropertySchema "justification" PropertyString False $ Just
                 "Required nonempty explanation when sandbox_permissions is require_escalated."
             ])
@@ -225,7 +225,7 @@ shellDescription =
     \- By default, a command that is still running after 10000 ms is retained and returned with a session_id. Completion is reported automatically; do not poll or run sleep commands while waiting.\n\
     \- Set `timeout_ms` only when the command should be stopped after a fixed runtime, or `yield_time_ms` to change the initial wait.\n\
     \- Use `write_stdin` only to send input, interrupt, inspect a current snapshot, or perform one bounded wait.\n\
-    \- If sandbox isolation blocks a required command (for example Swift package manifests), request require_escalated with a justification. This requires fresh user approval; do not automatically retry or disable isolation globally."
+    \- If sandbox isolation blocks a required command (for example Swift package manifests), request require_escalated with a justification. Full access (--yolo) auto-approves this request; otherwise fresh user approval is required. Never silently retry outside the sandbox or disable isolation globally."
 
 defaultShellYieldMs :: Int
 defaultShellYieldMs = 10000
@@ -344,7 +344,7 @@ writeStdinApproval session call =
             | maybe True (\input -> Text.null input || input == "\ETX") args.chars ->
                 pure ApprovalNotRequired
             | otherwise -> codexShellCommandIsEscalated session args.sessionId >>= \case
-                Right True -> pure FreshApprovalRequired
+                Right True -> pure SandboxEscalationApprovalRequired
                 _ -> pure ApprovalPromptRequired
         Left _ -> pure ApprovalPromptRequired
 

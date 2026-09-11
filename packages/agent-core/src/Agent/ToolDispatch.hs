@@ -489,7 +489,8 @@ dispatchToolHandlerDetailed
 dispatchToolHandlerDetailed config maybeHandler call = do
     dispatchToolHandlerWithAuthorization Nothing config maybeHandler call
 
--- | Host boundary: call only after fresh user confirmation of this exact call.
+-- | Host boundary: call only after authorization of this exact call, either
+-- fresh user confirmation or full-access approval of sandbox escalation.
 -- Generic dispatch deliberately never supplies this capability.
 dispatchApprovedToolHandler
     :: ToolDispatchConfig -> Maybe ToolHandler -> ToolCall -> IO ToolCallResult

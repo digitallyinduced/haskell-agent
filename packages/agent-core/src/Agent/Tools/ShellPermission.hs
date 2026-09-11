@@ -1,5 +1,5 @@
 -- | Shell permission requests are untrusted input; execution authorization is
--- supplied separately by the host's fresh-confirmation dispatch boundary.
+-- supplied separately by the host's exact-invocation authorization boundary.
 module Agent.Tools.ShellPermission
     ( ShellPermissionRequest(..)
     , shellPermissionFieldsDecoder
@@ -47,6 +47,7 @@ shellPermissionApproval call =
         -- Resource-claim classification is not an authorization boundary:
         -- apparently read-only commands can execute configured programs.
         Right UseDefaultSandbox -> ApprovalPromptRequired
+        Right RequireEscalatedSandbox{} -> SandboxEscalationApprovalRequired
         -- Malformed requests fail closed and are rejected again by the handler.
         _ -> FreshApprovalRequired
 
@@ -65,7 +66,7 @@ shellExecutionAuthorization _ UseDefaultSandbox = Right DefaultShellExecution
 shellExecutionAuthorization (Just authorization) RequireEscalatedSandbox{} =
     Right (EscalatedShellExecution authorization)
 shellExecutionAuthorization Nothing RequireEscalatedSandbox{} =
-    Left "Sandbox escalation requires fresh user approval for this exact invocation."
+    Left "Sandbox escalation requires fresh user approval or --yolo authorization for this exact invocation."
 
 shellExecutionIsEscalated :: ShellExecutionAuthorization -> Bool
 shellExecutionIsEscalated DefaultShellExecution = False
