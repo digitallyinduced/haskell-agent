@@ -102,6 +102,7 @@ spec = describe "Agent.CLI.McpAdmin" do
                     { mcpEnabled = True
                     , mcpUrl = Just "https://example.test/mcp"
                     , mcpConnectionId = Nothing
+                    , mcpConnectionCredentials = Nothing
                     , mcpConnectionGeneration = Nothing
                     , mcpDisplayName = Nothing
                     , mcpCommand = ""
@@ -120,13 +121,14 @@ spec = describe "Agent.CLI.McpAdmin" do
                 defaultHarnessConfig
                     { configMcpServers = Map.singleton "remote" remote }
                 `shouldReturn` Right ()
+            Right identified <- loadHarnessConfig home
             Right snapshot <- listMcpAdminServers home
             editMcpAdminServer home snapshot.mcpAdminRevision "remote" input
                 `shouldReturn`
                     Left (McpAdminInvalid
                         "remote HTTP MCP servers cannot be edited through this API")
             Right config <- loadHarnessConfig home
-            Map.lookup "remote" config.configMcpServers `shouldBe` Just remote
+            config `shouldBe` identified
 
     it "linearizes revision validation with the supervisor restart" $
         withTempDir \home -> do

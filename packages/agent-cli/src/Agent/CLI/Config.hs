@@ -20,6 +20,7 @@ module Agent.CLI.Config
     , withHarnessConfigSnapshot
     , mcpServerEnabledForRuntime
     , mcpServersForRuntime
+    , mcpUsesConnectionCredentials
     , useProgressiveMcp
     ) where
 
@@ -50,6 +51,8 @@ import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Maybe (isJust, isNothing)
+import qualified Data.Set as Set
+import Numeric (showHex)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory.OsPath (createDirectoryIfMissing, doesFileExist)
@@ -88,7 +91,10 @@ data McpServerConfig = McpServerConfig
     { mcpEnabled :: !Bool
     , mcpUrl :: !(Maybe Text)
     , mcpConnectionId :: !(Maybe Text)
-    -- ^ Immutable identity for independently authorized remote connections.
+    -- ^ Immutable management identity, independent of the server's tool prefix.
+    , mcpConnectionCredentials :: !(Maybe Bool)
+    -- ^ Explicit credential selection. Nothing preserves the pre-migration
+    -- semantics (an existing identity selects the protected credential store).
     , mcpConnectionGeneration :: !(Maybe Text)
     -- ^ Persisted lifecycle nonce; changes invalidate captured credentials.
     , mcpDisplayName :: !(Maybe Text)
@@ -302,6 +308,7 @@ instance Aeson.ToJSON McpServerConfig where
             [ "enabled" Aeson..= server.mcpEnabled
             , "url" Aeson..= server.mcpUrl
             , "connectionId" Aeson..= server.mcpConnectionId
+            , "connectionCredentials" Aeson..= server.mcpConnectionCredentials
             , "connectionGeneration" Aeson..= server.mcpConnectionGeneration
             , "displayName" Aeson..= server.mcpDisplayName
             , "command" Aeson..= server.mcpCommand
@@ -418,6 +425,7 @@ mcpServerConfigDecoder =
             <$> defaultKey True "enabled" Hermes.bool
             <*> optionalKey "url" Hermes.text
             <*> optionalKey "connectionId" Hermes.text
+            <*> optionalKey "connectionCredentials" Hermes.bool
             <*> optionalKey "connectionGeneration" Hermes.text
             <*> optionalKey "displayName" Hermes.text
             <*> defaultKey "" "command" Hermes.text
@@ -646,12 +654,16 @@ loadHarnessConfigUnlocked home = do
                 Right config ->
                     case validateHarnessConfig config of
                         Left err -> pure (Left err)
-                        Right valid ->
-                            loadHarnessRevisionKeyUnlocked home >>= \case
-                                Left err -> pure (Left err)
-                                Right key ->
-                                    pure (Right
-                                        (keyedConfigRevision key bytes, valid))
+                        Right valid -> do
+                            identified <- assignMcpConnectionIds valid
+                            if identified /= valid
+                                then fmap (fmap (, identified))
+                                    (writeHarnessConfigUnlocked home identified)
+                                else loadHarnessRevisionKeyUnlocked home >>= \case
+                                    Left err -> pure (Left err)
+                                    Right key ->
+                                        pure (Right
+                                            (keyedConfigRevision key bytes, valid))
 
 -- | Atomically read, transform, validate, and replace the config while holding
 -- the process-shared config lock. The returned revision is for the exact bytes
@@ -676,12 +688,13 @@ modifyHarnessConfigEffect home change =
             Right (revision, config) ->
                 change revision config >>= \case
                     Left err -> pure (Left err)
-                    Right (updated, value) ->
-                        writeHarnessConfigUnlocked home updated >>= \case
+                    Right (updated, value) -> do
+                        identified <- assignMcpConnectionIds updated
+                        writeHarnessConfigUnlocked home identified >>= \case
                             Left err -> pure (Left err)
                             Right nextRevision ->
                                 pure (Right
-                                    (nextRevision, updated, value))
+                                    (nextRevision, identified, value))
 
 writeHarnessConfigUnlocked
     :: OsPath -> HarnessConfig -> IO (Either Text Word64)
@@ -713,8 +726,38 @@ writeHarnessConfigUnlocked home config =
 
 saveHarnessConfig :: OsPath -> HarnessConfig -> IO (Either Text ())
 saveHarnessConfig home config =
-    withPrivateFileLock (harnessConfigLockPath home) $
-        fmap (fmap (const ())) (writeHarnessConfigUnlocked home config)
+    withPrivateFileLock (harnessConfigLockPath home) do
+        identified <- assignMcpConnectionIds config
+        fmap (fmap (const ())) (writeHarnessConfigUnlocked home identified)
+
+-- | Assign only missing remote identities under the caller's catalog lock.
+-- Never rename tool prefixes or opt existing credentials into a different store.
+assignMcpConnectionIds :: HarnessConfig -> IO HarnessConfig
+assignMcpConnectionIds config = do
+    servers <- Map.traverseWithKey identify config.configMcpServers
+    pure config { configMcpServers = servers }
+  where
+    identify label server
+        | isJust server.mcpUrl && isNothing server.mcpConnectionId = do
+            bytes <- withBinaryFile "/dev/urandom" ReadMode (`BS.hGet` 16)
+            unless (BS.length bytes == 16) $
+                ioError (userError "Unable to generate MCP connection identity")
+            let identifier = Text.pack (concatMap
+                    (\byte -> let hex = showHex byte "" in replicate (2 - length hex) '0' <> hex)
+                    (BS.unpack bytes))
+            pure server
+                { mcpConnectionId = Just identifier
+                , mcpConnectionGeneration = Just identifier
+                , mcpConnectionCredentials = Just False
+                , mcpDisplayName = case server.mcpDisplayName of
+                    Nothing -> Just label
+                    existing -> existing
+                }
+        | otherwise = pure server
+
+mcpUsesConnectionCredentials :: McpServerConfig -> Bool
+mcpUsesConnectionCredentials server =
+    maybe (isJust server.mcpConnectionId) id server.mcpConnectionCredentials
 
 harnessConfigLockPath :: OsPath -> OsPath
 harnessConfigLockPath home =
@@ -864,6 +907,10 @@ validateHarnessConfig config = do
                 <> Text.pack (show harnessConfigSchemaVersion)
             )
     _ <- Map.traverseWithKey validateServer config.configMcpServers
+    let identifiers = [identifier | server <- Map.elems config.configMcpServers
+            , Just identifier <- [server.mcpConnectionId]]
+    unless (length identifiers == Set.size (Set.fromList identifiers)) $
+        Left "MCP connection identities must be unique"
     validateWebFetch config.configWebFetch
     _ <- Map.traverseWithKey validateLspServer config.configLsp.lspServers
     validateMaxConcurrentAgents config.configMaxConcurrentAgents
@@ -877,11 +924,11 @@ validateHarnessConfig config = do
         when (hasUrl == hasCommand) $
             Left ("MCP server " <> quote label <> " must configure exactly one of url or command")
         forM_ server.mcpConnectionId \connectionId -> do
-            unless (hasUrl && label == "connection_" <> connectionId
+            unless (hasUrl && Text.length connectionId <= 128
                     && not (Text.null connectionId)
                     && Text.all (\character -> character >= 'a' && character <= 'z'
                         || character >= '0' && character <= '9' || character == '-') connectionId) $
-                Left "MCP connection identity must match its immutable remote server key"
+                Left "MCP connection identity must be a nonempty remote identifier"
         forM_ server.mcpDisplayName \displayName ->
             when (Text.null (Text.strip displayName)) $
                 Left "MCP connection display name must not be empty"

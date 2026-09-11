@@ -32,7 +32,11 @@ spec = describe "Agent.CLI.McpCatalog" do
                 registerAuthorizedMcpServer home "https://mcp.stripe.com/"
                     `shouldReturn` Right ("mcp-stripe-com", True)
                 config <- loadHarnessConfig home >>= either (fail . Text.unpack) pure
-                Map.lookup "mcp-stripe-com" config.configMcpServers
+                let registered = config.configMcpServers Map.! "mcp-stripe-com"
+                registered.mcpConnectionId `shouldSatisfy` (/= Nothing)
+                registered.mcpConnectionCredentials `shouldBe` Just False
+                Just registered { mcpConnectionId = Nothing, mcpConnectionCredentials = Nothing
+                    , mcpConnectionGeneration = Nothing, mcpDisplayName = Nothing }
                     `shouldBe` Just remoteServer { mcpUrl = Just "https://mcp.stripe.com/" }
                 entries <- listMcpCatalog home >>= either (fail . show) pure
                 map (.mcpCatalogName) entries `shouldBe` ["mcp-stripe-com"]
@@ -47,11 +51,12 @@ spec = describe "Agent.CLI.McpCatalog" do
                             }
                         }
                 saveHarnessConfig home configured `shouldReturn` Right ()
+                Right identified <- loadHarnessConfig home
                 registerAuthorizedMcpServer home "https://example.test/mcp"
                     `shouldReturn` Right ("billing", False)
                 registerAuthorizedMcpServer home "https://example.test/mcp"
                     `shouldReturn` Right ("billing", False)
-                loadHarnessConfig home `shouldReturn` Right configured
+                loadHarnessConfig home `shouldReturn` Right identified
 
         forM_ [False, True] \enabled ->
             it ("reuses equivalent URL spellings with enabled = " <> show enabled) $
@@ -68,12 +73,13 @@ spec = describe "Agent.CLI.McpCatalog" do
                         loginUrl = "https://example.test/mcp?account=first"
                     lookupServerOAuthConfig loginUrl configured `shouldBe` Just oauth
                     saveHarnessConfig home configured `shouldReturn` Right ()
+                    Right identified <- loadHarnessConfig home
                     registerAuthorizedMcpServer home loginUrl
                         `shouldReturn` Right ("billing", enabled)
                     registerAuthorizedMcpServer home loginUrl
                         `shouldReturn` Right ("billing", enabled)
-                    loadHarnessConfig home `shouldReturn` Right configured
-                        { configMcpServers = Map.singleton "billing" server
+                    loadHarnessConfig home `shouldReturn` Right identified
+                        { configMcpServers = Map.singleton "billing" (identified.configMcpServers Map.! "billing")
                             { mcpUrl = Just loginUrl } }
 
         it "does not reuse OAuth settings from a different endpoint query" do
@@ -98,13 +104,14 @@ spec = describe "Agent.CLI.McpCatalog" do
                             ]
                         }
                 saveHarnessConfig home configured `shouldReturn` Right ()
+                Right identified <- loadHarnessConfig home
                 registerAuthorizedMcpServer home "https://example.test/mcp"
                     `shouldReturn` Right ("example-test-3", True)
                 registerAuthorizedMcpServer home "https://example.test/mcp"
                     `shouldReturn` Right ("example-test-3", True)
                 updated <- loadHarnessConfig home >>= either (fail . Text.unpack) pure
                 Map.delete "example-test-3" updated.configMcpServers
-                    `shouldBe` configured.configMcpServers
+                    `shouldBe` identified.configMcpServers
 
         it "does not collapse distinct endpoint queries into one credential key" $
             withTempDir \home -> do
@@ -116,18 +123,20 @@ spec = describe "Agent.CLI.McpCatalog" do
         it "preserves unrelated configuration when adding a server" $
             withTempDir \home -> do
                 saveHarnessConfig home catalogConfig `shouldReturn` Right ()
+                Right identified <- loadHarnessConfig home
                 registerAuthorizedMcpServer home "https://mcp.stripe.com/"
                     `shouldReturn` Right ("mcp-stripe-com", True)
                 updated <- loadHarnessConfig home >>= either (fail . Text.unpack) pure
                 updated { configMcpServers = Map.delete "mcp-stripe-com" updated.configMcpServers }
-                    `shouldBe` catalogConfig
+                    `shouldBe` identified
 
         it "rejects invalid endpoints without changing configuration" $
             withTempDir \home -> do
                 saveHarnessConfig home catalogConfig `shouldReturn` Right ()
+                Right identified <- loadHarnessConfig home
                 result <- registerAuthorizedMcpServer home "file:///etc/example"
                 result `shouldSatisfy` either (const True) (const False)
-                loadHarnessConfig home `shouldReturn` Right catalogConfig
+                loadHarnessConfig home `shouldReturn` Right identified
 
     it "lists configured servers without exposing environment values" $
         withTempDir \home -> do
@@ -254,12 +263,13 @@ spec = describe "Agent.CLI.McpCatalog" do
     it "rejects unknown and empty names without rewriting config" $
         withTempDir \home -> do
             saveHarnessConfig home catalogConfig `shouldReturn` Right ()
+            Right identified <- loadHarnessConfig home
             setMcpCatalogEnabled home "missing" False
                 `shouldReturn` Left (McpCatalogNotFound "missing")
             setMcpCatalogEnabled home "  " True
                 `shouldReturn` Left
                     (McpCatalogInvalid "MCP server name must not be empty")
-            loadHarnessConfig home `shouldReturn` Right catalogConfig
+            loadHarnessConfig home `shouldReturn` Right identified
 
 docsEntry :: Bool -> McpCatalogEntry
 docsEntry enabled =
@@ -301,6 +311,7 @@ docsServer =
         { mcpEnabled = False
         , mcpUrl = Nothing
         , mcpConnectionId = Nothing
+        , mcpConnectionCredentials = Nothing
         , mcpConnectionGeneration = Nothing
         , mcpDisplayName = Nothing
         , mcpCommand = "mcp-docs"
@@ -322,6 +333,7 @@ remoteServer =
         { mcpEnabled = True
         , mcpUrl = Just "https://example.test/mcp"
         , mcpConnectionId = Nothing
+        , mcpConnectionCredentials = Nothing
         , mcpConnectionGeneration = Nothing
         , mcpDisplayName = Nothing
         , mcpCommand = ""
