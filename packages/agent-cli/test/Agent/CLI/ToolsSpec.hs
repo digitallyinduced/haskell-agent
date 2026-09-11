@@ -590,7 +590,7 @@ spec = describe "schemasFromAppTools" do
 
     it "omits an empty required list from reserved collaboration schemas" do
         let wait = jsonAppTool "wait_agent" "Wait."
-                [ PropertySchema "timeout_ms" PropertyInteger False Nothing ]
+                [ PropertySchema "timeout_ms" PropertyNumber False Nothing ]
                 AlwaysReadOnly
                 (noArgsTool "wait_agent" (pure (Right "ok")))
         case schemasFromAppTools codexDialect [wait] of
@@ -686,8 +686,10 @@ spec = describe "schemasFromAppTools" do
                                 required_ tool `shouldBe` Nothing
                                 additionalProperties tool `shouldBe`
                                     Just False
+                                -- This is the provider's reserved wire schema,
+                                -- not the runtime's integer argument type.
                                 propertyType "timeout_ms" tool `shouldBe`
-                                    Just "integer"
+                                    Just "number"
                             other -> expectationFailure
                                 ("expected production wait_agent, got "
                                     <> show other)
