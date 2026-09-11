@@ -102,6 +102,9 @@ data Name
     | PlanningPanel
     | PlanningSubmit
     | ConversationBlock !AgentTarget !BlockId
+    | ConversationMessage !AgentTarget !BlockId
+    | ConversationLatest
+    | ConversationNewerGap
     | ConversationChunkCache
         !AgentTarget
         !BlockId

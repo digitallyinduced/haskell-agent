@@ -1167,6 +1167,30 @@ spec = do
                     RowEnd width -> Text.replicate width " "
             rendered `shouldSatisfy` Text.isInfixOf marker
 
+    describe "messages below indicator" do
+        it "shows a count while scrolled up and resumes following when clicked" do
+            let transcript = Text.unlines
+                    ([ "Earlier row " <> Text.pack (show index)
+                     | index <- [1 .. 100 :: Int]
+                     ] <> ["LATEST_MESSAGE_MARKER"])
+                ui = reduceUi (UiAssistantHistory transcript) initialUiState
+                bounds = (80, 24)
+            runtime <- newScriptRuntime ui
+            let initial = (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    { appUi = ui }
+            (_, frames, finalState) <- runFullscreenScriptDetailedAt bounds initial
+                [ FullscreenScriptMouseDown ConversationViewport
+                    V.BScrollUp (B.Location (0, 0))
+                , FullscreenScriptMouseDown ConversationLatest
+                    V.BLeft (B.Location (0, 0))
+                , FullscreenScriptHalt
+                ]
+            let rendered = map (renderedPictureTextAt bounds) frames
+            rendered `shouldSatisfy` any (Text.isInfixOf "1 Message")
+            last rendered `shouldSatisfy` Text.isInfixOf "LATEST_MESSAGE_MARKER"
+            last rendered `shouldSatisfy` (not . Text.isInfixOf "Click to resume")
+            finalState.appUi.uiFollow `shouldBe` True
+
     describe "planning question panel" do
         forM_ [False, True] \textPrompt ->
             describe (if textPrompt then "custom answer" else "choice") do

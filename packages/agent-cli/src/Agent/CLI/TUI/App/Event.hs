@@ -1216,6 +1216,8 @@ handleNormalMouseDown
     -> EventM Name AppState ()
 handleNormalMouseDown name button =
     case (name, button) of
+        (ConversationLatest, V.BLeft) ->
+            resumeConversationFollow
         (ComposerModel, V.BLeft) ->
             Composer.handleControlMouseDown ComposerModel
         (ComposerEffort, V.BLeft) ->
