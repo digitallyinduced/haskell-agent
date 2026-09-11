@@ -60,6 +60,15 @@ decodeGatewayModels bytes =
 
 spec :: Spec
 spec = describe "gateway device authorization" do
+    it "decodes gateway organization identity and optional icon bytes" do
+        let decode = Aeson.eitherDecodeStrict' :: BS.ByteString -> Either String GatewayAccount
+        decode "{\"organization\":{\"id\":\"org\",\"name\":\"Example\",\"iconDataUrl\":\"data:image/png;base64,aWNvbg==\"},\"user\":{\"name\":\"Alex\"}}"
+            `shouldBe` Right (GatewayAccount "org" "Example" "Alex" "icon")
+        decode "{\"organization\":{\"id\":\"org\",\"name\":\"Example\"},\"user\":{\"name\":\"Alex\"}}"
+            `shouldBe` Right (GatewayAccount "org" "Example" "Alex" BS.empty)
+        decode "{\"organization\":{\"id\":\"org\",\"name\":\"Example\",\"iconDataUrl\":\"https://example.test/logo.png\"},\"user\":{\"name\":\"Alex\"}}"
+            `shouldBe` Right (GatewayAccount "org" "Example" "Alex" BS.empty)
+
     it "invalidates idle credential owners before replacement and logout complete" $
         withTempHome \home ->
             withHomeEnvironment home do

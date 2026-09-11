@@ -29,9 +29,10 @@ escalation justifications are rejected.
   `--yolo` or remembered tool approval. There is no permanent escalation choice.
 - Plan/read-only restrictions still apply. Child agents and hosts without a
   suitable fresh-confirmation channel must deny the request.
-  Currently the interactive line CLI supports this confirmation; native,
-  managed-turn and fullscreen session routes fail closed until their approval
-  protocols support the same warning and once-only semantics.
+  Interactive line and fullscreen CLIs and native hosts support this
+  confirmation. The fullscreen dialog defaults to Deny and offers only
+  Allow once or Deny. Managed-turn routes still fail closed until their
+  approval protocol supports the same warning and once-only semantics.
 - The trusted host dispatch supplies an opaque one-use authorization, separate
   from model arguments. It expires when dispatch finishes. Ordinary direct
   dispatch and all existing process APIs remain sandboxed.

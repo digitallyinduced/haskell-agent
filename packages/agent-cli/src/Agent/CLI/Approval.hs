@@ -265,7 +265,10 @@ approveToolDecisionWithReporterAndPersistenceClassifiedWithPrompt
                 Nothing -> classifyReadOnly call >>= \case
                     Just True -> pure ApprovalNotRequired
                     _ -> pure ApprovalPromptRequired
+            policy <- readIORef policyRef
             let requiresExplicit = requirement == FreshApprovalRequired
+                    || (requirement == SandboxEscalationApprovalRequired
+                        && policy /= ApproveAll)
                 readOnly = requirement == ApprovalNotRequired
             let nextFacts = facts
                     { readOnly = Just readOnly
@@ -346,6 +349,9 @@ childApprove policy tools call =
     decide FreshApprovalRequired =
         pure $ Left
             "This sensitive tool requires an explicit parent approval for every call."
+    decide SandboxEscalationApprovalRequired
+        | policy /= ApproveAll =
+            pure $ Left "Sandbox escalation requires parent approval or --yolo."
     decide requirement = case scopedToolPolicy policy tools call of
         ApproveAll -> pure (Right True)
         DenyMutating ->

@@ -5,7 +5,7 @@ module Agent.CLI.McpConnectionRuntime
     , invalidateMcpConnectionRuntimes
     ) where
 
-import Agent.CLI.Config (HarnessConfig(..), McpServerConfig(..), withHarnessConfigSnapshot, harnessConfigPath)
+import Agent.CLI.Config (HarnessConfig(..), McpServerConfig(..), withHarnessConfigSnapshot, harnessConfigPath, mcpUsesConnectionCredentials)
 import Agent.CLI.McpConnectionCredentials (mcpConnectionCredentialProviderWith, withMcpConnectionRefreshLock)
 import Agent.OsPath (fromText)
 import qualified Agent.MCP as MCP
@@ -64,6 +64,7 @@ mcpConnectionCredentials runtime = case runtime.mcpServerConnection of
             case Map.lookup runtime.mcpServerName catalog.configMcpServers of
                 Just config
                     | config.mcpConnectionId == Just identity.mcpConnectionIdentifier
+                    , mcpUsesConnectionCredentials config
                     , config.mcpConnectionGeneration == identity.mcpConnectionGeneration
                     , config.mcpUrl == runtime.mcpServerUrl
                     , config.mcpEnabled -> action

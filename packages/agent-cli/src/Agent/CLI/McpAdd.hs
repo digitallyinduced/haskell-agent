@@ -43,6 +43,7 @@ defaultMcpServerConfig =
         { mcpEnabled = True
         , mcpUrl = Nothing
         , mcpConnectionId = Nothing
+        , mcpConnectionCredentials = Nothing
         , mcpConnectionGeneration = Nothing
         , mcpDisplayName = Nothing
         , mcpCommand = ""

@@ -14,6 +14,7 @@ build-type:         Simple
 extra-source-files: include/HaskellAgentBridge.h
 
 common common-options
+    build-depends:    http-client, http-client-tls, http-types, websockets, wuss
     default-language: GHC2021
     default-extensions: BlockArguments
                       , OverloadedStrings
@@ -94,6 +95,8 @@ foreign-library haskell-agent-bridge
                     , Agent.CLI.MacOS.AccountBridge
                     , Agent.CLI.MacOS.BrowserBridge
                     , Agent.CLI.MacOS.GatewayBridge
+                    , Agent.CLI.MacOS.MobileGateway
+                    , Agent.CLI.MacOS.MobileGatewayBridge
                     , Agent.CLI.MacOS.Marshalling
                     , Agent.CLI.MacOS.ComputerBridge
                     , Agent.CLI.MacOS.EngineMailbox
@@ -199,6 +202,7 @@ test-suite agent-native-bridge-test
                     , test/cbits/HaskellAgentBridgeIntegrationSmoke.c
                     , test/cbits/HaskellAgentBridgeTaskSmoke.c
                     , test/cbits/HaskellAgentBridgeSessionObservationSmoke.c
+                    , test/cbits/HaskellAgentBridgeMobileSmoke.c
                     , test/cbits/HaskellAgentBridgeMcpConnectionSmoke.c
                     , cbits/HaskellAgentBridgeRuntime.c
                     , cbits/HaskellAgentMcpKeychain.c
@@ -209,6 +213,7 @@ test-suite agent-native-bridge-test
                      , Agent.CLI.MacOS.SessionTransferBridge
                      , Agent.CLI.MacOS.SessionObservationBridge
                      , Agent.CLI.MacOS.SessionObservationBridgeSpec
+                     , Agent.CLI.MacOS.MobileGatewaySpec
                      , Agent.CLI.MacOS.AgentSnapshot
                      , Agent.CLI.MacOS.EngineCallbacks
                      , Agent.CLI.MacOS.EngineEvents
@@ -235,6 +240,8 @@ test-suite agent-native-bridge-test
                      , Agent.CLI.MacOS.AccountBridge
                      , Agent.CLI.MacOS.BrowserBridge
                      , Agent.CLI.MacOS.GatewayBridge
+                     , Agent.CLI.MacOS.MobileGateway
+                     , Agent.CLI.MacOS.MobileGatewayBridge
                      , Agent.CLI.MacOS.Marshalling
                      , Agent.CLI.MacOS.ComputerBridge
                      , Agent.CLI.MacOS.RepositoryWorkers

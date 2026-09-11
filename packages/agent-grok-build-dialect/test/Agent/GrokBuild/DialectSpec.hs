@@ -98,12 +98,12 @@ spec = describe "Grok Build dialect" do
                 ]
             close
 
-    it "requires fresh approval and rejects unapproved terminal escalation" do
+    it "requires exact-invocation authorization and rejects unapproved terminal escalation" do
         withGrokRegistry \registry close -> do
             let call = escalatedTerminalCall "printf approved" False
             let tool = maybe (error "missing terminal") id $
                     lookupRegisteredTool "run_terminal_cmd" registry
-            toolApprovalRequirement tool call `shouldReturn` FreshApprovalRequired
+            toolApprovalRequirement tool call `shouldReturn` SandboxEscalationApprovalRequired
             result <- dispatchRegisteredToolCall testDispatchConfig registry call
             result.output `shouldSatisfy` Text.isInfixOf "requires fresh user approval"
             close

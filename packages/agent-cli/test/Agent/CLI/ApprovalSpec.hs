@@ -31,6 +31,7 @@ import Agent.Tools.Types
     , jsonAppTool
     , mkToolRegistry
     )
+import Agent.Tools.ShellPermission (shellPermissionApproval)
 import Agent.Tools.PlanMode
     ( activatePlanMode
     , newPlanModeEnv
@@ -486,6 +487,55 @@ spec = do
                     "Blocked dangerous shell command"
                         `Text.isInfixOf` message
                 _ -> False
+
+        it "auto-approves sandbox escalation only under full access, including child calls" do
+            policy <- newIORef ApproveAll
+            allowed <- newIORef (Set.singleton "shell_command")
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/approval-test") Nothing
+            permissionRequests <- newIORef (0 :: Int)
+            let shellTool = tool "shell_command" (ClassifyApproval shellPermissionApproval)
+                tools = registry [shellTool]
+                call = functionToolCall "escalation" "shell_command"
+                    "{\"command\":\"pwd\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Inspect directory\"}"
+                approve = approveToolDecisionWithReporterAndPersistenceClassified
+                    (const (pure (Just True)))
+                    (\_ -> modifyIORef' permissionRequests (+ 1) >> pure (Just PermissionAllowOnce))
+                    (\_ -> pure ()) (pure ()) policy allowed tools plan call
+            approve `shouldReturn` Right True
+            readIORef permissionRequests `shouldReturn` 0
+            childApprove ApproveAll tools call `shouldReturn` Right True
+            childApprove PromptMutating tools call `shouldReturn`
+                Left "Sandbox escalation requires parent approval or --yolo."
+            writeIORef policy PromptMutating
+            approve `shouldReturn` Right True
+            approve `shouldReturn` Right True
+            readIORef permissionRequests `shouldReturn` 2
+            writeIORef policy DenyMutating
+            approve `shouldReturn` Right False
+            readIORef permissionRequests `shouldReturn` 2
+            writeIORef policy ApproveAll
+            activatePlanMode plan
+            result <- approve
+            result `shouldSatisfy` either
+                (Text.isInfixOf "only editable file") (const False)
+
+        it "does not treat a tool-specific allowance as full access for escalation" do
+            policy <- newIORef PromptMutating
+            allowed <- newIORef (Set.singleton "shell_command")
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/approval-test") Nothing
+            permissionRequests <- newIORef (0 :: Int)
+            let shellTool = tool "shell_command"
+                    (AutoApprove (ClassifyApproval shellPermissionApproval))
+                tools = registry [shellTool]
+                call = functionToolCall "escalation" "shell_command"
+                    "{\"command\":\"pwd\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Inspect directory\"}"
+            approveToolDecisionWithReporter
+                (\_ -> modifyIORef' permissionRequests (+ 1) >> pure (Just PermissionDeny))
+                (\_ -> pure ()) policy allowed tools plan call
+                `shouldReturn` Right False
+            readIORef permissionRequests `shouldReturn` 1
+            childApprove PromptMutating tools call `shouldReturn`
+                Left "Sandbox escalation requires parent approval or --yolo."
 
         it "prompts for every explicit-confirmation call under ApproveAll" do
             policy <- newIORef ApproveAll

@@ -563,6 +563,7 @@ authorizedMcpServerRegistration serverUrl config = do
                         { mcpEnabled = True
                         , mcpUrl = Just serverUrl
                         , mcpConnectionId = Nothing
+                        , mcpConnectionCredentials = Nothing
                         , mcpConnectionGeneration = Nothing
                         , mcpDisplayName = Nothing
                         , mcpCommand = ""

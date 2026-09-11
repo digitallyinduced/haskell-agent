@@ -42,6 +42,22 @@ typedef void (*ha_event_callback)(
 );
 
 /*
+ * Account status: 0 = profile, 1 = disconnected/unsupported, -1 = error.
+ * Icon is PNG bytes, or length 0 if absent. All buffers are callback-scoped;
+ * NULL is valid only with length 0. Copy them before returning.
+ * Runs on a worker thread. Returns 0 when accepted, 1 for a NULL callback.
+ */
+typedef void (*ha_gateway_account_callback)(
+    void *context, int32_t status,
+    const uint8_t *organization_id, size_t organization_id_length,
+    const uint8_t *organization_name, size_t organization_name_length,
+    const uint8_t *user_name, size_t user_name_length,
+    const uint8_t *icon_png, size_t icon_png_length,
+    const uint8_t *error, size_t error_length
+);
+int32_t ha_gateway_account(ha_gateway_account_callback callback, void *context);
+
+/*
  * Remote MCP connections have immutable IDs independent of display names and
  * endpoint URLs. Identical endpoints may have independently authorized accounts.
  * No credentials are exposed by this interface.
@@ -2074,6 +2090,40 @@ int32_t ha_gateway_connect_exchange(
     ha_gateway_result_callback callback,
     void *context
 );
+/* Mobile uses the saved main gateway account. No credential crosses this ABI.
+ * All async functions return 0 when accepted (one terminal callback), 1 on
+ * invalid arguments, or 3 if unavailable (no callback on nonzero return).
+ * Callback status: 0 success, 1 invalid input, 2 account changed/unavailable,
+ * 3 transport/server failure, 4 pairing row (nonterminal, list only).
+ * Callbacks run on runtime threads, serially per operation; context is opaque.
+ * Buffers are callback-scoped and must be copied; null is allowed at length 0.
+ * Input buffers are copied before return. Text is UTF-8; max 4096 input bytes.
+ * Open returns an owned nonzero handle; session value is the inherited base URL.
+ * Register returns runner ID in value. List emits ID/value and name, then status
+ * 0. Receive returns an encrypted frame (max 1 MiB); send accepts the same bound.
+ * Other success fields are empty/zero. No server error text is exposed.
+ * Close is synchronous/idempotent and invalidates pending operations. Closing a
+ * session also stops its relays; every returned handle still needs closing.
+ * Receive completes when data arrives or the relay/session closes. HTTP and
+ * relay-open/send operations time out. Calls may execute concurrently.
+ */
+typedef void (*ha_mobile_callback)(
+    void *context, int32_t status, uint64_t handle,
+    const uint8_t *value, size_t value_length,
+    const uint8_t *name, size_t name_length);
+int32_t ha_mobile_session_open(ha_mobile_callback callback, void *context);
+int32_t ha_mobile_handle_close(uint64_t handle);
+int32_t ha_mobile_runner_register(uint64_t session,
+    const uint8_t *device_id, size_t device_id_length,
+    const uint8_t *name, size_t name_length,
+    ha_mobile_callback callback, void *context);
+int32_t ha_mobile_pairings_list(uint64_t session, ha_mobile_callback callback, void *context);
+int32_t ha_mobile_pairing_revoke(uint64_t session, const uint8_t *pairing_id, size_t length, ha_mobile_callback callback, void *context);
+int32_t ha_mobile_pairing_wake(uint64_t session, const uint8_t *pairing_id, size_t length, ha_mobile_callback callback, void *context);
+int32_t ha_mobile_relay_open(uint64_t session, const uint8_t *pairing_id, size_t length, ha_mobile_callback callback, void *context);
+int32_t ha_mobile_relay_send(uint64_t relay, const uint8_t *bytes, size_t length, ha_mobile_callback callback, void *context);
+int32_t ha_mobile_relay_receive(uint64_t relay, ha_mobile_callback callback, void *context);
+
 int32_t ha_gateway_disconnect(
     ha_gateway_result_callback callback,
     void *context

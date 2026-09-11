@@ -17,7 +17,7 @@ module Agent.CLI.McpConnection
     , probeMcpConnection
     ) where
 
-import Agent.CLI.Config (HarnessConfig(..), McpServerConfig(..), withHarnessConfigSnapshot)
+import Agent.CLI.Config (HarnessConfig(..), McpServerConfig(..), withHarnessConfigSnapshot, mcpUsesConnectionCredentials)
 import Agent.CLI.McpAdmin
 import Agent.CLI.McpConnectionCredentials (loadMcpConnectionRecord, saveMcpConnectionRecord, deleteMcpConnectionRecord)
 import Agent.CLI.McpConnectionRuntime (invalidateMcpConnectionRuntimes)
@@ -138,6 +138,8 @@ authorizeMcpConnectionWith
 authorizeMcpConnectionWith host home expected identifier openBrowser = do
     generation <- UUID.toText <$> UUID.nextRandom
     started <- invalidateAfter $ changeConnection home expected identifier \server -> do
+        when (not (mcpUsesConnectionCredentials server)) $
+            Left (McpAdminInvalid "This connection uses CLI-configured credentials. Use agent-cli mcp login to update its authorization.")
         when (not server.mcpEnabled) $
             Left (McpAdminInvalid "Enable the MCP connection before authorizing")
         pure server { mcpConnectionGeneration = Just generation }
@@ -182,10 +184,10 @@ authorizeMcpConnectionWith host home expected identifier openBrowser = do
                     then pure (Left (McpAdminConflict current))
                     else case findConnection identifier config of
                         Left err -> pure (Left err)
-                        Right (_, server)
+                        Right (_, _, server)
                             | server.mcpConnectionGeneration /= Just generation || not server.mcpEnabled ->
                                 pure (Left (McpAdminInvalid "MCP authorization was superseded by a connection change"))
-                        Right (url, server) -> do
+                        Right (_, url, server) -> do
                             saved <- maybe (pure (Right ()))
                                 (host.connectionSaveCredential identifier) credential
                             pure case saved of
@@ -225,6 +227,7 @@ createMcpConnection home expected label endpoint = do
                 { mcpEnabled = True
                 , mcpUrl = Just url
                 , mcpConnectionId = Just identifier
+                , mcpConnectionCredentials = Just True
                 , mcpConnectionGeneration = Just generation
                 , mcpDisplayName = Just displayName
                 , mcpCommand = ""
@@ -276,13 +279,15 @@ removeMcpConnectionWith deleteCredential home expected identifier =
     invalidateAfter $ mutateEffect home expected \config ->
         case findConnection identifier config of
             Left err -> pure (Left err)
-            Right _ -> deleteCredential identifier >>= \case
-                Left err -> pure (Left (McpAdminInvalid err))
-                Right () -> pure $ Right
-                    ( config { configMcpServers =
-                        Map.delete (connectionServerName identifier) config.configMcpServers }
-                    , ()
-                    )
+            Right (name, _, server) ->
+                (if mcpUsesConnectionCredentials server
+                    then deleteCredential identifier else pure (Right ())) >>= \case
+                    Left err -> pure (Left (McpAdminInvalid err))
+                    Right () -> pure $ Right
+                        ( config { configMcpServers =
+                            Map.delete name config.configMcpServers }
+                        , ()
+                        )
 
 invalidateAfter :: IO (Either McpAdminError a) -> IO (Either McpAdminError a)
 invalidateAfter action = do
@@ -301,7 +306,7 @@ readMcpConnectionConfig home expected identifier = do
         snapshot <- loaded
         when (snapshot.mcpAdminRevision /= expected) $
             Left (McpAdminConflict snapshot.mcpAdminRevision)
-        (_, server) <- findConnection identifier snapshot.mcpAdminValue
+        (_, _, server) <- findConnection identifier snapshot.mcpAdminValue
         pure snapshot { mcpAdminValue = server }
 
 changeConnection
@@ -310,20 +315,21 @@ changeConnection
     -> IO (Either McpAdminError (McpAdminSnapshot McpConnection))
 changeConnection home expected identifier change =
     mutate home expected \config -> do
-        (url, existing) <- findConnection identifier config
+        (name, url, existing) <- findConnection identifier config
         server <- change existing
         pure
             ( config { configMcpServers =
-                Map.insert (connectionServerName identifier) server config.configMcpServers }
+                Map.insert name server config.configMcpServers }
             , publicConnection identifier url server
             )
 
-findConnection :: Text -> HarnessConfig -> Either McpAdminError (Text, McpServerConfig)
+findConnection :: Text -> HarnessConfig -> Either McpAdminError (Text, Text, McpServerConfig)
 findConnection identifier config =
-    case Map.lookup (connectionServerName identifier) config.configMcpServers of
-        Just server
-            | server.mcpConnectionId == Just identifier
-            , Just url <- server.mcpUrl -> Right (url, server)
+    case [(name, url, server)
+         | (name, server) <- Map.toList config.configMcpServers
+         , server.mcpConnectionId == Just identifier
+         , Just url <- [server.mcpUrl]] of
+        [connection] -> Right connection
         _ -> Left (McpAdminNotFound identifier)
 
 publicConnection :: Text -> Text -> McpServerConfig -> McpConnection
