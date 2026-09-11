@@ -256,6 +256,7 @@ spec = describe "Agent.MCP" do
                     { iconSrc = "https://example.com/icon.svg"
                     , iconMimeType = Just "image/svg+xml"
                     , iconSizes = ["any", "48x48"]
+                    , iconTheme = Nothing
                     }
                 ]
             icons =
@@ -269,6 +270,11 @@ spec = describe "Agent.MCP" do
                     <> icons <> "}") of
                 Left err -> expectationFailure (show err)
                 Right tool -> tool.discoveredIcons `shouldBe` expected
+        it "preserves icon appearance hints" do
+            case decode mcpToolDecoder
+                "{\"name\":\"run\",\"inputSchema\":{},\"icons\":[{\"src\":\"https://example.com/dark.png\",\"theme\":\"dark\"}]}" of
+                Left err -> expectationFailure (show err)
+                Right tool -> map (.iconTheme) tool.discoveredIcons `shouldBe` [Just "dark"]
         it "decodes prompt icons" do
             case decode mcpPromptDecoder
                 ("{\"name\":\"review\"," <> icons <> "}") of

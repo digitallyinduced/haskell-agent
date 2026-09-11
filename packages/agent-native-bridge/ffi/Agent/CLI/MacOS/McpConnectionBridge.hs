@@ -14,6 +14,9 @@ import Agent.CLI.MacOS.McpConnectionOperation (startMcpConnectionOperation)
 import Agent.CLI.MacOS.McpCredentialStore (ensureNativeMcpCredentialStore)
 import Agent.CLI.McpAdmin (McpAdminError(..), McpAdminSnapshot(..))
 import Agent.CLI.McpConnection
+import Agent.CLI.McpConnectionRuntime (readMcpConnectionIcons)
+import qualified Agent.MCP as MCP
+import Data.Maybe (fromMaybe)
 import Control.Monad (forM_, when)
 import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import qualified Data.Set as Set
@@ -33,6 +36,28 @@ type McpConnectionCallback =
 
 type McpConnectionAuthorizationCallback =
     Ptr () -> CString -> CSize -> IO ()
+
+type McpConnectionIconCallback =
+    Ptr () -> CString -> CSize -> CString -> CSize
+    -> CString -> CSize -> CString -> CSize -> IO ()
+
+foreign import ccall "dynamic"
+    invokeIconCallback :: FunPtr McpConnectionIconCallback -> McpConnectionIconCallback
+
+foreign export ccall ha_mcp_connections_list_with_icons
+    :: FunPtr McpConnectionCallback -> FunPtr McpConnectionIconCallback
+    -> Ptr () -> Ptr (Ptr ()) -> IO CInt
+
+ha_mcp_connections_list_with_icons
+    :: FunPtr McpConnectionCallback -> FunPtr McpConnectionIconCallback
+    -> Ptr () -> Ptr (Ptr ()) -> IO CInt
+ha_mcp_connections_list_with_icons callback icons context output = do
+    when (output /= nullPtr) (poke output nullPtr)
+    if icons == nullFunPtr then pure 1 else
+        withConnectionInputs callback output [] \_ ->
+            startConnectionResultWithIcons icons callback context output 0 do
+                home <- getHomeDirectory
+                listMcpConnections home
 
 foreign import ccall "dynamic"
     invokeConnectionCallback
@@ -167,7 +192,14 @@ startConnectionResult
     :: FunPtr McpConnectionCallback -> Ptr () -> Ptr (Ptr ()) -> CInt
     -> IO (Either McpAdminError (McpAdminSnapshot [McpConnection]))
     -> IO CInt
-startConnectionResult callback context output state action =
+startConnectionResult = startConnectionResultWithIcons nullFunPtr
+
+startConnectionResultWithIcons
+    :: FunPtr McpConnectionIconCallback
+    -> FunPtr McpConnectionCallback -> Ptr () -> Ptr (Ptr ()) -> CInt
+    -> IO (Either McpAdminError (McpAdminSnapshot [McpConnection]))
+    -> IO CInt
+startConnectionResultWithIcons icons callback context output state action =
     startMcpConnectionOperation output (ensureNativeMcpCredentialStore >> action) complete
         (emitConnectionTerminal callback context (-1) 0
             "MCP connection operation failed.")
@@ -181,6 +213,16 @@ startConnectionResult callback context output state action =
         forM_ snapshot.mcpAdminValue \connection -> do
             observed <- observedConnectionState state connection
             emitConnection callback context snapshot.mcpAdminRevision observed connection
+            when (icons /= nullFunPtr && connection.connectionEnabled) do
+                metadata <- readMcpConnectionIcons connection.connectionId
+                    connection.connectionGeneration connection.connectionUrl
+                forM_ metadata \icon ->
+                    withText connection.connectionId \identifier identifierLength ->
+                    withText icon.iconSrc \src srcLength ->
+                    withText (fromMaybe "" icon.iconMimeType) \mime mimeLength ->
+                    withText (fromMaybe "" icon.iconTheme) \theme themeLength ->
+                        invokeIconCallback icons context identifier identifierLength
+                            src srcLength mime mimeLength theme themeLength
         emitConnectionTerminal callback context 1 snapshot.mcpAdminRevision ""
 
 -- A configured endpoint (or a saved credential) is not evidence of readiness.

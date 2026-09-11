@@ -87,6 +87,7 @@ data McpIcon = McpIcon
     { iconSrc :: !Text
     , iconMimeType :: !(Maybe Text)
     , iconSizes :: ![Text]
+    , iconTheme :: !(Maybe Text)
     } deriving (Eq, Show)
 
 mcpIconDecoder :: Json.Decoder McpIcon
@@ -94,6 +95,7 @@ mcpIconDecoder = Json.object do
     iconSrc <- Json.atKey "src" Json.text
     iconMimeType <- Json.optionalKey "mimeType" Json.text
     iconSizes <- Json.defaultKey [] "sizes" (Json.list Json.text)
+    iconTheme <- Json.optionalKey "theme" Json.text
     pure McpIcon{..}
 
 -- | A filesystem root offered by the host to an MCP server.
@@ -280,6 +282,8 @@ data McpHostHooks = McpHostHooks
     -- materialization of explicitly tagged MCP artifact resources.
     , mcpHostCredentials :: !(McpServerConfig -> IO (Maybe McpCredentialProvider))
     -- ^ Resolve by immutable server identity, never by URL alone.
+    , mcpHostServerInfo :: !(McpServerConfig -> McpServerInfo -> IO ())
+    -- ^ Observe negotiated metadata. Called on the startup worker; must not block.
     }
 
 defaultMcpHostHooks :: McpHostHooks
@@ -291,6 +295,7 @@ defaultMcpHostHooks = McpHostHooks
     , mcpHostClientVersion = "0.1.0"
     , mcpHostArtifactDirectory = Nothing
     , mcpHostCredentials = const (pure Nothing)
+    , mcpHostServerInfo = \_ _ -> pure ()
     }
 
 -- | A server's request for user input, delivered either as a legacy

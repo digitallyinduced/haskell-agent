@@ -16,6 +16,16 @@ static void connection_callback(
     if (context) (*(int *)context)++;
 }
 
+static void icon_callback(
+    void *context, const uint8_t *identifier, size_t identifier_length,
+    const uint8_t *src, size_t src_length, const uint8_t *mime, size_t mime_length,
+    const uint8_t *theme, size_t theme_length
+) {
+    (void)identifier; (void)identifier_length; (void)src; (void)src_length;
+    (void)mime; (void)mime_length; (void)theme; (void)theme_length;
+    if (context) (*(int *)context)++;
+}
+
 static void authorization_callback(void *context, const uint8_t *url, size_t length) {
     (void)url; (void)length;
     if (context) (*(int *)context)++;
@@ -50,6 +60,12 @@ int ha_mcp_connection_validation_smoke(void) {
     if (ha_mcp_connection_authorize(0, invalid_utf8, 1, authorization_callback,
             connection_callback, &callbacks, &operation) != 2 || operation) return 10;
     ha_mcp_connection_operation_cancel(NULL);
+    if (ha_mcp_connections_list_with_icons(NULL, icon_callback,
+            &callbacks, &operation) != 1 || operation) return 12;
+    if (ha_mcp_connections_list_with_icons(connection_callback, NULL,
+            &callbacks, &operation) != 1 || operation) return 13;
+    if (ha_mcp_connections_list_with_icons(connection_callback, icon_callback,
+            &callbacks, NULL) != 1) return 14;
     ha_mcp_connection_operation_destroy(NULL);
     return callbacks ? 11 : 0;
 }

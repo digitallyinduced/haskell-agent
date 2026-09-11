@@ -48,7 +48,7 @@ import Agent.MCP.Types
       McpServerStatus(..),
       McpInitState(McpFailed, McpClosed, McpPending, McpInitializing,
                    McpReady),
-      McpHostHooks(mcpHostElicit, mcpHostRoots, mcpHostSample),
+      McpHostHooks(mcpHostElicit, mcpHostRoots, mcpHostSample, mcpHostServerInfo),
       McpServerConfig(mcpServerEnv, mcpServerCwd, mcpServerCommand,
                       mcpServerArgs, mcpServerStartupTimeoutSeconds, mcpServerProtocol,
                       mcpServerName, mcpServerUrl, mcpServerRootsEnabled,
@@ -85,7 +85,7 @@ import Control.Concurrent.STM
       TMVar )
 import Control.Exception.Safe
     ( bracketOnError, finally, onException, tryAny, MonadMask(mask) )
-import Control.Monad ( void )
+import Control.Monad ( void, forM_ )
 import Control.Monad.Trans.Class ()
 import Control.Monad.Trans.Except ()
 import Data.Aeson ( KeyValue((.=)) )
@@ -348,6 +348,8 @@ ensureMcpClientReadyWith publishReady client = mask \restore -> do
                     closeMcpClient client
                 initialize = do
                     negotiateProtocol client
+                    info <- readTVarIO client.clientServerInfo
+                    forM_ info (client.clientHooks.mcpHostServerInfo client.clientConfig)
                     loggingWarnings <- configureLegacyLogging client
                     skillWarnings <- discoverMcpSkills client
                     startSubscriptions client
