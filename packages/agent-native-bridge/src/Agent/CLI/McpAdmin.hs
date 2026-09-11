@@ -22,6 +22,7 @@ module Agent.CLI.McpAdmin
 import Agent.CLI.Config
     ( HarnessConfig(..)
     , McpServerConfig(..)
+    , mcpUsesConnectionCredentials
     , loadHarnessConfigSnapshot
     , modifyHarnessConfigEffect
     , withHarnessConfigSnapshot
@@ -93,7 +94,7 @@ listMcpAdminServers home =
     loadSnapshot home \config ->
         [ publicServer name server
         | (name, server) <- Map.toAscList config.configMcpServers
-        , server.mcpConnectionId == Nothing
+        , not (mcpUsesConnectionCredentials server)
         ]
 
 readMcpAdminServer
@@ -220,7 +221,7 @@ removeMcpAdminServer home expected name =
     mutate home expected \config -> do
         when (not (Map.member name config.configMcpServers)) $
             Left (McpAdminNotFound name)
-        when (maybe False ((/= Nothing) . (.mcpConnectionId))
+        when (maybe False mcpUsesConnectionCredentials
                 (Map.lookup name config.configMcpServers)) $
             Left (McpAdminInvalid "Managed MCP connections must be removed through the connection API")
         pure
@@ -306,6 +307,7 @@ inputServer enabled input = McpServerConfig
     { mcpEnabled = enabled
     , mcpUrl = Nothing
     , mcpConnectionId = Nothing
+    , mcpConnectionCredentials = Nothing
     , mcpConnectionGeneration = Nothing
     , mcpDisplayName = Nothing
     , mcpCommand = Text.strip input.mcpAdminInputCommand

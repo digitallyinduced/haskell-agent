@@ -6,7 +6,7 @@ module Agent.CLI.Runtime.Orchestration.Tools.Mcp
 
 import Agent.CLI.Config
     ( HarnessConfig(..), McpServerConfig(..)
-    , mcpServersForRuntime, useProgressiveMcp )
+    , mcpServersForRuntime, useProgressiveMcp, mcpUsesConnectionCredentials )
 import Agent.CLI.FileUri (fileUri)
 import Agent.CLI.IntegrationGateway (integrationEndpointServers)
 import Agent.CLI.McpElicitation (cliMcpElicitation)
@@ -72,7 +72,7 @@ mcpConfiguration AgentToolsRequest
             { MCP.mcpServerName = label
             , MCP.mcpServerConnection = fmap (\identifier -> MCP.McpConnectionIdentity
                 identifier config.mcpConnectionGeneration config.mcpDisplayName)
-                config.mcpConnectionId
+                (if mcpUsesConnectionCredentials config then config.mcpConnectionId else Nothing)
             , MCP.mcpServerUrl = config.mcpUrl
             , MCP.mcpServerCommand = Text.unpack config.mcpCommand
             , MCP.mcpServerArgs = map Text.unpack config.mcpArgs
@@ -82,8 +82,8 @@ mcpConfiguration AgentToolsRequest
             , MCP.mcpServerEnv =
                 [ (Text.unpack name, Text.unpack value)
                 | (name, value) <- Map.toAscList config.mcpEnv
-                ] <> case (config.mcpConnectionId, config.mcpUrl) of
-                    (Nothing, Just url)
+                ] <> case (mcpUsesConnectionCredentials config, config.mcpUrl) of
+                    (False, Just url)
                         | Map.notMember
                             "MCP_OAUTH_TOKEN_FILE"
                             config.mcpEnv ->

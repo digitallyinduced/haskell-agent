@@ -1,6 +1,7 @@
 module Agent.CLI.McpConnectionSpec (spec) where
 
-import Agent.CLI.Config (HarnessConfig(..), McpServerConfig(..), loadHarnessConfig)
+import Agent.CLI.Config (HarnessConfig(..), McpServerConfig(..), loadHarnessConfig, harnessConfigPath, saveHarnessConfig, mcpUsesConnectionCredentials)
+import Control.Concurrent.Async (concurrently)
 import Agent.CLI.McpAdmin
 import Agent.CLI.McpConnection
 import Control.Exception.Safe (bracket)
@@ -15,6 +16,44 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.CLI.McpConnection" do
+    it "migrates legacy CLI connections once and manages them by identity without renaming keys" $
+        withTempDir \home -> do
+            path <- decodeUtf (harnessConfigPath home)
+            Directory.createDirectoryIfMissing True (FilePath.takeDirectory path)
+            writeFile path "{\"version\":1,\"mcpServers\":{\"saasflow\":{\"url\":\"https://example.test/mcp\",\"env\":{\"MCP_ACCESS_TOKEN\":\"test-token\"},\"roots\":true},\"local\":{\"command\":\"test-server\"}}}"
+            (Right first, Right second) <- concurrently
+                (listMcpConnections home) (listMcpConnections home)
+            first `shouldBe` second
+            [connection] <- pure first.mcpAdminValue
+            connection.connectionDisplayName `shouldBe` "saasflow"
+            Right config <- loadHarnessConfig home
+            let server = config.configMcpServers Map.! "saasflow"
+            mcpUsesConnectionCredentials server `shouldBe` False
+            server.mcpEnv `shouldBe` Map.singleton "MCP_ACCESS_TOKEN" "test-token"
+            server.mcpRoots `shouldBe` True
+            (config.configMcpServers Map.! "local").mcpConnectionId `shouldBe` Nothing
+            saveHarnessConfig home config `shouldReturn` Right ()
+            listMcpConnections home `shouldReturn` Right first
+            let host = McpConnectionAuthorizationHost
+                    { connectionLoadCredential = \_ -> expectationFailure "Unexpected credential read" >> pure (Right Nothing)
+                    , connectionSaveCredential = \_ _ -> expectationFailure "Unexpected credential write" >> pure (Right ())
+                    , connectionProbe = \_ _ -> expectationFailure "Unexpected probe" >> pure (Right McpConnectionReady)
+                    }
+            authorizeMcpConnectionWith host home first.mcpAdminRevision connection.connectionId
+                (\_ -> expectationFailure "Unexpected browser launch" >> pure (Right ()))
+                `shouldReturn` Left (McpAdminInvalid "This connection uses CLI-configured credentials. Use agent-cli mcp login to update its authorization.")
+            listMcpConnections home `shouldReturn` Right first
+            Right renamed <- renameMcpConnection home first.mcpAdminRevision connection.connectionId "Finance"
+            Right disabled <- setMcpConnectionEnabled home renamed.mcpAdminRevision connection.connectionId False
+            Right changed <- loadHarnessConfig home
+            Map.keys changed.configMcpServers `shouldBe` ["local", "saasflow"]
+            mcpUsesConnectionCredentials (changed.configMcpServers Map.! "saasflow") `shouldBe` False
+            Right _ <- removeMcpConnectionWith
+                (const (expectationFailure "must not delete unrelated protected credentials" >> pure (Right ())))
+                home disabled.mcpAdminRevision connection.connectionId
+            Right remaining <- loadHarnessConfig home
+            Map.keys remaining.configMcpServers `shouldBe` ["local"]
+
     it "creates distinct identities and namespaces for the same endpoint" $
         withTempDir \home -> do
             Right initial <- listMcpConnections home

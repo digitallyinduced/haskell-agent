@@ -30,6 +30,7 @@ import Agent.CLI.Config
     , McpOAuthConfig(..)
     , McpServerConfig(..)
     , WebFetchConfig(..)
+    , mcpUsesConnectionCredentials
     )
 import Agent.CLI.GatewayClient (cachedGatewayModels, gatewayModelIds)
 import Agent.CLI.Interrupt (withTurnCancel)
@@ -104,7 +105,7 @@ applyMetaConfigAction secrets config = \case
         let name = proposed.metaMcpName
             existing = Map.lookup name config.configMcpServers
         remote <- resolveMetaMcpUrl name existing proposed.metaMcpUrl
-        when (maybe False ((/= Nothing) . (.mcpConnectionId)) existing
+        when (maybe False mcpUsesConnectionCredentials existing
                 && remote /= (existing >>= (.mcpUrl))) $
             Left "Managed MCP connection endpoints cannot be changed"
         let
@@ -128,8 +129,9 @@ applyMetaConfigAction secrets config = \case
             next = McpServerConfig
                 { mcpEnabled = proposed.metaMcpEnabled
                 , mcpUrl = remote
-                , mcpConnectionId = existing >>= (.mcpConnectionId)
-                , mcpConnectionGeneration = existing >>= (.mcpConnectionGeneration)
+                , mcpConnectionId = remote >> (existing >>= (.mcpConnectionId))
+                , mcpConnectionCredentials = remote >> (existing >>= (.mcpConnectionCredentials))
+                , mcpConnectionGeneration = remote >> (existing >>= (.mcpConnectionGeneration))
                 , mcpDisplayName = existing >>= (.mcpDisplayName)
                 , mcpCommand =
                     maybe "" Text.strip proposed.metaMcpCommand
@@ -163,7 +165,7 @@ applyMetaConfigAction secrets config = \case
             }
     MetaRemoveMcp name -> do
         server <- requireLookup "MCP server" name config.configMcpServers
-        when (server.mcpConnectionId /= Nothing) $
+        when (mcpUsesConnectionCredentials server) $
             Left "Remove managed MCP connections from Plugins so their credentials are deleted"
         Right config
             { configMcpServers =

@@ -31,6 +31,30 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.CLI.Config" do
+    it "preserves the credential-store default for existing managed identities" do
+        mcpUsesConnectionCredentials httpMcpServer
+            { mcpConnectionId = Just "existing" } `shouldBe` True
+        mcpUsesConnectionCredentials httpMcpServer
+            { mcpConnectionId = Just "migrated", mcpConnectionCredentials = Just False }
+            `shouldBe` False
+
+    it "rejects duplicate connection identities across different tool prefixes" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home
+                "{\"version\":1,\"mcpServers\":{\"first\":{\"url\":\"https://example.test/mcp\",\"connectionId\":\"same\"},\"second\":{\"url\":\"https://example.test/mcp\",\"connectionId\":\"same\"}}}"
+            loadHarnessConfig home `shouldReturn` Left "MCP connection identities must be unique"
+
+    it "assigns identities to disabled CLI connections without enabling them" $
+        withTempDir "agent-config-" \home -> do
+            saveHarnessConfig home defaultHarnessConfig
+                { configMcpServers = Map.singleton "disabled" httpMcpServer { mcpEnabled = False } }
+                `shouldReturn` Right ()
+            Right config <- loadHarnessConfig home
+            let server = config.configMcpServers Map.! "disabled"
+            server.mcpConnectionId `shouldSatisfy` isJust
+            server.mcpEnabled `shouldBe` False
+            mcpUsesConnectionCredentials server `shouldBe` False
+
     describe "mcpServerEnabledForRuntime" do
         it "keeps remote HTTP MCP enabled without host command extensions" do
             mcpServerEnabledForRuntime True False httpMcpServer
@@ -98,6 +122,7 @@ spec = describe "Agent.CLI.Config" do
                                 { mcpEnabled = True
                                 , mcpUrl = Just "https://example.test/mcp"
                                 , mcpConnectionId = Nothing
+                                , mcpConnectionCredentials = Nothing
                                 , mcpConnectionGeneration = Nothing
                                 , mcpDisplayName = Nothing
                                 , mcpCommand = ""
@@ -114,6 +139,7 @@ spec = describe "Agent.CLI.Config" do
                                 }
                         }
             saveHarnessConfig home original `shouldReturn` Right ()
+            Right identified <- loadHarnessConfig home
             result <- updateHarnessConfig home \config ->
                 Right config { configMaxConcurrentAgents = Just 12 }
             fmap (.configMaxConcurrentAgents) result `shouldBe` Right (Just 12)
@@ -121,7 +147,7 @@ spec = describe "Agent.CLI.Config" do
             fmap
                 (Map.lookup "kept" . (.configMcpServers))
                 loaded
-                `shouldBe` Right (Map.lookup "kept" original.configMcpServers)
+                `shouldBe` Right (Map.lookup "kept" identified.configMcpServers)
 
     it "loads MCP servers with defaults and deterministic map ordering" $
         withTempDir "agent-config-" \home -> do
@@ -139,6 +165,7 @@ spec = describe "Agent.CLI.Config" do
                             { mcpEnabled = False
                             , mcpUrl = Nothing
                             , mcpConnectionId = Nothing
+                            , mcpConnectionCredentials = Nothing
                             , mcpConnectionGeneration = Nothing
                             , mcpDisplayName = Nothing
                             , mcpCommand = "a"
@@ -158,6 +185,7 @@ spec = describe "Agent.CLI.Config" do
                             { mcpEnabled = True
                             , mcpUrl = Nothing
                             , mcpConnectionId = Nothing
+                            , mcpConnectionCredentials = Nothing
                             , mcpConnectionGeneration = Nothing
                             , mcpDisplayName = Nothing
                             , mcpCommand = "z"
@@ -417,6 +445,7 @@ spec = describe "Agent.CLI.Config" do
                     { mcpEnabled = True
                     , mcpUrl = Nothing
                     , mcpConnectionId = Nothing
+                    , mcpConnectionCredentials = Nothing
                     , mcpConnectionGeneration = Nothing
                     , mcpDisplayName = Nothing
                     , mcpCommand = "nix"
@@ -452,6 +481,7 @@ spec = describe "Agent.CLI.Config" do
                             { mcpEnabled = True
                             , mcpUrl = Nothing
                             , mcpConnectionId = Nothing
+                            , mcpConnectionCredentials = Nothing
                             , mcpConnectionGeneration = Nothing
                             , mcpDisplayName = Nothing
                             , mcpCommand = ""
@@ -582,6 +612,7 @@ testMcpServer =
         { mcpEnabled = True
         , mcpUrl = Nothing
         , mcpConnectionId = Nothing
+        , mcpConnectionCredentials = Nothing
         , mcpConnectionGeneration = Nothing
         , mcpDisplayName = Nothing
         , mcpCommand = ""
