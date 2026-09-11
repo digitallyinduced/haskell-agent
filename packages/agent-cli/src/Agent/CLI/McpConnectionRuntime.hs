@@ -3,6 +3,8 @@ module Agent.CLI.McpConnectionRuntime
     ( mcpConnectionCredentials
     , registerMcpConnectionRuntime
     , invalidateMcpConnectionRuntimes
+    , observeMcpConnectionInfo
+    , readMcpConnectionIcons
     ) where
 
 import Agent.CLI.Config (HarnessConfig(..), McpServerConfig(..), withHarnessConfigSnapshot, harnessConfigPath, mcpUsesConnectionCredentials)
@@ -18,6 +20,27 @@ import System.IO.Unsafe (unsafePerformIO)
 import System.OsPath (takeDirectory, (</>))
 import qualified Data.Text as Text
 import Data.Char (isAsciiLower, isAsciiUpper, isDigit)
+
+-- Process-local, bounded metadata cache. Identity, generation and endpoint
+-- must all match; a removed/replaced connection cannot inherit another icon.
+{-# NOINLINE connectionIcons #-}
+connectionIcons :: IORef (Map.Map (Text.Text, Maybe Text.Text, Maybe Text.Text) [MCP.McpIcon])
+connectionIcons = unsafePerformIO (newIORef Map.empty)
+
+observeMcpConnectionInfo :: MCP.McpServerConfig -> MCP.McpServerInfo -> IO ()
+observeMcpConnectionInfo config info = case config.mcpServerConnection of
+    Nothing -> pure ()
+    Just identity -> atomicModifyIORef' connectionIcons \current ->
+        let key = (identity.mcpConnectionIdentifier,
+                identity.mcpConnectionGeneration, config.mcpServerUrl)
+            bounded = if Map.size current >= 256 then Map.empty else current
+            icons = take 8 $ filter (\icon -> Text.length icon.iconSrc <= 262144)
+                info.serverInfoIcons
+        in (Map.insert key icons bounded, ())
+
+readMcpConnectionIcons :: Text.Text -> Maybe Text.Text -> Text.Text -> IO [MCP.McpIcon]
+readMcpConnectionIcons identifier generation endpoint =
+    Map.findWithDefault [] (identifier, generation, Just endpoint) <$> readIORef connectionIcons
 
 runtimeInvalidators :: IORef (Map.Map Unique (IO ()))
 runtimeInvalidators = unsafePerformIO (newIORef Map.empty)

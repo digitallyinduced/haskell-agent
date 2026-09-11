@@ -20,7 +20,7 @@ module Agent.CLI.McpConnection
 import Agent.CLI.Config (HarnessConfig(..), McpServerConfig(..), withHarnessConfigSnapshot, mcpUsesConnectionCredentials)
 import Agent.CLI.McpAdmin
 import Agent.CLI.McpConnectionCredentials (loadMcpConnectionRecord, saveMcpConnectionRecord, deleteMcpConnectionRecord)
-import Agent.CLI.McpConnectionRuntime (invalidateMcpConnectionRuntimes)
+import Agent.CLI.McpConnectionRuntime (invalidateMcpConnectionRuntimes, observeMcpConnectionInfo)
 import Agent.CLI.McpOAuth (McpOAuthHost(..), authorizeMcpWith, defaultLoginOptions)
 import Agent.MCP (McpProtocolPreference(..))
 import qualified Agent.MCP as MCP
@@ -91,7 +91,8 @@ probeMcpConnection server credential = do
         Right value -> value
   where
     hooks = MCP.defaultMcpHostHooks
-        { MCP.mcpHostCredentials = const $ pure $ Just MCP.McpCredentialProvider
+        { MCP.mcpHostServerInfo = observeMcpConnectionInfo
+        , MCP.mcpHostCredentials = const $ pure $ Just MCP.McpCredentialProvider
             { MCP.mcpCredentialAccessToken =
                 pure (Right ((.tokenAccessToken) . fst <$> credential))
             , MCP.mcpCredentialRefreshAccessToken =
@@ -100,7 +101,7 @@ probeMcpConnection server credential = do
         }
     runtimeConfig = MCP.McpServerConfig
         { MCP.mcpServerName = connectionServerName (fromMaybe "probe" server.mcpConnectionId)
-        , MCP.mcpServerConnection = Nothing
+        , MCP.mcpServerConnection = (\identifier -> MCP.McpConnectionIdentity identifier server.mcpConnectionGeneration Nothing) <$> server.mcpConnectionId
         , MCP.mcpServerUrl = server.mcpUrl
         , MCP.mcpServerCommand = ""
         , MCP.mcpServerArgs = []

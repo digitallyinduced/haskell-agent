@@ -107,6 +107,24 @@ typedef void (*ha_mcp_connection_authorization_callback)(
 int32_t ha_mcp_connections_list(
     ha_mcp_connection_callback callback, void *context, void **out_operation
 );
+/* Like list, with zero or more advertised icons after each row and before the
+ * terminal callback. No network I/O: only metadata negotiated in this process.
+ * Both callbacks are required, serial on the operation worker. UTF-8 buffers
+ * are callback-scoped; copy before returning. Empty MIME/theme means absent.
+ * Icons are untrusted: consumers must validate URLs and image content.
+ * All list status, cancellation, context and handle ownership rules apply.
+ */
+typedef void (*ha_mcp_connection_icon_callback)(
+    void *context,
+    const uint8_t *connection_id, size_t connection_id_length,
+    const uint8_t *src, size_t src_length,
+    const uint8_t *mime_type, size_t mime_type_length,
+    const uint8_t *theme, size_t theme_length
+);
+int32_t ha_mcp_connections_list_with_icons(
+    ha_mcp_connection_callback callback, ha_mcp_connection_icon_callback icons,
+    void *context, void **out_operation
+);
 int32_t ha_mcp_connection_create(
     uint64_t expected_revision,
     const uint8_t *display_name, size_t display_name_length,

@@ -87,7 +87,7 @@ import Agent.CLI.Timestamp (MessageClock, parseMessageClock)
 import Agent.TUI.Motion (MotionMode(..))
 import Agent.Tools.Types (defaultToolEnv)
 import qualified Agent.MCP as MCP
-import Agent.CLI.McpConnectionRuntime (mcpConnectionCredentials, registerMcpConnectionRuntime)
+import Agent.CLI.McpConnectionRuntime (mcpConnectionCredentials, registerMcpConnectionRuntime, observeMcpConnectionInfo)
 import Control.Exception.Safe (finally, mask, onException)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -130,7 +130,10 @@ newNativeProcessRuntimeWithOrganizationIntegrations provider organizationProvide
             borrowedLocalProvider organizationProvider integrationToolEnv)
             `onException` closeIntegrationSupervisor localIntegrations
     core <- restore (NativeProcess.newNativeProcessRuntimeWithMcpHooks
-        MCP.defaultMcpHostHooks { MCP.mcpHostCredentials = mcpConnectionCredentials }
+        MCP.defaultMcpHostHooks
+            { MCP.mcpHostCredentials = mcpConnectionCredentials
+            , MCP.mcpHostServerInfo = observeMcpConnectionInfo
+            }
         root) `onException` (closeIntegrationSupervisor integrations
             `finally` closeIntegrationSupervisor localIntegrations)
     unregister <- registerMcpConnectionRuntime (NativeProcess.restartNativeMcpRuntime core)
