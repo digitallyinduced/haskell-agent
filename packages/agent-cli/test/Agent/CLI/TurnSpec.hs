@@ -8,8 +8,7 @@ import Agent.CLI.Turn
     , takeGrokFirstTurnContext
     )
 import Agent.CLI.TurnState
-import Agent.CLI.Session.Lifecycle (exitFailedTurn)
-import Agent.CLI.Runtime.Types (StartupFailure(..))
+import Agent.CLI.NativeRuntime (StartupFailure(..), exitFailedTurn)
 import Agent.CLI.Compaction (AutomaticCompactionBoundary(..))
 import Agent.Error (ApiError(..))
 import Agent.Loop

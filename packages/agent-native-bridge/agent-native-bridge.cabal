@@ -175,6 +175,7 @@ test-suite agent-native-bridge-test
                     , Agent.CLI.ResourceAdminSpec
     build-depends:    agent-native-bridge
                     , agent-cli
+                    , agent-cli-runtime
                     , agent-responses-types
                     , agent-integration-api
                     , agent-core

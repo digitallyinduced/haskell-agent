@@ -23,8 +23,7 @@ import Agent.CLI.GatewayClient
     , registerGatewayCredentialInvalidatorAt
     , saveGatewayCredentialAt
     )
-import Agent.CLI.NativeRuntime (StartupFailure(..))
-import Agent.CLI.Session.Lifecycle (exitFailedTurn)
+import Agent.CLI.NativeRuntime (StartupFailure(..), exitFailedTurn)
 import Agent.CLI.MacOS.TurnEvents (turnFailedEvent)
 import Control.Concurrent
     ( newEmptyMVar

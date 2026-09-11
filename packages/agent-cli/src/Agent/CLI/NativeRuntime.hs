@@ -13,6 +13,7 @@ module Agent.CLI.NativeRuntime
     , NativeTurnRequest(..)
     , NativeMessageClock(..)
     , StartupFailure(..)
+    , exitFailedTurn
     , closeNativeProcessRuntime
     , newNativeProcessRuntime
     , newNativeProcessRuntimeWithIntegrations
@@ -28,6 +29,7 @@ module Agent.CLI.NativeRuntime
     ) where
 
 import qualified Agent.CLI.NativeProcess as NativeProcess
+import Agent.CLI.Session.Lifecycle (exitFailedTurn)
 import Agent.CLI.Session.Runner.Execution (applyNativeInteractionMode)
 import Agent.Integration.API
     ( IntegrationSupervisor
