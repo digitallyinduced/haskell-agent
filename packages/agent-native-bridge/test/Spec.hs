@@ -14,6 +14,7 @@ import qualified Agent.CLI.McpAdminSpec as McpAdminSpec
 import qualified Agent.CLI.McpConnectionSpec as McpConnectionSpec
 import qualified Agent.CLI.ResourceAdminSpec as ResourceAdminSpec
 #ifdef darwin_HOST_OS
+import qualified Agent.CLI.MacOS.InstalledSkillsSpec as InstalledSkillsSpec
 import qualified Agent.CLI.MacOS.AccountConnectionSpec as AccountConnectionSpec
 import qualified Agent.CLI.MacOS.MobileGatewaySpec as MobileGatewaySpec
 import qualified Agent.CLI.MacOS.BridgeFFISpec as BridgeFFISpec
@@ -39,6 +40,7 @@ main = hspec do
     RepositoryWorkersSpec.spec
     RepositoryInputSpec.spec
 #ifdef darwin_HOST_OS
+    InstalledSkillsSpec.spec
     AccountConnectionSpec.spec
     MobileGatewaySpec.spec
     BrowserBridgeFFISpec.spec
