@@ -70,6 +70,7 @@ testConfig backend = do
             [ typedTool "echo" echoArgsDecoder $ \EchoArgs { message } ->
                 pure (Right ("echo:" <> message))
             ]
+        , loopReadTools = Nothing
         , loopDispatch = defaultLoopDispatch
         , loopMaxTurns = defaultLoopMaxTurns
         , loopOnEvent = \_ -> pure ()

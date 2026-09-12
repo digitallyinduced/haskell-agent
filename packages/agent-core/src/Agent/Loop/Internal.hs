@@ -113,6 +113,10 @@ data LoopConfig = LoopConfig
     { loopBackend :: !Backend
     , loopBackendState :: !BackendStateStore
     , loopTools :: !ToolRegistry
+    -- | Refresh the request's tool exposure before submission. The returned
+    -- registry is retained for every call admitted from that response; changes
+    -- made by discovery tools take effect only on the next request.
+    , loopReadTools :: !(Maybe (IO ToolRegistry))
     , loopDispatch :: !ToolDispatchConfig
     , loopMaxTurns :: !Int
     , loopOnEvent :: !(LoopEvent -> IO ())
@@ -415,7 +419,10 @@ runLoopState runtime = do
                     (Left (LoopCancelled []))
                 else do
                     config.loopOnEvent TurnStarted
-                    submission <- submitLoopTurn runtime state
+                    tools <- maybe (pure config.loopTools) id config.loopReadTools
+                    let requestRuntime = runtime
+                            { loopRuntimeConfig = config { loopTools = tools } }
+                    submission <- submitLoopTurn requestRuntime state
                     case submission of
                         SubmissionCancelled ->
                             finishLoopExecution runtime
@@ -427,7 +434,7 @@ runLoopState runtime = do
                                 finishLoopExecution runtime
                                     (Left LoopNoResponseId)
                         SubmissionReturned BackendResult{backendOutput} ->
-                            continueCommittedLoop runtime backendOutput
+                            continueCommittedLoop requestRuntime backendOutput
 
 submitLoopTurn
     :: LoopRuntime
@@ -542,6 +549,7 @@ submitLoopTurn runtime state = do
                                 RecoveryClosed -> pure ()
                                 RecoveryOpen{} ->
                                     ToolExecution.admitAsyncToolCall
+                                        config.loopTools
                                         (toolScope runtime)
                                         call
                         , onRecoveryCheckpoint = checkpoint
@@ -662,7 +670,7 @@ completeLoopTurn runtime turn = do
     clearSteeringAcknowledgement runtime
     race
         (waitCancel config.loopCancel)
-        (ToolExecution.runToolCalls (toolScope runtime) turn.toolCalls)
+        (ToolExecution.runToolCalls config.loopTools (toolScope runtime) turn.toolCalls)
         >>= \case
             Left () ->
                 -- Leaving the enclosing tool scope cancels and joins

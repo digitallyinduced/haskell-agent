@@ -256,6 +256,7 @@ recoveryConfig backend tools items = do
             , commitBackendState = \snapshot -> writeIORef state snapshot >> pure snapshot
             }
         , loopTools = registry
+        , loopReadTools = Nothing
         , loopDispatch = defaultLoopDispatch
         , loopMaxTurns = defaultLoopMaxTurns
         , loopOnEvent = const (pure ())

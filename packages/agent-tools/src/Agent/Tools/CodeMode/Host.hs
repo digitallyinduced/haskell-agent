@@ -17,6 +17,7 @@ module Agent.Tools.CodeMode.Host
     , defaultCodeModeConfig
     , execCodeCell
     , execCodeCellWithTools
+    , codeModeHostWithToolHandler
     , newCodeModeHost
     , readRunningCodeCells
     , terminateCodeCell
@@ -178,6 +179,13 @@ closeCodeModeHost host = do
     mapM_ cancel filler
     mapM_ (void . waitCatch) filler
     mapM_ stopIdleWorker idle
+
+-- | Select an immutable dispatcher for newly started cells while retaining
+-- the session's worker pool, stored values, and running-cell ownership.
+-- Existing cells retain the dispatcher captured when they started.
+codeModeHostWithToolHandler :: CodeModeHost -> CodeModeToolHandler -> CodeModeHost
+codeModeHostWithToolHandler host handler =
+    host { hostConfig = host.hostConfig { toolHandler = handler } }
 
 execCodeCell
     :: CodeModeHost

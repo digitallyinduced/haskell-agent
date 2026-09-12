@@ -92,6 +92,9 @@ data ToolScope = ToolScope
 
 data AdmittedToolCall = AdmittedToolCall
     { admittedCall :: !ToolCall
+    -- The registry exposed for this request, retained through approval,
+    -- scheduling and execution even when later requests refresh their tools.
+    , admittedTools :: !ToolRegistry
     , admittedResult :: !(TMVar (Maybe ToolCallResult))
     -- Recorded by the worker before event delivery; unlike admittedResult,
     -- this does not release scheduling barriers or normal result waiters.
@@ -147,29 +150,31 @@ readToolRecoveryEvidence scope = atomically do
 readToolFailure :: ToolScope -> IO (Maybe SomeException)
 readToolFailure scope = atomically (tryReadTMVar scope.asyncToolFailure)
 
-admitAsyncToolCall :: ToolScope -> ToolCall -> IO ()
-admitAsyncToolCall scope call
+admitAsyncToolCall :: ToolRegistry -> ToolScope -> ToolCall -> IO ()
+admitAsyncToolCall tools scope call
     | toolCallMode call /= AsyncToolCall =
         atomically $
             throwSTM $
                 AsyncToolCallConflict
                     ("Backend announced a non-async tool call: " <> call.callId)
     | otherwise = do
-        _ <- atomically (admitToolCall scope call)
+        _ <- atomically (admitToolCall tools scope call)
         pure ()
 
 admitBlockingToolCall
-    :: ToolScope
+    :: ToolRegistry
+    -> ToolScope
     -> ToolCall
     -> IO (TMVar (Maybe ToolCallResult))
-admitBlockingToolCall scope call =
-    atomically (admitToolCall scope call)
+admitBlockingToolCall tools scope call =
+    atomically (admitToolCall tools scope call)
 
 admitToolCall
-    :: ToolScope
+    :: ToolRegistry
+    -> ToolScope
     -> ToolCall
     -> STM (TMVar (Maybe ToolCallResult))
-admitToolCall scope call = do
+admitToolCall tools scope call = do
     calls <- readTVar scope.asyncToolCalls
     case Map.lookup call.callId calls of
         Just existing
@@ -186,6 +191,7 @@ admitToolCall scope call = do
             -- recovery, so its size is also the next admission sequence.
             let record = AdmittedToolCall
                     { admittedCall = call
+                    , admittedTools = tools
                     , admittedResult = result
                     , admittedTrustedResult = trustedResult
                     , admissionSequence = Map.size calls
@@ -198,8 +204,8 @@ admitToolCall scope call = do
             writeTQueue scope.asyncToolRequests record
             pure result
 
-runToolCalls :: ToolScope -> [ToolCall] -> IO [ToolCallResult]
-runToolCalls scope calls = do
+runToolCalls :: ToolRegistry -> ToolScope -> [ToolCall] -> IO [ToolCallResult]
+runToolCalls tools scope calls = do
     blocking <- catMaybes <$> traverse admit calls
     blockingResults <-
         catMaybes <$> traverse (atomically . readTMVar) blocking
@@ -227,9 +233,9 @@ runToolCalls scope calls = do
     admit call =
         case toolCallMode call of
             AsyncToolCall ->
-                admitAsyncToolCall scope call >> pure Nothing
+                admitAsyncToolCall tools scope call >> pure Nothing
             BlockingToolCall ->
-                Just <$> admitBlockingToolCall scope call
+                Just <$> admitBlockingToolCall tools scope call
 
 takeAsyncToolCompletions :: ToolScope -> STM [ToolCallResult]
 takeAsyncToolCompletions scope = do
@@ -259,6 +265,7 @@ withToolScope config scope = withAsync (runToolScheduler config scope)
 runToolScheduler :: ToolExecutionConfig -> ToolScope -> IO ()
 runToolScheduler config scope = do
     request <- atomically (readTQueue scope.asyncToolRequests)
+    let requestConfig = config { tools = request.admittedTools }
     cancelledBefore <- isCancelled config.cancel
     if cancelledBefore
         then completeCancelledRequest request
@@ -267,8 +274,8 @@ runToolScheduler config scope = do
                 (waitCancel config.cancel)
                 (do
                     prepared <-
-                        prepareAdmittedToolCall config request.admittedCall
-                    plan <- schedulingPlanForPrepared config prepared
+                        prepareAdmittedToolCall requestConfig request.admittedCall
+                    plan <- schedulingPlanForPrepared requestConfig prepared
                     pure (prepared, plan))
                 >>= \case
                     Left () ->
@@ -286,7 +293,7 @@ runToolScheduler config scope = do
                                             plan)
                                 withAsync
                                     (runToolWorker
-                                        config scope request prepared plan)
+                                        requestConfig scope request prepared plan)
                                     \worker ->
                                         withAsync
                                             (waitCatch worker

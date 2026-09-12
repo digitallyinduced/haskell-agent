@@ -813,7 +813,7 @@ spec = describe "code-mode Bun host" do
                 ParallelSafe
                 (typedTool "double" doubleArgsDecoder \(args :: DoubleArgs) ->
                     pure (Right (Text.pack (show (args.value * 2)))))
-            invoke call = do
+            invoke _tool call = do
                 modifyIORef' approvals (+ 1)
                 result <- dispatchToolCall
                     defaultLoopDispatch
@@ -837,6 +837,96 @@ spec = describe "code-mode Bun host" do
         readIORef approvals `shouldReturn` 1
         toolSet.closeCodeModeToolSet
 
+    it "retains running cell dispatchers when the host surface changes" do
+        worker <- codeModeWorkerPath
+        entered <- newEmptyMVar
+        release <- newEmptyMVar
+        let originalHandler _ _ = do
+                putMVar entered ()
+                takeMVar release
+                pure (Right (String "original dispatcher"))
+            refreshedHandler _ _ =
+                pure (Right (String "refreshed dispatcher"))
+        withCodeModeHost (defaultCodeModeConfig worker originalHandler) \host ->
+            withAsync (execCodeCell host
+                "text(await tools.operation({}));" ["operation"] 10000) \running -> do
+                observed <- timeout 3000000 (takeMVar entered)
+                observed `shouldBe` Just ()
+                let refreshedHost = codeModeHostWithToolHandler host refreshedHandler
+                result <- execCodeCell refreshedHost
+                    "text(await tools.operation({}));" ["operation"] 3000
+                show result `shouldSatisfy`
+                    Data.List.isInfixOf "refreshed dispatcher"
+                putMVar release ()
+                original <- wait running
+                show original `shouldSatisfy`
+                    Data.List.isInfixOf "original dispatcher"
+
+    it "refreshes declarations and invocation without expanding old exec capabilities" do
+        worker <- codeModeWorkerPath
+        invoked <- newIORef (0 :: Int)
+        capturedDescriptions <- newIORef []
+        let discovered = jsonAppToolWithExecution
+                "discovered"
+                "Discovered operation."
+                []
+                AlwaysReadOnly
+                ParallelSafe
+                (typedTool "discovered" emptyObjectDecoder \() ->
+                    pure (Right "discovered result"))
+            invoke tool call = do
+                modifyIORef' invoked (+ 1)
+                modifyIORef' capturedDescriptions (<> [tool.appToolDescription])
+                Right <$> dispatchToolCall defaultLoopDispatch
+                    [toolHandlerOf tool] call
+        created <- newCodeModeToolSet
+            CodeOnlyToolMode ImageDetailVisible worker invoke []
+        toolSet <- either (fail . Text.unpack) pure created
+        flip finally toolSet.closeCodeModeToolSet do
+            refreshed <- toolSet.codeModeRefreshToolSet [plainNested discovered]
+                >>= either (fail . Text.unpack) pure
+            let refreshedSet = toolSet { codeModeTools = refreshed }
+            map (.appToolDescription) refreshed
+                `shouldSatisfy` any (Text.isInfixOf "Discovered operation.")
+            original <- runRegisteredExec toolSet
+                "try { await tools.discovered({}); } catch (error) { text(String(error)); }"
+            original `shouldSatisfy` Text.isInfixOf "not available"
+            result <- runRegisteredExec refreshedSet
+                "text(ALL_TOOLS); text(await tools.discovered({}));"
+            result `shouldSatisfy` Text.isInfixOf "discovered result"
+            result `shouldSatisfy` Text.isInfixOf "Discovered operation."
+            readIORef invoked `shouldReturn` 1
+            let replacement = discovered
+                    { appToolDescription = "Replacement operation." }
+            replaced <- toolSet.codeModeRefreshToolSet [plainNested replacement]
+                >>= either (fail . Text.unpack) pure
+            map (.appToolDescription) replaced
+                `shouldSatisfy` any (Text.isInfixOf "Replacement operation.")
+            retained <- runRegisteredExec refreshedSet
+                "text(ALL_TOOLS); text(await tools.discovered({}));"
+            retained `shouldSatisfy` Text.isInfixOf "Discovered operation."
+            retained `shouldSatisfy` (not . Text.isInfixOf "Replacement operation.")
+            _ <- runRegisteredExec (toolSet { codeModeTools = replaced })
+                "text(await tools.discovered({}));"
+            readIORef capturedDescriptions `shouldReturn`
+                [ "Discovered operation."
+                , "Discovered operation."
+                , "Replacement operation."
+                ]
+            removed <- toolSet.codeModeRefreshToolSet []
+                >>= either (fail . Text.unpack) pure
+            unavailable <- runRegisteredExec
+                (toolSet { codeModeTools = removed })
+                "try { await tools.discovered({}); } catch (error) { text(String(error)); }"
+            unavailable `shouldSatisfy` Text.isInfixOf "not available"
+            collision <- toolSet.codeModeRefreshToolSet
+                [ plainNested (discovered { appToolName = "look-up" })
+                , plainNested (discovered { appToolName = "look_up" })
+                ]
+            fmap (map (.appToolName)) collision `shouldSatisfy` \case
+                Left message -> "identifier collision" `Text.isInfixOf` message
+                Right _ -> False
+
     it "passes freeform nested tool input without JSON encoding" do
         received <- newIORef Nothing
         worker <- codeModeWorkerPath
@@ -849,7 +939,7 @@ spec = describe "code-mode Bun host" do
                 (textTool "apply_patch" \input -> do
                     writeIORef received (Just input)
                     pure (Right "applied"))
-            invoke call = do
+            invoke _tool call = do
                 call.callKind `shouldBe` CustomCallKind
                 result <- dispatchToolCall
                     defaultLoopDispatch
@@ -881,7 +971,7 @@ spec = describe "code-mode Bun host" do
                 AlwaysReadOnly
                 ParallelSafe
                 (typedTool "lookup" emptyObjectDecoder \() -> pure (Right "value"))
-            invoke _ = pure
+            invoke _tool _ = pure
                 (Right (ToolCallResult "nested" "value" FunctionCallKind BlockingToolCall [] Nothing))
         codeOnly <- newCodeModeToolSet
             CodeOnlyToolMode ImageDetailVisible worker invoke
@@ -910,7 +1000,7 @@ spec = describe "code-mode Bun host" do
 
     it "marks both code-mode host tools async-capable" do
         worker <- codeModeWorkerPath
-        let invoke _ = pure
+        let invoke _tool _ = pure
                 (Right (ToolCallResult "nested" "value" FunctionCallKind BlockingToolCall [] Nothing))
         created <- newCodeModeToolSet
             CodeToolMode ImageDetailVisible worker invoke []
@@ -923,7 +1013,7 @@ spec = describe "code-mode Bun host" do
         toolSet.closeCodeModeToolSet
 
     it "fails closed before advertising a missing worker" do
-        let invoke _ = pure
+        let invoke _tool _ = pure
                 (Right (ToolCallResult "nested" "value" FunctionCallKind BlockingToolCall [] Nothing))
         unavailable <- newCodeModeToolSet
             CodeOnlyToolMode
@@ -950,7 +1040,7 @@ spec = describe "code-mode Bun host" do
                 ParallelSafe
                 (typedTool name emptyObjectDecoder \() ->
                     pure (Right ("from " <> name)))
-            invoke call = do
+            invoke _tool call = do
                 result <- dispatchToolCall
                     defaultLoopDispatch
                     [toolHandlerOf (mkTool "look-up"), toolHandlerOf (mkTool "look_up")]
@@ -979,7 +1069,7 @@ spec = describe "code-mode Bun host" do
                 ParallelSafe
                 (typedTool "lookup" emptyObjectDecoder \() ->
                     pure (Right "namespaced result"))
-            invoke call = do
+            invoke _tool call = do
                 call.name `shouldBe` "lookup"
                 result <- dispatchToolCall
                     defaultLoopDispatch

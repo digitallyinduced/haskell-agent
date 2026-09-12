@@ -413,6 +413,7 @@ withSessionTitleRuntime host SessionRequest{..} SessionBackend{..} =
 -- viewport. Allocation and viewport registration form one startup phase.
 data SessionControlRuntime = SessionControlRuntime
     { controlToolRegistry :: !ToolRegistry
+    , controlCurrentToolRegistry :: !(IORef ToolRegistry)
     , controlSteeringInputs :: !SteeringInputs
     , controlSpinnerRef :: !(IORef (Maybe (Async ())))
     , controlRenderStateRef :: !(IORef RenderState)
@@ -450,6 +451,7 @@ newSessionControlRuntime
     -> IO SessionControlRuntime
 newSessionControlRuntime host SessionRequest{..} = do
     toolRegistry <- requireToolRegistry allTools
+    currentToolRegistry <- newIORef toolRegistry
     steeringInputs <- newSteeringInputs
     installBackgroundTaskSteering toolEnv steeringInputs
     spinnerRef <- newIORef Nothing
@@ -543,6 +545,7 @@ newSessionControlRuntime host SessionRequest{..} = do
         (selectAgentViewport agentViewportRuntime)
     pure SessionControlRuntime
         { controlToolRegistry = toolRegistry
+        , controlCurrentToolRegistry = currentToolRegistry
         , controlSteeringInputs = steeringInputs
         , controlSpinnerRef = spinnerRef
         , controlRenderStateRef = renderStateRef
@@ -931,6 +934,8 @@ data SessionApprovalRuntime = SessionApprovalRuntime
         :: !(Maybe Bool -> ToolCall -> IO ToolApproval)
     , approvalApproveRegistered
         :: !(ToolCall -> IO ToolApproval)
+    , approvalApproveSnapshot
+        :: !(ToolRegistry -> ToolCall -> IO ToolApproval)
     }
 
 buildSessionApprovalRuntime
@@ -942,9 +947,13 @@ buildSessionApprovalRuntime host controls SessionRequest{..} =
     SessionApprovalRuntime
         { approvalApproveClassified = approveToolWithClassification
         , approvalApproveRegistered = approveRegisteredTool
+        , approvalApproveSnapshot = \registry ->
+            approveToolWithRegistry (pure registry) Nothing
         }
   where
-    approveToolWithClassification classifiedReadOnly call =
+    approveToolWithClassification =
+        approveToolWithRegistry (readIORef controls.controlCurrentToolRegistry)
+    approveToolWithRegistry readRegistry classifiedReadOnly call =
         withMVar host.hostApprovalLock \_ ->
             chooseApproval
       where
@@ -990,7 +999,8 @@ buildSessionApprovalRuntime host controls SessionRequest{..} =
                                                         message))))
                                 (saveProjectAutoApprove workspace.projectRoot True)
         classify = const (pure classifiedReadOnly)
-        approve request report persist =
+        approve request report persist = do
+            registry <- readRegistry
             approveToolDecisionWithReporterAndPersistenceClassifiedWithPrompt
                 classify
                 (\requiresExplicit requested ->
@@ -1005,7 +1015,7 @@ buildSessionApprovalRuntime host controls SessionRequest{..} =
                 persist
                 policyRef
                 controls.controlAllowedToolsRef
-                controls.controlToolRegistry
+                registry
                 planMode
                 call
         -- Existing managed protocols do not carry once-only
@@ -1083,15 +1093,15 @@ buildSessionShellRuntime host controls SessionRequest{..} =
                     ("Tool " <> call.name
                         <> " is disabled by the current /shell setting.")
             else Nothing
-    activeSessionTools ghciEnabled bashEnabled computerUseEnabled =
+    activeSessionTools available ghciEnabled bashEnabled computerUseEnabled =
         filterComputerUseTools computerUseEnabled $
             filterGhciTools ghciEnabled
-                (filterBashTools bashEnabled sessionTools)
-    providerVisibleTools enabledTools =
+                (filterBashTools bashEnabled available)
+    providerVisibleTools wireTools enabledTools =
         case codeModeRuntime of
             Nothing -> enabledTools
             Just runtime ->
-                runtime.codeModeWireTools
+                wireTools
                     <> (projectCodeModeToolsFor
                             runtime.codeModeProjectionStrategy
                             enabledTools
@@ -1112,8 +1122,10 @@ buildSessionShellRuntime host controls SessionRequest{..} =
         ghciEnabled <- readIORef ghciEnabledRef
         bashEnabled <- readIORef bashEnabledRef
         computerUseEnabled <- readIORef computerUseEnabledRef
+        discovered <- maybe (pure []) id deferredTools
         let active =
                 activeSessionTools
+                    (sessionTools <> discovered)
                     ghciEnabled
                     bashEnabled
                     computerUseEnabled
@@ -1157,11 +1169,29 @@ buildSessionShellRuntime host controls SessionRequest{..} =
         sessionTmp <- readIORef toolEnv.toolSessionTmp
         effectiveModel <- readSessionRequestModel paramsRef
         today <- utctDay <$> getCurrentTime
+        discovered <- maybe (pure []) id deferredTools
         let enabledTools =
                 activeSessionTools
+                    (sessionTools <> discovered)
                     ghciEnabled
                     bashEnabled
                     computerUseEnabled
+        wireTools <- case codeModeRuntime of
+            Nothing -> pure []
+            Just runtime ->
+                case deferredTools of
+                    Nothing -> pure runtime.codeModeWireTools
+                    Just _ ->
+                        runtime.codeModeRefreshTools enabledTools >>=
+                            either (fail . Text.unpack) pure
+        case deferredTools of
+            Nothing -> pure ()
+            Just _ -> do
+                registry <- requireToolRegistry $
+                    sessionDirectTools allTools codeModeRuntime
+                        <> discovered <> wireTools
+                writeIORef controls.controlCurrentToolRegistry registry
+        let
             enabledNames = map (.appToolName) enabledTools
             instructionText =
                 appendMcpInstructions mcpInstructions case codexCatalogSession of
@@ -1192,7 +1222,7 @@ buildSessionShellRuntime host controls SessionRequest{..} =
                             nativeCapabilities.nativeProviderHostedTools
                             modelSupportsAsync
                             dialect
-                            (providerVisibleTools enabledTools)
+                            (providerVisibleTools wireTools enabledTools)
                     Nothing ->
                         schemasFromAppToolsWithHostedSearchAndAsyncCapability
                             nativeCapabilities.nativeProviderHostedTools
@@ -1315,6 +1345,12 @@ buildSessionLoopConfig
                 commitLiveBackendState conversationRef
             }
         , loopTools = controls.controlToolRegistry
+        , loopReadTools =
+            case deferredTools of
+                Nothing -> Nothing
+                Just _ -> Just do
+                    shellRuntime.shellRefreshRequestParams
+                    readIORef controls.controlCurrentToolRegistry
         , loopDispatch =
             defaultLoopDispatch
                 { toolDispatchFinalizeOutput = \call output ->
@@ -1346,7 +1382,7 @@ installSessionToolRuntimes
     -> LoopConfig
     -> IO ()
 installSessionToolRuntimes
-        host controls SessionRequest{..}
+        host _controls SessionRequest{..}
         eventRuntime shellRuntime approvalRuntime config = do
     installClaudeSessionRuntime claudeRuntimeSlot ClaudeSessionRuntime
         { approveNativeTool = \call readOnly ->
@@ -1358,11 +1394,12 @@ installSessionToolRuntimes
             host.hostNativeCapabilities.nativeProviderNativeTools
         }
     forM_ ((.codeModeNestedSlot) <$> codeModeRuntime) \slot ->
-        setCodeModeNestedInvoke slot \call -> do
+        setCodeModeNestedInvoke slot \tool call -> do
+            registry <- requireToolRegistry [tool]
             shellRuntime.shellToolDisabledReason call >>= \case
                 Just reason -> pure (Left reason)
                 Nothing ->
-                    approvalRuntime.approvalApproveRegistered call >>= \case
+                    approvalRuntime.approvalApproveSnapshot registry call >>= \case
                         ToolApprovalDenied denial -> pure (Left denial)
                         ToolApprovalRejected ->
                             pure (Left "Tool call rejected by user.")
@@ -1370,7 +1407,7 @@ installSessionToolRuntimes
                             eventRuntime.loopEventEmit (ToolStarted call)
                             result <- dispatchApprovedRegisteredToolCall
                                 config.loopDispatch
-                                controls.controlToolRegistry
+                                registry
                                 call
                             eventRuntime.loopEventEmit (ToolFinished result)
                             pure (Right result)

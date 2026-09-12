@@ -130,7 +130,7 @@ import Agent.Tools.PlanMode
       activatePlanMode,
       PlanModeState(PlanPending) )
 import Agent.Tools.Types
-    ( AppTool
+    ( AppTool(appToolName)
     , AppToolGroup(..)
     , BackgroundTaskHooks(..)
     , BackgroundTaskNotice(..)
@@ -148,7 +148,9 @@ import Data.Unique (newUnique, hashUnique)
 import System.Info (os)
 import System.OsPath (OsPath)
 import qualified Agent.MCP as MCP
-    ( mcpFleetGrokMetaToolsForArtifactDirectory,
+    ( mcpFleetCodexToolsForArtifactDirectory,
+      newMcpToolDiscovery,
+      mcpFleetGrokMetaToolsForArtifactDirectory,
       mcpFleetMetaToolsForArtifactDirectory,
       mcpFleetRegistrationsForArtifactDirectory,
       mcpFleetResourceTools,
@@ -179,6 +181,7 @@ data SessionToolsRuntime = SessionToolsRuntime
     { sessionAllTools :: [AppTool]
     , sessionTools :: [AppTool]
     , sessionMcpTools :: [AppTool]
+    , sessionDeferredTools :: Maybe (IO [AppTool])
     , sessionDatabaseTools :: [AppTool]
     , sessionLearnedSkillTools :: [AppTool]
     , sessionGatewayTools :: [AppTool]
@@ -588,11 +591,34 @@ assembleSessionToolsRuntime request@AgentToolsRequest
     , controlSessionTools = persistedSessionTools
     } = do
     let artifactDirectory = Just (unsafeToFilePath sessionTmp)
+    discovery <- MCP.newMcpToolDiscovery
+    let readCodexTools =
+            MCP.mcpFleetCodexToolsForArtifactDirectory
+                artifactDirectory mcpFleet discovery
+        sessionDeferredTools
+            | dialectId == CodexDialect
+            , not (null mcpServerConfigs) =
+                Just $
+                    composeDeferredTools
+                        . filter ((/= "tool_search") . (.appToolName))
+                        <$> readCodexTools
+            | otherwise = Nothing
+        composeDeferredTools appTools =
+            case startup.startupNativeHooks of
+                Nothing -> appTools
+                Just hooks -> hooks.nativeComposeTools [HostToolGroup appTools]
+    initialCodexTools <-
+        if dialectId == CodexDialect && not (null mcpServerConfigs)
+            then readCodexTools
+            else pure []
+    let
         sessionMcpTools =
             if null mcpServerConfigs
                 then []
                 else
-                    (if dialectId == GrokBuildDialect
+                    (if dialectId == CodexDialect
+                        then initialCodexTools
+                        else if dialectId == GrokBuildDialect
                         then
                             MCP.mcpFleetGrokMetaToolsForArtifactDirectory
                                 artifactDirectory
@@ -775,6 +801,7 @@ launchAgentToolsSession codeModeResourceScope AgentToolsRequest{..} ToolStartup
     { sessionAllTools = allTools
     , sessionTools = tools
     , sessionMcpTools = mcpTools
+    , sessionDeferredTools = deferredTools
     , sessionDatabaseTools = databaseAppTools
     , sessionLearnedSkillTools = learnedSkillAppTools
     , sessionGatewayTools = gatewayTools
@@ -798,6 +825,7 @@ launchAgentToolsSession codeModeResourceScope AgentToolsRequest{..} ToolStartup
         , activeAccountRef
         , agentTypesRef
         , allTools
+        , deferredTools
         , recordImageGenerationInputs =
             recordImageGenerationImages imageGenerationHistory
         , clearImageGenerationHistory =

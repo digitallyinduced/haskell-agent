@@ -205,6 +205,7 @@ runWorkload workload eventCount sinkDelayMicros = do
                 StreamingFailureEvents -> emptyRegistry
                 ParallelToolEvents -> streamingRegistry
                 QueuedEvents -> emptyRegistry
+            , loopReadTools = Nothing
             , loopDispatch = defaultLoopDispatch
             , loopMaxTurns = defaultLoopMaxTurns
             , loopOnEvent = sink
