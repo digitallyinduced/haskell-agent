@@ -11,6 +11,7 @@ import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (SomeException, try)
 import Control.Monad (unless, void)
 import Data.Either (isRight)
+import GHC.Clock (getMonotonicTimeNSec)
 import System.Posix.Signals
     ( nullSignal
     , Signal
@@ -114,19 +115,23 @@ waitForProcessGroupExit
     -> ProcessHandle
     -> Int
     -> IO Bool
-waitForProcessGroupExit groupId processHandle timeoutMs =
-    go (max 0 timeoutMs)
+waitForProcessGroupExit groupId processHandle timeoutMs = do
+    started <- getMonotonicTimeNSec
+    go (toInteger started + toInteger (max 0 timeoutMs) * 1_000_000)
   where
-    go remaining = do
+    -- Sleep durations are lower bounds: scheduler delays and Darwin timer
+    -- coalescing must not extend each grace period by another polling tick.
+    go deadline = do
         alive <- processGroupAlive groupId processHandle
+        now <- getMonotonicTimeNSec
         if not alive
             then pure True
-            else if remaining <= 0
+            else if toInteger now >= deadline
                 then pure False
                 else do
-                    let delayMs = min 10 remaining
-                    threadDelay (delayMs * 1_000)
-                    go (remaining - delayMs)
+                    let remainingUs = (deadline - toInteger now + 999) `div` 1_000
+                    threadDelay (fromInteger (min 10_000 remainingUs))
+                    go deadline
 
 processGroupAlive
     :: Maybe ProcessGroupID
