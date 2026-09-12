@@ -104,7 +104,7 @@ import Agent.Runtime.Session
       SessionMeta(metaId, metaProvider, metaConnection, metaModel,
                   metaTransportModel, metaDialect, metaGatewayIdentity),
       SessionTurn )
-import Agent.CLI.Session.History ( detectGitBranch )
+import Agent.Runtime.Session.History ( detectGitBranch )
 import Agent.CLI.Session.Runtime.Types
     ( StartupRuntime(startupToolEnv, startupStderr, startupStdout,
                      startupStdoutTty, startupStdinTty, startupFullscreen,

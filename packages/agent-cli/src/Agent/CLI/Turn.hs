@@ -14,7 +14,7 @@ import Agent.Runtime.Session.Request
     ( withPersistentSessionRequest
     )
 import Agent.CLI.CancelWatch (withEscCancel)
-import Agent.CLI.Compaction (AutomaticCompactionBoundary)
+import Agent.Runtime.Compaction (AutomaticCompactionBoundary)
 import Agent.CLI.Interrupt (withTurnCancel, resetIdleTurnCancel)
 import Agent.CLI.Plan (extractProposedPlan, planDecisionFollowUp)
 import Agent.CLI.ProviderFallback (isProviderUnavailable)
@@ -77,7 +77,7 @@ import Agent.CLI.SessionEnv
     ( PreparedWorkspaceEnvironment(..)
     , SessionEnv(..)
     )
-import Agent.CLI.Session.History
+import Agent.Runtime.Session.History
     ( durableTranscriptCheckpoint
     )
 import Agent.CLI.SessionTitle

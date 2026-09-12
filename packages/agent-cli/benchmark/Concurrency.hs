@@ -10,7 +10,7 @@ import Agent.CLI.PendingInputs
     )
 import Agent.Runtime.ModelConfig (loadModelCatalogAt)
 import Agent.CLI.Project (loadProjectSettings, loadUserSettings)
-import Agent.CLI.Session.History (detectGitBranch)
+import Agent.Runtime.Session.History (detectGitBranch)
 import Agent.CLI.Skills (loadSkillsCatalogQuiet)
 import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.Dialect (DialectId(CodexDialect), dialectForId)

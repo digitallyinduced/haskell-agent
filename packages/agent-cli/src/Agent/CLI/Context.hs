@@ -7,11 +7,11 @@ module Agent.CLI.Context
     , formatContextReport
     ) where
 
-import Agent.CLI.Compaction
+import Agent.Runtime.Compaction.Provider
     ( OccupancyKind(..)
     , OccupancySnapshot(..)
     )
-import Agent.CLI.Compaction.Types (occupancyMatchesHistory)
+import Agent.Runtime.Compaction.Types (occupancyMatchesHistory)
 import Agent.Runtime.ProviderRequest
     ( setRequestInstructions
     , setRequestInstructionsAndTools

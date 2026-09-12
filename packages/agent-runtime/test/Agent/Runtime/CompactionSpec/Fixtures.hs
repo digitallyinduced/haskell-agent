@@ -1,5 +1,5 @@
 -- | Response fixtures shared by manual, automatic, and task-plan compaction.
-module Agent.CLI.CompactionSpec.Fixtures
+module Agent.Runtime.CompactionSpec.Fixtures
     ( responseItemHasTaskPlan
     , taskPlanMessage
     , responseMessageHasText

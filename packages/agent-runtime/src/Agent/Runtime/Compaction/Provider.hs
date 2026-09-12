@@ -1,5 +1,5 @@
 -- | Run provider compaction and rewrite the local transcript.
-module Agent.CLI.Compaction
+module Agent.Runtime.Compaction.Provider
     ( AutomaticCompactionBoundary(..)
     , CompactOutcome(..)
     , CompactionInstall(..)
@@ -50,12 +50,12 @@ import Agent.Runtime.Session.Request
     , readSessionRequestParams
     )
 import Agent.Runtime.Error (formatApiError)
-import Agent.CLI.Compaction.Continuation
+import Agent.Runtime.Compaction.Continuation
     ( boundCompletedToolContinuations
     )
-import Agent.CLI.Compaction.Projection
-import Agent.CLI.Compaction.Types
-import Agent.CLI.Session.History
+import Agent.Runtime.Compaction.Projection
+import Agent.Runtime.Compaction.Types
+import Agent.Runtime.Session.History
     ( LiveConversation
     , writeLivePreviousResponseId
     , writeLiveTranscript

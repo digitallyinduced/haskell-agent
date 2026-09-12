@@ -1,6 +1,6 @@
 module Agent.CLI.ContextSpec (spec) where
 
-import Agent.CLI.Compaction
+import Agent.Runtime.Compaction.Provider
     ( estimatedOccupancy
     , reportedOccupancy
     , occupancyOnTurnFinished

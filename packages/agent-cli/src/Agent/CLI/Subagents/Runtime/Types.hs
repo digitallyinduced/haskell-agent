@@ -10,7 +10,7 @@ module Agent.CLI.Subagents.Runtime.Types
 import Agent.Runtime.Session.Request
     ( SessionRequestState
     )
-import Agent.CLI.Compaction (OccupancySnapshot)
+import Agent.Runtime.Compaction.Provider (OccupancySnapshot)
 import Agent.CLI.Options (ApprovalPolicy, CliOptions)
 import Agent.Connectivity.NetworkPath (NetworkRecovery)
 import Agent.Runtime.Session (LegacySubagentTarget)

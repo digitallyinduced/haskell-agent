@@ -1,6 +1,6 @@
 module Agent.CLI.SubagentStoreSpec (spec) where
 
-import Agent.CLI.Compaction (estimatedOccupancy)
+import Agent.Runtime.Compaction.Provider (estimatedOccupancy)
 import Agent.Runtime.ModelConfig (organizationGatewayConnectionId)
 import Agent.CLI.SubagentStore
 import Agent.Runtime.Session (LegacySubagentTarget(..))

@@ -1,11 +1,11 @@
-module Agent.CLI.Runtime.Orchestration.Providers.Claude
+module Agent.Runtime.Providers.Claude
     ( withClaudeProvider
     ) where
 
 import Agent.Runtime.Session.Request
     ( readSessionRequestParams
     )
-import Agent.CLI.Compaction
+import Agent.Runtime.Compaction.Provider
     ( autoCompactBackendWith
     , claudeAutoCompactTokenLimit
     , claudeCompactionInputLimit
@@ -14,16 +14,16 @@ import Agent.CLI.Compaction
     , runClaudeBackendCompactHistoryWithLimits
     , runClaudeBackendCompactWithLimits
     )
-import Agent.CLI.Runtime.Orchestration.Providers.Common
+import Agent.Runtime.Providers.Common
     ( decorateAutomaticCompact
     , decorateManualCompact
     )
-import Agent.CLI.Runtime.Orchestration.Providers.Types
+import Agent.Runtime.Providers.Types
     ( ClaudeConfig(..), ProviderHost(..), ProviderCompaction(..)
     , ProviderRuntime(..), ProviderAccountSelection(..), ProviderSubagents(..)
     )
-import Agent.CLI.Session.History (readLiveTranscript)
-import Agent.CLI.Session.Runtime.Types
+import Agent.Runtime.Session.History (readLiveTranscript)
+import Agent.Runtime.Session.Backend
     ( SessionBackend(..)
     )
 import Agent.Claude

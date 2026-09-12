@@ -45,7 +45,6 @@ import qualified Agent.CLI.ClaudeSpec as ClaudeSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
 import qualified Agent.CLI.ComputerUseSpec as ComputerUseSpec
 import qualified Agent.CLI.ConfigSpec as ConfigSpec
-import qualified Agent.CLI.CompactionSpec as CompactionSpec
 import qualified Agent.CLI.ContextSpec as ContextSpec
 import qualified Agent.CLI.ConnectivitySpec as ConnectivitySpec
 import qualified Agent.CLI.DialectsSpec as DialectsSpec
@@ -88,7 +87,6 @@ import qualified Agent.CLI.RecapSpec as RecapSpec
 import qualified Agent.CLI.ProviderFallbackSpec as ProviderFallbackSpec
 import qualified Agent.CLI.ProviderAvailabilitySpec as ProviderAvailabilitySpec
 import qualified Agent.CLI.ProviderTransitionSpec as ProviderTransitionSpec
-import qualified Agent.CLI.ProviderRuntimeSpec as ProviderRuntimeSpec
 import qualified Agent.CLI.RequestSpec as RequestSpec
 import qualified Agent.CLI.RenderSpec as RenderSpec
 import qualified Agent.CLI.ReplStatusSpec as ReplStatusSpec
@@ -189,7 +187,6 @@ specs = do
     CommandSpec.spec
     ComputerUseSpec.spec
     ConfigSpec.spec
-    CompactionSpec.spec
     ContextSpec.spec
     ConnectivitySpec.spec
     DialectsSpec.spec
@@ -232,7 +229,6 @@ specs = do
     ProviderFallbackSpec.spec
     ProviderAvailabilitySpec.spec
     ProviderTransitionSpec.spec
-    ProviderRuntimeSpec.spec
     RequestSpec.spec
     RenderSpec.spec
     ReplStatusSpec.spec

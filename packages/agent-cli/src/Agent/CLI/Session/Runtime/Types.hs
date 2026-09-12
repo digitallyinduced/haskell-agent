@@ -19,14 +19,14 @@ import Agent.CLI.AgentViewport
     )
 import Agent.CLI.Claude (ClaudeSessionRuntimeSlot)
 import Agent.Runtime.Config (HarnessConfig)
-import Agent.CLI.Session.History (LiveConversation)
+import Agent.Runtime.Session.History (LiveConversation)
 import Agent.CLI.Session.Workspace (WorkspaceContext)
-import Agent.CLI.Btw (BtwBackendFactory)
+import Agent.Runtime.Session.Backend (SessionBackend(..))
 import Agent.CLI.CodeModeRuntime
     ( CodeModeSessionRuntime
     , CodexCatalogSession
     )
-import Agent.CLI.Compaction
+import Agent.Runtime.Compaction.Provider
     ( AutomaticCompactionBoundary
     , CompactOutcome
     , CompactionInstall
@@ -63,8 +63,7 @@ import Agent.Error (ApiError)
 import Agent.GrokBuild.Dialect.Runtime (GrokRuntimeControl)
 import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.Loop
-    ( Backend
-    , ImageAttachment
+    ( ImageAttachment
     , TokenUsage
     , TurnInput
     )
@@ -106,13 +105,6 @@ import Data.Time.Clock
     )
 import System.IO (Handle)
 import System.OsPath (OsPath)
-
-data SessionBackend = SessionBackend
-    { backend :: !Backend
-    , btwBackend :: !BtwBackendFactory
-    , interruptBackend :: !(IO ())
-    , resetBackendState :: !(IO ())
-    }
 
 -- | Side-effect-free startup reads that can be prepared while independent
 -- tool resources initialize. Their warnings and model-facing formatting are

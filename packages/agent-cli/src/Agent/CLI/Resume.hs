@@ -53,7 +53,7 @@ import Agent.Runtime.Session
     , loadSessionMeta
     , loadSessionResumeStats
     )
-import Agent.CLI.Session.History (foldSessionItems)
+import Agent.Runtime.Session.History (foldSessionItems)
 import Agent.Runtime.Session.Types (TranscriptEffect(..))
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
 import Agent.OpenAI.Compaction (hasReloadedGeneratedContextItems)

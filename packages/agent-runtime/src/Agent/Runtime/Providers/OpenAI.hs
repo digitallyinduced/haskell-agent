@@ -1,32 +1,32 @@
-module Agent.CLI.Runtime.Orchestration.Providers.OpenAI
+module Agent.Runtime.Providers.OpenAI
     ( withOpenAiProvider
     ) where
 
 import Agent.Runtime.Session.Request
     ( readSessionRequestParams
     )
-import Agent.CLI.Compaction
+import Agent.Runtime.Compaction.Provider
     ( decorateCompactOutcomeWithTaskPlan
     , installLiveCompactOutcome
     , runProviderCompactWith
     )
-import Agent.CLI.Provider.OpenAI
+import Agent.Runtime.Provider.OpenAI
     ( OpenAiPersistentConnection(..)
     , lockedOpenAiSession
     )
-import Agent.CLI.Runtime.Orchestration.Providers.Common
+import Agent.Runtime.Providers.Common
     ( decorateManualCompact
     )
-import Agent.CLI.Runtime.Orchestration.Providers.Types
+import Agent.Runtime.Providers.Types
     ( OpenAiConfig(..), OpenAiAccounts(..), ProviderHost(..)
     , ProviderCompaction(..), ProviderRuntime(..)
     , ProviderAccountSelection(..), ProviderSubagents(..)
     )
-import Agent.CLI.Session.History (readLiveTranscript)
-import Agent.CLI.Session.Runtime.Types
+import Agent.Runtime.Session.History (readLiveTranscript)
+import Agent.Runtime.Session.Backend
     ( SessionBackend(..)
     )
-import Agent.CLI.Subagents.Runtime.OpenAI
+import Agent.Runtime.Provider.OpenAI.Fresh
     ( freshOpenAiBackend
     )
 import Agent.Error (ApiError(..))

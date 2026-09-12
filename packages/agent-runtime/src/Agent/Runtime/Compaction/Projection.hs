@@ -1,4 +1,4 @@
-module Agent.CLI.Compaction.Projection
+module Agent.Runtime.Compaction.Projection
     ( automaticCompactionHeadroom
     , compactedSnapshotThresholdError
     , hasFocus
@@ -14,7 +14,7 @@ module Agent.CLI.Compaction.Projection
     , toolContinuationTooLargeError
     ) where
 
-import Agent.CLI.Compaction.Types
+import Agent.Runtime.Compaction.Types
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop
     ( BackendContinuation(..)

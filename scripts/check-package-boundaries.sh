@@ -68,6 +68,22 @@ for module_path in Agent/Runtime/NativeProcess.hs Agent/Runtime/Session/Threads.
   [[ ! -e "$cli/src/${module_path/Runtime/CLI}" ]] || fail "legacy resource implementation returned to CLI: $module_path"
 done
 
+# Provider construction and model-history compaction have one runtime owner,
+# not legacy CLI implementations or reexport facades.
+if rg --line-number \
+  'Agent\.CLI\.(Compaction|ProviderRuntime|Provider\.OpenAI|Subagents\.Runtime\.OpenAI|Runtime\.Orchestration\.Providers)(\.|[^[:alnum:]_]|$)' \
+  "$root/packages" --glob '*.hs' --glob '*.cabal'; then
+  fail "provider or compaction ownership returned to a retired CLI namespace"
+fi
+
+# This is deliberately a presentation-only module. Live transcript operations
+# must be imported from Agent.Runtime.Session.History instead of reexported here.
+if ! rg --quiet --multiline \
+  'module[[:space:]]+Agent\.CLI\.Session\.History[[:space:]]*\([[:space:]]*hydrateUiHistory[[:space:]]*\)[[:space:]]+where' \
+  "$cli/src/Agent/CLI/Session/History.hs"; then
+  fail "CLI session history must expose only UI hydration"
+fi
+
 moved_modules=(
   Agent.CLI.BrowserTools
   Agent.CLI.McpAdmin
@@ -141,6 +157,25 @@ for registration in \
 done
 
 required_files=(
+  packages/agent-runtime/src/Agent/Runtime/Providers.hs
+  packages/agent-runtime/src/Agent/Runtime/Providers/Types.hs
+  packages/agent-runtime/src/Agent/Runtime/Providers/Common.hs
+  packages/agent-runtime/src/Agent/Runtime/Providers/OpenAI.hs
+  packages/agent-runtime/src/Agent/Runtime/Providers/XAI.hs
+  packages/agent-runtime/src/Agent/Runtime/Providers/Gemini.hs
+  packages/agent-runtime/src/Agent/Runtime/Providers/OpenRouter.hs
+  packages/agent-runtime/src/Agent/Runtime/Providers/Claude.hs
+  packages/agent-runtime/src/Agent/Runtime/Provider/OpenAI.hs
+  packages/agent-runtime/src/Agent/Runtime/Provider/OpenAI/Fresh.hs
+  packages/agent-runtime/src/Agent/Runtime/Compaction.hs
+  packages/agent-runtime/src/Agent/Runtime/Compaction/Provider.hs
+  packages/agent-runtime/src/Agent/Runtime/Compaction/Types.hs
+  packages/agent-runtime/src/Agent/Runtime/Compaction/Projection.hs
+  packages/agent-runtime/src/Agent/Runtime/Compaction/Continuation.hs
+  packages/agent-runtime/src/Agent/Runtime/Session/Backend.hs
+  packages/agent-runtime/src/Agent/Runtime/Session/History.hs
+  packages/agent-runtime/test/Agent/Runtime/ProviderRuntimeSpec.hs
+  packages/agent-runtime/test/Agent/Runtime/CompactionSpec.hs
   packages/agent-runtime/src/Agent/Runtime/StartupPolicy.hs
   packages/agent-runtime/src/Agent/Runtime/ConversationStore.hs
   packages/agent-runtime/src/Agent/Runtime/SessionState.hs

@@ -36,6 +36,14 @@ library
     hs-source-dirs:   src
     autogen-modules:  Paths_agent_runtime
     other-modules:    Agent.Runtime.Gateway.Account
+                    , Agent.Runtime.Provider.OpenAI
+                    , Agent.Runtime.Providers.Claude
+                    , Agent.Runtime.Providers.Common
+                    , Agent.Runtime.Providers.Gemini
+                    , Agent.Runtime.Providers.OpenAI
+                    , Agent.Runtime.Providers.OpenRouter
+                    , Agent.Runtime.Providers.XAI
+                    , Agent.Runtime.Compaction.Continuation
                     , Agent.Runtime.ConversationStore.Lifecycle
                     , Agent.Runtime.Gateway.Catalog
                     , Agent.Runtime.Gateway.Dictation
@@ -53,6 +61,10 @@ library
                     , Agent.Runtime.AgentSnapshot
                     , Agent.Runtime.Browser
                     , Agent.Runtime.Config
+                    , Agent.Runtime.Compaction
+                    , Agent.Runtime.Compaction.Provider
+                    , Agent.Runtime.Compaction.Projection
+                    , Agent.Runtime.Compaction.Types
                     , Agent.Runtime.Database
                     , Agent.Runtime.Database.Store
                     , Agent.Runtime.Duration
@@ -74,9 +86,14 @@ library
                     , Agent.Runtime.Permission.Types
                     , Agent.Runtime.Project
                     , Agent.Runtime.ProviderRequest
+                    , Agent.Runtime.Providers
+                    , Agent.Runtime.Providers.Types
+                    , Agent.Runtime.Provider.OpenAI.Fresh
+                    , Agent.Runtime.Session.Backend
                     , Agent.Runtime.Session
                     , Agent.Runtime.Session.Activity
                     , Agent.Runtime.Session.Codec
+                    , Agent.Runtime.Session.History
                     , Agent.Runtime.Session.Inbox
                     , Agent.Runtime.Session.Observation
                     , Agent.Runtime.Session.PullRequest
@@ -89,7 +106,6 @@ library
                     , Agent.Runtime.SessionLock
                     , Agent.Runtime.Transcription
                     , Agent.Runtime.TurnRecord
-                    , Agent.Runtime.Compaction
                     , Agent.Runtime.ConversationStore
                     , Agent.Runtime.Request
                     , Agent.Runtime.SessionOwner
@@ -179,6 +195,11 @@ test-suite agent-runtime-test
     main-is:          Spec.hs
     ghc-options:      -threaded
     other-modules:    Agent.Runtime.RequestSpec
+                    , Agent.Runtime.ProviderRuntimeSpec
+                    , Agent.Runtime.CompactionSpec
+                    , Agent.Runtime.CompactionSpec.Fixtures
+                    , Agent.Runtime.CompactionSpec.ManualOpenAI
+                    , Agent.Runtime.CompactionSpec.TaskPlan
                     , Agent.Runtime.TurnStateSpec
                     , Agent.Runtime.EnvironmentSpec
                     , Agent.Runtime.ErrorSpec
@@ -209,13 +230,16 @@ test-suite agent-runtime-test
                     , Agent.Runtime.SessionOwnerSpec
     build-depends:    agent-runtime
                     , agent-accounts
+                    , agent-connectivity
                     , agent-core
                     , agent-tools
                     , agent-json
                     , agent-openai
+                    , agent-openrouter
                     , agent-responses
                     , agent-responses-types
                     , agent-store
+                    , agent-xai
                     , aeson
                     , async
                     , base >= 4.17 && < 5
@@ -231,6 +255,7 @@ test-suite agent-runtime-test
                     , stm
                     , text
                     , time
+                    , transformers
                     , unix
                     , wai
                     , warp
