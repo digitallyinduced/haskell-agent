@@ -1,5 +1,6 @@
 module Agent.TUI.MarkdownSpec (spec) where
 
+import Agent.TUI.FencedCode (emptyFenceStreamState, feedFenceStream)
 import Agent.TUI.Markdown
 import Agent.Syntax
     ( SyntaxClass(SyntaxComment)
@@ -1192,19 +1193,25 @@ checkStreamingPicturesAtHeight height width =
     checkStreamingFrames . map ((width, height),)
 
 checkStreamingFrames :: [((Int, Int), Text.Text)] -> Expectation
-checkStreamingFrames = go Nothing emptyRenderState
+checkStreamingFrames frames =
+    go False Nothing "" emptyFenceStreamState emptyRenderState frames
+        >> go True Nothing "" emptyFenceStreamState emptyRenderState frames
   where
-    go _ _ [] = pure ()
-    go previousRegion previous ((region, input) : rest) = do
+    go _ _ _ _ _ [] = pure ()
+    go incremental previousRegion previousInput parser previous ((region, input) : rest) = do
         let baseline = markdownWidgetWithLinks id input
+            nextParser = case Text.stripPrefix previousInput input of
+                Just delta -> feedFenceStream parser delta
+                Nothing -> feedFenceStream emptyFenceStreamState input
+            proseCache chunk section = cached (Text.pack (show (chunk, section)))
             streaming =
-                markdownWidgetWithStreamingCache
-                    Nothing
-                    id
-                    (\chunk section -> cached (Text.pack (show (chunk, section))))
-                    (\_ widget -> widget)
-                    (\_ _ -> txt "")
-                    input
+                if incremental
+                    then markdownWidgetWithParsedStreamingCache
+                        Nothing id proseCache (\_ widget -> widget)
+                        (\_ _ -> txt "") nextParser
+                    else markdownWidgetWithStreamingCache
+                        Nothing id proseCache (\_ widget -> widget)
+                        (\_ _ -> txt "") input
             (next, actual, _, actualExtents) =
                 renderFinal Theme.terminalDefault [streaming] region
                     (const Nothing)
@@ -1228,7 +1235,7 @@ checkStreamingFrames = go Nothing emptyRenderState
         rows actual `shouldBe` rows expected
         sortOn id (map extentKey actualExtents)
             `shouldBe` sortOn id (map extentKey expectedExtents)
-        go (Just region) next rest
+        go incremental (Just region) input nextParser next rest
 
 spanRowText :: [SpanOp] -> Text.Text
 spanRowText =

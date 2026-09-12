@@ -1,6 +1,7 @@
 module Agent.TUI.ModelSpec (spec) where
 
 import Agent.TUI.Model
+import Agent.TUI.FencedCode (emptyFenceStreamState, feedFenceStream, fenceStreamSections)
 import Agent.TUI.Presentation
     ( TodoDisplayLine(..)
     , TodoDisplayStatus(..)
@@ -28,6 +29,33 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "fullscreen UI reducer" do
+    it "retains incremental assistant parsing across deltas and releases it at completion" do
+        let fragments = ["First paragraph.\n", "\n```haskell\n", "value = 1\n", "```\n"]
+            streaming = foldl' (flip (reduceUi . UiLoop . TextDelta)) initialUiState fragments
+            expected = feedFenceStream emptyFenceStreamState (Text.concat fragments)
+        fmap (fenceStreamSections . snd) streaming.uiStreamingMarkdown
+            `shouldBe` Just (fenceStreamSections expected)
+        fmap fst streaming.uiStreamingMarkdown `shouldBe` streaming.uiSelectedBlock
+        let completed = reduceUi (UiLoop (TurnFinished (emptyTurnOutput "r1" [] Nothing))) streaming
+        completed.uiStreamingMarkdown `shouldBe` Nothing
+
+    it "discards streaming parsing on cancellation, restart, clear, and non-assistant blocks" do
+        let streaming = reduceUi (UiLoop (TextDelta "paragraph\n\n```\npartial")) initialUiState
+        map (\event -> (reduceUi event streaming).uiStreamingMarkdown)
+            [ UiTurnEnded BlockCancelled
+            , UiTurnEnded BlockFailed
+            , UiTurnRestarted
+            , UiConversationCleared
+            , UiUserSubmitted "next question"
+            ] `shouldBe` replicate 5 Nothing
+
+    it "reconstructs missing assistant parser state before extending an existing block" do
+        let first = reduceUi (UiLoop (TextDelta "paragraph\n\n```\n")) initialUiState
+            recovered = reduceUi (UiLoop (TextDelta "body\n```")) first{uiStreamingMarkdown = Nothing}
+            expected = feedFenceStream emptyFenceStreamState "paragraph\n\n```\nbody\n```"
+        fmap (fenceStreamSections . snd) recovered.uiStreamingMarkdown
+            `shouldBe` Just (fenceStreamSections expected)
+
     it "updates background work without changing the draft or adding transcript blocks" do
         let draft = reduceUi (UiSetDraft "follow-up message" 4) initialUiState
             active = reduceUi (UiSetBackgroundTaskStatus ["1 background task"]) draft

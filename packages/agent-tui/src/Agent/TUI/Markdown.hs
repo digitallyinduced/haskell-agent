@@ -17,6 +17,7 @@ module Agent.TUI.Markdown
     , markdownWidgetWithSyntaxHighlighting
     , markdownWidgetWithSyntaxHighlightingAndLinks
     , markdownWidgetWithStreamingCache
+    , markdownWidgetWithParsedStreamingCache
     , markdownStreamingCacheSections
     , parseInline
     ) where
@@ -25,6 +26,9 @@ import Agent.TUI.FencedCode
     ( FenceChunk(..)
     , FencedBlock(..)
     , fenceChunks
+    , FenceStreamState
+    , FenceSection(..)
+    , fenceStreamSections
     )
 import Agent.TUI.Markdown.Inline
     ( Inline(..)
@@ -213,6 +217,33 @@ markdownStreamingCacheSections input =
     | (chunkIndex, FenceText prose) <- zip [1 ..] (fenceChunks input)
     , sectionIndex <- [1 .. Text.count "\n\n" prose]
     ]
+
+-- | Render retained block boundaries. Feed the state on source deltas, not on
+-- redraws; width and interaction changes affect layout caches, not parsing.
+markdownWidgetWithParsedStreamingCache
+    :: Ord n
+    => Maybe SyntaxHighlighter
+    -> (Text -> n)
+    -> (Int -> Int -> Widget n -> Widget n)
+    -> (Int -> Widget n -> Widget n)
+    -> (Int -> Text -> Widget n)
+    -> FenceStreamState
+    -> Widget n
+markdownWidgetWithParsedStreamingCache highlighter linkName cacheProse cacheCode codeHeader =
+    vBox . concatMap renderSection . fenceStreamSections
+  where
+    renderSection (FenceCodeSection _ block) =
+        renderChunk highlighter (Just linkName) cacheCode codeHeader (FenceBlock block)
+    renderSection (FenceProseSection chunkIndex sectionIndex stable prose)
+        | stable =
+            [ cacheProse chunkIndex sectionIndex $
+                B.Widget
+                    (if Text.all isSpace prose then B.Fixed else B.Greedy)
+                    B.Fixed $
+                    B.render $
+                        vBox (renderLines (Just linkName) (Text.lines prose))
+            ]
+        | otherwise = renderLines (Just linkName) (Text.lines prose)
 
 -- | Render a standalone code body with the same width bounding and optional
 -- syntax highlighting used by fenced Markdown blocks.

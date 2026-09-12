@@ -63,6 +63,7 @@ import Agent.TUI.Model.ToolResult
 import Agent.TUI.Model.State
 import Agent.TUI.Model.Timing
 import Agent.TUI.Model.Types
+import Agent.TUI.FencedCode (emptyFenceStreamState, feedFenceStream)
 import Agent.TUI.Motion
     ( completionStatusDurationMillis )
 import Agent.Loop
@@ -289,6 +290,7 @@ clearConversation :: UiState -> UiState
 clearConversation state =
     state
         { uiBlocks = Seq.empty
+        , uiStreamingMarkdown = Nothing
         , uiSelectedBlock = Nothing
         , uiSelectedBlockIndex = Nothing
         , uiBlockIndices = Map.empty
@@ -333,6 +335,7 @@ restartTurn :: UiState -> UiState
 restartTurn state =
     state
         { uiBlocks = blocks
+        , uiStreamingMarkdown = Nothing
         , uiSelectedBlock = (.blockId) . snd <$> selected
         , uiSelectedBlockIndex = fst <$> selected
         , uiBlockIndices =
@@ -384,6 +387,7 @@ snapshotGenerationRate usage state =
     in state
         { uiGenerating = False
         , uiGenerationMillis = generationMillis
+        , uiStreamingMarkdown = Nothing
         , uiLastTokensPerSecond =
             generationTokensPerSecond
                 usage.outputTokens
@@ -551,6 +555,16 @@ appendOrExtend kind title delta streamState state =
                     { uiBlocks =
                         rest Seq.|> block
                             { blockBody = block.blockBody <> delta }
+                    , uiStreamingMarkdown =
+                        if kind == BlockAssistant
+                            then
+                                let previous = case state.uiStreamingMarkdown of
+                                        Just (ident, parsed)
+                                            | ident == block.blockId -> parsed
+                                        _ -> feedFenceStream emptyFenceStreamState block.blockBody
+                                    parsed = feedFenceStream previous delta
+                                in parsed `seq` Just (block.blockId, parsed)
+                            else Nothing
                     }
         _ ->
             appendBlock kind title delta "" streamState Nothing state
@@ -1086,6 +1100,7 @@ discardResponseAttempt state =
             retainShellProcesses blocks state.uiShellProcesses
     in state
         { uiBlocks = blocks
+        , uiStreamingMarkdown = Nothing
         , uiSelectedBlock = (.blockId) . snd <$> selected
         , uiSelectedBlockIndex = fst <$> selected
         , uiBlockIndices =
@@ -1176,6 +1191,7 @@ finalizeTurn terminalState state =
     in state
         { uiBlocks = blocks
         , uiRunning = False
+        , uiStreamingMarkdown = Nothing
         , uiGenerating = False
         , uiGenerationMillis = generationMillis
         , uiLastTokensPerSecond =
@@ -1224,7 +1240,8 @@ transientNotice kind text = UiNotice
 finalizeStreams :: UiState -> UiState
 finalizeStreams state =
     state
-        { uiBlocks =
+        { uiStreamingMarkdown = Nothing
+        , uiBlocks =
             fmap
                 (\block ->
                     if block.blockState == BlockStreaming

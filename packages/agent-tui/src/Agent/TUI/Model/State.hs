@@ -18,6 +18,7 @@ import qualified Data.Sequence as Seq
 initialUiState :: UiState
 initialUiState = UiState
     { uiBlocks = Seq.empty
+    , uiStreamingMarkdown = Nothing
     , uiNextBlockId = 1
     , uiDraft = ""
     , uiCursor = 0

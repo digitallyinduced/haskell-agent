@@ -1,5 +1,9 @@
 # Fullscreen streaming Markdown benchmark
 
+The original section-cache comparison is retained below. For the subsequent
+retained-parser comparison, use `current` versus `incremental` and see
+[Retained parser](#retained-parser).
+
 `FullscreenMarkdown.hs` retains the pre-optimization production path as
 `baseline`: strict `Text` append followed by whole-message Markdown rendering,
 with Brick's existing closed-code-body cache. `optimized` additionally caches
@@ -151,3 +155,87 @@ and benchmark source are unchanged: the timings above include the final
 completed-message render, but exclude that targeted event-loop cleanup.
 The harness retains its prose entries until the sample ends, so these results
 do not measure production cache residency after completion.
+
+## Retained parser
+
+`current` is the existing streaming-section-cache renderer (also available as
+the historical `new` mode). `incremental` additionally retains
+`FenceStreamState`, feeds each new delta inside the measured interval, and
+renders its parsed sections. Both retain the strict body append and perform
+the same final completed-message render. Cold history bypasses the parser.
+The measurement therefore includes parser maintenance rather than moving
+that work outside the timed region.
+
+```sh
+nix develop
+cabal build --offline agent-tui:bench:fullscreen-markdown-bench
+bin=$(cabal list-bin agent-tui:bench:fullscreen-markdown-bench)
+"$bin" current mixed 100 64 7 +RTS -T
+"$bin" incremental mixed 100 64 7 +RTS -T
+```
+
+The incremental mode compares every frame with the existing section-cache
+renderer before measurement, including normalized display text, attributes,
+and click extents. The benchmark's parser, renderer, and support modules use
+`-O2`; shared dependency libraries use Cabal's normal optimization settings.
+The original `old` and `new` modes remain available.
+
+### Measurements, 2026-09-12
+
+GHC 9.10.3, Apple M3 Max (arm64 macOS), single-threaded RTS with `+RTS -T`,
+default allocation area, seven samples per row. Time covers all frames,
+including completion; allocation is decimal MB.
+
+| Workload | Count | Chunk | Wall current → incremental (ms) | CPU current → incremental (ms) | Allocated current → incremental (MB) |
+| --- | ---: | ---: | --- | --- | --- |
+| prose | 20 | 64 | 5.981 → 5.715 | 5.976 → 5.696 | 44.665 → 44.346 |
+| prose | 50 | 64 | 17.551 → 17.636 | 17.527 → 17.571 | 131.987 → 130.015 |
+| prose | 100 | 64 | 41.656 → 43.949 | 41.628 → 43.759 | 298.150 → 290.413 |
+| prose | 200 | 64 | 108.097 → 93.691 | 107.713 → 93.662 | 719.611 → 688.701 |
+| mixed | 50 | 64 | 128.041 → 115.699 | 127.752 → 115.640 | 719.094 → 664.796 |
+| mixed | 100 | 64 | 381.505 → 335.819 | 379.783 → 335.283 | 1947.231 → 1729.814 |
+| prose-lines | 50 | 64 | 86.942 → 86.585 | 86.849 → 86.514 | 543.395 → 542.492 |
+| fence | 100 | 64 | 28.643 → 28.926 | 28.611 → 28.891 | 186.993 → 184.940 |
+| open-fence | 100 | 64 | 30.257 → 29.397 | 30.217 → 29.384 | 191.361 → 189.400 |
+| table | 100 | 64 | 113.322 → 114.826 | 112.837 → 114.611 | 617.845 → 616.585 |
+| open-table | 100 | 64 | 115.089 → 112.165 | 114.499 → 112.063 | 614.829 → 613.633 |
+| resize | 50 | 64 | 165.758 → 155.165 | 165.556 → 154.723 | 859.159 → 804.829 |
+| mixed | 50 | 16 | 381.735 → 347.581 | 381.236 → 347.086 | 2440.845 → 2223.372 |
+| mixed | 50 | 256 | 59.804 → 55.980 | 59.752 → 55.949 | 288.679 → 275.052 |
+| mixed (repeat) | 50 | 64 | 124.231 → 112.191 | 123.943 → 112.118 | 719.094 → 664.796 |
+| history-prose | 50 | 64 | 2.515 → 2.489 | 2.515 → 2.483 | 15.754 → 15.754 |
+| history-mixed | 50 | 64 | 18.660 → 18.729 | 18.649 → 18.702 | 78.135 → 78.135 |
+
+The mixed 50-group repeat retains a 9.5% CPU reduction and 7.6% allocation
+reduction. The 100-group mixed case reduces CPU 11.7% and allocation 11.2%.
+This is an incremental improvement over section caching, not the much larger
+historical gain from introducing section caching itself.
+
+The small apparent regressions were repeated in reverse implementation order
+with 21 samples. The initial 100-paragraph slowdown did not reproduce; a
+growing table remains effectively unchanged. Sample-specific headings have
+different digit lengths in the 21-sample run, so allocation totals are not
+identical to the seven-sample run.
+
+| Repeated workload | Count | Chunk | Wall current → incremental (ms) | CPU current → incremental (ms) | Allocated current → incremental (MB) |
+| --- | ---: | ---: | --- | --- | --- |
+| prose | 100 | 64 | 39.375 → 38.301 | 39.361 → 38.281 | 297.649 → 289.913 |
+| fence | 100 | 64 | 28.475 → 27.805 | 28.453 → 27.801 | 186.946 → 184.894 |
+| table | 100 | 64 | 111.675 → 111.497 | 111.346 → 111.397 | 616.883 → 615.623 |
+| prose | 50 | 64 | 16.808 → 16.719 | 16.799 → 16.709 | 131.739 → 129.768 |
+| mixed | 100 | 64 | 358.745 → 317.702 | 358.045 → 317.055 | 1947.665 → 1730.266 |
+| prose, single delta | 50 | 100000 | 5.317 → 5.300 | 5.318 → 5.306 | 31.840 → 31.816 |
+| mixed, single delta | 50 | 100000 | 36.632 → 36.900 | 36.606 → 36.856 | 146.890 → 146.739 |
+
+Every incremental run passed per-frame equivalence. The representative
+100-group mixed improvement remains 11.4% CPU and 11.2% allocation on repeat.
+No speedup is claimed for growing tables, small prose messages, cold history,
+or the single-delta boundary. Their CPU differences are small and inconsistent
+between runs.
+
+This change removes rediscovery of completed fences and prose-section
+boundaries. It does not make total streaming work linear: strict body append,
+unfinished-section parsing/layout, open-code-body flattening, and Brick image
+composition still revisit growing state. The benchmark includes those costs
+and excludes event-loop cache retirement, terminal I/O, and syntax highlighting
+just as the original comparison does.

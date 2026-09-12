@@ -55,6 +55,7 @@ import Agent.TUI.Markdown
       diffWidgetWithSyntaxHighlighting,
       markdownWidgetWithLinks,
       markdownWidgetWithStreamingCache,
+      markdownWidgetWithParsedStreamingCache,
       markdownWidgetWithSyntaxHighlightingAndLinks )
 import Agent.TUI.Model
     ( blockCodeLanguage,
@@ -69,7 +70,8 @@ import Agent.TUI.Model
       RetryCountdown(retryCountdownBlockId),
       UiBlock(blockId, blockTimestamp, blockTitle, blockKind, blockState,
               blockDetail, blockExpanded, blockBody),
-      UiState(uiRetryCountdown, uiSelectedBlock, uiFocus, uiInspectionGroups) )
+      UiState(uiRetryCountdown, uiSelectedBlock, uiFocus, uiInspectionGroups,
+              uiStreamingMarkdown) )
 import Agent.TUI.Motion
     ( foregroundIndicator,
       nativeProgressAnimationEnabled,
@@ -208,21 +210,28 @@ drawBlock state target ui block =
             txt (if highlighted then "❯ " else "  ")
         -- Completed/history blocks already have a whole-block cache. Avoid
         -- paying for cold prose-section cache entries when no appends remain.
-        assistantMarkdown =
-            if block.blockState == BlockStreaming
-                then markdownWidgetWithStreamingCache
+        assistantMarkdown cacheCode codeHeader body
+            | block.blockState == BlockStreaming
+            , Just (ident, parsed) <- ui.uiStreamingMarkdown
+            , ident == block.blockId =
+                markdownWidgetWithParsedStreamingCache
                     state.appSyntaxHighlighter
                     MarkdownLink
-                    (\chunkIndex sectionIndex ->
-                        cached
-                            (MarkdownProseCache
-                                target
-                                block.blockId
-                                chunkIndex
-                                sectionIndex))
-                else markdownWidgetWithSyntaxHighlightingAndLinks
+                    cacheProse
+                    cacheCode codeHeader parsed
+            | block.blockState == BlockStreaming =
+                markdownWidgetWithStreamingCache
                     state.appSyntaxHighlighter
                     MarkdownLink
+                    cacheProse
+                    cacheCode codeHeader body
+            | otherwise =
+                markdownWidgetWithSyntaxHighlightingAndLinks
+                    state.appSyntaxHighlighter
+                    MarkdownLink
+                    cacheCode codeHeader body
+        cacheProse chunkIndex sectionIndex =
+            cached (MarkdownProseCache target block.blockId chunkIndex sectionIndex)
         content = case block.blockKind of
             BlockUser ->
                 withAttr Theme.userAttr $

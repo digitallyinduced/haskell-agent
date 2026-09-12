@@ -5,6 +5,7 @@ module Agent.TUI.Model.Block
     ) where
 
 import Agent.TUI.Model.Types
+import Agent.TUI.FencedCode (emptyFenceStreamState, feedFenceStream)
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
@@ -42,6 +43,11 @@ appendBlock kind title body detail blockState callId state =
             }
     in prepared
         { uiBlocks = prepared.uiBlocks Seq.|> block
+        , uiStreamingMarkdown =
+            if kind == BlockAssistant && blockState == BlockStreaming
+                then let parsed = feedFenceStream emptyFenceStreamState body
+                     in parsed `seq` Just (ident, parsed)
+                else Nothing
         , uiNextBlockId = prepared.uiNextBlockId + 1
         , uiSelectedBlock = Just ident
         , uiSelectedBlockIndex = Just index

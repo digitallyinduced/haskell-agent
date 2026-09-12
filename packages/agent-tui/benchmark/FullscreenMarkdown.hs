@@ -5,6 +5,7 @@
 module Main (main) where
 
 import qualified Agent.TUI.Markdown as Markdown
+import Agent.TUI.FencedCode (FenceStreamState, emptyFenceStreamState, feedFenceStream)
 import qualified Agent.TUI.Theme as Theme
 import Brick
 import Control.Exception (evaluate) -- safe-exceptions does not export evaluate.
@@ -32,7 +33,10 @@ data Name = Transcript | Code !Int | Prose !Int !Int | Link !Text
 
 data Sample = Sample !Double !Double !Double
 
-type Renderer = Bool -> Text -> Widget Name
+-- The historical modes remain available so earlier benchmark reports can be
+-- reproduced. "current" is the baseline for retained-parser measurements.
+data Renderer = LegacyRenderer | SectionCacheRenderer | IncrementalRenderer
+    deriving (Eq)
 
 -- This is the pre-optimization production path: append the strict body, parse
 -- the complete Markdown every frame, and cache only closed fenced-code bodies.
@@ -45,9 +49,25 @@ optimized = Markdown.markdownWidgetWithStreamingCache
     Nothing Link (\chunk section -> cached (Prose chunk section))
     (\index -> cached (Code index)) (\_ _ -> emptyWidget)
 
-oldRenderer, newRenderer :: Renderer
-oldRenderer _ = baseline
-newRenderer streaming = if streaming then optimized else baseline
+prepareFrame
+    :: Renderer
+    -> FenceStreamState
+    -> Bool
+    -> Text
+    -> Text
+    -> (FenceStreamState, Widget Name)
+prepareFrame renderer parser streaming body delta
+    | not streaming = (emptyFenceStreamState, baseline body)
+    | renderer == LegacyRenderer = (parser, baseline body)
+    | renderer == SectionCacheRenderer = (parser, optimized body)
+    | otherwise =
+        let !nextParser = feedFenceStream parser delta
+        in ( nextParser
+           , Markdown.markdownWidgetWithParsedStreamingCache
+                Nothing Link (\chunk section -> cached (Prose chunk section))
+                (\index -> cached (Code index)) (\_ _ -> emptyWidget)
+                nextParser
+           )
 
 main :: IO ()
 main = do
@@ -56,9 +76,11 @@ main = do
     getArgs >>= \case
         [mode, scenario, countArg, chunkArg, samplesArg] -> do
             renderer <- case mode of
-                "old" -> pure oldRenderer
-                "new" -> pure newRenderer
-                _ -> die "mode must be old or new"
+                "old" -> pure LegacyRenderer
+                "new" -> pure SectionCacheRenderer
+                "current" -> pure SectionCacheRenderer
+                "incremental" -> pure IncrementalRenderer
+                _ -> die "mode must be old, new, current, or incremental"
             unless (scenario `elem`
                 ["prose", "prose-lines", "fence", "open-fence", "table", "open-table", "mixed", "resize",
                  "history-prose", "history-mixed"])
@@ -69,8 +91,8 @@ main = do
             let input = frameInput scenario count chunkSize 0
             case [(index, old, new) |
                     (index, (old, new)) <- zip [0 :: Int ..]
-                        (zip (frames oldRenderer (scenario == "resize") input)
-                            (frames newRenderer (scenario == "resize") input)),
+                        (zip (frames SectionCacheRenderer (scenario == "resize") input)
+                            (frames renderer (scenario == "resize") input)),
                     old /= new] of
                 [] -> pure ()
                 (index, old, new) : _ ->
@@ -84,7 +106,7 @@ main = do
                 (median [wall | Sample wall _ _ <- results])
                 (median [cpu | Sample _ cpu _ <- results])
                 (median [bytes | Sample _ _ bytes <- results])
-        _ -> die "usage: fullscreen-markdown-bench old|new SCENARIO COUNT CHUNK_CHARS SAMPLES"
+        _ -> die "usage: fullscreen-markdown-bench old|new|current|incremental SCENARIO COUNT CHUNK_CHARS SAMPLES"
   where
     positive raw = case reads raw of
         [(n, "")] | n > 0 -> pure n
@@ -113,43 +135,45 @@ measure renderer resize input = do
 
 {-# NOINLINE run #-}
 run :: Renderer -> Bool -> [(Bool, Text)] -> Int
-run renderer resize = go "" emptyRenderState 0 (0 :: Int)
+run renderer resize = go "" emptyFenceStreamState emptyRenderState 0 (0 :: Int)
   where
-    go !_ !_ !total !_ [] = total
-    go !body !state !total !frame ((streaming, delta) : rest) =
+    go !_ !_ !_ !total !_ [] = total
+    go !body !parser !state !total !frame ((streaming, delta) : rest) =
         let !nextBody = body <> delta
+            (!nextParser, markdown) = prepareFrame renderer parser streaming nextBody delta
             width = if resize && (frame `div` 50) `mod` 2 == 1 then 40 else 80
             region = (width, 30)
             stateBefore =
                 if resize && frame `mod` 50 == 0 then emptyRenderState else state
             widget = viewport Transcript Vertical $
-                vBox [renderer streaming nextBody, visible (txt " ")]
+                vBox [markdown, visible (txt " ")]
             (nextState, picture, _, extents) =
                 renderFinal Theme.terminalDefault [widget] region
                     (const Nothing) stateBefore
             !checksum = foldl' (foldl' spanChecksum) 0
                 (displayOpsForPic picture region)
                 + foldl' (\n extent -> n + length (show extent)) 0 extents
-        in go nextBody nextState (total + checksum) (frame + 1) rest
+        in go nextBody nextParser nextState (total + checksum) (frame + 1) rest
 
 -- Equality checking deliberately stays outside the measurement. Compare the
 -- complete display operations (including styles/URLs) and click extents.
 frames :: Renderer -> Bool -> [(Bool, Text)] -> [([[(Char, V.Attr)]], [String])]
-frames renderer resize = go "" emptyRenderState (0 :: Int)
+frames renderer resize = go "" emptyFenceStreamState emptyRenderState (0 :: Int)
   where
-    go _ _ _ [] = []
-    go body state frame ((streaming, delta) : rest) =
+    go _ _ _ _ [] = []
+    go body parser state frame ((streaming, delta) : rest) =
         let nextBody = body <> delta
+            (nextParser, markdown) = prepareFrame renderer parser streaming nextBody delta
             width = if resize && (frame `div` 50) `mod` 2 == 1 then 40 else 80
             region = (width, 30)
             before = if resize && frame `mod` 50 == 0 then emptyRenderState else state
             widget = viewport Transcript Vertical $
-                vBox [renderer streaming nextBody, visible (txt " ")]
+                vBox [markdown, visible (txt " ")]
             (nextState, picture, _, extents) =
                 renderFinal Theme.terminalDefault [widget] region (const Nothing) before
         in ( map (concatMap spanCells . toList) (toList (displayOpsForPic picture region))
             , sort (map show extents))
-            : go nextBody nextState (frame + 1) rest
+            : go nextBody nextParser nextState (frame + 1) rest
 
 -- Span segmentation depends on image composition and is not observable.
 -- SpanOp's Show instance also omits text, so compare explicit payloads.

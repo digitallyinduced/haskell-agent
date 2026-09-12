@@ -15,8 +15,8 @@ mkDerivation {
     QuickCheck text vty
   ];
   benchmarkHaskellDepends = [
-    aeson aeson-pretty agent-core agent-json agent-syntax base brick
-    bytestring containers deepseq safe-exceptions text vty
+    aeson aeson-pretty agent-core agent-json agent-syntax agent-tools
+    base brick bytestring containers deepseq safe-exceptions text vty
   ];
   description = "Retained terminal UI for the universal agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";
