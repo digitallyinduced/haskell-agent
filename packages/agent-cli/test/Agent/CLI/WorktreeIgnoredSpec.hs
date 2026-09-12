@@ -4,6 +4,7 @@ import Agent.CLI.Worktree.Ignored (checkIgnoredPath, inspectCabalArtifacts, remo
 import qualified Data.ByteString as BS
 import System.Process (readProcessWithExitCode, readCreateProcessWithExitCode, proc, CreateProcess(..))
 import System.Exit (ExitCode(..))
+import System.Environment (getEnvironment)
 import Control.Monad (forM_, unless)
 import qualified System.Directory as Directory
 import System.FilePath ((</>), takeDirectory)
@@ -36,9 +37,12 @@ spec = describe "ignored worktree paths" $ do
                     , "remote-repo-cache: " <> repository </> "cabal-repositories"
                     , "logs-dir: " <> repository </> "cabal-logs"
                     ]
+                -- The outer Nix build exports a package path for Setup, but
+                -- Cabal requires managing its own package databases.
+                cabalEnvironment <- filter ((/= "GHC_PACKAGE_PATH") . fst) <$> getEnvironment
                 let cabal arguments = do
                         (code, output, errors) <- readCreateProcessWithExitCode
-                            ((proc "cabal" (["--config-file=" <> cabalConfig] <> arguments)) { cwd = Just repository }) ""
+                            ((proc "cabal" (["--config-file=" <> cabalConfig] <> arguments)) { cwd = Just repository, env = Just cabalEnvironment }) ""
                         unless (code == ExitSuccess) (fail (output <> errors))
                         pure output
                 _ <- cabal ["build", "--offline", "exe:example"]
