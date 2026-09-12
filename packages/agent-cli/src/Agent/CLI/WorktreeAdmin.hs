@@ -8,6 +8,7 @@ import Agent.CLI.Worktree.Provenance (WorktreeActivity, loadWorktreeActivity)
 import Agent.CLI.Worktree
     ( WorktreeCleanupReport(..)
     , enrollWorktree
+    , cleanWorktreeArtifacts
     , gcWorktreesManuallyWithActivity
     , isUnderWorktreeRoot
     , protectWorktree
@@ -39,6 +40,19 @@ runWorktreeAdmin command = do
             action path >>= either failCommand (const $
                 Text.putStrLn (message <> ": " <> Text.pack (unsafeToFilePath path)))
     case command of
+        WorktreeArtifacts execute requested -> do
+            path <- makeAbsolute requested
+            cwd <- getCurrentDirectory
+            Text.hPutStrLn stderr "Only ignored Cabal compiled output and its recognized build monitors are considered. Stop external builds before execution; lsof verification is required. Swift .build and other data are preserved."
+            result <- cleanWorktreeArtifacts root path execute [cwd]
+            inventory <- either failCommand pure result
+            Text.putStrLn (if execute then "Artifact removal completed" else "Dry run — no files or registry state written")
+            mapM_ (\(relative, bytes) -> Text.putStrLn $
+                (if execute then "removed\t" else "eligible\t")
+                <> Text.pack (show (unsafeToFilePath path <> "/" <> relative))
+                <> "\tapparent bytes: " <> Text.pack (show bytes)) inventory
+            Text.putStrLn $ "Total apparent bytes: " <> Text.pack (show (sum (map snd inventory)))
+                <> " (APFS sharing, snapshots and open files may prevent equivalent disk savings)."
         WorktreeGC dryRun overrideDays -> do
             config <- loadHarnessConfig home >>= either failCommand pure
             cwd <- getCurrentDirectory

@@ -402,6 +402,24 @@ Configure a positive whole number of days with
 `worktree gc --inactivity-days 14` for one pass. Saving a conversation does not
 protect a checkout forever; use `worktree protect` for long-lived work.
 
+To reclaim compiled output while keeping a dirty or unmerged checkout, run
+artifact maintenance from outside that checkout:
+
+```console
+agent-cli worktree artifacts --dry-run /absolute/path/to/managed/worktree
+agent-cli worktree artifacts --execute /absolute/path/to/managed/worktree
+```
+
+The default is dry-run. This only removes recognized, repository-ignored Cabal
+compiled files under `dist-newstyle/build` and recognized build monitors so a
+subsequent Cabal build regenerates them. Source, settings, conversation history,
+downloaded sources, and Swift `.build` are preserved. It does not enroll legacy
+worktrees or relax whole-checkout GC rules. Protected, active, Git-locked, and
+current checkouts are refused. Stop external builds and editors first: execution
+requires a successful `lsof` check, and external processes must remain stopped
+throughout cleanup. Reported bytes are apparent sizes, not guaranteed APFS space
+savings; rebuilding will consume space again.
+
 Use `--provider openai`, `--provider xai`, `--provider openrouter`,
 `--provider gemini`, or `--provider claude-code` to override automatic
 provider detection. Claude Code is selected explicitly rather than by
