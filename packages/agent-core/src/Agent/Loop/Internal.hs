@@ -955,9 +955,8 @@ handleLoopEventFailure unexpected = \case
         Exception.throwIO exception
 
 data AsyncToolManager = AsyncToolManager
-    { asyncToolRequests :: !(TQueue ManagedToolRequest)
+    { asyncToolRequests :: !(TQueue ManagedToolCall)
     , asyncToolCalls :: !(TVar (Map Text ManagedToolCall))
-    , asyncToolNextSequence :: !(TVar Int)
     , asyncToolScheduled :: !(TVar (IntMap ToolSchedulingPlan))
     , asyncToolOutstanding :: !(TVar Int)
     , asyncToolCompleted :: !(TQueue ToolCallResult)
@@ -975,11 +974,6 @@ data ManagedToolCall = ManagedToolCall
     , managedAdmissionSequence :: !Int
     }
 
-data ManagedToolRequest = ManagedToolRequest
-    { managedSequence :: !Int
-    , managedRecord :: !ManagedToolCall
-    }
-
 data AsyncToolCallConflict = AsyncToolCallConflict !Text
 
 instance Show AsyncToolCallConflict where
@@ -992,7 +986,6 @@ newAsyncToolManager =
     AsyncToolManager
         <$> newTQueueIO
         <*> newTVarIO Map.empty
-        <*> newTVarIO 0
         <*> newTVarIO IntMap.empty
         <*> newTVarIO 0
         <*> newTQueueIO
@@ -1038,25 +1031,20 @@ admitManagedToolCall manager call = do
         Nothing -> do
             result <- newEmptyTMVar
             trustedResult <- newTVar Nothing
-            sequenceNumber <- readTVar manager.asyncToolNextSequence
+            -- The registry retains every admitted call for deduplication and
+            -- recovery, so its size is also the next admission sequence.
             let record = ManagedToolCall
                     { managedCall = call
                     , managedResult = result
                     , managedTrustedResult = trustedResult
-                    , managedAdmissionSequence = sequenceNumber
+                    , managedAdmissionSequence = Map.size calls
                     }
             writeTVar
                 manager.asyncToolCalls
                 (Map.insert call.callId record calls)
-            writeTVar
-                manager.asyncToolNextSequence
-                (sequenceNumber + 1)
             when (toolCallMode call == AsyncToolCall) $
                 modifyTVar' manager.asyncToolOutstanding (+ 1)
-            writeTQueue manager.asyncToolRequests ManagedToolRequest
-                { managedSequence = sequenceNumber
-                , managedRecord = record
-                }
+            writeTQueue manager.asyncToolRequests record
             pure result
 
 runManagedToolCalls
@@ -1130,7 +1118,7 @@ runAsyncToolManager config manager = do
                     prepared <-
                         prepareManagedToolCall
                             config
-                            request.managedRecord.managedCall
+                            request.managedCall
                     plan <- schedulingPlanForPrepared config prepared
                     pure (prepared, plan))
                 >>= \case
@@ -1145,7 +1133,7 @@ runAsyncToolManager config manager = do
                                     modifyTVar'
                                         manager.asyncToolScheduled
                                         (IntMap.insert
-                                            request.managedSequence
+                                            request.managedAdmissionSequence
                                             plan)
                                 withAsync
                                     (runManagedToolWorker
@@ -1186,7 +1174,7 @@ prepareManagedToolCall config call
 runManagedToolWorker
     :: LoopConfig
     -> AsyncToolManager
-    -> ManagedToolRequest
+    -> ManagedToolCall
     -> PreparedToolCall
     -> ToolSchedulingPlan
     -> IO (Maybe ToolCallResult)
@@ -1198,7 +1186,7 @@ runManagedToolWorker config manager request prepared plan = do
                 IntMap.foldrWithKey
                     (\sequenceNumber earlierPlan conflicts ->
                         conflicts
-                            || ( sequenceNumber < request.managedSequence
+                            || ( sequenceNumber < request.managedAdmissionSequence
                                 && schedulingPlansConflict earlierPlan plan
                                ))
                     False
@@ -1206,7 +1194,7 @@ runManagedToolWorker config manager request prepared plan = do
     race
         (waitCancel config.loopCancel)
         (runPreparedToolCallWithCompletion
-            (atomically . writeTVar request.managedRecord.managedTrustedResult . Just)
+            (atomically . writeTVar request.managedTrustedResult . Just)
             config
             prepared)
         >>= \case
@@ -1215,15 +1203,15 @@ runManagedToolWorker config manager request prepared plan = do
 
 completeManagedToolRequest
     :: AsyncToolManager
-    -> ManagedToolRequest
+    -> ManagedToolCall
     -> Either SomeException (Maybe ToolCallResult)
     -> IO ()
 completeManagedToolRequest manager request outcome =
     atomically do
         modifyTVar'
             manager.asyncToolScheduled
-            (IntMap.delete request.managedSequence)
-        let call = request.managedRecord.managedCall
+            (IntMap.delete request.managedAdmissionSequence)
+        let call = request.managedCall
         case outcome of
             Left exception -> do
                 -- Do not publish a synthetic empty completion for a crashed
@@ -1232,7 +1220,7 @@ completeManagedToolRequest manager request outcome =
                 _ <- tryPutTMVar manager.asyncToolFailure exception
                 pure ()
             Right result -> do
-                putTMVar request.managedRecord.managedResult result
+                putTMVar request.managedResult result
                 when (toolCallMode call == AsyncToolCall) do
                     modifyTVar'
                         manager.asyncToolOutstanding
