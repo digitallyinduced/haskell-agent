@@ -72,6 +72,7 @@ data Command
 
 data WorktreeCommand
     = WorktreeGC !Bool !(Maybe Int)
+    | WorktreeArtifacts !Bool !OsPath
     | WorktreeEnroll !OsPath
     | WorktreeRestore !OsPath
     | WorktreeProtect !OsPath
@@ -388,6 +389,13 @@ worktreeParser = Worktree <$> Options.hsubparser
                     (Options.long "inactivity-days" <> Options.metavar "DAYS"
                         <> Options.help "Minimum inactivity for merged, clean checkouts (default 1 day; unmerged work never expires)")))
             (Options.progDesc "Collect stale, clean worktrees whose work is incorporated into another branch or verified merged PR"))
+    <> Options.command "artifacts"
+        (Options.info
+            (WorktreeArtifacts
+                <$> (Options.flag' True (Options.long "execute" <> Options.help "Remove inspected Cabal compiled output and build monitors; requires lsof and stopped external builds")
+                    Options.<|> Options.flag False False (Options.long "dry-run" <> Options.help "Report files and apparent bytes without writing (default)"))
+                <*> (unsafeEncodeUtf <$> Options.argument Options.str (Options.metavar "PATH")))
+            (Options.progDesc "Inspect or explicitly remove Cabal compiler output from one managed checkout; never remove worktrees"))
     <> pathCommand "enroll" WorktreeEnroll "Explicitly enroll an existing checkout in automatic collection"
     <> pathCommand "restore" WorktreeRestore "Restore a collected checkout without overwriting existing paths"
     <> pathCommand "protect" WorktreeProtect "Protect an enrolled checkout from collection"

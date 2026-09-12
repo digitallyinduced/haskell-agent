@@ -14,6 +14,16 @@ fromFilePath = unsafeEncodeUtf
 spec :: Spec
 spec = do
     describe "worktree administration" do
+        it "defaults artifact maintenance to dry-run and requires explicit execution" do
+            let path = fromFilePath "/checkout"
+            parseArgs ["worktree", "artifacts", "/checkout"]
+                `shouldBe` Right (Worktree (WorktreeArtifacts False path))
+            parseArgs ["worktree", "artifacts", "--dry-run", "/checkout"]
+                `shouldBe` Right (Worktree (WorktreeArtifacts False path))
+            parseArgs ["worktree", "artifacts", "--execute", "/checkout"]
+                `shouldBe` Right (Worktree (WorktreeArtifacts True path))
+            parseArgs ["worktree", "artifacts", "--execute", "--dry-run", "/checkout"]
+                `shouldSatisfy` either (const True) (const False)
         it "parses dry-run and inactivity override" do
             parseArgs ["worktree", "gc", "--dry-run"]
                 `shouldBe` Right (Worktree (WorktreeGC True Nothing))
