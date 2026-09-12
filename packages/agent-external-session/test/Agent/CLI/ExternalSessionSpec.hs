@@ -509,6 +509,41 @@ spec = describe "Agent.CLI.ExternalSession" do
                         `shouldSatisfy` (<= 40)
                 [] -> expectationFailure "expected a recovered Claude tool call"
 
+    it "bounds Claude cycles and keeps summaries from beyond the retained turns" $
+        withFixture \fixture -> do
+            let transcript = fixture.cwd </> "cycle.jsonl"
+                record n = object
+                    [ "type" .= (if n == 1 then "user" else "assistant" :: Text)
+                    , "uuid" .= Text.pack (show n)
+                    , "parentUuid" .= Text.pack (show (if n == 1 then 205 else n - 1))
+                    , "timestamp" .= n
+                    , "cwd" .= fixture.cwd
+                    , "message" .= object ["content" .= Text.pack (show n)]
+                    ]
+            writeJsonl transcript (map record [1 .. 205 :: Int])
+            session <- showReference fixture.env ExternalClaude (Text.pack transcript) 100
+            map (.externalTurnText) session.externalSessionTurns
+                `shouldBe` map (Text.pack . show) [6 .. 205 :: Int]
+            session.externalSessionLastUserRequest `shouldBe` Just "1"
+            session.externalSessionLastAssistantAction `shouldBe` Just "205"
+
+    it "keeps Claude turns when a parent is missing and skips hidden ancestors" $
+        withFixture \fixture -> do
+            let transcript = fixture.cwd </> "missing-parent.jsonl"
+                record uuid parent hidden = object
+                    [ "type" .= ("user" :: Text)
+                    , "uuid" .= (uuid :: Text)
+                    , "parentUuid" .= (parent :: Text)
+                    , "isMeta" .= hidden
+                    , "cwd" .= fixture.cwd
+                    , "message" .= object ["content" .= uuid]
+                    ]
+            writeJsonl transcript
+                [record "hidden" "missing" True, record "visible" "hidden" False]
+            session <- showReference fixture.env ExternalClaude (Text.pack transcript) 100
+            map (.externalTurnText) session.externalSessionTurns `shouldBe` ["visible"]
+            warningCodes session `shouldContain` ["unsafe_records_skipped"]
+
     it "does not follow symlinked Claude transcripts during discovery" $
         withFixture \fixture -> do
             let slug = map
@@ -598,6 +633,41 @@ spec = describe "Agent.CLI.ExternalSession" do
             rendered `shouldExclude` "instruction-like metadata"
             rendered `shouldExclude` "cursor-image-secret"
             warningCodes session `shouldContain` ["image_content_omitted"]
+
+    it "folds Cursor desktop rows in key order with bounded turns and binary warnings" $
+        withFixture \fixture -> do
+            let store = fixture.root </> "state.vscdb"
+                sessionId = "44444444-4444-4444-4444-444444444444"
+            withDatabase store \database -> do
+                SQLite.exec database "CREATE TABLE composerHeaders (composerId TEXT, value TEXT)"
+                executeSql database "INSERT INTO composerHeaders VALUES (?, ?)"
+                    [SQLText sessionId, SQLText "{}"]
+                SQLite.exec database "CREATE TABLE cursorDiskKV (key TEXT, value TEXT)"
+                executeSql database "INSERT INTO cursorDiskKV VALUES (?, ?)"
+                    [ SQLText ("composerData:" <> sessionId)
+                    , SQLText $ renderJson $ object ["composerId" .= sessionId]
+                    ]
+                forM_ (reverse [1000 .. 1204 :: Int]) \n ->
+                    executeSql database "INSERT INTO cursorDiskKV VALUES (?, ?)"
+                        [ SQLText ("bubbleId:" <> sessionId <> ":" <> Text.pack (show n))
+                        , SQLText $ renderJson $ object
+                            [ "role" .= ("user" :: Text)
+                            , "text" .= Text.pack (show n)
+                            ]
+                        ]
+                executeSql database "INSERT INTO cursorDiskKV VALUES (?, ?)"
+                    [SQLText ("bubbleId:" <> sessionId <> ":bad"), SQLText "not JSON"]
+            let env = fixture.env { externalCursorDesktopStores = [store] }
+            session <- showReference env ExternalCursor sessionId 100
+            map (.externalTurnText) session.externalSessionTurns
+                `shouldBe` map (Text.pack . show) [1005 .. 1204 :: Int]
+            session.externalSessionLastUserRequest `shouldBe` Just "1204"
+            warningCodes session `shouldContain` ["binary_content_unavailable"]
+            withDatabase store \database ->
+                SQLite.exec database "DROP TABLE cursorDiskKV"
+            failed <- showReference env ExternalCursor sessionId 100
+            warningCodes failed `shouldContain`
+                ["cursor_store_error", "cursor_transcript_unavailable"]
 
     it "decodes Grok session directories and bounds streamed histories" $
         withFixture \fixture -> do
