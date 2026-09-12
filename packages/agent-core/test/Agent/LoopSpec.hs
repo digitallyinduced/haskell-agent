@@ -1292,6 +1292,54 @@ spec = describe "runLoop" do
                 expectationFailure $
                     "unexpected async submissions: " <> show seen
 
+    it "admits ordered fresh calls after a completed async call is replayed" do
+        invocations <- newIORef ([] :: [Text])
+        step <- newIORef (0 :: Int)
+        let completedCall = asyncFunctionToolCall "completed" "first" "{}"
+            freshCalls =
+                [ functionToolCall "fresh-1" "second" "{}"
+                , functionToolCall "fresh-2" "third" "{}"
+                ]
+            record name = do
+                atomicModifyIORef' invocations \names -> (names <> [name], ())
+                pure (Right name)
+            sequentialTool name =
+                jsonAppToolWithExecution name "" [] AlwaysReadOnly TurnSequential
+                    (noArgsTool name (record name))
+            tools =
+                [ asyncNoArgsTool "first" (record "first")
+                , sequentialTool "second"
+                , sequentialTool "third"
+                ]
+            backend = backendWithCallbacks \state _previous _inputs callbacks -> do
+                current <- atomicModifyIORef' step \value ->
+                    (value + 1, value + 1)
+                output <- case current of
+                    1 -> do
+                        callbacks.onAsyncToolCall completedCall
+                        pure $ emptyTurnOutput "resp-first" [completedCall] Nothing
+                    2 -> do
+                        -- The previous result was consumed before this model
+                        -- request; replay must not requeue it or reset ordering.
+                        callbacks.onAsyncToolCall completedCall
+                        pure $ emptyTurnOutput "resp-fresh" freshCalls Nothing
+                    _ ->
+                        pure $ emptyTurnOutput "resp-done" [] (Just "done")
+                pure $ Right BackendResult
+                    { backendOutput = output
+                    , backendState = appendStateMarker state
+                    }
+        config <- testConfig backend
+        timeout concurrencyProbeMicros
+            (runLoop config { loopTools = registryFromTools tools } Nothing "go")
+            `shouldReturn` Just (Right LoopResult
+                { finalResponseId = "resp-done"
+                , finalText = Just "done"
+                , turnsUsed = 3
+                , tokenUsage = emptyTokenUsage
+                })
+        readIORef invocations `shouldReturn` ["first", "second", "third"]
+
     it "fails closed when an async call_id is reused for a different call" do
         firstInvocations <- newIORef (0 :: Int)
         secondInvocations <- newIORef (0 :: Int)
