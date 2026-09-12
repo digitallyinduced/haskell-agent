@@ -90,6 +90,9 @@ module Agent.CLI.TUI.App
     , requestFullscreenText
     , runFullscreen
     , withFullscreenWorker
+    , withFullscreenFinalOutput
+    , enqueueMailboxEvent
+    , eventPump
     , commitFullscreenImagePreviews
     , commitFullscreenHistoryTurn
     , resetHistoryPage

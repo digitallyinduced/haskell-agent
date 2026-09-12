@@ -2,9 +2,7 @@ module Agent.CLI.TUIAppSpec (spec) where
 
 import qualified Agent.TUI.Theme as Theme
 import Agent.CLI.TUI.Keyboard (decodeKeyboardBody, classifyKeyboard, runKeyboardInput)
-import Agent.CLI.TUI.App (finishedMarkdownProseCaches)
-import Agent.CLI.TUI.App.Run (withFullscreenFinalOutput)
-import Agent.CLI.TUI.App.Mailbox (enqueueMailboxEvent, eventPump)
+import Agent.CLI.TUI.App (finishedMarkdownProseCaches, withFullscreenFinalOutput, enqueueMailboxEvent, eventPump)
 import Brick.BChan (readBChan)
 import Control.Monad (forM_, when)
 import Control.Monad.IO.Class (liftIO)
