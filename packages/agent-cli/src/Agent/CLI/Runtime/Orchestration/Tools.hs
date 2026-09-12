@@ -53,7 +53,7 @@ import Agent.Runtime.ModelConfig (builtinConnectionId)
 import Agent.Runtime.Models (ModelTarget(targetConnectionId, targetWireModelId))
 import Agent.CLI.Options
     ( isOneShot, resolveComputerUseEnabled
-    , CliOptions(optGhci, optBash, optSkills)
+    , CliOptions(optGhci, optBash, optSkills, optAgentsMd)
     )
 import Agent.CLI.Plan (resumedPlanNeedsApproval)
 import Agent.CLI.Runtime.Orchestration.Background
@@ -67,12 +67,10 @@ import Agent.CLI.Runtime.Orchestration.Types
     , nativeLoadsHostWorkspaceContext
     , nativePreparedDiscovery
     )
-import Agent.CLI.Resume
-    ( SessionInitialContext
-        ( initialContextMayRestoreSnapshot
-        , initialContextNeeded
-        )
-    , resolveSessionInitialContext
+import Agent.Runtime.Startup.Context
+    ( SessionInitialContext, ContextPreloadPolicy(..)
+    , resolveSessionInitialContext, preloadInitialContext, preloadAgentsContext
+    , assembleInitialSkills
     )
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.Runtime.Orchestration.Session ( AgentSessionRequest(..)
@@ -99,8 +97,7 @@ import Agent.Runtime.SessionLock
       sessionLockFilePath,
       sessionLockPath )
 import Agent.CLI.Startup.Auth (startupDie)
-import Agent.CLI.StartupContext ( preloadAgentsContext )
-import Agent.CLI.Skills (loadMcpSkillsCatalog, mergeSkillCatalogs)
+import Agent.CLI.Skills (loadMcpSkillsCatalog)
 import Agent.CLI.WebFetch
     ( WebFetchRuntime
     , closeWebFetchRuntime
@@ -141,7 +138,6 @@ import Agent.Tools.Types
     , ToolEnv(..)
     , appToolsFromGroups
     )
-import Control.Concurrent.Async ( concurrently )
 import Control.Exception.Safe
     ( SomeException, mask_, throwIO, try )
 import Control.Monad ( forM_, when, void )
@@ -257,14 +253,11 @@ runAgentTools request = withSessionResourceScopes \resources -> do
         (reportStartupWarning request.startup)
         lspStartup.lspStartupWarnings
     installCollaborationCallbacks request collaborationRuntime
-    remoteInitialSkills <-
-        if request.options.optSkills
-            then loadMcpSkillsCatalog mcpRuntime.runtimeMcpFleet
-            else pure (SkillCatalog [] [])
-    let initialSkills =
-            mergeSkillCatalogs
-                localToolRuntime.localInitialSkills
-                remoteInitialSkills
+    initialSkills <-
+        assembleInitialSkills
+            request.options.optSkills
+            localToolRuntime.localInitialSkills
+            (loadMcpSkillsCatalog mcpRuntime.runtimeMcpFleet)
     sessionControlRuntime <-
         newSessionControlRuntime
             request
@@ -437,7 +430,17 @@ prepareInitialContextPreload AgentToolsRequest
     , toolRefreshDialectContext = refreshDialectContext
     } = do
     (preloadedAgentsContext, preloadedLearnedSkills) <-
-        concurrently preloadAgents preloadLearnedSkills
+        preloadInitialContext
+            ContextPreloadPolicy
+                { contextLoadsHostWorkspace = loadsHostWorkspaceContext
+                , contextRefreshDialect = refreshDialectContext
+                }
+            contextRequirements
+            (preloadAgentsContext options.optAgentsMd dialect home cwd)
+            (successfulLearnedSkillsPreload
+                <$> loadApplicableLearnedSkillsForStore
+                    startup.startupDatabaseStore
+                    databaseScopes)
     pure (contextRequirements, InitialContextPreload{..})
   where
     contextRequirements =
@@ -452,23 +455,6 @@ prepareInitialContextPreload AgentToolsRequest
                 . (.nativeWorkspaceDiscovery)
             )
             startup.startupNativeHooks
-    preloadAgents
-        | loadsHostWorkspaceContext
-            && ( contextRequirements.initialContextNeeded
-                || refreshDialectContext
-               ) =
-            if refreshDialectContext
-                || not contextRequirements.initialContextMayRestoreSnapshot
-                then preloadAgentsContext options dialect home cwd
-                else pure Nothing
-        | otherwise = pure Nothing
-    preloadLearnedSkills
-        | contextRequirements.initialContextNeeded =
-            successfulLearnedSkillsPreload
-                <$> loadApplicableLearnedSkillsForStore
-                    startup.startupDatabaseStore
-                    databaseScopes
-        | otherwise = pure Nothing
 
 newSessionControlRuntime
     :: AgentToolsRequest windowTitleResult

@@ -9,6 +9,7 @@ import qualified Agent.Runtime.CollaborationSpec as Collaboration
 import qualified Agent.Runtime.ProviderRuntimeSpec as ProviderRuntime
 import qualified Agent.Runtime.CompactionSpec as Compaction
 import qualified Agent.Runtime.StartupPolicySpec as StartupPolicy
+import qualified Agent.Runtime.Startup.ContextSpec as StartupContext
 import qualified Agent.Runtime.Startup.ModelSpec as StartupModel
 import qualified Agent.Runtime.Startup.PolicySpec as StartupApproval
 import qualified Agent.Runtime.Startup.GatewaySpec as StartupGateway
@@ -48,6 +49,7 @@ main = hspec do
     ToolStartup.spec
     McpStartup.spec
     Collaboration.spec
+    StartupContext.spec
     Request.spec
     ProviderRuntime.spec
     Compaction.spec
