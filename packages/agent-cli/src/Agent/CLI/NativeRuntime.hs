@@ -18,6 +18,7 @@ module Agent.CLI.NativeRuntime
     , newNativeProcessRuntime
     , newNativeProcessRuntimeWithIntegrations
     , newNativeProcessRuntimeWithOrganizationIntegrations
+    , newNativeProcessRuntimeWithCredentialRuntime
     , nativeProcessIntegrationSupervisor
     , acquireNativeLocalIntegrationRuntime
     , nativeTurnOptions
@@ -56,6 +57,7 @@ import Agent.Loop
 import Agent.CLI.Options
     ( Command(..)
     , CliOptions(..)
+    , Override(..)
     , CodeModeOption(..)
     , ScreenMode(..)
     , defaultCliOptions
@@ -88,6 +90,7 @@ import Agent.TUI.Motion (MotionMode(..))
 import Agent.Tools.Types (defaultToolEnv)
 import qualified Agent.MCP as MCP
 import Agent.CLI.McpConnectionRuntime (mcpConnectionCredentials, registerMcpConnectionRuntime, observeMcpConnectionInfo)
+import Agent.CLI.McpConnectionCredentials (CredentialRuntime, newCredentialRuntime)
 import Control.Exception.Safe (finally, mask, onException)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -117,7 +120,16 @@ newNativeProcessRuntimeWithIntegrations provider =
 newNativeProcessRuntimeWithOrganizationIntegrations
     :: IntegrationProvider -> Maybe OrganizationIntegrationProvider
     -> OsPath -> IO NativeProcessRuntime
-newNativeProcessRuntimeWithOrganizationIntegrations provider organizationProvider root = mask \restore -> do
+newNativeProcessRuntimeWithOrganizationIntegrations provider organizationProvider root = do
+    credentials <- newCredentialRuntime Nothing
+    newNativeProcessRuntimeWithCredentialRuntime credentials provider organizationProvider root
+
+-- | The application supplies one credential runtime shared by every process
+-- owner and catalog operation. Never allocate its lock registries per session.
+newNativeProcessRuntimeWithCredentialRuntime
+    :: CredentialRuntime -> IntegrationProvider -> Maybe OrganizationIntegrationProvider
+    -> OsPath -> IO NativeProcessRuntime
+newNativeProcessRuntimeWithCredentialRuntime credentials provider organizationProvider root = mask \restore -> do
     integrationToolEnv <- restore (defaultToolEnv root)
     localIntegrations <- restore (newIntegrationSupervisor provider integrationToolEnv)
     -- Direct turns borrow the same local owner used by native account settings.
@@ -131,7 +143,7 @@ newNativeProcessRuntimeWithOrganizationIntegrations provider organizationProvide
             `onException` closeIntegrationSupervisor localIntegrations
     core <- restore (NativeProcess.newNativeProcessRuntimeWithMcpHooks
         MCP.defaultMcpHostHooks
-            { MCP.mcpHostCredentials = mcpConnectionCredentials
+            { MCP.mcpHostCredentials = mcpConnectionCredentials credentials
             , MCP.mcpHostServerInfo = observeMcpConnectionInfo
             }
         root) `onException` (closeIntegrationSupervisor integrations
@@ -224,8 +236,7 @@ nativeTurnOptions request = do
             , optModel = request.nativeTurnModel
             , optCwd = Just request.nativeTurnCwd
             , optWorktree = False
-            , optYolo = False
-            , optNoYolo = True
+            , optYolo = Explicit False
             , optEffort = request.nativeTurnEffort
             , optPrompt = Just request.nativeTurnPrompt
             , optPromptFile = Nothing
@@ -236,7 +247,7 @@ nativeTurnOptions request = do
             , optSaveSession = True
             , optGhci = nativeGhciEnabled request.nativeTurnShellMode
             , optBash = nativeBashEnabled request.nativeTurnShellMode
-            , optComputerUse = False
+            , optComputerUse = Explicit False
             , optScreenMode = ScreenMinimal
             , optMotionMode = MotionOff
             , optMessageClock = clock
@@ -325,11 +336,10 @@ applyNativeStartupPolicy policy cwd = restrictContext . restrictFacilities
         TurnScopedFacilities -> options
             { optCwd = Just cwd
             , optWorktree = False
-            , optYolo = False
-            , optNoYolo = True
+            , optYolo = Explicit False
             , optPromptFile = Nothing
             , optManagedTurnFile = Nothing
-            , optComputerUse = False
+            , optComputerUse = Explicit False
             , optCodeMode = CodeModeDisabled
             }
 

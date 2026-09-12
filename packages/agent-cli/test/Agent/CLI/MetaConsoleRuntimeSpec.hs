@@ -16,8 +16,10 @@ import Agent.CLI.MetaConsole
 import Agent.CLI.Runtime.MetaConsole
     ( MetaSecretValue(..)
     , applyMetaConfigActions
+    , collectMetaSecretsWith
     )
 import Agent.MCP (McpLogLevel(..), McpProtocolPreference(..))
+import Data.IORef (newIORef, modifyIORef', readIORef)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import Test.Hspec
@@ -25,11 +27,60 @@ import Test.Hspec
     , describe
     , it
     , shouldBe
+    , shouldReturn
     , shouldSatisfy
     )
 
 spec :: Spec
 spec = describe "Meta Console host executor" do
+    describe "secret collection" do
+        it "does not prompt for an empty action list" do
+            collectMetaSecretsWith (\_ _ -> fail "unexpected prompt") []
+                `shouldReturn` Right []
+
+        it "collects MCP and LSP values in prompt order without changing whitespace" do
+            prompts <- newIORef []
+            let prompt title body = do
+                    modifyIORef' prompts (<> [(title, body)])
+                    pure (Just " test value ")
+            collectMetaSecretsWith prompt
+                [ MetaSetMcpEnabled "docs" True
+                , MetaSetMcpSecretEnv "docs" "TOKEN"
+                , MetaSetMcpEnabled "docs" False
+                , MetaSetLspSecretEnv "hls" "KEY"
+                ]
+                `shouldReturn` Right
+                    [ MetaMcpSecretValue "docs" "TOKEN" " test value "
+                    , MetaLspSecretValue "hls" "KEY" " test value "
+                    ]
+            readIORef prompts `shouldReturn`
+                [ ("MCP docs · TOKEN", "Enter the value for environment variable TOKEN on MCP server docs. It stays local and is never sent to the model.")
+                , ("LSP hls · KEY", "Enter the value for environment variable KEY on LSP server hls. It stays local and is never sent to the model.")
+                ]
+
+        it "stops after MCP cancellation" do
+            prompts <- newIORef []
+            let prompt title _ = do
+                    modifyIORef' prompts (<> [title])
+                    pure Nothing
+            collectMetaSecretsWith prompt
+                [MetaSetMcpSecretEnv "docs" "TOKEN", MetaSetLspSecretEnv "hls" "KEY"]
+                `shouldReturn` Left "secret input for MCP server 'docs' was cancelled"
+            readIORef prompts `shouldReturn` ["MCP docs · TOKEN"]
+
+        it "discards partial collection and stops after LSP cancellation" do
+            prompts <- newIORef []
+            let prompt title _ = do
+                    modifyIORef' prompts (<> [title])
+                    pure (if title == "MCP docs · TOKEN" then Just "" else Nothing)
+            collectMetaSecretsWith prompt
+                [ MetaSetMcpSecretEnv "docs" "TOKEN"
+                , MetaSetLspSecretEnv "hls" "KEY"
+                , MetaSetMcpSecretEnv "later" "TOKEN"
+                ]
+                `shouldReturn` Left "secret input for LSP server 'hls' was cancelled"
+            readIORef prompts `shouldReturn` ["MCP docs · TOKEN", "LSP hls · KEY"]
+
     it "updates public MCP fields while preserving env and OAuth credentials" do
         let existing = McpServerConfig
                 { mcpEnabled = True

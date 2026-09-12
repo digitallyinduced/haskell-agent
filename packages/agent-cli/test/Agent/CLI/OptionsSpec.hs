@@ -1,6 +1,7 @@
 module Agent.CLI.OptionsSpec (spec) where
 
 import Agent.CLI.Options
+import Control.Monad (forM_, replicateM)
 import Agent.Dialect (DialectId(..))
 import Agent.Loop (defaultLoopMaxTurns)
 import System.OsPath (unsafeEncodeUtf)
@@ -11,8 +12,88 @@ import Test.Hspec
 
 fromFilePath = unsafeEncodeUtf
 
+policyOptions :: Bool -> Bool -> Bool -> CliOptions
+policyOptions prompt file managed = defaultCliOptions
+    { optPrompt = if prompt then Just "hi" else Nothing
+    , optPromptFile = if file then Just (fromFilePath "prompt.md") else Nothing
+    , optManagedTurnFile = if managed then Just (fromFilePath "turn.json") else Nothing
+    }
+
 spec :: Spec
 spec = do
+    describe "policy override matrices" do
+        -- Enumerate every combination of policy inputs, including overlapping
+        -- one-shot sources and the managed-denial marker.
+        forM_ [(yolo, deny, tty, project, prompt, file, managed)
+              | yolo <- [Inherit, Explicit False, Explicit True]
+              , deny <- [False, True], tty <- [False, True]
+              , project <- [False, True], prompt <- [False, True]
+              , file <- [False, True], managed <- [False, True]] $
+            \inputs@(yolo, deny, tty, project, prompt, file, managed) ->
+                it ("resolves approvals " <> show inputs) do
+                    let options = (policyOptions prompt file managed)
+                            { optYolo = yolo, optManagedDenyMutations = deny }
+                        -- A decision table independent of the resolver's
+                        -- ordered guards: explicit yolo wins even over a
+                        -- previous managed denial; no-yolo retains remote
+                        -- prompting only for managed turns.
+                        expected = case (yolo, deny) of
+                            (Explicit True, _) -> ApproveAll
+                            (_, True) -> DenyMutating
+                            (Explicit False, False)
+                                | managed || tty -> PromptMutating
+                                | otherwise -> DenyMutating
+                            (Inherit, False)
+                                | tty -> if project then ApproveAll else PromptMutating
+                                | prompt || file || managed -> ApproveAll
+                                | otherwise -> DenyMutating
+                    resolveApprovalPolicy options tty project `shouldBe` expected
+
+        forM_ [(computer, tty, prompt, file, managed)
+              | computer <- [Inherit, Explicit False, Explicit True]
+              , tty <- [False, True], prompt <- [False, True]
+              , file <- [False, True], managed <- [False, True]] $
+            \inputs@(computer, tty, prompt, file, managed) ->
+                it ("resolves computer use " <> show inputs) do
+                    let options = (policyOptions prompt file managed)
+                            { optComputerUse = computer }
+                        expected = case computer of
+                            Inherit -> (tty, prompt, file, managed) == (True, False, False, False)
+                            Explicit enabled -> enabled
+                    resolveComputerUseEnabled options tty `shouldBe` expected
+
+        -- All sequences through length four cover repetition, reversal, and
+        -- interleaving of both override families and sticky managed denial.
+        forM_ (concatMap (\n -> replicateM n
+                ["--yolo", "--no-yolo", "--managed-deny-mutations",
+                 "--computer-use", "--no-computer-use"]) [0 .. 4]) $ \flags ->
+            it ("parses ordered overrides " <> show flags) do
+                let lastValue yes no = case reverse (filter (\flag -> flag == yes || flag `elem` no) flags) of
+                        [] -> Inherit
+                        flag : _ -> Explicit (flag == yes)
+                parseArgs flags `shouldBe` Right (RunAgent defaultCliOptions
+                    { optYolo = lastValue "--yolo" ["--no-yolo", "--managed-deny-mutations"]
+                    , optComputerUse = lastValue "--computer-use" ["--no-computer-use"]
+                    , optManagedDenyMutations = "--managed-deny-mutations" `elem` flags
+                    })
+
+        forM_ [(policy, yolo, deny, project)
+              | policy <- [ApproveAll, PromptMutating, DenyMutating]
+              , yolo <- [Inherit, Explicit False, Explicit True]
+              , deny <- [False, True], project <- [False, True]] $
+            \inputs@(policy, yolo, deny, project) ->
+                it ("preserves background approval safety " <> show inputs) do
+                    let options = applyBackgroundApproval policy defaultCliOptions
+                            { optPrompt = Just "background turn"
+                            , optYolo = yolo
+                            , optManagedDenyMutations = deny
+                            }
+                        expected = case policy of
+                            ApproveAll -> ApproveAll
+                            PromptMutating -> DenyMutating
+                            DenyMutating -> DenyMutating
+                    resolveApprovalPolicy options False project `shouldBe` expected
+
     describe "worktree administration" do
         it "parses dry-run and inactivity override" do
             parseArgs ["worktree", "gc", "--dry-run"]
@@ -113,7 +194,7 @@ spec = do
                     , optModel = Just "grok-4.6"
                     , optCwd = Just (fromFilePath "/tmp/work")
                     , optBash = True
-                    , optYolo = True
+                    , optYolo = Explicit True
                     , optMaxTurns = 3
                     , optMaxConcurrentAgents = Just 64
                     , optCompactThreshold = Just 1200
@@ -201,16 +282,14 @@ spec = do
         it "applies approval flags in command-line order" do
             parseArgs ["--yolo", "--no-yolo", "--yolo"]
                 `shouldBe` Right (RunAgent defaultCliOptions
-                    { optYolo = True
-                    , optNoYolo = False
+                    { optYolo = Explicit True
                     })
             parseArgs
                 [ "--managed-deny-mutations"
                 , "--yolo"
                 ]
                 `shouldBe` Right (RunAgent defaultCliOptions
-                    { optYolo = True
-                    , optNoYolo = False
+                    { optYolo = Explicit True
                     , optManagedDenyMutations = True
                     })
 
@@ -434,22 +513,18 @@ spec = do
                 `shouldBe` Right (RunAgent defaultCliOptions { optBash = True })
 
         it "tracks explicit computer-use overrides with last-flag-wins semantics" do
-            defaultCliOptions.optComputerUse `shouldBe` True
-            defaultCliOptions.optComputerUseExplicit `shouldBe` False
+            defaultCliOptions.optComputerUse `shouldBe` Inherit
             parseArgs ["--no-computer-use"]
                 `shouldBe` Right (RunAgent defaultCliOptions
-                    { optComputerUse = False
-                    , optComputerUseExplicit = True
+                    { optComputerUse = Explicit False
                     })
             parseArgs ["--no-computer-use", "--computer-use"]
                 `shouldBe` Right (RunAgent defaultCliOptions
-                    { optComputerUse = True
-                    , optComputerUseExplicit = True
+                    { optComputerUse = Explicit True
                     })
             parseArgs ["--computer-use", "--no-computer-use"]
                 `shouldBe` Right (RunAgent defaultCliOptions
-                    { optComputerUse = False
-                    , optComputerUseExplicit = True
+                    { optComputerUse = Explicit False
                     })
 
         it "defaults computer use to TTY sessions while honoring explicit flags" do
@@ -457,15 +532,13 @@ spec = do
             resolveComputerUseEnabled defaultCliOptions False `shouldBe` False
             resolveComputerUseEnabled
                 defaultCliOptions
-                    { optComputerUse = True
-                    , optComputerUseExplicit = True
+                    { optComputerUse = Explicit True
                     }
                 False
                 `shouldBe` True
             resolveComputerUseEnabled
                 defaultCliOptions
-                    { optComputerUse = False
-                    , optComputerUseExplicit = True
+                    { optComputerUse = Explicit False
                     }
                 True
                 `shouldBe` False
@@ -488,8 +561,7 @@ spec = do
             resolveComputerUseEnabled
                 defaultCliOptions
                     { optPrompt = Just "hi"
-                    , optComputerUse = True
-                    , optComputerUseExplicit = True
+                    , optComputerUse = Explicit True
                     }
                 True
                 `shouldBe` True
@@ -521,14 +593,14 @@ spec = do
                 `shouldBe` ApproveAll
 
         it "denies mutating tools without a TTY when --no-yolo is set" do
-            resolveApprovalPolicy defaultCliOptions { optNoYolo = True } False False
+            resolveApprovalPolicy defaultCliOptions { optYolo = Explicit False } False False
                 `shouldBe` DenyMutating
 
         it "keeps managed non-TTY turns in remote prompt mode" do
             resolveApprovalPolicy
                 defaultCliOptions
                     { optManagedTurnFile = Just (fromFilePath "turn.json")
-                    , optNoYolo = True
+                    , optYolo = Explicit False
                     }
                 False
                 False
@@ -550,12 +622,12 @@ spec = do
 
         it "prompts on a TTY unless --yolo is set" do
             resolveApprovalPolicy defaultCliOptions True False `shouldBe` PromptMutating
-            resolveApprovalPolicy defaultCliOptions { optYolo = True } True False
+            resolveApprovalPolicy defaultCliOptions { optYolo = Explicit True } True False
                 `shouldBe` ApproveAll
 
         it "honors project auto-approve on a TTY unless --no-yolo is set" do
             resolveApprovalPolicy defaultCliOptions True True `shouldBe` ApproveAll
-            resolveApprovalPolicy defaultCliOptions { optNoYolo = True } True True
+            resolveApprovalPolicy defaultCliOptions { optYolo = Explicit False } True True
                 `shouldBe` PromptMutating
 
     describe "parseApprovalAnswer" do

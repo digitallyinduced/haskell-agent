@@ -10,6 +10,7 @@ import Agent.CLI.Session
 import Agent.Dialect (dialectSlug)
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider (providerSlug)
+import Data.List (intercalate)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -38,7 +39,7 @@ renderAgentSession meta status activity turns =
             <> ["", "Recent turns: " <> Text.pack (show (length turns))]
             <> case turns of
                 [] -> ["  (none)"]
-                _ -> [""] <> intercalateBlank
+                _ -> [""] <> intercalate [""]
                     (zipWith renderSessionTurn [1 :: Int ..] turns)
 
 renderActivity :: SessionActivity -> [Text]
@@ -64,11 +65,6 @@ renderSessionTurn index turn =
             turn.turnAssistantText
         <> maybe [] (\text -> ["Error:", indentText text])
             turn.turnError
-
-intercalateBlank :: [[Text]] -> [Text]
-intercalateBlank = \case
-    [] -> []
-    first : rest -> first <> concatMap ("" :) rest
 
 indentText :: Text -> Text
 indentText = Text.intercalate "\n" . map ("  " <>) . Text.lines

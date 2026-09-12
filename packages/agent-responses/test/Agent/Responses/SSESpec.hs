@@ -121,6 +121,32 @@ spec = describe "Responses SSE decoder" do
                         Text.isInfixOf "\"x-codex-turn-state\":\"direct\""
             [] -> expectationFailure "expected turn-state events"
 
+    it "keeps turn-state precedence and falls back through absent fields" do
+        let nested =
+                "\"headers\":{\"x-codex-turn-state\":\"nested\",\"turn_state\":\"nested-alias\"}"
+            fields =
+                [ "\"x-codex-turn-state\":\"direct\",\"turn_state\":\"alias\"," <> nested
+                , "\"turn_state\":\"alias\"," <> nested
+                , nested
+                , "\"headers\":{\"turn_state\":\"nested-alias\"}"
+                , "\"headers\":{}"
+                , "\"x-codex-turn-state\":\"\",\"turn_state\":\"alias\"," <> nested
+                ]
+        events <- expectRight $ parseSseEvents $ Text.concat
+            [ sseBlock "response.output_text.done"
+                ("{\"type\":\"response.output_text.done\"," <> field <> "}")
+            | field <- fields
+            ]
+        [turnState | OtherResponseStreamEvent { turnState } <- events]
+            `shouldBe`
+                [ Just "direct"
+                , Just "alias"
+                , Just "nested"
+                , Just "nested-alias"
+                , Nothing
+                , Just ""
+                ]
+
     it "round-trips typed Codex rate limits through Aeson encoding" do
         let payload =
                 "{\"type\":\"codex.rate_limits\",\"sequence_number\":7,"

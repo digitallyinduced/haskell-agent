@@ -9,7 +9,8 @@
 -- easy to test.
 module Agent.CLI.Database
     ( DatabaseScope(..)
-    , databaseScopeDecoder
+    , CustomDatabaseScope(..)
+    , customDatabaseScopeDecoder
     , ConversationSearchMatch(..)
     , DatabaseToolsEnv(..)
     , databaseTools
@@ -27,33 +28,41 @@ import Agent.Tools.Types
 import Data.Text (Text)
 import qualified Data.Text as Text
 
-data DatabaseScope
+-- | Provisioned custom data; unlike the runtime catalog, these scopes can be mutated.
+data CustomDatabaseScope
     = DatabaseUserScope
     | DatabaseRepositoryScope
     | DatabaseCheckoutScope
+    deriving (Eq, Show)
+
+-- | All queryable scopes. Only the custom branch can reach custom-data APIs.
+data DatabaseScope
+    = DatabaseCustomScope !CustomDatabaseScope
     | DatabaseHarnessScope
     deriving (Eq, Show)
 
 -- | Custom-data scopes used by learned skills and the native data browser.
 -- The runtime @harness@ catalog is not a provisioned custom scope.
-databaseScopeDecoder :: Hermes.Decoder DatabaseScope
-databaseScopeDecoder = databaseScopeDecoderWithHarness False
+customDatabaseScopeDecoder :: Hermes.Decoder CustomDatabaseScope
+customDatabaseScopeDecoder = Hermes.withText (customDatabaseScopeFromText False)
+
+customDatabaseScopeFromText :: MonadFail m => Bool -> Text -> m CustomDatabaseScope
+customDatabaseScopeFromText exposeHarness = \case
+    "user" -> pure DatabaseUserScope
+    "repository" -> pure DatabaseRepositoryScope
+    "checkout" -> pure DatabaseCheckoutScope
+    "harness" -> fail "the harness catalog is not available in this session"
+    value -> fail
+        ("unknown database scope " <> show value <> "; expected "
+            <> expectedScopes exposeHarness)
 
 databaseScopeDecoderWithHarness :: Bool -> Hermes.Decoder DatabaseScope
 databaseScopeDecoderWithHarness exposeHarness = Hermes.withText \case
-        "user" -> pure DatabaseUserScope
-        "repository" -> pure DatabaseRepositoryScope
-        "checkout" -> pure DatabaseCheckoutScope
         "harness"
             | exposeHarness -> pure DatabaseHarnessScope
             | otherwise ->
                 fail "the harness catalog is not available in this session"
-        value ->
-            fail
-                ("unknown database scope "
-                    <> show value
-                    <> "; expected "
-                    <> expectedScopes exposeHarness)
+        value -> DatabaseCustomScope <$> customDatabaseScopeFromText exposeHarness value
 
 -- | Storage callbacks for the model-facing database operations.
 --
@@ -67,7 +76,7 @@ data DatabaseToolsEnv = DatabaseToolsEnv
     , databaseRunQuery
         :: !(DatabaseScope -> Text -> IO (Either Text Text))
     , databaseRunExecute
-        :: !(DatabaseScope -> Text -> Text -> IO (Either Text Text))
+        :: !(CustomDatabaseScope -> Text -> Text -> IO (Either Text Text))
     , databaseSearchConversations
         :: !(Text -> Int -> IO (Either Text [ConversationSearchMatch]))
     -- | Local CLI and personal native embeddings expose the runtime catalog.
@@ -94,6 +103,8 @@ queryArgsDecoder exposeHarness = Hermes.object $
             <$> Hermes.atKey "scope" (databaseScopeDecoderWithHarness exposeHarness)
             <*> Hermes.atKey "sql" Hermes.text
 
+-- Keep the wire-level scope broad so harness writes retain their specific
+-- read-only error. Only a custom scope is passed to the mutation callback.
 data ExecuteArgs = ExecuteArgs !DatabaseScope !Text !Text
 
 executeArgsDecoder :: Bool -> Hermes.Decoder ExecuteArgs
@@ -170,13 +181,13 @@ executeTool env = jsonTool
         "database_execute"
         (executeArgsDecoder env.databaseHarnessCatalogEnabled)
         \(ExecuteArgs scope sql purpose) ->
-        if scope == DatabaseHarnessScope
-            then pure (Left harnessCatalogReadOnlyError)
-            else if Text.null (Text.strip sql)
+        case scope of
+            DatabaseHarnessScope -> pure (Left harnessCatalogReadOnlyError)
+            DatabaseCustomScope selected -> if Text.null (Text.strip sql)
                 then pure (Left "database SQL must not be empty")
                 else if Text.null (Text.strip purpose)
                     then pure (Left "database change purpose must not be empty")
-                    else env.databaseRunExecute scope purpose sql)
+                    else env.databaseRunExecute selected purpose sql)
 
 conversationSearchTool :: DatabaseToolsEnv -> AppTool
 conversationSearchTool env = jsonTool

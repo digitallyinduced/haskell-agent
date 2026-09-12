@@ -26,6 +26,7 @@ import Agent.CLI.Runtime.MetaConsole
     ( MetaSecretValue(..)
     , applyMetaConfigActions
     , buildMetaContext
+    , collectMetaSecretsWith
     , isMetaConfigAction
     , metaConfigRequiresRestart
     , runMetaPlanner
@@ -291,62 +292,7 @@ collectMetaSecrets
     -> [Meta.MetaAction]
     -> IO (Either Text [MetaSecretValue])
 collectMetaSecrets runtime =
-    foldM (collectOneMetaSecret runtime) (Right [])
-
-collectOneMetaSecret
-    :: MetaConsoleRuntime
-    -> Either Text [MetaSecretValue]
-    -> Meta.MetaAction
-    -> IO (Either Text [MetaSecretValue])
-collectOneMetaSecret _ result@(Left _) _ = pure result
-collectOneMetaSecret runtime (Right values) action = case action of
-    Meta.MetaSetMcpSecretEnv server key ->
-        promptMetaSecret
-            runtime
-            ("MCP " <> server <> " · " <> key)
-            ("Enter the value for environment variable "
-                <> key
-                <> " on MCP server "
-                <> server
-                <> ". It stays local and is never sent to the model.")
-            >>= \case
-                Nothing ->
-                    pure
-                        (Left
-                            ("secret input for MCP server '"
-                                <> server
-                                <> "' was cancelled"))
-                Just value ->
-                    pure
-                        (Right
-                            (values
-                                <> [ MetaMcpSecretValue
-                                        server key value
-                                   ]))
-    Meta.MetaSetLspSecretEnv server key ->
-        promptMetaSecret
-            runtime
-            ("LSP " <> server <> " · " <> key)
-            ("Enter the value for environment variable "
-                <> key
-                <> " on LSP server "
-                <> server
-                <> ". It stays local and is never sent to the model.")
-            >>= \case
-                Nothing ->
-                    pure
-                        (Left
-                            ("secret input for LSP server '"
-                                <> server
-                                <> "' was cancelled"))
-                Just value ->
-                    pure
-                        (Right
-                            (values
-                                <> [ MetaLspSecretValue
-                                        server key value
-                                   ]))
-    _ -> pure (Right values)
+    collectMetaSecretsWith (promptMetaSecret runtime)
 
 promptMetaSecret
     :: MetaConsoleRuntime

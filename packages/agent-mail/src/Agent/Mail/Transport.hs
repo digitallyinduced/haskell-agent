@@ -59,6 +59,7 @@ import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isControl, isDigit, isSpace)
 import Data.List (find, nub)
+import qualified Data.List.Split as Split
 import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -2859,11 +2860,7 @@ boundedCount hardMaximum requested =
     max 1 (min hardMaximum requested)
 
 chunksOf :: Int -> [value] -> [[value]]
-chunksOf requested values
-    | null values = []
-    | otherwise =
-        let (chunk, rest) = splitAt (max 1 requested) values
-        in chunk : chunksOf requested rest
+chunksOf requested = Split.chunksOf (max 1 requested)
 
 nonEmptyBytes :: Text -> Maybe BS.ByteString
 nonEmptyBytes value

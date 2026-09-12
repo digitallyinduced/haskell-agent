@@ -21,6 +21,7 @@ import Agent.CLI.Gateway.Credentials
 import Agent.CLI.Gateway.OAuth.Protocol
 import Agent.CLI.Gateway.Origin (validateBaseUrl)
 import Agent.Json.Decode qualified as Hermes
+import Agent.MCP.OAuth qualified as OAuth
 import Agent.Server.Client.GatewayIdentity (GatewayCredential(..))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (race)
@@ -624,26 +625,9 @@ receiveGatewayAuthorizationCallback listener expectedState = do
 
 gatewayCallbackPage :: Either Text Text -> BS.ByteString
 gatewayCallbackPage result =
-    TextEncoding.encodeUtf8 $
-        "<!doctype html><html><head><meta charset=\"utf-8\">\
-        \<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
-        \<title>Haskell Agent</title></head>\
-        \<body style=\"font-family:system-ui;margin:3rem;max-width:40rem\">\
-        \<h1>"
-            <> title
-            <> "</h1><p>"
-            <> message
-            <> "</p></body></html>"
-  where
-    (title, message) = case result of
-        Right _ ->
-            ( "Authorization received"
-            , "Return to Haskell Agent while it finishes connecting."
-            )
-        Left _ ->
-            ( "Haskell Agent could not connect"
-            , "Return to Haskell Agent to see the error and try again."
-            )
+    LBS.toStrict $ OAuth.oauthCallbackPage $ case result of
+        Right _ -> OAuth.OAuthCallbackReceived
+        Left _ -> OAuth.OAuthCallbackFailed
 
 randomUrlText :: Int -> IO Text
 randomUrlText byteCount =

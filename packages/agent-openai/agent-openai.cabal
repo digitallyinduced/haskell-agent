@@ -81,11 +81,12 @@ library
                     , Agent.OpenAI.ToolDSL
                     , Agent.OpenAI.ImageGeneration
     other-modules:    Agent.OpenAI.Compaction.Commands
+                    , Agent.OpenAI.Models.Manager.State
                     , Agent.OpenAI.Compaction.Request
                     , Agent.OpenAI.Models.Types.Enums
                     , Paths_agent_openai
     autogen-modules:  Paths_agent_openai
-    hs-source-dirs:   src
+    hs-source-dirs:   src internal
     build-depends:    base                  >= 4.14 && < 5
                     , agent-core            >= 0.1 && < 0.2
                     , agent-json            >= 0.1 && < 0.2
@@ -132,9 +133,10 @@ executable agent-openai-login
 test-suite agent-openai-test
     import:           common-opts
     type:             exitcode-stdio-1.0
-    hs-source-dirs:   test
+    hs-source-dirs:   test internal
     main-is:          Spec.hs
     other-modules:    Agent.OpenAI.AuthSpec
+                    , Agent.OpenAI.Models.Manager.State
                     , Agent.OpenAI.ClientSpec
                     , Agent.OpenAI.CredentialSpec
                     , Agent.OpenAI.ErrorSpec

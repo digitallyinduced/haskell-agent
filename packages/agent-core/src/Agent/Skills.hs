@@ -50,12 +50,12 @@ import System.OsPath (OsPath, unsafeEncodeUtf)
 import Data.Aeson.Types (Parser, parseEither)
 import qualified Data.ByteString as BS
 import Data.Char (isAlphaNum)
+import Data.Containers.ListUtils (nubOrdOn)
 import Data.List (sort, sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Ord (Down(..))
-import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -823,16 +823,7 @@ skillMentionNames text =
     mentionChar c = isAlphaNum c || c `elem` ['-', ':']
 
 dedupe :: [SkillInvocation] -> [SkillInvocation]
-dedupe = go Set.empty
-  where
-    go :: Set Text -> [SkillInvocation] -> [SkillInvocation]
-    go _ [] = []
-    go seen (item:rest)
-        | skillSourceIdentity item.invocationSkill `Set.member` seen = go seen rest
-        | otherwise =
-            item : go
-                (Set.insert (skillSourceIdentity item.invocationSkill) seen)
-                rest
+dedupe = nubOrdOn (skillSourceIdentity . (.invocationSkill))
 
 skillSourceIdentity :: Skill -> Text
 skillSourceIdentity skill = case skill.skillSource of
