@@ -50,7 +50,6 @@ import Agent.Tools.Types
     )
 import Control.Concurrent.Async
     ( Async
-    , mapConcurrently
     , race
     , waitCatch
     , withAsync
@@ -96,7 +95,6 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (IORef, atomicModifyIORef', atomicWriteIORef, modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.IntMap.Strict as IntMap
 import Data.IntMap.Strict (IntMap)
-import qualified Data.IntSet as IntSet
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Maybe (catMaybes, fromMaybe)
@@ -695,52 +693,55 @@ continueCommittedLoop runtime turn = do
                         finishLoopExecution runtime
                             (Left (LoopIncomplete turn))
                     TurnCompleted -> do
-                        state <- readIORef runtime.loopRuntimeState
-                        config.loopCommitSteering state.pending.steeringToAcknowledge
-                        clearSteeringAcknowledgement runtime
-                        racedResults <-
-                            race
-                                (waitCancel config.loopCancel)
-                                (runManagedToolCalls
-                                    (asyncToolManager runtime)
-                                    turn.toolCalls)
-                        case racedResults of
-                            Left () ->
-                                -- The manager itself is scoped by
-                                -- 'runLoopWithEventPump'. Returning here lets
-                                -- that scope cancel and join a handler or an
-                                -- approval callback that has not completed.
-                                finishLoopExecution runtime
-                                    (Left (LoopCancelled []))
-                            Right results -> do
-                                setPendingInputs runtime (map CompletedTool results)
-                                cancelledAfter <-
-                                    isCancelled config.loopCancel
-                                if cancelledAfter
-                                    then finishLoopExecution runtime
-                                        (Left (LoopCancelled results))
-                                    else do
-                                        steering <- config.loopReadSteering
-                                        let continuation =
-                                                map CompletedTool results
-                                                    <> steering
-                                        latest <- readIORef runtime.loopRuntimeState
-                                        case decideCompletedTurn latest turn continuation of
-                                            ContinueLoop{nextEmptyContinuations} -> do
-                                                modifyIORef' runtime.loopRuntimeState $
-                                                    advanceLoopState turn
-                                                        (PendingInputs continuation (length steering))
-                                                        nextEmptyContinuations
-                                                runLoopState runtime
-                                            FinishLoop result ->
-                                                finishLoopExecution runtime
-                                                    (Right result)
-                                            WarnAndFinishLoop result -> do
-                                                config.loopOnEvent
-                                                    (WarningRaised
-                                                        emptyContinuationWarning)
-                                                finishLoopExecution runtime
-                                                    (Right result)
+                        completeLoopTurn runtime turn
+
+-- | The response is committed before acknowledging its inputs or waiting for
+-- tools. Keep these boundaries explicit: recovery observes each completed effect.
+completeLoopTurn :: LoopRuntime -> TurnOutput -> IO LoopExecution
+completeLoopTurn runtime turn = do
+    let config = runtime.loopRuntimeConfig
+    state <- readIORef runtime.loopRuntimeState
+    config.loopCommitSteering state.pending.steeringToAcknowledge
+    clearSteeringAcknowledgement runtime
+    race
+        (waitCancel config.loopCancel)
+        (runManagedToolCalls (asyncToolManager runtime) turn.toolCalls)
+        >>= \case
+            Left () ->
+                -- Leaving the enclosing manager scope cancels and joins
+                -- unfinished handlers and approval callbacks.
+                finishLoopExecution runtime (Left (LoopCancelled []))
+            Right results -> do
+                -- Retain completed results even if cancellation or reading
+                -- steering interrupts the transition to the next turn.
+                setPendingInputs runtime (map CompletedTool results)
+                cancelled <- isCancelled config.loopCancel
+                if cancelled
+                    then finishLoopExecution runtime (Left (LoopCancelled results))
+                    else advanceCompletedTurn runtime turn results
+
+advanceCompletedTurn
+    :: LoopRuntime
+    -> TurnOutput
+    -> [ToolCallResult]
+    -> IO LoopExecution
+advanceCompletedTurn runtime turn results = do
+    let config = runtime.loopRuntimeConfig
+    steering <- config.loopReadSteering
+    let continuation = map CompletedTool results <> steering
+    state <- readIORef runtime.loopRuntimeState
+    case decideCompletedTurn state turn continuation of
+        ContinueLoop{nextEmptyContinuations} -> do
+            modifyIORef' runtime.loopRuntimeState $
+                advanceLoopState turn
+                    (PendingInputs continuation (length steering))
+                    nextEmptyContinuations
+            runLoopState runtime
+        FinishLoop result ->
+            finishLoopExecution runtime (Right result)
+        WarnAndFinishLoop result -> do
+            config.loopOnEvent (WarningRaised emptyContinuationWarning)
+            finishLoopExecution runtime (Right result)
 
 runLoopWithEventPump
     :: LoopRuntime
@@ -1260,110 +1261,6 @@ waitAsyncToolManagerFailure managerWorker manager =
                             "Async tool manager stopped unexpectedly."
             Right exception -> pure exception
 
--- | Preserve model order between conflicting calls while allowing independent
--- calls from the same model turn to overlap. Results are returned in model
--- order regardless of completion order.
-runToolCalls :: LoopConfig -> [ToolCall] -> IO [ToolCallResult]
-runToolCalls config calls = do
-    prepared <- prepareIndexedToolCalls config (zip [0..] calls)
-    scheduled <- traverse schedule prepared
-    go scheduled IntMap.empty
-  where
-    schedule
-        :: IndexedPreparedToolCall
-        -> IO PreparedScheduledToolCall
-    schedule indexed = do
-        plan <- schedulingPlanForPrepared config indexed.prepared
-        pure PreparedScheduledToolCall
-            { index = indexed.index
-            , plan
-            , prepared = indexed.prepared
-            }
-
-    go
-        :: [PreparedScheduledToolCall]
-        -> IntMap ToolCallResult
-        -> IO [ToolCallResult]
-    go [] completed =
-        pure (IntMap.elems completed)
-    go remaining completed = do
-        let ready = readyCalls remaining
-            readyIndexes = IntSet.fromList (map (.index) ready)
-            pending =
-                filter
-                    (\scheduled ->
-                        IntSet.notMember scheduled.index readyIndexes)
-                    remaining
-        raced <- race
-            (waitCancel config.loopCancel)
-            (mapConcurrently
-                (\scheduled -> do
-                    result <-
-                        runPreparedToolCall config scheduled.prepared
-                    pure (fmap (\value -> (scheduled.index, value)) result))
-                ready)
-        case raced of
-            Left () ->
-                -- 'race' cancels and joins the structured concurrent batch,
-                -- so no tool handler survives the cancelled turn.
-                pure (IntMap.elems completed)
-            Right batchResults -> do
-                let completed' =
-                        foldr
-                            (\result acc ->
-                                maybe
-                                    acc
-                                    (\(index, value) ->
-                                        IntMap.insert index value acc)
-                                    result)
-                            completed
-                            batchResults
-                go pending completed'
-
-data IndexedPreparedToolCall = IndexedPreparedToolCall
-    { index :: !Int
-    , prepared :: !PreparedToolCall
-    }
-
-data PreparedScheduledToolCall = PreparedScheduledToolCall
-    { index :: !Int
-    , plan :: !ToolSchedulingPlan
-    , prepared :: !PreparedToolCall
-    }
-
-readyCalls :: [PreparedScheduledToolCall] -> [PreparedScheduledToolCall]
-readyCalls calls =
-    [ call
-    | call <- calls
-    , not
-        (any
-            (\earlier ->
-                earlier.index < call.index
-                    && schedulingPlansConflict earlier.plan call.plan)
-            calls)
-    ]
-
-prepareIndexedToolCalls
-    :: LoopConfig
-    -> [(Int, ToolCall)]
-    -> IO [IndexedPreparedToolCall]
-prepareIndexedToolCalls _ [] = pure []
-prepareIndexedToolCalls config ((index, call) : rest) = do
-    cancelled <- isCancelled config.loopCancel
-    if cancelled
-        then pure []
-        else do
-            prepared <- prepareToolCall config call
-            cancelledAfter <- isCancelled config.loopCancel
-            if cancelledAfter
-                then pure []
-                else
-                    (IndexedPreparedToolCall
-                        { index
-                        , prepared
-                        } :)
-                        <$> prepareIndexedToolCalls config rest
-
 data ToolApproval
     = ToolApprovalDenied !Text
     | ToolApprovalRejected
@@ -1405,12 +1302,6 @@ prepareToolCall config call = do
         Left denial -> ToolApprovalDenied denial
         Right False -> ToolApprovalRejected
         Right True -> ToolApprovalGranted
-
-runPreparedToolCall
-    :: LoopConfig
-    -> PreparedToolCall
-    -> IO (Maybe ToolCallResult)
-runPreparedToolCall = runPreparedToolCallWithCompletion (const (pure ()))
 
 runPreparedToolCallWithCompletion
     :: (ToolCallResult -> IO ())
