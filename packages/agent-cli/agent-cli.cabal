@@ -237,6 +237,7 @@ library
                     , Agent.CLI.Options
                     , Agent.CLI.Permission
                     , Agent.CLI.PendingInputs
+                    , Agent.CLI.PendingInputs.Model
                     , Agent.CLI.InputBudget
                     , Agent.CLI.Picker
                     , Agent.CLI.Plan
