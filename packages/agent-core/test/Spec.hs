@@ -44,10 +44,12 @@ import qualified Agent.Tools.ViewImageSpec as ViewImageSpec
 import qualified Agent.Tools.RenderChartSpec as RenderChartSpec
 import qualified Agent.Tools.ResourceArbiterSpec as ResourceArbiterSpec
 import qualified Agent.Transport.WebSocketSpec as WebSocketSpec
+import qualified Agent.Transport.SSESpec as SSESpec
 import Test.Hspec (hspec)
 
 main :: IO ()
 main = hspec do
+    SSESpec.spec
     JWTSpec.spec
     ClientIdentitySpec.spec
     CancelSpec.spec

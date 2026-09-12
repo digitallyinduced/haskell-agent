@@ -4,7 +4,7 @@ import Agent.Error (ApiError(..))
 import Agent.Responses.SSE
 import qualified Agent.Responses.Codec as Codec
 import Agent.Responses.Types
-import Control.Monad (foldM)
+import Control.Monad (foldM, forM_)
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.ByteString as BS
@@ -60,6 +60,28 @@ spec = describe "Responses SSE decoder" do
             "event: ping\nid: 1\n\n"
                 <> "data: " <> completedJson <> "\n\n"
         eventTypes events `shouldBe` [EventResponseCompleted]
+
+    it "uses the first event override and skips malformed JSON across every split and EOF" do
+        let body =
+                "data: {not-json}\r\n\r\nevent: response.first\r\n"
+                <> "event: response.second\r\ndata:{\"vendor_field\":true}\r\n\r\n"
+                <> "event: response.first\r\ndata:{\"type\":\"response.wrong\"}\r\n\r\n"
+                <> "data: {also-not-json}"
+        forM_ [0 .. BS.length body] \offset -> do
+            events <- decodeChunks [BS.take offset body, "", BS.drop offset body]
+            eventTypes events `shouldBe` [StreamEventUnknown "response.first"]
+        events <- decodeChunks (map BS.singleton (BS.unpack body))
+        eventTypes events `shouldBe` [StreamEventUnknown "response.first"]
+
+    it "keeps the Responses limit error label" do
+        fmap snd (feedSseDecoder newSseDecoder (BS.replicate (64 * 1024 * 1024 + 1) 97))
+            `shouldBe` Left (JsonDecodeError "Responses SSE event exceeds 67108864 bytes" "")
+
+    it "rejects invalid UTF-8 in non-data lines on EOF" do
+        parseSseEventsBytes ": \xc3" `shouldSatisfy` \case
+            Left (JsonDecodeError message _) ->
+                "Invalid UTF-8 in Responses SSE event: " `Text.isPrefixOf` message
+            _ -> False
 
     it "accepts Unicode whitespace around the done sentinel" do
         events <- expectRight $ parseSseEvents $
