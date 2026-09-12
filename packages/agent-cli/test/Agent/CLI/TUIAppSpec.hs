@@ -3163,6 +3163,28 @@ spec = do
             failedText `shouldNotSatisfy`
                 Text.isInfixOf "failed-output-marker"
 
+    describe "background task prompt status" do
+        it "renders idle work above the editable prompt and hides it during a turn" do
+            runtime <- newScriptRuntime initialUiState
+            let base = initialFullscreenAppState runtime [] AgentRoot [] 0
+                idle = initialUiState
+                    { uiAwaitingInput = True
+                    , uiDraft = "follow-up message"
+                    , uiCursor = 17
+                    , uiBackgroundTaskStatus =
+                        [ "◌ 1 background task · 4m 32s · Release build"
+                        , "  Agent will resume when a shell task finishes."
+                        ]
+                    }
+                rendered ui = renderedAppText (100, 24) (base { appUi = ui })
+            rendered idle `shouldSatisfy` Text.isInfixOf "1 background task"
+            rendered idle `shouldSatisfy` Text.isInfixOf "follow-up message"
+            rendered idle `shouldSatisfy` Text.isInfixOf "Agent will resume"
+            rendered (idle { uiRunning = True })
+                `shouldNotSatisfy` Text.isInfixOf "1 background task"
+            rendered (idle { uiBackgroundTaskStatus = [] })
+                `shouldNotSatisfy` Text.isInfixOf "1 background task"
+
     describe "conversation scrollbar" do
         it "uses a visible trough that repaints old thumb cells" do
             let renderCell widget =
