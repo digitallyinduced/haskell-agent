@@ -197,6 +197,31 @@ The CLI retains credential loading, transcript persistence callbacks, worktree
 creation, and notification presentation. This session-integration layer remains
 in `agent-runtime`, without a new Cabal package or frontend dependencies.
 
+## Implemented: shared startup context preparation
+
+`Agent.Runtime.Startup.Context` owns transcript-derived initial-context and
+snapshot eligibility, instruction discovery, and startup skill-catalog assembly.
+Context preloading preserves host workspace restrictions and dialect refresh
+semantics, and overlaps independent reads with structured concurrency. The host
+supplies learned-skill storage access and remote catalog loading; terminal notices
+and context installation remain in CLI. Existing CLI entry points delegate or
+reexport for compatibility. This extraction adds no Cabal package.
+
+## Implemented: shared local-tool startup
+
+`Agent.Runtime.Tools.LocalStartup` owns optional web-fetch, LSP, and
+computer-use startup policy and resource acquisitions. Typed settings replace
+CLI options; the CLI retains option translation and startup error presentation.
+The acquisitions still run in the existing concurrent startup domains, preserving
+their teardown order before scratch storage is released.
+
+`Agent.Runtime.Lsp` and `Agent.Runtime.WebFetch` now own the concrete clients,
+with compatibility exports at the previous CLI entry points. Their protocol,
+network restrictions, and disabled-by-default configuration are unchanged.
+Computer-use runtime availability remains distinct from tool exposure: the
+existing provider/platform acquisition rule is retained independently of the
+host's resolved tool-enable setting. No new Cabal package is introduced.
+
 ## Remaining: move session composition and ownership out of the CLI
 
 ### Conversation-state ownership

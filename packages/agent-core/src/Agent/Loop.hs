@@ -23,6 +23,7 @@ module Agent.Loop
     , LoopProgress(..)
     , LoopResult(..)
     , TokenUsage(..)
+    , ToolApproval(..)
     , TurnAttachment(..)
     , TurnCompletion(..)
     , TurnInput(..)
@@ -59,6 +60,7 @@ import Agent.Loop.Input
 import Agent.Loop.Internal
 import Agent.Loop.Output
 import Agent.Loop.TokenUsage
+import Agent.Tools.Types (ToolApproval(..))
 import Agent.ToolDispatch (ToolDispatchConfig(..))
 import Control.Exception.Safe (SomeException)
 import qualified Data.Text as Text

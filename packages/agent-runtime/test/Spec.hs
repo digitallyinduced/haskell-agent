@@ -4,11 +4,14 @@ import qualified Agent.Runtime.RequestSpec as Request
 import qualified Agent.Runtime.Tools.ResourcesSpec as ToolResources
 import qualified Agent.Runtime.Tools.DialectsSpec as ToolDialects
 import qualified Agent.Runtime.Tools.StartupSpec as ToolStartup
+import qualified Agent.Runtime.Tools.LocalStartupSpec as LocalTools
+import qualified Agent.Runtime.Tools.WebLspSpec as WebLsp
 import qualified Agent.Runtime.Mcp.StartupSpec as McpStartup
 import qualified Agent.Runtime.CollaborationSpec as Collaboration
 import qualified Agent.Runtime.ProviderRuntimeSpec as ProviderRuntime
 import qualified Agent.Runtime.CompactionSpec as Compaction
 import qualified Agent.Runtime.StartupPolicySpec as StartupPolicy
+import qualified Agent.Runtime.Startup.ContextSpec as StartupContext
 import qualified Agent.Runtime.Startup.ModelSpec as StartupModel
 import qualified Agent.Runtime.Startup.PolicySpec as StartupApproval
 import qualified Agent.Runtime.Startup.GatewaySpec as StartupGateway
@@ -46,8 +49,11 @@ main = hspec do
     ToolDialects.spec
     ToolResources.spec
     ToolStartup.spec
+    LocalTools.spec
+    WebLsp.spec
     McpStartup.spec
     Collaboration.spec
+    StartupContext.spec
     Request.spec
     ProviderRuntime.spec
     Compaction.spec

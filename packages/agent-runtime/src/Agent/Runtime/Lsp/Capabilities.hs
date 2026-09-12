@@ -1,4 +1,4 @@
-module Agent.CLI.Lsp.Capabilities
+module Agent.Runtime.Lsp.Capabilities
     ( clientCapabilities
     ) where
 

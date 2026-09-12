@@ -25,6 +25,7 @@ import Agent.ToolDispatch
     )
 import Agent.Tools.Types
     ( AppTool(..)
+    , ToolApproval(..)
     , ApprovalRequirement(..)
     , ApprovalRule(..)
     , ToolRegistry
@@ -63,7 +64,7 @@ spec = do
             planApproval facts
                 `shouldSatisfy` \case
                     CompleteApproval
-                        (Left message)
+                        (ToolApprovalDenied message)
                         [ReportApprovalNotice (ApprovalWarning notice)] ->
                             "Blocked dangerous shell command"
                                 `Text.isInfixOf` message
@@ -84,7 +85,7 @@ spec = do
             planApproval facts
                 `shouldSatisfy` \case
                     CompleteApproval
-                        (Left message)
+                        (ToolApprovalDenied message)
                         [ReportApprovalNotice (ApprovalWarning notice)] ->
                             "Computer key combination is blocked"
                                 `Text.isInfixOf` message
@@ -103,7 +104,7 @@ spec = do
             planApproval facts
                 `shouldSatisfy` \case
                     CompleteApproval
-                        (Left message)
+                        (ToolApprovalDenied message)
                         [ReportApprovalNotice (ApprovalWarning notice)] ->
                             "Blocked hardcoded system temp path"
                                 `Text.isInfixOf` message
@@ -128,7 +129,7 @@ spec = do
                     }
             planApproval facts `shouldSatisfy` \case
                 CompleteApproval
-                    (Left message)
+                    (ToolApprovalDenied message)
                     [ReportApprovalNotice (ApprovalWarning notice)] ->
                         "file edits are not allowed in plan mode"
                             `Text.isInfixOf` message
@@ -146,7 +147,7 @@ spec = do
                     , readOnly = Just False
                     }
             planApproval facts
-                `shouldBe` CompleteApproval (Right True) []
+                `shouldBe` CompleteApproval ToolApprovalGranted []
 
         it "allows the path-locked plan edit but rejects another target" do
             let searchReplace target = functionToolCall
@@ -160,10 +161,10 @@ spec = do
                     , allowedForSession = Just True
                     }
             planApproval (facts (searchReplace "plan.md"))
-                `shouldBe` CompleteApproval (Right True) []
+                `shouldBe` CompleteApproval ToolApprovalGranted []
             planApproval (facts (searchReplace "src/Main.hs"))
                 `shouldSatisfy` \case
-                    CompleteApproval (Left _) [_] -> True
+                    CompleteApproval (ToolApprovalDenied _) [_] -> True
                     _ -> False
 
         it "blocks collaboration writes in plan mode even if marked read-only" do
@@ -178,7 +179,7 @@ spec = do
                     , allowedForSession = Just True
                     }
             planApproval facts `shouldSatisfy` \case
-                CompleteApproval (Left _) [_] -> True
+                CompleteApproval (ToolApprovalDenied _) [_] -> True
                 _ -> False
 
         it "applies the session policy after remembered-tool approval" do
@@ -186,17 +187,17 @@ spec = do
                     { readOnly = Just False
                     }
             planApproval (classified { allowedForSession = Just True })
-                `shouldBe` CompleteApproval (Right True) []
+                `shouldBe` CompleteApproval ToolApprovalGranted []
             planApproval (classified
                 { policy = ApproveAll
                 , allowedForSession = Just False
                 })
-                `shouldBe` CompleteApproval (Right True) []
+                `shouldBe` CompleteApproval ToolApprovalGranted []
             planApproval (classified
                 { policy = DenyMutating
                 , allowedForSession = Just False
                 })
-                `shouldBe` CompleteApproval (Right False) []
+                `shouldBe` CompleteApproval ToolApprovalRejected []
 
         it "auto-approves read-only calls under restrictive policies" do
             let facts policy = (approvalFacts readOnlyCall)
@@ -205,9 +206,9 @@ spec = do
                     , allowedForSession = Just False
                     }
             planApproval (facts DenyMutating)
-                `shouldBe` CompleteApproval (Right True) []
+                `shouldBe` CompleteApproval ToolApprovalGranted []
             planApproval (facts PromptMutating)
-                `shouldBe` CompleteApproval (Right True) []
+                `shouldBe` CompleteApproval ToolApprovalGranted []
 
         it "requires fresh confirmation despite yolo or remembered approval" do
             let facts policy = (approvalFacts mutatingCall)
@@ -221,23 +222,23 @@ spec = do
             planApproval (facts PromptMutating)
                 `shouldBe` NeedPermissionPrompt
             planApproval (facts DenyMutating)
-                `shouldBe` CompleteApproval (Right False) []
+                `shouldBe` CompleteApproval ToolApprovalRejected []
 
     describe "resolveApprovalPrompt" do
         it "maps cancellation and explicit denial to an in-band denial" do
             resolveApprovalPrompt mutatingCall Nothing
-                `shouldBe` CompleteApproval (Right False) []
+                `shouldBe` CompleteApproval ToolApprovalRejected []
             resolveApprovalPrompt mutatingCall (Just PermissionDeny)
-                `shouldBe` CompleteApproval (Right False) []
+                `shouldBe` CompleteApproval ToolApprovalRejected []
 
         it "allows once without changing approval state" do
             resolveApprovalPrompt mutatingCall (Just PermissionAllowOnce)
-                `shouldBe` CompleteApproval (Right True) []
+                `shouldBe` CompleteApproval ToolApprovalGranted []
 
         it "plans project persistence after enabling auto-approval" do
             resolveApprovalPrompt mutatingCall (Just PermissionAllowAll)
                 `shouldBe` CompleteApproval
-                    (Right True)
+                    ToolApprovalGranted
                     [ SetApprovalPolicy ApproveAll
                     , PersistProjectAutoApprove
                     , ReportApprovalNotice
@@ -252,7 +253,7 @@ spec = do
                     "{\"command\":\"git status\"}"
             resolveApprovalPrompt call (Just PermissionAllowTool)
                 `shouldBe` CompleteApproval
-                    (Right True)
+                    ToolApprovalGranted
                     [ RememberToolForSession "run_terminal_cmd"
                     , ReportApprovalNotice
                         (ApprovalSuccess
@@ -262,23 +263,23 @@ spec = do
         it "distinguishes unavailable fresh approval from an explicit denial" do
             resolveApprovalPromptWith True mutatingCall Nothing
                 `shouldBe` CompleteApproval
-                    (Left "Fresh approval was not obtained: the approval prompt was unavailable or closed without a decision. The tool was not run.")
+                    (ToolApprovalDenied "Fresh approval was not obtained: the approval prompt was unavailable or closed without a decision. The tool was not run.")
                     []
             resolveApprovalPromptWith True mutatingCall (Just PermissionDeny)
-                `shouldBe` CompleteApproval (Right False) []
+                `shouldBe` CompleteApproval ToolApprovalRejected []
             resolveApprovalPromptWith True mutatingCall (Just PermissionAllowOnce)
-                `shouldBe` CompleteApproval (Right True) []
+                `shouldBe` CompleteApproval ToolApprovalGranted []
 
         it "rejects broader approval for an explicit-confirmation call" do
             resolveApprovalPromptWith True mutatingCall
                 (Just PermissionAllowAll)
                 `shouldBe` CompleteApproval
-                    (Left "This tool requires fresh approval for this invocation; a remembered or blanket approval cannot authorize it. The tool was not run.")
+                    (ToolApprovalDenied "This tool requires fresh approval for this invocation; a remembered or blanket approval cannot authorize it. The tool was not run.")
                     []
             resolveApprovalPromptWith True mutatingCall
                 (Just PermissionAllowTool)
                 `shouldBe` CompleteApproval
-                    (Left "This tool requires fresh approval for this invocation; a remembered or blanket approval cannot authorize it. The tool was not run.")
+                    (ToolApprovalDenied "This tool requires fresh approval for this invocation; a remembered or blanket approval cannot authorize it. The tool was not run.")
                     []
         it "preserves project-wide approval semantics for a computer workflow" do
             let call = ToolCall
@@ -290,7 +291,7 @@ spec = do
                     }
             resolveApprovalPrompt call (Just PermissionAllowAll)
                 `shouldBe` CompleteApproval
-                    (Right True)
+                    ToolApprovalGranted
                     [ SetApprovalPolicy ApproveAll
                     , PersistProjectAutoApprove
                     , RememberToolForSession computerToolName
@@ -311,10 +312,10 @@ spec = do
                     , argumentsEncrypted = False
                     }
             resolveApprovalPrompt call (Just PermissionAllowOnce)
-                `shouldBe` CompleteApproval (Right True) []
+                `shouldBe` CompleteApproval ToolApprovalGranted []
             resolveApprovalPrompt call (Just PermissionAllowTool)
                 `shouldBe` CompleteApproval
-                    (Right True)
+                    ToolApprovalGranted
                     [ RememberToolForSession computerToolName
                     , ReportApprovalNotice
                         (ApprovalSuccess
@@ -352,7 +353,7 @@ spec = do
                 policy allowed
                 (registry [autoApproveMutatingTool])
                 plan mutatingCall
-                `shouldReturn` Right True
+                `shouldReturn` ToolApprovalGranted
 
             readIORef permissionRequests `shouldReturn` 0
             readIORef persistenceCalls `shouldReturn` 0
@@ -372,7 +373,7 @@ spec = do
                 policy allowed
                 (registry [mutatingTool])
                 plan mutatingCall
-                `shouldReturn` Right False
+                `shouldReturn` ToolApprovalRejected
 
             readIORef permissionRequests `shouldReturn` 1
             readIORef policy `shouldReturn` PromptMutating
@@ -392,9 +393,9 @@ spec = do
                 (registry [autoApproveMutatingTool])
                 plan mutatingCall
 
-            result `shouldSatisfy` either
-                (Text.isInfixOf "only editable file")
-                (const False)
+            result `shouldSatisfy` \case
+                ToolApprovalDenied message -> "only editable file" `Text.isInfixOf` message
+                _ -> False
             readIORef permissionRequests `shouldReturn` 0
 
         it "keeps dangerous shell denials ahead of scoped auto-approval" do
@@ -416,9 +417,9 @@ spec = do
                 (\_ -> pure ())
                 policy allowed (registry [shellTool]) plan call
 
-            result `shouldSatisfy` either
-                (Text.isInfixOf "Blocked dangerous shell command")
-                (const False)
+            result `shouldSatisfy` \case
+                ToolApprovalDenied message -> "Blocked dangerous shell command" `Text.isInfixOf` message
+                _ -> False
             readIORef permissionRequests `shouldReturn` 0
 
         it "does not bypass computer-use consent when marked for auto-approval" do
@@ -445,7 +446,7 @@ spec = do
                 policy allowed
                 (registry [autoApproveComputer])
                 plan call
-                `shouldReturn` Right True
+                `shouldReturn` ToolApprovalGranted
 
             readIORef permissionRequests `shouldReturn` 1
 
@@ -473,9 +474,9 @@ spec = do
                 (modifyIORef' persistenceCalls (+ 1))
                 policy allowed (registry [shellTool]) plan call
 
-            result `shouldSatisfy` either
-                (Text.isInfixOf "Blocked dangerous shell command")
-                (const False)
+            result `shouldSatisfy` \case
+                ToolApprovalDenied message -> "Blocked dangerous shell command" `Text.isInfixOf` message
+                _ -> False
             readIORef classifications `shouldReturn` 0
             readIORef permissionRequests `shouldReturn` 0
             readIORef persistenceCalls `shouldReturn` 0
@@ -501,23 +502,24 @@ spec = do
                     (const (pure (Just True)))
                     (\_ -> modifyIORef' permissionRequests (+ 1) >> pure (Just PermissionAllowOnce))
                     (\_ -> pure ()) (pure ()) policy allowed tools plan call
-            approve `shouldReturn` Right True
+            approve `shouldReturn` ToolApprovalGranted
             readIORef permissionRequests `shouldReturn` 0
-            childApprove ApproveAll tools call `shouldReturn` Right True
+            childApprove ApproveAll tools call `shouldReturn` ToolApprovalGranted
             childApprove PromptMutating tools call `shouldReturn`
-                Left "Sandbox escalation requires parent approval or --yolo."
+                ToolApprovalDenied "Sandbox escalation requires parent approval or --yolo."
             writeIORef policy PromptMutating
-            approve `shouldReturn` Right True
-            approve `shouldReturn` Right True
+            approve `shouldReturn` ToolApprovalGranted
+            approve `shouldReturn` ToolApprovalGranted
             readIORef permissionRequests `shouldReturn` 2
             writeIORef policy DenyMutating
-            approve `shouldReturn` Right False
+            approve `shouldReturn` ToolApprovalRejected
             readIORef permissionRequests `shouldReturn` 2
             writeIORef policy ApproveAll
             activatePlanMode plan
             result <- approve
-            result `shouldSatisfy` either
-                (Text.isInfixOf "only editable file") (const False)
+            result `shouldSatisfy` \case
+                ToolApprovalDenied message -> "only editable file" `Text.isInfixOf` message
+                _ -> False
 
         it "does not treat a tool-specific allowance as full access for escalation" do
             policy <- newIORef PromptMutating
@@ -532,10 +534,10 @@ spec = do
             approveToolDecisionWithReporter
                 (\_ -> modifyIORef' permissionRequests (+ 1) >> pure (Just PermissionDeny))
                 (\_ -> pure ()) policy allowed tools plan call
-                `shouldReturn` Right False
+                `shouldReturn` ToolApprovalRejected
             readIORef permissionRequests `shouldReturn` 1
             childApprove PromptMutating tools call `shouldReturn`
-                Left "Sandbox escalation requires parent approval or --yolo."
+                ToolApprovalDenied "Sandbox escalation requires parent approval or --yolo."
 
         it "prompts for every explicit-confirmation call under ApproveAll" do
             policy <- newIORef ApproveAll
@@ -552,8 +554,8 @@ spec = do
                 approve = approveToolDecisionWithReporter
                     request (\_ -> pure ()) policy allowed
                     (registry [sensitiveTool]) plan sensitiveCall
-            approve `shouldReturn` Right True
-            approve `shouldReturn` Right True
+            approve `shouldReturn` ToolApprovalGranted
+            approve `shouldReturn` ToolApprovalGranted
             readIORef permissionRequests `shouldReturn` 2
             readIORef policy `shouldReturn` ApproveAll
             readIORef allowed `shouldReturn` Set.singleton "sensitive"
@@ -571,13 +573,13 @@ spec = do
                     request (\_ -> pure ()) policy allowed
                     (registry [callSensitiveTool]) plan call
 
-            approve callSensitiveReadCall `shouldReturn` Right True
-            approve callSensitiveWriteCall `shouldReturn` Right True
-            approve callSensitiveFreshCall `shouldReturn` Right True
-            approve callSensitiveFreshCall `shouldReturn` Right True
+            approve callSensitiveReadCall `shouldReturn` ToolApprovalGranted
+            approve callSensitiveWriteCall `shouldReturn` ToolApprovalGranted
+            approve callSensitiveFreshCall `shouldReturn` ToolApprovalGranted
+            approve callSensitiveFreshCall `shouldReturn` ToolApprovalGranted
 
             writeIORef policy PromptMutating
-            approve callSensitiveFreshCall `shouldReturn` Right True
+            approve callSensitiveFreshCall `shouldReturn` ToolApprovalGranted
 
             readIORef permissionRequests `shouldReturn` 3
             readIORef policy `shouldReturn` PromptMutating
@@ -602,15 +604,15 @@ spec = do
                     (\_ -> pure ())
                     (pure ())
                     policy allowed tools plan
-            approve sensitiveCall `shouldReturn` Right True
-            approve callSensitiveFreshCall `shouldReturn` Right True
+            approve sensitiveCall `shouldReturn` ToolApprovalGranted
+            approve callSensitiveFreshCall `shouldReturn` ToolApprovalGranted
             readIORef permissionRequests `shouldReturn` 2
             readIORef policy `shouldReturn` PromptMutating
             childApprove ApproveAll tools sensitiveCall
-                `shouldReturn` Left
+                `shouldReturn` ToolApprovalDenied
                     "This sensitive tool requires an explicit parent approval for every call."
             childApprove ApproveAll tools callSensitiveFreshCall
-                `shouldReturn` Left
+                `shouldReturn` ToolApprovalDenied
                     "This sensitive tool requires an explicit parent approval for every call."
 
         it "reports plan-mode denials without requiring terminal output" do
@@ -633,10 +635,10 @@ spec = do
                 call
 
             result `shouldSatisfy` \case
-                Left message ->
+                ToolApprovalDenied message ->
                     "file edits are not allowed in plan mode"
                         `Text.isInfixOf` message
-                Right _ -> False
+                _ -> False
             readIORef permissionRequests `shouldReturn` 0
             readIORef notices `shouldReturn`
                 [ApprovalWarning
@@ -664,7 +666,9 @@ spec = do
                 plan
                 call
 
-            result `shouldSatisfy` either (const True) (const False)
+            result `shouldSatisfy` \case
+                ToolApprovalDenied{} -> True
+                _ -> False
             recorded <- readIORef notices
             recorded `shouldSatisfy` \case
                 [ApprovalWarning message] ->
@@ -684,9 +688,9 @@ spec = do
                 (\_ -> pure (Just PermissionAllowOnce))
                 (\_ -> pure ())
                 policy allowed (registry []) plan call
-            result `shouldSatisfy` either
-                (Text.isInfixOf "Blocked dangerous shell command")
-                (const False)
+            result `shouldSatisfy` \case
+                ToolApprovalDenied message -> "Blocked dangerous shell command" `Text.isInfixOf` message
+                _ -> False
 
         it "rejects shell inspection in plan mode in favor of dedicated read tools" do
             policy <- newIORef ApproveAll
@@ -699,9 +703,9 @@ spec = do
                 (\_ -> pure (Just PermissionAllowOnce))
                 (\_ -> pure ())
                 policy allowed (registry []) plan call
-            result `shouldSatisfy` either
-                (Text.isInfixOf "only editable file")
-                (const False)
+            result `shouldSatisfy` \case
+                ToolApprovalDenied message -> "only editable file" `Text.isInfixOf` message
+                _ -> False
 
         it "rejects the public Grok shell alias in plan mode" do
             policy <- newIORef ApproveAll
@@ -716,9 +720,9 @@ spec = do
                 (\_ -> pure (Just PermissionAllowOnce))
                 (\_ -> pure ())
                 policy allowed (registry []) plan call
-            result `shouldSatisfy` either
-                (Text.isInfixOf "only editable file")
-                (const False)
+            result `shouldSatisfy` \case
+                ToolApprovalDenied message -> "only editable file" `Text.isInfixOf` message
+                _ -> False
 
         it "rejects shell writes in plan mode even under yolo" do
             policy <- newIORef ApproveAll
@@ -731,9 +735,9 @@ spec = do
                 (\_ -> pure (Just PermissionAllowOnce))
                 (\_ -> pure ())
                 policy allowed (registry []) plan call
-            result `shouldSatisfy` either
-                (Text.isInfixOf "only editable file")
-                (const False)
+            result `shouldSatisfy` \case
+                ToolApprovalDenied message -> "only editable file" `Text.isInfixOf` message
+                _ -> False
 
         it "auto-approves the path-locked write_plan tool" do
             policy <- newIORef PromptMutating
@@ -748,7 +752,7 @@ spec = do
                     >> pure (Just PermissionAllowOnce))
                 (\_ -> pure ())
                 policy allowed (registry [writePlanSafeTool]) plan call
-                `shouldReturn` Right True
+                `shouldReturn` ToolApprovalGranted
             readIORef permissionRequests `shouldReturn` 0
 
         it "rejects every other mutating tool in plan mode even under yolo" do
@@ -760,9 +764,9 @@ spec = do
                 (\_ -> pure (Just PermissionAllowOnce))
                 (\_ -> pure ())
                 policy allowed (registry [mutatingTool]) plan mutatingCall
-            result `shouldSatisfy` either
-                (Text.isInfixOf "only editable file")
-                (const False)
+            result `shouldSatisfy` \case
+                ToolApprovalDenied message -> "only editable file" `Text.isInfixOf` message
+                _ -> False
 
         it "reports remembered tool approval through the callback" do
             policy <- newIORef PromptMutating
@@ -781,11 +785,11 @@ spec = do
             approveToolDecisionWithReporter
                 request report policy allowed
                 (registry [mutatingTool]) plan mutatingCall
-                `shouldReturn` Right True
+                `shouldReturn` ToolApprovalGranted
             approveToolDecisionWithReporter
                 request report policy allowed
                 (registry [mutatingTool]) plan mutatingCall
-                `shouldReturn` Right True
+                `shouldReturn` ToolApprovalGranted
 
             readIORef permissionRequests `shouldReturn` 1
             readIORef notices `shouldReturn`
@@ -813,7 +817,7 @@ spec = do
                 report
                 persist
                 policy allowed (registry [mutatingTool]) plan mutatingCall
-                `shouldReturn` Right True
+                `shouldReturn` ToolApprovalGranted
 
             readIORef policy `shouldReturn` ApproveAll
             readIORef persisted `shouldReturn` 1
@@ -833,7 +837,7 @@ spec = do
                 (\notice -> modifyIORef' notices (<> [notice]))
                 (modifyIORef' persisted (+ 1))
                 policy allowed (registry [mutatingTool]) plan mutatingCall
-                `shouldReturn` Right False
+                `shouldReturn` ToolApprovalRejected
 
             readIORef policy `shouldReturn` PromptMutating
             readIORef allowed `shouldReturn` Set.empty
@@ -859,10 +863,10 @@ spec = do
                 tools = registry [tool "run_terminal_cmd" AlwaysPrompt]
             approveToolDecisionWithReporter
                 request (\_ -> pure ()) policy allowed tools plan publicCall
-                `shouldReturn` Right True
+                `shouldReturn` ToolApprovalGranted
             approveToolDecisionWithReporter
                 request (\_ -> pure ()) policy allowed tools plan internalCall
-                `shouldReturn` Right True
+                `shouldReturn` ToolApprovalGranted
             readIORef permissionRequests `shouldReturn` 1
             readIORef allowed `shouldReturn` Set.singleton "run_terminal_cmd"
 
@@ -889,8 +893,8 @@ spec = do
                     policy allowed
                     (registry [computerUseTool]) plan (computerCall kind)
             mapM_ (\kind -> do
-                approve kind `shouldReturn` Right True
-                approve kind `shouldReturn` Right True)
+                approve kind `shouldReturn` ToolApprovalGranted
+                approve kind `shouldReturn` ToolApprovalGranted)
                 [ComputerCallKind, ComputerFunctionCallKind]
             readIORef permissionRequests `shouldReturn` 1
             readIORef policy `shouldReturn` ApproveAll
@@ -906,21 +910,21 @@ spec = do
             childApprove ApproveAll
                 (registry [sensitiveTool]) sensitiveCall
                 `shouldReturn`
-                    Left
+                    ToolApprovalDenied
                         "This sensitive tool requires an explicit parent approval for every call."
 
         it "rejects only fresh calls from a call-sensitive child tool" do
             childApprove ApproveAll
                 (registry [callSensitiveTool]) callSensitiveFreshCall
                 `shouldReturn`
-                    Left
+                    ToolApprovalDenied
                         "This sensitive tool requires an explicit parent approval for every call."
             childApprove ApproveAll
                 (registry [callSensitiveTool]) callSensitiveWriteCall
-                `shouldReturn` Right True
+                `shouldReturn` ToolApprovalGranted
             childApprove DenyMutating
                 (registry [callSensitiveTool]) callSensitiveReadCall
-                `shouldReturn` Right True
+                `shouldReturn` ToolApprovalGranted
 
         it "prompts for each computer call after an Allow once choice" do
             policy <- newIORef ApproveAll
@@ -944,8 +948,8 @@ spec = do
                     (\notice -> modifyIORef' notices (<> [notice]))
                     policy allowed
                     (registry [computerUseTool]) plan call
-            approve `shouldReturn` Right True
-            approve `shouldReturn` Right True
+            approve `shouldReturn` ToolApprovalGranted
+            approve `shouldReturn` ToolApprovalGranted
             readIORef permissionRequests `shouldReturn` 2
             readIORef allowed `shouldReturn` Set.empty
             readIORef notices `shouldReturn` []
@@ -971,13 +975,13 @@ spec = do
                     (registry [computerUseTool])
                     plan computerCall
             approve (call "{\"actions\":[{\"type\":\"screenshot\"}]}")
-                `shouldReturn` Right True
+                `shouldReturn` ToolApprovalGranted
             readIORef permissionRequests `shouldReturn` 0
             approve
                 (call
                     "{\"actions\":[{\"type\":\"screenshot\"}],\
                     \\"pending_safety_checks\":[{\"id\":\"check-1\"}]}")
-                `shouldReturn` Right True
+                `shouldReturn` ToolApprovalGranted
             readIORef permissionRequests `shouldReturn` 1
 
         it "prompts again after the computer-use workflow grant is cleared" do
@@ -999,12 +1003,12 @@ spec = do
                 approve kind = approveToolDecisionWithReporter
                     request (\_ -> pure ()) policy allowed
                     (registry [computerUseTool]) plan (computerCall kind)
-            approve ComputerCallKind `shouldReturn` Right True
-            approve ComputerCallKind `shouldReturn` Right True
+            approve ComputerCallKind `shouldReturn` ToolApprovalGranted
+            approve ComputerCallKind `shouldReturn` ToolApprovalGranted
             readIORef permissionRequests `shouldReturn` 1
             modifyIORef' allowed (Set.delete computerToolName)
-            approve ComputerFunctionCallKind `shouldReturn` Right True
-            approve ComputerFunctionCallKind `shouldReturn` Right True
+            approve ComputerFunctionCallKind `shouldReturn` ToolApprovalGranted
+            approve ComputerFunctionCallKind `shouldReturn` ToolApprovalGranted
             readIORef permissionRequests `shouldReturn` 2
             readIORef allowed `shouldReturn` Set.singleton computerToolName
 
@@ -1030,18 +1034,18 @@ spec = do
                     plan call
             functionResult <- approve (spoof FunctionCallKind)
             customResult <- approve (spoof CustomCallKind)
-            functionResult `shouldSatisfy` either
-                (Text.isInfixOf "mismatched provider-native")
-                (const False)
-            customResult `shouldSatisfy` either
-                (Text.isInfixOf "mismatched provider-native")
-                (const False)
+            functionResult `shouldSatisfy` \case
+                ToolApprovalDenied message -> "mismatched provider-native" `Text.isInfixOf` message
+                _ -> False
+            customResult `shouldSatisfy` \case
+                ToolApprovalDenied message -> "mismatched provider-native" `Text.isInfixOf` message
+                _ -> False
             readIORef permissionRequests `shouldReturn` 0
 
     describe "childApprove" do
         it "allows every known tool under ApproveAll" do
             childApprove ApproveAll (registry [mutatingTool]) mutatingCall
-                `shouldReturn` Right True
+                `shouldReturn` ToolApprovalGranted
 
         it "never lets a child bypass computer approval" do
             let computerCall kind = ToolCall
@@ -1056,38 +1060,38 @@ spec = do
                     (registry [mutatingTool])
                     (computerCall kind)
                     `shouldReturn`
-                        Left
+                        ToolApprovalDenied
                             "Computer use must be approved in the interactive parent session.")
                 [ComputerCallKind, ComputerFunctionCallKind]
 
         it "allows only read-only tools under DenyMutating" do
             childApprove DenyMutating (registry [readOnlyTool]) readOnlyCall
-                `shouldReturn` Right True
+                `shouldReturn` ToolApprovalGranted
             childApprove DenyMutating (registry [mutatingTool]) mutatingCall
-                `shouldReturn` Right False
+                `shouldReturn` ToolApprovalRejected
 
         it "recognizes namespaced collaboration tools as read-only" do
             childApprove DenyMutating (registry [namespacedReadOnlyTool]) namespacedReadOnlyCall
-                `shouldReturn` Right True
+                `shouldReturn` ToolApprovalGranted
 
         it "returns an in-band denial when a child would need to prompt" do
             result <- childApprove PromptMutating (registry [mutatingTool]) mutatingCall
             result `shouldSatisfy` \case
-                Left message -> "cannot prompt for approval" `Text.isInfixOf` message
-                Right _ -> False
+                ToolApprovalDenied message -> "cannot prompt for approval" `Text.isInfixOf` message
+                _ -> False
 
         it "honors scoped auto-approval without weakening read-only mode" do
             let tools = registry [autoApproveMutatingTool]
             childApprove PromptMutating tools mutatingCall
-                `shouldReturn` Right True
+                `shouldReturn` ToolApprovalGranted
             childApprove DenyMutating tools mutatingCall
-                `shouldReturn` Right False
+                `shouldReturn` ToolApprovalRejected
 
         it "honors per-call read-only classifiers" do
             childApprove DenyMutating (registry [dynamicTool]) dynamicReadCall
-                `shouldReturn` Right True
+                `shouldReturn` ToolApprovalGranted
             childApprove DenyMutating (registry [dynamicTool]) dynamicWriteCall
-                `shouldReturn` Right False
+                `shouldReturn` ToolApprovalRejected
 
 readOnlyCall :: ToolCall
 readOnlyCall = functionToolCall "call-read" "read" "{}"

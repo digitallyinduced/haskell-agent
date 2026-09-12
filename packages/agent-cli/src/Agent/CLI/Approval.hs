@@ -57,6 +57,7 @@ import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRequirement(..)
     , ApprovalRule(..)
+    , ToolApproval(..)
     , ToolRegistry
     , lookupRegisteredTool
     , toolAcceptsCall
@@ -93,7 +94,7 @@ approveToolDecision
     -> OsPath
     -> OsPath
     -> ToolCall
-    -> IO (Either Text Bool)
+    -> IO ToolApproval
 approveToolDecision
         policyRef allowedToolsRef tools planMode projectRoot cwd =
     approveToolDecisionClassified
@@ -117,7 +118,7 @@ approveToolDecisionClassified
     -> OsPath
     -> OsPath
     -> ToolCall
-    -> IO (Either Text Bool)
+    -> IO ToolApproval
 approveToolDecisionClassified classifyReadOnly
         policyRef allowedToolsRef tools planMode projectRoot cwd call = do
     approveToolDecisionWithReporterAndPersistenceClassifiedWithPrompt
@@ -148,7 +149,7 @@ approveToolDecisionWith
     -> ToolRegistry
     -> PlanModeEnv
     -> ToolCall
-    -> IO (Either Text Bool)
+    -> IO ToolApproval
 approveToolDecisionWith requestPermission =
     approveToolDecisionWithReporterAndPersistence requestPermission (\case
         ApprovalWarning message -> do
@@ -167,7 +168,7 @@ approveToolDecisionWithReporter
     -> ToolRegistry
     -> PlanModeEnv
     -> ToolCall
-    -> IO (Either Text Bool)
+    -> IO ToolApproval
 approveToolDecisionWithReporter requestPermission report =
     approveToolDecisionWithReporterAndPersistence requestPermission report (pure ())
 
@@ -180,7 +181,7 @@ approveToolDecisionWithReporterAndPersistence
     -> ToolRegistry
     -> PlanModeEnv
     -> ToolCall
-    -> IO (Either Text Bool)
+    -> IO ToolApproval
 approveToolDecisionWithReporterAndPersistence requestPermission report persistAlwaysApprove policyRef allowedToolsRef tools planMode call = do
     approveToolDecisionWithReporterAndPersistenceClassified
         (const (pure Nothing))
@@ -203,7 +204,7 @@ approveToolDecisionWithReporterAndPersistenceClassified
     -> ToolRegistry
     -> PlanModeEnv
     -> ToolCall
-    -> IO (Either Text Bool)
+    -> IO ToolApproval
 approveToolDecisionWithReporterAndPersistenceClassified
         classifyReadOnly requestPermission report persistAlwaysApprove
         policyRef allowedToolsRef tools planMode call =
@@ -228,7 +229,7 @@ approveToolDecisionWithReporterAndPersistenceClassifiedWithPrompt
     -> ToolRegistry
     -> PlanModeEnv
     -> ToolCall
-    -> IO (Either Text Bool)
+    -> IO ToolApproval
 approveToolDecisionWithReporterAndPersistenceClassifiedWithPrompt
         classifyReadOnly requestPermission report persistAlwaysApprove
         policyRef allowedToolsRef tools planMode call =
@@ -238,7 +239,7 @@ approveToolDecisionWithReporterAndPersistenceClassifiedWithPrompt
                 let message =
                         "Rejected: mismatched provider-native tool call kind."
                 report (ApprovalWarning message)
-                pure (Left message)
+                pure (ToolApprovalDenied message)
         _ -> do
             policy <- readIORef policyRef
             planActive <- isPlanModeActive planMode
@@ -331,15 +332,15 @@ setApprovalPolicy policyRef projectRoot policy = do
         PromptMutating -> "ask before changes (saved for project)"
         DenyMutating -> "read-only enabled for this session"
 
-childApprove :: ApprovalPolicy -> ToolRegistry -> ToolCall -> IO (Either Text Bool)
+childApprove :: ApprovalPolicy -> ToolRegistry -> ToolCall -> IO ToolApproval
 childApprove _ tools call
     | Just tool <- lookupRegisteredTool call.name tools
     , not (toolAcceptsCall tool call) =
-        pure $ Left
+        pure $ ToolApprovalDenied
             "Mismatched provider-native tool call kind requires parent review."
 childApprove _ _ call
     | isComputerToolCallKind call.callKind =
-        pure $ Left
+        pure $ ToolApprovalDenied
             "Computer use must be approved in the interactive parent session."
 childApprove policy tools call =
     case lookupRegisteredTool call.name tools of
@@ -347,32 +348,38 @@ childApprove policy tools call =
         Nothing -> ordinaryDecision Nothing
   where
     decide FreshApprovalRequired =
-        pure $ Left
+        pure $ ToolApprovalDenied
             "This sensitive tool requires an explicit parent approval for every call."
     decide SandboxEscalationApprovalRequired
         | policy /= ApproveAll =
-            pure $ Left "Sandbox escalation requires parent approval or --yolo."
+            pure $ ToolApprovalDenied "Sandbox escalation requires parent approval or --yolo."
     decide requirement = case scopedToolPolicy policy tools call of
-        ApproveAll -> pure (Right True)
+        ApproveAll -> pure ToolApprovalGranted
         DenyMutating ->
-            pure (Right (requirement == ApprovalNotRequired))
+            pure $
+                if requirement == ApprovalNotRequired
+                    then ToolApprovalGranted
+                    else ToolApprovalRejected
         PromptMutating
-            | requirement == ApprovalNotRequired -> pure (Right True)
+            | requirement == ApprovalNotRequired -> pure ToolApprovalGranted
             | otherwise -> childCannotPrompt
 
     ordinaryDecision tool = case scopedToolPolicy policy tools call of
-        ApproveAll -> pure (Right True)
-        DenyMutating -> Right <$> isReadOnly tool
+        ApproveAll -> pure ToolApprovalGranted
+        DenyMutating -> do
+            readOnly <- isReadOnly tool
+            pure $
+                if readOnly then ToolApprovalGranted else ToolApprovalRejected
         PromptMutating ->
             isReadOnly tool >>= \case
-                True -> pure (Right True)
+                True -> pure ToolApprovalGranted
                 False -> childCannotPrompt
 
     isReadOnly = \case
         Just tool -> toolAllowsWithoutPrompt tool call
         Nothing -> pure False
 
-    childCannotPrompt = pure $ Left
+    childCannotPrompt = pure $ ToolApprovalDenied
         "Subagent cannot prompt for approval on mutating tools. \
         \Re-run the parent with auto-approve/--yolo, or have the \
         \parent perform this edit."
