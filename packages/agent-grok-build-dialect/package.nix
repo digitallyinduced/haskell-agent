@@ -12,8 +12,8 @@ mkDerivation {
     transformers unix
   ];
   testHaskellDepends = [
-    agent-core async base containers directory filepath hspec process
-    safe-exceptions temporary text time unix
+    agent-core agent-tools async base containers directory filepath
+    hspec process safe-exceptions temporary text time unix
   ];
   benchmarkHaskellDepends = [
     aeson agent-core agent-tools async base containers filepath

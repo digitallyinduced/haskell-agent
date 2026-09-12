@@ -79,7 +79,6 @@ benchmark workflow-snapshots-bench
     build-depends:    agent-grok-build-dialect
                     , agent-core
                     , agent-tools
-                    , agent-tools
                     , aeson
                     , async
                     , base >= 4.14 && < 5
@@ -102,6 +101,7 @@ test-suite agent-grok-build-dialect-test
                     , Agent.GrokBuild.WebLspSpec
     build-depends:    agent-grok-build-dialect
                     , agent-core
+                    , agent-tools
                     , async
                     , base >= 4.14 && < 5
                     , containers
