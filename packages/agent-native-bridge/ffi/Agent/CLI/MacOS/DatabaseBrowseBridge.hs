@@ -5,7 +5,7 @@
 -- | Read-only scoped database browsing and callback-scoped row marshalling.
 module Agent.CLI.MacOS.DatabaseBrowseBridge () where
 
-import Agent.CLI.Database (DatabaseScope(..))
+import Agent.CLI.Database (CustomDatabaseScope(..))
 import Agent.CLI.Database.Store
     ( DatabaseBrowsePage(..), DatabaseScopes, deriveDatabaseScopes
     , listDatabaseObjects, loadDatabaseRows )
@@ -175,7 +175,7 @@ loadDataCatalogFor cwd =
 
 loadDataPageFor
     :: FilePath
-    -> DatabaseScope
+    -> CustomDatabaseScope
     -> Text
     -> Int64
     -> Int
@@ -241,7 +241,7 @@ dataObjectKind = \case
     "materialized_view" -> 1
     _ -> 0
 
-dataScopeFromCode :: CInt -> Maybe DatabaseScope
+dataScopeFromCode :: CInt -> Maybe CustomDatabaseScope
 dataScopeFromCode = \case
     0 -> Just DatabaseUserScope
     1 -> Just DatabaseRepositoryScope
