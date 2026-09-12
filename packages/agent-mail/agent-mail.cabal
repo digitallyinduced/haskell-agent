@@ -37,7 +37,8 @@ common common-options
 
 library
     import:          common-options
-    hs-source-dirs:  src
+    hs-source-dirs:  src internal
+    other-modules:  Agent.Mail.Utf8
     exposed-modules:
         Agent.Mail.Imap
         Agent.Mail.Mime
@@ -66,13 +67,15 @@ library
 test-suite agent-mail-test
     import:          common-options
     type:            exitcode-stdio-1.0
-    hs-source-dirs:  test
+    hs-source-dirs:  test internal
+    other-modules:  Agent.Mail.Utf8
     main-is:         Spec.hs
     build-depends:
         agent-mail
         , aeson
         , base
         , hspec >= 2.11 && < 2.12
+        , bytestring
         , http-types
         , text
         , time
