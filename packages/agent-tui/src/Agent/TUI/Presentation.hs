@@ -66,7 +66,7 @@ import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Char (isDigit, isSpace)
 import qualified Data.Foldable as Foldable
 import Data.List (sortOn)
-import Data.Maybe (fromMaybe, mapMaybe, maybeToList)
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -1284,7 +1284,3 @@ askUserQuestionDetail arguments =
 decodeMaybe :: Hermes.Decoder a -> Text -> Maybe a
 decodeMaybe decoder input =
     either (const Nothing) Just (Hermes.decodeText decoder input)
-
-listToMaybe :: [a] -> Maybe a
-listToMaybe [] = Nothing
-listToMaybe (x : _) = Just x

@@ -48,7 +48,7 @@ import Agent.Mail.Types
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async (mapConcurrently)
 import Control.Exception.Safe (SomeException, tryAny)
-import Control.Monad (foldM, unless, when)
+import Control.Monad (foldM, guard, unless, when)
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.:), (.:?))
 import Data.Aeson.Types (Parser, parseEither)
@@ -2630,8 +2630,8 @@ parseListLine raw = do
     let stripped = Text.strip raw
     guardPrefix "* list " stripped
     mailbox <- lastImapArgument stripped
-    whenMaybe (not (Text.any (`elem` ['\\', '"', '\r', '\n', '\NUL']) mailbox))
-    whenMaybe (Text.length (encodeImapMailboxId mailbox) <= 900)
+    guard (not (Text.any (`elem` ['\\', '"', '\r', '\n', '\NUL']) mailbox))
+    guard (Text.length (encodeImapMailboxId mailbox) <= 900)
     pure MailboxSummary
         { mailMailboxId = encodeImapMailboxId mailbox
         , mailMailboxName = mailbox
@@ -2722,7 +2722,7 @@ imapLiteralLength line = do
     let (before, suffix) = Text.breakOnEnd "{" stripped
         digits = Text.dropEnd 1 suffix
         normalized = Text.dropWhileEnd (== '+') digits
-    whenMaybe (not (Text.null before) && not (Text.null normalized)
+    guard (not (Text.null before) && not (Text.null normalized)
         && Text.all isDigit normalized)
     case reads (Text.unpack normalized) of
         [(value, "")] -> Just value
@@ -2732,10 +2732,6 @@ guardSuffix :: Text -> Text -> Maybe ()
 guardSuffix suffix value
     | suffix `Text.isSuffixOf` value = Just ()
     | otherwise = Nothing
-
-whenMaybe :: Bool -> Maybe ()
-whenMaybe True = Just ()
-whenMaybe False = Nothing
 
 parseHeaders :: Text -> [(Text, Text)]
 parseHeaders =

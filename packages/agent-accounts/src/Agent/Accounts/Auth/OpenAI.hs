@@ -46,6 +46,7 @@ import Agent.Provider
 import Control.Applicative ((<|>))
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Monad (when)
+import Control.Monad.Extra (firstJustM)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except (ExceptT, runExceptT, throwE)
 import qualified Data.Aeson as Aeson
@@ -185,7 +186,7 @@ loadExternalOpenAiApiKeyDictationAuth =
 loadOpenAiApiKeyDictationAuthWith :: Bool -> IO (Maybe LoadedAuth)
 loadOpenAiApiKeyDictationAuthWith includeManaged =
     fmap (fmap loadedAuthForApiKey) $
-        firstJustM
+        firstJustM id
             ( [ loadEnvironmentApiKey "OPENAI_API_KEY"
               , loadEnvironmentApiKey "CODEX_API_KEY"
               , loadCodexEnvironmentApiKey
@@ -231,17 +232,6 @@ loadOpenAiApiKeyDictationAuthWith includeManaged =
                 (Text.pack (unsafeToFilePath filePath))
                 "OpenAI API key"
                 <$> (fileBytes >>= codexApiKeyFromJson)
-
-firstJustM :: [IO (Maybe value)] -> IO (Maybe value)
-firstJustM = \case
-    [] ->
-        pure Nothing
-    action : remaining ->
-        action >>= \case
-            Just value ->
-                pure (Just value)
-            Nothing ->
-                firstJustM remaining
 
 externalApiKeySource :: Text -> Text -> Text -> OpenAiApiKeySource
 externalApiKeySource source label accessToken =
