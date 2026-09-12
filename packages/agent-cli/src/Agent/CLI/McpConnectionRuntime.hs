@@ -8,7 +8,7 @@ module Agent.CLI.McpConnectionRuntime
     ) where
 
 import Agent.CLI.Config (HarnessConfig(..), McpServerConfig(..), withHarnessConfigSnapshot, harnessConfigPath, mcpUsesConnectionCredentials)
-import Agent.CLI.McpConnectionCredentials (mcpConnectionCredentialProviderWith, withMcpConnectionRefreshLock)
+import Agent.CLI.McpConnectionCredentials (CredentialRuntime, mcpConnectionCredentialProviderWith, withMcpConnectionRefreshLock)
 import Agent.OsPath (fromText)
 import qualified Agent.MCP as MCP
 import qualified Data.Map.Strict as Map
@@ -64,15 +64,15 @@ invalidateMcpConnectionRuntimes =
 -- | Explicit host metadata, not names or URLs, selects protected credentials.
 -- Removed/stale identities remain authoritative and cannot fall back to
 -- legacy tokens. The generation participates in fleet configuration equality.
-mcpConnectionCredentials :: MCP.McpServerConfig -> IO (Maybe MCP.McpCredentialProvider)
-mcpConnectionCredentials runtime = case runtime.mcpServerConnection of
+mcpConnectionCredentials :: CredentialRuntime -> MCP.McpServerConfig -> IO (Maybe MCP.McpCredentialProvider)
+mcpConnectionCredentials credentials runtime = case runtime.mcpServerConnection of
     Nothing -> pure Nothing
     Just identity -> do
         home <- getHomeDirectory
         let identifier = identity.mcpConnectionIdentifier
             valid = not (Text.null identifier) && Text.length identifier <= 128
                 && Text.all (\c -> isAsciiLower c || isAsciiUpper c || isDigit c || c == '-') identifier
-            provider = mcpConnectionCredentialProviderWith identifier (gate identity)
+            provider = mcpConnectionCredentialProviderWith credentials identifier (gate identity)
             lockPath = takeDirectory (harnessConfigPath home) </>
                 fromText ("mcp-refresh-" <> identifier <> ".lock")
         pure (Just (if valid then withMcpConnectionRefreshLock lockPath provider

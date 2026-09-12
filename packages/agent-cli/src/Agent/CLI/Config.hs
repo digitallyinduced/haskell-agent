@@ -44,6 +44,8 @@ import Agent.TUI.Theme
 import Agent.CLI.PrivateFileLock (withPrivateFileLock)
 import Control.Exception.Safe (displayException, tryIO)
 import Control.Monad (forM_, unless, when)
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Trans.Except (ExceptT(..), runExceptT, withExceptT)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Bits ((.|.), rotateL, shiftL, xor)
@@ -682,19 +684,14 @@ modifyHarnessConfigEffect
     -> (Word64 -> HarnessConfig -> IO (Either Text (HarnessConfig, a)))
     -> IO (Either Text (Word64, HarnessConfig, a))
 modifyHarnessConfigEffect home change =
-    withPrivateFileLock (harnessConfigLockPath home) do
-        loadHarnessConfigUnlocked home >>= \case
-            Left _ -> pure (Left "Unable to read the machine configuration")
-            Right (revision, config) ->
-                change revision config >>= \case
-                    Left err -> pure (Left err)
-                    Right (updated, value) -> do
-                        identified <- assignMcpConnectionIds updated
-                        writeHarnessConfigUnlocked home identified >>= \case
-                            Left err -> pure (Left err)
-                            Right nextRevision ->
-                                pure (Right
-                                    (nextRevision, identified, value))
+    withPrivateFileLock (harnessConfigLockPath home) $ runExceptT do
+        (revision, config) <-
+            withExceptT (const "Unable to read the machine configuration") $
+                ExceptT (loadHarnessConfigUnlocked home)
+        (updated, value) <- ExceptT (change revision config)
+        identified <- liftIO (assignMcpConnectionIds updated)
+        nextRevision <- ExceptT (writeHarnessConfigUnlocked home identified)
+        pure (nextRevision, identified, value)
 
 writeHarnessConfigUnlocked
     :: OsPath -> HarnessConfig -> IO (Either Text Word64)

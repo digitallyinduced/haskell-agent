@@ -654,6 +654,7 @@ uiEventLogicalBytes = \case
         logicalTextsBytes [branch, cwd, root]
     UiSetNotice notice ->
         maybe 128 (logicalTextBytes . (.noticeText)) notice
+    UiSetBackgroundTaskStatus rows -> logicalTextsBytes rows
     UiMoveSelection _ -> 128
     UiSelectBlock _ -> 128
     UiActivateBlock _ -> 128

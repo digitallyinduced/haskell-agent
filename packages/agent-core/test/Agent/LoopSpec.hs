@@ -1744,6 +1744,38 @@ spec = describe "runLoop" do
         execution.executionPendingInputs `shouldBe`
             [CompletedTool (ToolCallResult "c1" "echo:hi" FunctionCallKind BlockingToolCall [] (Just ToolSucceeded))]
 
+    it "retains completed tools when reading the next steering inputs throws" do
+        submissions <- newIORef []
+        steeringReads <- newIORef (0 :: Int)
+        acknowledgements <- newIORef []
+        backend <- retainingEchoCall <$> scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing
+            ]
+        config0 <- testConfig backend
+        let config = config0
+                { loopReadSteering = do
+                    count <- atomicModifyIORef' steeringReads \n -> (n + 1, n)
+                    if count == 0
+                        then pure [UserMessage "also verify tests"]
+                        else Safe.throwIO (userError "steering unavailable")
+                , loopCommitSteering = \count ->
+                    modifyIORef' acknowledgements (<> [count])
+                }
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        stored <- config.loopBackendState.readBackendState
+        execution.executionState `shouldBe` stored.backendItems
+        length execution.executionState `shouldBe` 1
+        execution.executionProgress `shouldBe` ResponseCommitted
+        execution.executionPendingInputs `shouldBe`
+            [CompletedTool (functionResult "c1" "echo:hi")]
+        execution.executionResult `shouldBe`
+            Left (LoopUnexpected "user error (steering unavailable)")
+        readIORef acknowledgements `shouldReturn` [1]
+        readIORef submissions `shouldReturn`
+            [(Nothing, [UserMessage "hello", UserMessage "also verify tests"])]
+
     it "interrupts the provider in-band before tearing down a cancelled submission" do
         started <- newEmptyMVar
         interrupted <- newEmptyMVar
@@ -2499,6 +2531,58 @@ spec = describe "runLoop" do
             , (Just "resp-1", [UserMessage "use the existing schema"])
             ]
         readIORef pending `shouldReturn` []
+
+    it "retains cleared input's steering acknowledgement debt through tool recovery" do
+        toolFinished <- newEmptyMVar
+        acknowledgements <- newIORef []
+        invocations <- newIORef (0 :: Int)
+        let initialInputs = [UserMessage "hello", UserMessage "also verify tests"]
+            call = asyncFunctionToolCall "saved" "save" "{}"
+            tool = asyncNoArgsTool "save" do
+                modifyIORef' invocations (+ 1)
+                pure (Right "saved once")
+            backend = backendWithCallbacks \state _ inputs callbacks -> do
+                inputs `shouldBe` initialInputs
+                callbacks.onAsyncToolCall call
+                -- The host work finishes, but the final provider response omits
+                -- its call. Teardown must retain it as attributed recovery.
+                takeMVar toolFinished
+                pure $ Right BackendResult
+                    { backendOutput = emptyTurnOutput "resp-1" [] (Just "done")
+                    , backendState = advanceBackendSnapshot state
+                        (turnInputsToItems inputs) Nothing
+                    }
+        config0 <- testConfig backend
+        let config = config0
+                { loopTools = registryFromTools [tool]
+                , loopReadSteering = pure [UserMessage "also verify tests"]
+                , loopCommitSteering = \count ->
+                    modifyIORef' acknowledgements (<> [count])
+                , loopOnEvent = \case
+                    ToolFinished _ -> putMVar toolFinished ()
+                    _ -> pure ()
+                , loopBackendState = config0.loopBackendState
+                    { commitBackendState = \snapshot -> do
+                        committed <- config0.loopBackendState.commitBackendState snapshot
+                        -- Deterministically cancel after publication but before
+                        -- normal completion can acknowledge the steering.
+                        requestCancel config0.loopCancel
+                        pure committed
+                    }
+                }
+        execution <- timeout concurrencyProbeMicros
+            (runLoopInputsDetailed config Nothing [UserMessage "hello"])
+            >>= maybe (fail "loop did not finish recovering the completed tool") pure
+        execution.executionProgress `shouldBe` ResponseCommitted
+        execution.executionPendingInputs `shouldBe` []
+        execution.executionResult `shouldBe` Left (LoopCancelled [])
+        take 2 execution.executionState `shouldBe` turnInputsToItems initialInputs
+        length execution.executionState `shouldBe` 3
+        show execution.executionState `shouldContain` "saved once"
+        stored <- config.loopBackendState.readBackendState
+        stored.backendItems `shouldBe` execution.executionState
+        readIORef acknowledgements `shouldReturn` [1]
+        readIORef invocations `shouldReturn` 1
 
     it "commits terminal incomplete responses without running their tools" do
         submissions <- newIORef []

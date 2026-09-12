@@ -4,6 +4,7 @@ import Agent.CLI.Database
 import Agent.CLI.Database.Storage
 import Agent.CLI.Database.Store
     ( DatabaseBrowsePage(..)
+    , applicableDatabaseScopes
     , databaseToolsEnvForStore
     , deriveDatabaseScopes
     , listDatabaseObjects
@@ -51,6 +52,8 @@ import Control.Exception.Safe (displayException, finally, onException)
 import Data.Aeson ((.=), object)
 import qualified Data.Aeson as Aeson
 import Data.IORef
+import Data.Either (isLeft)
+import Agent.Json.Decode qualified as Hermes
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory
@@ -65,7 +68,40 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "custom database scopes" do
+        it "decodes the existing custom wire strings" do
+            Hermes.decodeEither customDatabaseScopeDecoder "\"user\""
+                `shouldBe` Right DatabaseUserScope
+            Hermes.decodeEither customDatabaseScopeDecoder "\"repository\""
+                `shouldBe` Right DatabaseRepositoryScope
+            Hermes.decodeEither customDatabaseScopeDecoder "\"checkout\""
+                `shouldBe` Right DatabaseCheckoutScope
+
+        it "cannot decode the runtime catalog as custom data" do
+            Hermes.decodeEither customDatabaseScopeDecoder "\"harness\""
+                `shouldSatisfy` isLeft
+
     describe "databaseTools" do
+        mapM_ (\(wireScope, selected) ->
+            it ("dispatches custom mutations for " <> Text.unpack wireScope) do
+                seen <- newIORef Nothing
+                let env = testEnv
+                        { databaseRunExecute = \scope purpose sql -> do
+                            writeIORef seen (Just (scope, purpose, sql))
+                            pure (Right "ok")
+                        }
+                _ <- dispatchToolCall dispatchConfig
+                    (appToolHandlers (databaseTools env))
+                    (functionToolCall "custom-execute" "database_execute"
+                        ("{\"scope\":\"" <> wireScope
+                            <> "\",\"sql\":\"select 1\",\"purpose\":\"test\"}"))
+                readIORef seen `shouldReturn`
+                    Just (selected, "test", "select 1"))
+            [ ("user", DatabaseUserScope)
+            , ("repository", DatabaseRepositoryScope)
+            , ("checkout", DatabaseCheckoutScope)
+            ]
+
         it "dispatches a read-only query to the selected scope" do
             seen <- newIORef Nothing
             let env = testEnv
@@ -78,7 +114,7 @@ spec = do
                 (functionToolCall "call-1" "database_query"
                     "{\"scope\":\"user\",\"sql\":\"select * from todos\"}")
             readIORef seen `shouldReturn`
-                Just (DatabaseUserScope, "select * from todos")
+                Just (DatabaseCustomScope DatabaseUserScope, "select * from todos")
             result.output `shouldContainText` "title: test"
 
         it "rejects empty mutating SQL before calling storage" do
@@ -227,6 +263,18 @@ spec = do
             runStorageCommand env StorageDoctor `shouldReturn` Right "doctor"
 
     describe "deriveDatabaseScopes" do
+        it "maps every custom scope to its corresponding durable scope" do
+            directory <- getCurrentDirectory
+            deriveDatabaseScopes directory directory >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right scopes ->
+                    map (scopeForDatabase scopes)
+                        [ DatabaseUserScope
+                        , DatabaseRepositoryScope
+                        , DatabaseCheckoutScope
+                        ]
+                        `shouldBe` applicableDatabaseScopes scopes
+
         it "is stable for one state directory and checkout" do
             first <- deriveDatabaseScopes
                 "/tmp/haskell-agent-state"

@@ -33,7 +33,8 @@ import Agent.CLI.AgentViewport (AgentViewportEnv)
 import Agent.CLI.AgentViewport.Runtime
 import Agent.Tools.OutputArtifact
 import Agent.Tools.Background
-    ( setBackgroundTaskHooks )
+    ( setBackgroundTaskHooks, readBackgroundTasks, BackgroundTaskStatus(..) )
+import Data.List (sortOn)
 import Agent.CLI.SessionTitle
 import Agent.CLI.ManagedTurn
 import Agent.CLI.GatewayBridge
@@ -1589,6 +1590,11 @@ buildSessionEnv
     SessionEnv
         { sessionLoop = loopRuntime.loopRuntimeConfig
         , sessionSteeringInputs = controls.controlSteeringInputs
+        , sessionReadBackgroundTasks = do
+            shellTasks <- readBackgroundTasks toolEnv
+            codeCells <- maybe (pure []) (.codeModeReadBackgroundTasks) codeModeRuntime
+            pure $ sortOn (\task -> (task.taskStartedAt, task.taskKey))
+                (shellTasks <> codeCells)
         , sessionModelInfo = modelInfo
         , sessionBtwBackend = btwBackend
         , sessionQueueRecap = writeChan recapRequests

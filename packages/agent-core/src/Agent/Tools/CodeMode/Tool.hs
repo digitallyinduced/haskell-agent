@@ -54,6 +54,7 @@ import Agent.Tools.CodeMode.Host
     , defaultCodeModeConfig
     , execCodeCellWithTools
     , newCodeModeHost
+    , readRunningCodeCells
     , terminateCodeCell
     , waitCodeCell
     , withCodeModeHost
@@ -62,6 +63,7 @@ import Agent.Tools.CodeMode.Protocol (CodeModeToolMetadata(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , BackgroundTaskStatus(..)
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
     , freeformGrammarAppToolWithExecution
@@ -119,6 +121,7 @@ data CodeModeToolSet = CodeModeToolSet
     { codeModeTools :: ![AppTool]
       -- ^ The @exec@ and @wait@ tools, ready for registry and wire schemas.
     , codeModeNestedToolNames :: ![Text]
+    , codeModeReadBackgroundTasks :: !(IO [BackgroundTaskStatus])
     , closeCodeModeToolSet :: !(IO ())
     }
 
@@ -181,6 +184,20 @@ newCodeModeToolSet mode detailVisibility workerPath invoke specs =
                             pure $ Right CodeModeToolSet
                                 { codeModeTools = tools
                                 , codeModeNestedToolNames = names
+                                , codeModeReadBackgroundTasks = do
+                                    cells <- readRunningCodeCells host
+                                    pure
+                                        [ BackgroundTaskStatus
+                                            { taskKey = "code-mode:" <> identifier
+                                            , taskLabel = "JavaScript cell " <> identifier
+                                            , taskStartedAt = startedAt
+                                            -- Cells require an explicit wait; unlike
+                                            -- shell tasks, they do not enqueue a
+                                            -- completion wake for the agent.
+                                            , taskAutoResume = False
+                                            }
+                                        | (identifier, startedAt) <- cells
+                                        ]
                                 , closeCodeModeToolSet =
                                     closeCodeModeHost host
                                 }
