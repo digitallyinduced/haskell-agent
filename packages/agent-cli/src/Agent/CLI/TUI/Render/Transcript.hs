@@ -53,7 +53,7 @@ import Agent.CLI.TUI.Types
                appAgentEntries, appPullRequestURL, appSlashCatalog, appHistoryWindow, appUi,
                appAgentSelected),
       Name(QuickStartModel, CodeCopy, ConversationChunkCache,
-           ConversationReserve, QuickStartWorktree, QuickStartResume,
+           ConversationReserve, ConversationNewerGap, QuickStartWorktree, QuickStartResume,
            QuickStartCommands, QuickStartChangelog) )
 import Agent.CLI.Terminal ()
 import Agent.CLI.Timestamp ()
@@ -187,7 +187,7 @@ drawTranscriptContentChunks state =
             state.appHistoryWindow.historyWindowHasOlder
             state.appHistoryWindow.historyWindowPending
     newerGap =
-        historyGapWidget
+        map (reportExtent ConversationNewerGap) $ historyGapWidget
             HistoryNewer
             state.appHistoryWindow.historyWindowHasNewer
             state.appHistoryWindow.historyWindowPending

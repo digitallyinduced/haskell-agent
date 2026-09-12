@@ -197,7 +197,7 @@ import qualified Graphics.Vty.CrossPlatform as Vty ()
 
 import Agent.CLI.TUI.Render.Blocks (cacheableBlock, todoStatusAttr)
 import Agent.CLI.TUI.Render.Overlays
-    ( drawNotice, drawFollowStatus, drawFooter, drawPermission, drawResume
+    ( drawNotice, drawFooter, drawPermission, drawResume
     , drawChoice, drawTextPrompt, drawMetaConsole, choiceRowColumns
     , filterChoiceRowLimit
     , onboardingVisibleRowIndices
@@ -261,7 +261,6 @@ drawMain state =
                 , drawNotice state
                 , Composer.drawQueuedInputs state.appUi
                 , Composer.drawSlashMenu state
-                , drawFollowStatus state.appUi
                 , drawLiveTodos (activeConversationUi state)
                 , drawPromptActivity state
                 , case textOverlay state of
