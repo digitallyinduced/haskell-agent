@@ -82,7 +82,7 @@ import Agent.Provider
     , getNextToken
     )
 import Control.Concurrent.Async (concurrently_)
-import Control.Concurrent.MVar (modifyMVar_, newMVar)
+import Control.Concurrent.MVar (modifyMVar_, newMVar, readMVar)
 import Control.Monad (unless, void)
 import Data.IORef (atomicModifyIORef', modifyIORef', newIORef, readIORef)
 import Data.List (elemIndex)
@@ -188,8 +188,8 @@ modelChoiceWithEffort
                 state <- newMVar (picker, usage, notice)
                 let refresh publish = do
                         let update transform = modifyMVar_ state \previous -> do
-                                let next@(models, values, message) = transform previous
-                                publish models values message
+                                let next = transform previous
+                                publish next
                                 pure next
                             updateUsage values = update \(models, previous, message) ->
                                 (models, Map.union values previous, message)
@@ -215,6 +215,7 @@ modelChoiceWithEffort
                                     refreshGatewayModelUsage access added updateUsage
                         concurrently_ refreshCatalog
                             (refreshGatewayModelUsage access picker.pickerAll updateUsage)
+                        Just <$> readMVar state
                 Right <$> pickModelStateWithUpdates
                     color currentEffort notice usage picker refresh
             Just runtime -> do

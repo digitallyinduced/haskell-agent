@@ -11,16 +11,128 @@ import Agent.CLI.ModelConfig
 import Agent.Dialect (DialectId(..))
 import Agent.Provider (Provider(..))
 import Agent.ReasoningEffort (ReasoningEffort(..))
-import Control.Exception.Safe (bracket)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryTakeMVar)
+import Control.Exception.Safe (bracket, finally, throwIO)
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
+import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.IO (hClose, hFlush, hSeek, SeekMode(AbsoluteSeek), stdin, stderr)
+import System.IO.Temp (withSystemTempFile)
+import System.Timeout (timeout)
 import Test.Hspec
+
+-- Keep handle replacement scoped, including when the picker throws.
+captureNonTtyPicker :: IO a -> IO (a, Text.Text)
+captureNonTtyPicker action =
+    withSystemTempFile "model-picker-input" \_ input ->
+    withSystemTempFile "model-picker-output" \_ output -> do
+        let redirect target replacement inner =
+                bracket (hDuplicate target)
+                    (\saved -> hDuplicateTo saved target `finally` hClose saved)
+                    (\_ -> hDuplicateTo replacement target >> inner)
+        result <- redirect stdin input $ redirect stderr output action
+        hFlush output
+        hSeek output AbsoluteSeek 0
+        contents <- Text.hGetContents output
+        pure (result, contents)
 
 spec :: Spec
 spec = do
     catalog <- runIO readPackagedCatalog
+    describe "model picker refresh" do
+        let models = initialPickerState catalog "xai" XAIProvider "grok-4.6" GrokBuildDialect
+            initial = (models, Map.empty, "Loading models…")
+            intermediate = (models, Map.singleton "grok-4.6" "25%", "Refreshing…")
+            final = (models { pickerAll = [] }, Map.empty, "No models available")
+            await action = timeout 1_000_000 action >>= maybe
+                (fail "model picker refresh timed out") pure
+
+        it "retains the initial non-TTY snapshot when there is no update" do
+            resolveModelPickerRefresh initial (const (pure Nothing))
+                `shouldReturn` initial
+
+        it "uses the returned non-TTY snapshot without requiring publication" do
+            resolveModelPickerRefresh initial (const (pure (Just final)))
+                `shouldReturn` final
+
+        it "uses the final non-TTY result rather than intermediate callbacks" do
+            let refresh publish = publish intermediate >> pure (Just final)
+            resolveModelPickerRefresh initial refresh `shouldReturn` final
+
+        it "prints only the returned non-TTY catalog and escaped notice" do
+            let refresh publish = do
+                    publish intermediate
+                    pure (Just (models { pickerAll = [] }, Map.empty, "Unavailable\nShowing cache"))
+            (result, output) <- captureNonTtyPicker $
+                pickModelStateWithUpdates False EffortHigh "Loading models…" Map.empty models refresh
+            result `shouldBe` Nothing
+            output `shouldSatisfy` Text.isInfixOf "Unavailable↵Showing cache"
+            output `shouldSatisfy` (not . Text.isInfixOf "Refreshing…")
+            output `shouldSatisfy` (not . Text.isInfixOf "grok-4.6")
+
+        it "prints the initial non-TTY catalog and notice when no update arrives" do
+            (result, output) <- captureNonTtyPicker $
+                pickModelStateWithUpdates False EffortHigh "Cached models" Map.empty models
+                    (const (pure Nothing))
+            result `shouldBe` Nothing
+            output `shouldSatisfy` Text.isInfixOf "Cached models"
+            output `shouldSatisfy` Text.isInfixOf "grok-4.6"
+
+        it "does not swallow non-TTY refresh exceptions after publication" do
+            let refresh publish = publish intermediate >> throwIO (userError "refresh failed")
+            resolveModelPickerRefresh initial refresh `shouldThrow` anyIOException
+
+        it "delivers intermediate updates before refresh completion, then the final result" do
+            gate <- newEmptyMVar
+            let refresh publish = do
+                    publish intermediate
+                    takeMVar gate
+                    pure (Just final)
+            await $ withModelPickerRefresh refresh \next -> do
+                next `shouldReturn` intermediate
+                putMVar gate ()
+                next `shouldReturn` final
+
+        it "delivers a final-only interactive refresh" do
+            await (withModelPickerRefresh (const (pure (Just final))) id)
+                `shouldReturn` final
+
+        it "conflates intermediate updates without blocking the publisher" do
+            published <- newEmptyMVar
+            gate <- newEmptyMVar
+            let refresh publish = do
+                    publish initial
+                    publish intermediate
+                    putMVar published ()
+                    takeMVar gate
+                    pure (Just final)
+            await $ withModelPickerRefresh refresh \next -> do
+                takeMVar published
+                next `shouldReturn` intermediate
+                putMVar gate ()
+                next `shouldReturn` final
+
+        it "cancels and joins a blocked refresh when the interactive consumer closes" do
+            stopped <- newEmptyMVar
+            gate <- newEmptyMVar
+            let refresh publish =
+                    (publish intermediate >> takeMVar gate >> pure (Just final))
+                        `finally` putMVar stopped ()
+            await (withModelPickerRefresh refresh id) `shouldReturn` intermediate
+            tryTakeMVar stopped `shouldReturn` Just ()
+
+        it "retains a published update when the interactive worker fails" do
+            stopped <- newEmptyMVar
+            let refresh publish =
+                    (publish intermediate >> throwIO (userError "refresh failed"))
+                        `finally` putMVar stopped ()
+            await $ withModelPickerRefresh refresh \next -> do
+                takeMVar stopped
+                next `shouldReturn` intermediate
+
     describe "decodePickerKey" do
         it "maps arrows while keeping printable keys available to search" do
             decodePickerKey "\ESC[A" `shouldBe` Just PickerUp
