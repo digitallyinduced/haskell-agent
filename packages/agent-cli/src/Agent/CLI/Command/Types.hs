@@ -15,8 +15,10 @@ module Agent.CLI.Command.Types
     , SlashSuggestion(..)
     ) where
 
+import Agent.CLI.Command.CompletionIndex (CompletionIndex)
 import Agent.Dialect (DialectId)
 import Agent.ReasoningEffort (ReasoningEffort)
+import Data.IntMap.Strict (IntMap)
 import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Text (Text)
@@ -197,9 +199,24 @@ data SlashCatalog = SlashCatalog
     , slashCatalogCommandByName :: !(Map Text SlashCommand)
     , slashCatalogSkills :: ![SkillCommand]
     , slashCatalogSkillByName :: !(Map Text SkillCommand)
+    -- Derived indexes are demanded only when completing a nonempty query.
+    , slashCatalogCompletionIndex :: CompletionIndex
+    , slashCatalogCompletionCommands :: IntMap SlashCommand
     , slashCatalogModelIds :: ![Text]
     }
-    deriving (Eq, Show)
+    deriving (Show)
+
+-- Compare the source catalog, not its derived completion caches. Fullscreen
+-- catalog refreshes use equality even when no completion has been requested.
+instance Eq SlashCatalog where
+    left == right =
+        left.slashCatalogDialect == right.slashCatalogDialect
+            && left.slashCatalogToolNames == right.slashCatalogToolNames
+            && left.slashCatalogCommands == right.slashCatalogCommands
+            && left.slashCatalogCommandByName == right.slashCatalogCommandByName
+            && left.slashCatalogSkills == right.slashCatalogSkills
+            && left.slashCatalogSkillByName == right.slashCatalogSkillByName
+            && left.slashCatalogModelIds == right.slashCatalogModelIds
 
 -- | One row in the live slash-command dropdown.
 data SlashSuggestion = SlashSuggestion
