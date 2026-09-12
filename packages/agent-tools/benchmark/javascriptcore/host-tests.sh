@@ -20,6 +20,8 @@ packages:
     "$PWD/packages/agent-responses-types"
 optimization: 2
 tests: True
+-- All external dependencies are supplied by the pinned Nix shell.
+active-repositories: :none
 EOF
 if [[ $# == 1 ]]; then
   worker=$1
@@ -36,7 +38,7 @@ export AGENT_CODE_MODE_BACKEND=javascriptcore
 export AGENT_CODE_MODE_WORKER="$worker"
 # GNU timeout comes from the Nix development environment. Bound compilation and
 # tests together, then separately bound the executable to catch lifecycle hangs.
-nix develop --no-write-lock-file --command timeout --kill-after=30s 25m \
+nix develop .#code-mode --no-write-lock-file --command timeout --kill-after=30s 25m \
   bash -euo pipefail -c '
 out=$CODE_MODE_HOST_TEST_OUT
 timeout --kill-after=5s 15s "$AGENT_CODE_MODE_WORKER" --check

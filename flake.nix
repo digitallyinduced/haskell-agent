@@ -1562,6 +1562,28 @@
                     exePath = "/bin/agent-openai-login";
                 };
 
+                # Match the focused code-mode Cabal project. The full developer
+                # shell also pulls in unrelated server/integration test builds.
+                devShells.code-mode = developmentHaskellPackages.shellFor {
+                    packages = packages: [
+                        packages.agent-tools
+                        packages.agent-core
+                        packages.agent-json
+                        packages.agent-process
+                        packages.agent-responses-types
+                    ];
+                    withHoogle = false;
+                    nativeBuildInputs = [
+                        haskellPackages.cabal-install
+                        bun_1_4
+                        pkgs.git
+                        pkgs.ripgrep
+                        pkgs.coreutils
+                    ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+                        agentCodeModeWorker
+                    ];
+                };
+
                 devShells.default = developmentHaskellPackages.shellFor {
                     packages = packages: [
                         packages.agent-cli

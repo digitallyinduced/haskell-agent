@@ -65,7 +65,7 @@ jobs:
             "$helper_out/bin/agent-code-mode-worker" --check
           test -s "$helper_out/share/licenses/agent-code-mode-worker/acorn-LICENSE"
           test ! -e "$helper_out/bin/bun"
-          nix develop --no-write-lock-file --command otool -L \
+          nix develop .#code-mode --no-write-lock-file --command otool -L \
             "$helper_out/bin/agent-code-mode-worker" |
             grep -F '/System/Library/Frameworks/JavaScriptCore.framework/'
 
@@ -76,7 +76,7 @@ jobs:
           set -euo pipefail
           # Bun is solely the pinned test oracle; it is not a runtime dependency
           # of the native helper. Acorn comes from that helper's hashed package.
-          nix develop --no-write-lock-file --command bash -euo pipefail -c '
+          nix develop .#code-mode --no-write-lock-file --command bash -euo pipefail -c '
             bun packages/agent-tools/benchmark/javascriptcore/lowering.mjs \
               "$HELPER_OUT/share/agent-code-mode-worker/acorn.js"
             bun packages/agent-tools/benchmark/javascriptcore/worker-tests.mjs \
