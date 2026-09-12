@@ -37,8 +37,8 @@ import Agent.CLI.Input
 import Agent.OpenAI.Models.Types (ModelInfo(..), modelServiceTierForRequest)
 import Agent.Runtime.Models ( catalogModelIds )
 import Agent.CLI.SteeringInputs
-    ( awaitBackgroundCompletion
-    , hasBackgroundCompletions
+    ( awaitSteeringInput
+    , readSteeringTurn
     )
 import Agent.CLI.Provider.Switch
     ( reportProviderUnavailable, requestStartupProviderFallback )
@@ -141,7 +141,7 @@ sessionContinuation =
 
 data ReplWake
     = ProviderUnavailableWake !ApiError
-    | BackgroundCompletionWake
+    | SteeringInputWake
 
 runPendingTurn
     :: PendingTurnPresentation
@@ -318,19 +318,21 @@ replWithDraft env@SessionEnv
                         Left text -> (ReplText text, True)
                         Right line -> (line, False)
     case mlineResult of
-        Left BackgroundCompletionWake -> do
-            pending <-
-                hasBackgroundCompletions env.sessionSteeringInputs
-            if not pending
+        Left SteeringInputWake -> do
+            (promptText, pending) <-
+                readSteeringTurn env.sessionSteeringInputs
+            if null pending
                 then replWithDraft env draft
                 else do
                     forM_ fullscreen \runtime ->
                         emitUiEvent runtime
                             (UiSystemMessage
-                                "Background task completed; resuming the agent.")
-                    -- Keep the notice in the normal steering queue so it is
-                    -- acknowledged only after the provider commits it.
-                    result <- runOneTurn env "" []
+                                "Queued input received; resuming the agent.")
+                    -- Keep inputs in the normal steering queue so each is
+                    -- acknowledged only after the provider commits it. The
+                    -- prompt text preserves user guidance in durable history;
+                    -- it does not add a second copy to provider inputs.
+                    result <- runOneTurn env promptText []
                     finishTurn env False result
         Left (ProviderUnavailableWake apiError) -> do
             -- The startup check is one-shot. If no fallback account is usable,
@@ -394,21 +396,21 @@ readFullscreenPrompt
         \_ -> do
             startupUnavailable <- readIORef env.sessionStartupUnavailable
             failedTurn <- readIORef env.sessionLastFailedTurn
-            let backgroundWake =
+            let steeringWake =
                     case failedTurn of
                         -- Preserve the user's retry candidate. Its next retry
                         -- or replacement turn will consume the queued
-                        -- completion through normal steering.
+                        -- input through normal steering.
                         Just _ -> retry
                         Nothing ->
-                            BackgroundCompletionWake
-                                <$ awaitBackgroundCompletion
+                            SteeringInputWake
+                                <$ awaitSteeringInput
                                     env.sessionSteeringInputs
                 wake = case startupUnavailable of
-                    Nothing -> backgroundWake
+                    Nothing -> steeringWake
                     Just unavailable ->
                         (ProviderUnavailableWake <$> unavailable)
-                            `orElse` backgroundWake
+                            `orElse` steeringWake
             (withAsync
                 (refreshBackgroundTaskStatus env runtime (not (isJust failedTurn)))
                 \_ ->

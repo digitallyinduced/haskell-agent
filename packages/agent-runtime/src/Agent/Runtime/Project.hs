@@ -53,7 +53,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isSpace)
 import Data.List (dropWhileEnd)
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory.OsPath
@@ -211,7 +211,7 @@ projectSettingsDecoder = Hermes.object do
             -- A malformed or obsolete model selection should not discard
             -- unrelated project settings such as auto-approve.
             , settingsLastModel = lastModelValue >>= id
-            , settingsLastAccounts = mapMaybe id lastAccountsValue
+            , settingsLastAccounts = catMaybes lastAccountsValue
             , settingsMaxConcurrentAgents = maxConcurrentAgents
             }
 

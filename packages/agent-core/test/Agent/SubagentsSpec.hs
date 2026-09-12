@@ -1024,6 +1024,38 @@ spec = describe "Agent.Subagents" do
             Left _ -> False
         closeSubagentRegistry registry
 
+    it "interrupts every active record while preserving completed records" do
+        started <- newEmptyTMVarIO
+        registry <- newSubagentRegistry
+            (defaultSubagentConfig { maxConcurrent = 2 })
+            (fromFilePath "/tmp")
+            (\_ _ prompt _ ->
+                if messagePayload prompt == "completed"
+                    then pure $ Right LoopResult
+                        { finalResponseId = "done"
+                        , finalText = Just "done"
+                        , turnsUsed = 1
+                        , tokenUsage = emptyTokenUsage
+                        }
+                    else do
+                        atomically $ putTMVar started ()
+                        atomically retry)
+            (\_ _ -> pure ())
+        Right completed <- spawnSubagent registry Nothing 0 "completed" Nothing
+        _ <- waitSubagents registry [completed] 15000
+        getStatus registry completed `shouldReturn` Completed (Just "done")
+        Right first <- spawnSubagent registry Nothing 0 "first" Nothing
+        atomically $ takeTMVar started
+        Right second <- spawnSubagent registry Nothing 0 "second" Nothing
+        atomically $ takeTMVar started
+
+        interruptActiveSubagents registry
+
+        getStatus registry first `shouldReturn` Interrupted
+        getStatus registry second `shouldReturn` Interrupted
+        getStatus registry completed `shouldReturn` Completed (Just "done")
+        closeSubagentRegistry registry
+
     it "aborts only descendants owned by the failed root turn" do
         ownedStarted <- newEmptyTMVarIO
         unrelatedStarted <- newEmptyTMVarIO

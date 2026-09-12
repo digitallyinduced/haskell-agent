@@ -35,7 +35,7 @@ import Agent.Responses.Types
     , ToolChoiceMode(..)
     )
 import Control.Concurrent.Async (race)
-import Data.List (findIndex)
+import Data.List (dropWhileEnd, findIndex)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -178,7 +178,7 @@ isUnmatchedCall completed = \case
     _ -> False
 
 dropTrailingReasoning :: [ResponseItem] -> [ResponseItem]
-dropTrailingReasoning = reverse . dropWhile isReasoning . reverse
+dropTrailingReasoning = dropWhileEnd isReasoning
   where
     isReasoning ReasoningItemValue{} = True
     isReasoning _ = False

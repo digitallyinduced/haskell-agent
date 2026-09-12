@@ -102,7 +102,7 @@ spec = describe "fullscreen Markdown rendering" do
                 renderFinal Theme.terminalDefault [widget True] (40, 20)
                     (const Nothing) warm
         V.imageHeight (V.picImage picture) `shouldSatisfy` (> 0)
-        map extentName extents `shouldBe` ["https://example.com"]
+        map extentName extents `shouldBe` replicate 2 "https://example.com"
 
     it "parses strong, emphasis, code, and links" do
         parseInline
@@ -125,6 +125,22 @@ spec = describe "fullscreen Markdown rendering" do
             rendered = show (renderWidget Nothing [widget] (40, 3))
         rendered `shouldSatisfy`
             isInfixOf "attrURL = SetTo \"https://example.com\""
+
+    it "renders a muted URL suffix without the link title's underline" do
+        let url = "https://example.com"
+            widget :: Widget ()
+            widget = markdownWidget ("[Example](" <> url <> ") after")
+            (_, picture, _, _) =
+                renderFinal Theme.terminalDefault [widget] (80, 3)
+                    (const Nothing) emptyRenderState
+            spans = concatMap toList (toList (displayOpsForPic picture (80, 3)))
+            attributeFor value = spanAttr <$> find (hasText value) spans
+        attributeFor "Example" `shouldBe`
+            Just (attrMapLookup Theme.linkAttr Theme.terminalDefault `V.withURL` url)
+        attributeFor " (https://example.com)" `shouldBe`
+            Just (attrMapLookup Theme.dimAttr Theme.terminalDefault `V.withURL` url)
+        attributeFor " after" `shouldSatisfy`
+            maybe False ((/= V.SetTo url) . V.attrURL)
 
     it "renders bare URLs with native terminal hyperlink metadata" do
         let url = "https://github.com/digitallyinduced/haskell-agent/pull/339"
@@ -149,7 +165,10 @@ spec = describe "fullscreen Markdown rendering" do
                 , extentSize extent
                 ))
             extents
-            `shouldContain` [(url, Location (5, 0), (31, 1))]
+            `shouldContain`
+                [ (url, Location (5, 0), (4, 1))
+                , (url, Location (9, 0), (27, 1))
+                ]
 
     it "registers a click target for every wrapped link fragment" do
         let url = "https://example.com/abcdefgh"

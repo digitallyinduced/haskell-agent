@@ -12,13 +12,19 @@ handling. NUL splitting operates on Text and converts individual paths to
 `benchmark/GitOutput.md` for the isolated representation benchmark; this is
 not a measurement of whole-process memory or Git execution time.
 
+Markdown table rows now scan strict Text chunks rather than unpacking rows and
+packing each backtick-lookahead suffix. Completed cells are copied to avoid
+retaining a large source row through a small cell. Escape parity, Unicode
+whitespace, and the existing closing-backtick run rule are unchanged. See
+`../agent-tui/benchmark/MarkdownTable.md` for measurements and validation.
+This targets temporary parsing allocation, not retained conversation size.
+
 ## Prioritized follow-up
 
 | Priority | Module | Finding and acceptance criteria |
 | --- | --- | --- |
 | High | `agent-tui/src/Agent/TUI/TextWidth.hs` | `graphemeClusters` unpacks entire input, constructs character lists, then packs clusters; width checks also unpack. Benchmark Text traversal/slices in actual rendering and cursor workloads; preserve combining marks, flags, ZWJ, modifiers and terminal-width compatibility. |
 | Medium | `agent-cli/src/Agent/CLI/Clipboard/{MacOS,Linux}.hs` | Process capture passes potentially large clipboard content through String. Prefer byte capture with explicit decoding and Text results. Preserve subprocess cleanup, errors, and paste behavior. |
-| Medium | `agent-tui/src/Agent/TUI/Markdown/Block.hs` | `splitTableRow` unpacks each row and constructs reversed character lists. Benchmark a Text scanner/builder; preserve escaped pipes and code spans. |
 | Medium | `agent-store/src/Agent/Store/Postgres/Custom/Sql.hs` | `splitTopLevelStatements` unpacks complete SQL batches and constructs character-list statements. Separate parser change with equivalence tests for dollar quotes, escaping and nested comments. |
 | Lower | `agent-grok-build-dialect/src/Agent/GrokBuild/Dialect/Shell.hs` | Quote and ampersand scanning unpacks command text. Security-sensitive: preserve parser decisions before considering performance. |
 | Lower | `agent-mcp/src/Agent/MCP/Types.hs` | Arguments/environment retained as `[String]` and `[(String,String)]`. Text storage could defer conversion until process creation, but no significant memory contribution has been established. |
@@ -39,9 +45,9 @@ Further review identified these compatibility boundaries:
 - TextWidth predicates can migrate before segmentation. Preserve exactly two
   regional indicators for flags and character-count cursor offsets, not UTF-8
   byte offsets. Benchmark complete rendering/cursor consumers, not only helpers.
-- Markdown table scanning repeatedly packs the remaining suffix when looking
-  for closing backticks. Preserve escape parity and the existing closing-run
-  length rule while replacing this with Text traversal.
+- Markdown table scanning preserves escape parity and accepts closing backtick
+  runs at least as long as the opening run. Repeated suffix searches remain for
+  unmatched runs; the Text replacement is not a worst-case linear-time parser.
 - Clipboard byte capture must not silently change locale-based strict decoding
   into lenient UTF-8. Preserve backend fallback order and first-error selection.
 

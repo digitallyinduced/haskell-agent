@@ -63,6 +63,8 @@ library
     exposed-modules:  Agent.ComputerUse
                     , Agent.ComputerUse.Backend
                     , Agent.ComputerUse.Accessibility
+                    , Agent.ComputerUse.Semantic
+                    , Agent.ComputerUse.Transport
 
 test-suite agent-computer-use-test
     import:           common-options, computer-use-modules
@@ -71,6 +73,10 @@ test-suite agent-computer-use-test
     main-is:          Spec.hs
     ghc-options:      -threaded
     other-modules:    Agent.ComputerUseSpec
+                    , Agent.ComputerUse.SemanticSpec
+                    , Agent.ComputerUse.TransportSpec
+                    , Agent.ComputerUse.Transport
+                    , Agent.ComputerUse.Semantic
                     , Agent.ComputerUse
                     , Agent.ComputerUse.Backend
                     , Agent.ComputerUse.Accessibility

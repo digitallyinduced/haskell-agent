@@ -27,6 +27,10 @@ if [[ -e "$cli/src/Agent/CLI/Dialects.hs" \
 fi
 
 python3 "$root/scripts/check-package-graph.py" "$root"
+if rg --line-number 'MCP\.(acquireMcpFleet|releaseMcpFleetLease)' \
+    "$cli/src/Agent/CLI/Runtime/Orchestration/Tools/Mcp.hs"; then
+  fail "MCP startup lease ownership must remain in agent-runtime"
+fi
 [[ ! -e "$root/packages/agent-cli-runtime/agent-cli-runtime.cabal" ]] \
   || fail "agent-cli-runtime must be replaced by agent-runtime"
 
@@ -162,9 +166,17 @@ for registration in \
 done
 
 required_files=(
+  packages/agent-runtime/src/Agent/Runtime/Mcp/Startup.hs
+  packages/agent-runtime/test/Agent/Runtime/Mcp/StartupSpec.hs
+  packages/agent-runtime/src/Agent/Runtime/Session/Preparation.hs
+  packages/agent-runtime/src/Agent/Runtime/Session/Resources.hs
+  packages/agent-runtime/test/Agent/Runtime/Session/ResourcesSpec.hs
   packages/agent-runtime/src/Agent/Runtime/Tools/Dialects.hs
   packages/agent-runtime/src/Agent/Runtime/Tools/Resources.hs
   packages/agent-runtime/src/Agent/Runtime/Tools/Startup.hs
+  packages/agent-runtime/src/Agent/Runtime/Startup/Model.hs
+  packages/agent-runtime/src/Agent/Runtime/Startup/Policy.hs
+  packages/agent-runtime/src/Agent/Runtime/Startup/Gateway.hs
   packages/agent-runtime/test/Agent/Runtime/Tools/ResourcesSpec.hs
   packages/agent-runtime/test/Agent/Runtime/Tools/StartupSpec.hs
   packages/agent-runtime/src/Agent/Runtime/Providers.hs

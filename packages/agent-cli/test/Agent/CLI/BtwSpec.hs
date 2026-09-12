@@ -29,6 +29,18 @@ spec = do
             prompt `shouldSatisfy` Text.isSuffixOf "what does this do?\n"
 
     describe "trimDanglingToolSuffix" do
+        it "handles empty histories and a reasoning-only prefix before a live call" do
+            trimDanglingToolSuffix [] `shouldBe` []
+            trimDanglingToolSuffix
+                [reasoningItem, reasoningItem, functionCallItem "live"]
+                `shouldBe` []
+
+        it "drops only trailing reasoning while preserving earlier reasoning" do
+            let prefix = [reasoningItem, userItem "before"]
+            trimDanglingToolSuffix
+                (prefix <> [reasoningItem, reasoningItem, functionCallItem "live"])
+                `shouldBe` prefix
+
         it "keeps complete tool pairs" do
             let items =
                     [ userItem "before"

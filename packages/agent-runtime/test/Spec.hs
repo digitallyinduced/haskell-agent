@@ -4,9 +4,13 @@ import qualified Agent.Runtime.RequestSpec as Request
 import qualified Agent.Runtime.Tools.ResourcesSpec as ToolResources
 import qualified Agent.Runtime.Tools.DialectsSpec as ToolDialects
 import qualified Agent.Runtime.Tools.StartupSpec as ToolStartup
+import qualified Agent.Runtime.Mcp.StartupSpec as McpStartup
 import qualified Agent.Runtime.ProviderRuntimeSpec as ProviderRuntime
 import qualified Agent.Runtime.CompactionSpec as Compaction
 import qualified Agent.Runtime.StartupPolicySpec as StartupPolicy
+import qualified Agent.Runtime.Startup.ModelSpec as StartupModel
+import qualified Agent.Runtime.Startup.PolicySpec as StartupApproval
+import qualified Agent.Runtime.Startup.GatewaySpec as StartupGateway
 import qualified Agent.Runtime.ConversationStoreSpec as ConversationStore
 import qualified Agent.Runtime.ConversationSessionSpec as ConversationSession
 import qualified Agent.Runtime.TurnEngineSpec as TurnEngine
@@ -31,6 +35,8 @@ import qualified Agent.Runtime.ModelConfigSpec as ModelConfigSpec
 import qualified Agent.Runtime.ModelsSpec as ModelsSpec
 import qualified Agent.Runtime.NativeProcessSpec as NativeProcessSpec
 import qualified Agent.Runtime.SessionSpec as SessionSpec
+import qualified Agent.Runtime.Session.ResourcesSpec as SessionResources
+import qualified Agent.Runtime.Session.PreparationSpec as SessionPreparation
 import qualified Agent.Runtime.TurnStateSpec as TurnStateSpec
 import Test.Hspec
 
@@ -39,10 +45,14 @@ main = hspec do
     ToolDialects.spec
     ToolResources.spec
     ToolStartup.spec
+    McpStartup.spec
     Request.spec
     ProviderRuntime.spec
     Compaction.spec
     StartupPolicy.spec
+    StartupModel.spec
+    StartupApproval.spec
+    StartupGateway.spec
     ConversationStore.spec
     ConversationSession.spec
     TurnEngine.spec
@@ -108,4 +118,6 @@ main = hspec do
     ModelsSpec.spec
     NativeProcessSpec.spec
     SessionSpec.spec
+    SessionResources.spec
+    SessionPreparation.spec
     TurnStateSpec.spec

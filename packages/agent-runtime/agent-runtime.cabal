@@ -79,6 +79,7 @@ library
                     , Agent.Runtime.McpConnectionRuntime
                     , Agent.Runtime.McpOAuth
                     , Agent.Runtime.McpOAuthStore
+                    , Agent.Runtime.Mcp.Startup
                     , Agent.Runtime.ModelConfig
                     , Agent.Runtime.Models
                     , Agent.Runtime.NativeProcess
@@ -94,6 +95,8 @@ library
                     , Agent.Runtime.Session.Activity
                     , Agent.Runtime.Session.Codec
                     , Agent.Runtime.Session.History
+                    , Agent.Runtime.Session.Preparation
+                    , Agent.Runtime.Session.Resources
                     , Agent.Runtime.Session.Inbox
                     , Agent.Runtime.Session.Observation
                     , Agent.Runtime.Session.PullRequest
@@ -111,6 +114,9 @@ library
                     , Agent.Runtime.SessionOwner
                     , Agent.Runtime.SessionState
                     , Agent.Runtime.StartupPolicy
+                    , Agent.Runtime.Startup.Model
+                    , Agent.Runtime.Startup.Policy
+                    , Agent.Runtime.Startup.Gateway
                     , Agent.Runtime.TurnEngine
                     , Agent.Runtime.TurnExecution
                     , Agent.Runtime.TurnState
@@ -224,6 +230,7 @@ test-suite agent-runtime-test
     main-is:          Spec.hs
     ghc-options:      -threaded
     other-modules:    Agent.Runtime.RequestSpec
+                    , Agent.Runtime.Mcp.StartupSpec
                     , Agent.Runtime.Tools.DialectsSpec
                     , Agent.Runtime.Tools.ResourcesSpec
                     , Agent.Runtime.Tools.StartupSpec
@@ -249,12 +256,17 @@ test-suite agent-runtime-test
                     , Agent.Runtime.TurnRecordSpec
                     , Agent.Runtime.SessionThreadsSpec
                     , Agent.Runtime.SessionSpec
+                    , Agent.Runtime.Session.ResourcesSpec
+                    , Agent.Runtime.Session.PreparationSpec
                     , Agent.Runtime.SessionSpec.Compatibility
                     , Agent.Runtime.SessionSpec.Fixtures
                     , Agent.Runtime.SessionSpec.JsonCodec
                     , Agent.Runtime.SessionSpec.Persistence
                     , Agent.Runtime.SessionSpec.ResponseItems
                     , Agent.Runtime.StartupPolicySpec
+                    , Agent.Runtime.Startup.ModelSpec
+                    , Agent.Runtime.Startup.PolicySpec
+                    , Agent.Runtime.Startup.GatewaySpec
                     , Agent.Runtime.ConversationStoreSpec
                     , Agent.Runtime.ConversationSessionSpec
                     , Agent.Runtime.TurnEngineSpec
@@ -264,6 +276,7 @@ test-suite agent-runtime-test
                     , agent-accounts
                     , agent-connectivity
                     , agent-core
+                    , agent-mcp
                     , agent-tools
                     , agent-json
                     , agent-openai

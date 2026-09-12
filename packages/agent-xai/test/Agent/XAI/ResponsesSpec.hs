@@ -36,6 +36,8 @@ spec = do
         it "preserves authoritative gateway aliases instead of inferring models" do
             let options = gatewayClientOptions "https://gateway.example/"
             options.baseUrl `shouldBe` "https://gateway.example/v1"
+            (gatewayClientOptions "https://gateway.example/base///").baseUrl
+                `shouldBe` "https://gateway.example/base/v1"
             options.requestRedirectCount `shouldBe` 0
             mapModel options "organization-research"
                 `shouldBe` "organization-research"

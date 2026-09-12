@@ -4,7 +4,7 @@ module Agent.CLI.Worktree.Ignored (checkIgnoredPath) where
 
 import Control.Monad (unless)
 import qualified Data.ByteString as BS
-import Data.List (isPrefixOf)
+import Data.List (dropWhileEnd, isPrefixOf)
 import qualified System.Directory as Directory
 import System.FilePath ((</>), dropTrailingPathSeparator, takeFileName, takeDirectory, splitDirectories)
 import qualified System.Posix.Files as Posix
@@ -99,7 +99,7 @@ validStoreName name = case splitAt 32 name of
     _ -> False
 
 trim :: String -> String
-trim = reverse . dropWhile (`elem` ['\r', '\n']) . reverse
+trim = dropWhileEnd (`elem` ['\r', '\n'])
 
 nul :: String -> [String]
 nul [] = []

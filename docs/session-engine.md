@@ -50,6 +50,25 @@ finalize. A failure after loop execution must not retroactively roll it back.
 
 ### Native startup policy boundary
 
+`Agent.Runtime.Startup.Model` resolves typed model startup inputs into model
+identity, transport mapping, dialect, reasoning effort, and resume/context
+invalidation decisions. Its resume input contains only the persisted fields
+used by those decisions. Gateway selections remain authoritative; remembered
+project dialects only apply to the matching provider, and changed custom-model
+wire mappings invalidate the previous target using the existing rules.
+
+`Agent.Runtime.Startup.Policy` owns approval defaults, native interaction-mode
+approval, Claude bypass eligibility, and dialect effort normalization. A live
+native interaction-mode callback always prevents provider-side Claude bypass,
+including when the initial mode is Yolo. `Agent.Runtime.Startup.Gateway` owns
+pure gateway catalog projection and model selection; saved aliases are hints,
+not an authority for the provider assigned by the current gateway catalog.
+
+The CLI translates `CliOptions`, native hooks, project settings, and session
+metadata into these inputs. It retains credential/catalog IO, startup messages,
+and provider client-option construction. This is not yet a shared session
+startup entry point, and does not remove the server's CLI dependency.
+
 `Agent.CLI.NativeRuntime` remains the legacy execution adapter. It translates
 the native startup policy after preparing typed requests or legacy arguments.
 Restricted startup pins the admitted cwd and disables worktrees, automatic
@@ -140,9 +159,32 @@ unwind. Shutdown order remains activities, code mode, session lock, computer
 use, LSP, web fetch, MCP, coding tools, scratch storage.
 
 This is a bounded extraction, not the complete session entry point. Concrete
-MCP/scratch setup, host-specific tool groups, terminal hooks, and session launch
+host-specific tool groups, terminal hooks, and session launch
 still live in CLI orchestration. Server still depends on `agent-cli` until
 those remaining composition boundaries move. No new Cabal package is needed.
+
+## Implemented: shared session resource preparation
+
+`Agent.Runtime.Session.Preparation` owns deferred persistence creation and
+resumed-session retargeting through a typed `PersistenceRequest`.
+`Agent.Runtime.Session.Resources` restores task plans and image history,
+allocates scratch storage, and owns temporary-directory leases and cleanup.
+Partial acquisition failures and cancellation unwind the same resource scope.
+
+CLI supplies resume notices, fullscreen history wiring, external-session tool
+construction, and a repository worktree lease hook. CLI options are translated
+at the adapter boundary; the runtime request contains no terminal or CLI types.
+Stale-resource housekeeping remains in the host composition layer.
+
+## Implemented: shared MCP startup
+
+`Agent.Runtime.Mcp.Startup` maps harness configuration into MCP server
+configuration and owns blocking/progressive fleet acquisition and lease cleanup.
+Host hooks are cleared when startup fails or is cancelled and after lease release.
+The CLI adapter retains progress rendering, pending notices, interactive
+elicitation, integration endpoint discovery, and stale-resource housekeeping.
+Protocol and transport implementations remain in `agent-mcp`; no new package is
+introduced for this session-integration layer.
 
 ## Remaining: move session composition and ownership out of the CLI
 
