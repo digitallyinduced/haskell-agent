@@ -29,9 +29,9 @@ mkDerivation {
   testHaskellDepends = [
     aeson agent-accounts agent-core agent-json agent-openai
     agent-responses agent-responses-types agent-store agent-tools async
-    base bytestring containers directory filepath hspec http-client
-    http-types network QuickCheck safe-exceptions stm text time unix
-    wai warp
+    base bytestring containers directory filelock filepath hspec
+    http-client http-types network QuickCheck safe-exceptions stm text
+    time unix wai warp
   ];
   description = "Frontend-independent conversation and turn lifecycle";
   license = lib.meta.getLicenseFromSpdxId "MIT";

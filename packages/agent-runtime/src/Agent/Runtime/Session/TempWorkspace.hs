@@ -11,6 +11,7 @@ module Agent.Runtime.Session.TempWorkspace
     , sessionDirForId
     , sessionTempDirForId
     , allocateSessionTemp
+    , allocateSessionTempWithDirectoryCreation
     , acquireSessionTempLease
     , releaseSessionTempLease
     , cleanupStaleSessionTemps
@@ -69,7 +70,12 @@ import System.OsPath
     , unsafeEncodeUtf
     , (</>)
     )
-import System.IO.Error (isDoesNotExistError)
+import System.IO.Error
+    ( ioeGetLocation
+    , ioeSetLocation
+    , isAlreadyExistsError
+    , isDoesNotExistError
+    )
 import System.Posix.Files
     ( FileStatus
     , getSymbolicLinkStatus
@@ -157,7 +163,15 @@ sessionTempDirForId root sessionId
 -- | Reserve a unique session id by atomically creating its private scratch
 -- directory. The durable session directory remains deferred until first use.
 allocateSessionTemp :: OsPath -> IO (Text, OsPath)
-allocateSessionTemp root = do
+allocateSessionTemp = allocateSessionTempWithDirectoryCreation createDirectory
+
+-- | Supply the atomic directory creation operation so collision retries and
+-- non-retryable filesystem failures can be exercised deterministically.
+allocateSessionTempWithDirectoryCreation
+    :: (OsPath -> IO ())
+    -> OsPath
+    -> IO (Text, OsPath)
+allocateSessionTempWithDirectoryCreation createTempDirectory root = do
     let tempRoot = sessionTempsRoot root
     ensurePrivateDir tempRoot
     now <- getCurrentTime
@@ -181,8 +195,17 @@ allocateSessionTemp root = do
             if durableExists || recoveryExists
                 then go tempRoot now (attempt + 1)
                 else mask \restore ->
-                    tryIO (createDirectory tempDir) >>= \case
-                        Left _ -> restore (go tempRoot now (attempt + 1))
+                    tryIO (createTempDirectory tempDir) >>= \case
+                        Left err
+                            | isAlreadyExistsError err ->
+                                restore (go tempRoot now (attempt + 1))
+                            -- A new name cannot resolve permission, capacity,
+                            -- or other filesystem failures. Preserve the
+                            -- original error and its filename for diagnosis.
+                            | otherwise ->
+                                ioError $
+                                    ioeSetLocation err
+                                        ("allocateSessionTemp: " <> ioeGetLocation err)
                         Right () ->
                             restore
                                 (do
