@@ -111,6 +111,9 @@ library
                     , Agent.Runtime.SessionOwner
                     , Agent.Runtime.SessionState
                     , Agent.Runtime.StartupPolicy
+                    , Agent.Runtime.Startup.Model
+                    , Agent.Runtime.Startup.Policy
+                    , Agent.Runtime.Startup.Gateway
                     , Agent.Runtime.TurnEngine
                     , Agent.Runtime.TurnExecution
                     , Agent.Runtime.TurnState
@@ -255,6 +258,9 @@ test-suite agent-runtime-test
                     , Agent.Runtime.SessionSpec.Persistence
                     , Agent.Runtime.SessionSpec.ResponseItems
                     , Agent.Runtime.StartupPolicySpec
+                    , Agent.Runtime.Startup.ModelSpec
+                    , Agent.Runtime.Startup.PolicySpec
+                    , Agent.Runtime.Startup.GatewaySpec
                     , Agent.Runtime.ConversationStoreSpec
                     , Agent.Runtime.ConversationSessionSpec
                     , Agent.Runtime.TurnEngineSpec

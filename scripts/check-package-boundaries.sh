@@ -165,6 +165,9 @@ required_files=(
   packages/agent-runtime/src/Agent/Runtime/Tools/Dialects.hs
   packages/agent-runtime/src/Agent/Runtime/Tools/Resources.hs
   packages/agent-runtime/src/Agent/Runtime/Tools/Startup.hs
+  packages/agent-runtime/src/Agent/Runtime/Startup/Model.hs
+  packages/agent-runtime/src/Agent/Runtime/Startup/Policy.hs
+  packages/agent-runtime/src/Agent/Runtime/Startup/Gateway.hs
   packages/agent-runtime/test/Agent/Runtime/Tools/ResourcesSpec.hs
   packages/agent-runtime/test/Agent/Runtime/Tools/StartupSpec.hs
   packages/agent-runtime/src/Agent/Runtime/Providers.hs

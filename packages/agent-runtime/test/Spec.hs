@@ -7,6 +7,9 @@ import qualified Agent.Runtime.Tools.StartupSpec as ToolStartup
 import qualified Agent.Runtime.ProviderRuntimeSpec as ProviderRuntime
 import qualified Agent.Runtime.CompactionSpec as Compaction
 import qualified Agent.Runtime.StartupPolicySpec as StartupPolicy
+import qualified Agent.Runtime.Startup.ModelSpec as StartupModel
+import qualified Agent.Runtime.Startup.PolicySpec as StartupApproval
+import qualified Agent.Runtime.Startup.GatewaySpec as StartupGateway
 import qualified Agent.Runtime.ConversationStoreSpec as ConversationStore
 import qualified Agent.Runtime.ConversationSessionSpec as ConversationSession
 import qualified Agent.Runtime.TurnEngineSpec as TurnEngine
@@ -43,6 +46,9 @@ main = hspec do
     ProviderRuntime.spec
     Compaction.spec
     StartupPolicy.spec
+    StartupModel.spec
+    StartupApproval.spec
+    StartupGateway.spec
     ConversationStore.spec
     ConversationSession.spec
     TurnEngine.spec

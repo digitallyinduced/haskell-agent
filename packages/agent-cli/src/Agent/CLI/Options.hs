@@ -33,14 +33,19 @@ module Agent.CLI.Options
     ) where
 
 import System.OsPath (OsPath, unsafeEncodeUtf)
-import Agent.Dialect (DialectId(..))
 import Agent.Loop (defaultLoopMaxTurns)
 import Agent.Provider (Provider(..), parseProvider)
 import Agent.ReasoningEffort
-    ( ReasoningEffort(..)
+    ( ReasoningEffort
     , parseReasoningEffort
     )
-import qualified Agent.ReasoningEffort as ReasoningEffort
+import Agent.Runtime.Startup.Policy
+    ( ApprovalInputs(..)
+    , resolveApproval
+    , reasoningEfforts
+    , reasoningEffortsForDialect
+    , normalizeReasoningEffortForDialect
+    )
 import Agent.Runtime.Options
     ( ApprovalPolicy(..)
     , GatewayCommand(..)
@@ -283,17 +288,17 @@ resolveComputerUseEnabled options stdinTty =
 -- @--no-yolo@ is set. Interactive sessions prompt on mutating tools, unless
 -- project settings already enabled auto-approve (and @--no-yolo@ was not set).
 resolveApprovalPolicy :: CliOptions -> Bool -> Bool -> ApprovalPolicy
-resolveApprovalPolicy options isTty projectAutoApprove
-    | options.optYolo == Explicit True = ApproveAll
-    | options.optManagedDenyMutations = DenyMutating
-    | isJust options.optManagedTurnFile && options.optYolo == Explicit False =
-        PromptMutating
-    | options.optYolo == Explicit False && not isTty = DenyMutating
-    | not isTty && isOneShot options = ApproveAll
-    | not isTty = DenyMutating
-    | options.optYolo == Explicit False = PromptMutating
-    | projectAutoApprove = ApproveAll
-    | otherwise = PromptMutating
+resolveApprovalPolicy options isTty projectAutoApprove =
+    resolveApproval ApprovalInputs
+        { approvalYolo = case options.optYolo of
+            Inherit -> Nothing
+            Explicit enabled -> Just enabled
+        , approvalDenyMutations = options.optManagedDenyMutations
+        , approvalManagedTurn = isJust options.optManagedTurnFile
+        , approvalOneShot = isOneShot options
+        , approvalInteractive = isTty
+        , approvalProjectAutoApprove = projectAutoApprove
+        }
 
 -- | Preserve a parent's policy in a background turn without borrowing stdin.
 applyBackgroundApproval :: ApprovalPolicy -> CliOptions -> CliOptions
@@ -797,28 +802,6 @@ parseMotionMode raw = case Text.toLower (Text.pack raw) of
     "reduced" -> Right MotionReduced
     "off" -> Right MotionOff
     _ -> Left ("--motion expects full, reduced, or off (got " <> raw <> ")")
-
-reasoningEfforts :: [ReasoningEffort]
-reasoningEfforts = ReasoningEffort.reasoningEfforts
-
--- | Efforts exposed by the active model-facing protocol. Grok accepts
--- @xhigh@ but rejects the OpenAI-only @max@ value.
-reasoningEffortsForDialect :: DialectId -> [ReasoningEffort]
-reasoningEffortsForDialect = \case
-    GrokBuildDialect -> filter (/= EffortMax) reasoningEfforts
-    _ -> reasoningEfforts
-
--- | Replace an effort unsupported by the active model-facing protocol with
--- its closest supported value. This also cleans up resumed sessions and
--- provider switches that inherited an effort from another dialect.
-normalizeReasoningEffortForDialect
-    :: DialectId
-    -> ReasoningEffort
-    -> ReasoningEffort
-normalizeReasoningEffortForDialect dialect effort
-    | effort `elem` reasoningEffortsForDialect dialect = effort
-    | dialect == GrokBuildDialect = EffortHigh
-    | otherwise = effort
 
 parseEffort :: Text -> Either String ReasoningEffort
 parseEffort = either (Left . Text.unpack) Right . parseReasoningEffort

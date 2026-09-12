@@ -50,6 +50,25 @@ finalize. A failure after loop execution must not retroactively roll it back.
 
 ### Native startup policy boundary
 
+`Agent.Runtime.Startup.Model` resolves typed model startup inputs into model
+identity, transport mapping, dialect, reasoning effort, and resume/context
+invalidation decisions. Its resume input contains only the persisted fields
+used by those decisions. Gateway selections remain authoritative; remembered
+project dialects only apply to the matching provider, and changed custom-model
+wire mappings invalidate the previous target using the existing rules.
+
+`Agent.Runtime.Startup.Policy` owns approval defaults, native interaction-mode
+approval, Claude bypass eligibility, and dialect effort normalization. A live
+native interaction-mode callback always prevents provider-side Claude bypass,
+including when the initial mode is Yolo. `Agent.Runtime.Startup.Gateway` owns
+pure gateway catalog projection and model selection; saved aliases are hints,
+not an authority for the provider assigned by the current gateway catalog.
+
+The CLI translates `CliOptions`, native hooks, project settings, and session
+metadata into these inputs. It retains credential/catalog IO, startup messages,
+and provider client-option construction. This is not yet a shared session
+startup entry point, and does not remove the server's CLI dependency.
+
 `Agent.CLI.NativeRuntime` remains the legacy execution adapter. It translates
 the native startup policy after preparing typed requests or legacy arguments.
 Restricted startup pins the admitted cwd and disables worktrees, automatic
