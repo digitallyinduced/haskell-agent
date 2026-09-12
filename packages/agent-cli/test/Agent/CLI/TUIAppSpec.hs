@@ -3,6 +3,7 @@ module Agent.CLI.TUIAppSpec (spec) where
 import qualified Agent.TUI.Theme as Theme
 import Agent.CLI.TUI.Keyboard (decodeKeyboardBody, classifyKeyboard, runKeyboardInput)
 import Agent.CLI.TUI.App (finishedMarkdownProseCaches)
+import qualified Agent.CLI.TUI.App.Runtime as Runtime
 import Control.Monad (forM_, when)
 import Control.Monad.IO.Class (liftIO)
 import Graphics.Vty.Platform.Unix.Input.Classify.Types (KClass(..))
@@ -172,7 +173,7 @@ import Agent.TUI.Presentation
     )
 import Agent.TUI.Motion
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, threadDelay)
-import Control.Concurrent.Async (waitCatch, withAsync)
+import Control.Concurrent.Async (cancel, waitCatch, withAsync)
 import Control.Exception.Safe (bracket, bracket_)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import Control.Exception (AsyncException(UserInterrupt))
@@ -581,6 +582,87 @@ spec = do
                 `shouldBe` Just [("Current", "")]
 
     describe "idle choice closure" do
+        it "releases a displaced plan approval without approving it" do
+            runtime <- newScriptRuntime initialUiState
+            approval <- newEmptyTMVarIO
+            question <- newEmptyTMVarIO
+            let initial = initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, replaced) <- runFullscreenScriptWithState initial
+                [ FullscreenScriptApp
+                    (AppAskChoice ChoiceDialog "Enter plan mode?" "" 0
+                        [("Enter", ""), ("Stay", "")] approval)
+                , FullscreenScriptApp
+                    (AppAskChoice ChoicePlanning "Planning question" "" 0
+                        [("Continue", "")] question)
+                , FullscreenScriptHalt
+                ]
+            atomically (tryReadTMVar approval) `shouldReturn` Just Nothing
+            atomically (tryReadTMVar question) `shouldReturn` Nothing
+            (_, closed) <- runFullscreenScriptWithState replaced
+                [ FullscreenScriptApp (AppCloseChoice approval)
+                , FullscreenScriptVty (V.EvKey V.KEnter [])
+                , FullscreenScriptHalt
+                ]
+            atomically (tryReadTMVar question) `shouldReturn` Just (Just 0)
+            isNothing closed.appChoice `shouldBe` True
+
+        it "releases a choice displaced by a searchable or adjustable picker" do
+            forM_ (["filter", "adjustable", "dynamic"] :: [String]) \picker -> do
+                runtime <- newScriptRuntime initialUiState
+                approval <- newEmptyTMVarIO
+                indexReply <- newEmptyTMVarIO
+                adjustmentReply <- newEmptyTMVarIO
+                dynamicReply <- newEmptyTMVarIO
+                let replacement = case picker of
+                        "filter" -> AppAskFilterChoice "Select" 0 [("Item", "")] indexReply
+                        "adjustable" -> AppAskAdjustableFilterChoice "Select" 0
+                            [("Item", "", ["high"], 0)] adjustmentReply
+                        _ -> AppAskDynamicAdjustableFilterChoice "Select" "" 0
+                            [("item", "Item", "", ["high"], 0)] dynamicReply
+                _ <- runFullscreenScriptWithState
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    [ FullscreenScriptApp
+                        (AppAskChoice ChoiceDialog "Enter plan mode?" "" 0
+                            [("Enter", "")] approval)
+                    , FullscreenScriptApp replacement
+                    , FullscreenScriptHalt
+                    ]
+                atomically (tryReadTMVar approval) `shouldReturn` Just Nothing
+
+        it "closes the published choice when its waiting caller is cancelled" do
+            runtime <- newScriptRuntime initialUiState
+            withAsync
+                (Runtime.requestFullscreenChoiceWithBody runtime "Enter plan mode?"
+                    "" 0 [("Enter", "")]) \worker -> do
+                published <- timeout 1_000_000 $ atomically do
+                    let AppEventMailbox mailbox = runtime.runtimeMailbox
+                    pending <- readTVar mailbox
+                    case
+                        [ (event, reply)
+                        | PendingEvent event@(AppAskChoice _ _ _ _ _ reply) <-
+                            toList pending.mailboxPendingEvents
+                        ] of
+                        entry : _ -> pure entry
+                        _ -> retry
+                case published of
+                    Nothing -> expectationFailure "choice was not published"
+                    Just (event, reply) -> do
+                        cancel worker
+                        let AppEventMailbox mailbox = runtime.runtimeMailbox
+                        pending <- atomically (readTVar mailbox)
+                        let closes =
+                                [ close
+                                | PendingEvent close@(AppCloseChoice token) <-
+                                    toList pending.mailboxPendingEvents
+                                , token == reply
+                                ]
+                        length closes `shouldBe` 1
+                        (_, closed) <- runFullscreenScriptWithState
+                            (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                            (map FullscreenScriptApp (event : closes) ++ [FullscreenScriptHalt])
+                        isNothing closed.appChoice `shouldBe` True
+                        atomically (tryReadTMVar reply) `shouldReturn` Just Nothing
+
         it "renders fresh approval details literally and denies on Escape" do
             runtime <- newScriptRuntime initialUiState
             reply <- newEmptyTMVarIO
