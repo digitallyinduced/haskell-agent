@@ -786,7 +786,7 @@
                                     })
                                 [ pkgs.zstd ]);
                         agent-repository = localPackage
-                            (pkgs.haskell.lib.addTestToolDepends
+                            ((pkgs.haskell.lib.addTestToolDepends
                                 (pkgs.haskell.lib.overrideSrc
                                     (final.callPackage
                                         ./packages/agent-repository/package.nix
@@ -802,7 +802,24 @@
                                     pkgs.coreutils
                                     pkgs.git
                                     pkgs.python3
-                                ]);
+                                ]).overrideAttrs (old:
+                                    pkgs.lib.optionalAttrs
+                                        (packageMode == "check" && pkgs.stdenv.hostPlatform.isLinux)
+                                        {
+                                            # process-1.6.26.1 closes every possible FD
+                                            # before each isolated Git/gh spawn. Bound
+                                            # that scan inside the daemon's test builder,
+                                            # not the nix client or production runtime.
+                                            # Keep close_fds enabled; only lower the soft
+                                            # limit, and preserve already smaller limits.
+                                            preCheck = (old.preCheck or "") + ''
+                                                repositoryFdLimit=$(ulimit -Sn)
+                                                if [ "$repositoryFdLimit" = unlimited ] || [ "$repositoryFdLimit" -gt 4096 ]; then
+                                                    ulimit -Sn 4096
+                                                fi
+                                                echo "Repository test descriptor limit: $(ulimit -Sn)"
+                                            '';
+                                        }));
                         agent-cli = localPackage (pkgs.haskell.lib.addTestToolDepends
                             ((pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-cli/package.nix { }) {
                                 src =
