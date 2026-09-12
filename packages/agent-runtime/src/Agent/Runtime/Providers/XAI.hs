@@ -1,4 +1,4 @@
-module Agent.CLI.Runtime.Orchestration.Providers.XAI
+module Agent.Runtime.Providers.XAI
     ( withXaiProvider
     ) where
 
@@ -7,7 +7,7 @@ import Agent.Runtime.Session.Request
     )
 import Agent.Accounts.Auth (gatewayTokenProviderForProvider)
 import Agent.Runtime.GatewayClient (GatewayCredential(..))
-import Agent.CLI.Compaction
+import Agent.Runtime.Compaction.Provider
     ( autoCompactBackendWith
     , boundCompletedToolContinuations
     , installLiveCompactOutcome
@@ -15,16 +15,16 @@ import Agent.CLI.Compaction
     , runXaiResponsesCompactWithContextWindow
     )
 import Agent.Connectivity (withConnectionRecoveryOn)
-import Agent.CLI.Runtime.Orchestration.Providers.Common
+import Agent.Runtime.Providers.Common
     ( decorateAutomaticCompact
     , decorateManualCompact
     )
-import Agent.CLI.Runtime.Orchestration.Providers.Types
+import Agent.Runtime.Providers.Types
     ( ProviderHost(..), ProviderCompaction(..), ProviderRuntime(..)
     , ProviderAccountSelection(..), ProviderSubagents(..)
     )
-import Agent.CLI.Session.History (readLiveTranscript)
-import Agent.CLI.Session.Runtime.Types
+import Agent.Runtime.Session.History (readLiveTranscript)
+import Agent.Runtime.Session.Backend
     ( SessionBackend(..)
     )
 import Agent.Provider (Provider(XAIProvider), TokenProvider, runWithTokenProvider)

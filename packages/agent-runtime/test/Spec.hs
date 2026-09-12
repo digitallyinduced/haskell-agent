@@ -1,6 +1,8 @@
 module Main (main) where
 
 import qualified Agent.Runtime.RequestSpec as Request
+import qualified Agent.Runtime.ProviderRuntimeSpec as ProviderRuntime
+import qualified Agent.Runtime.CompactionSpec as Compaction
 import qualified Agent.Runtime.StartupPolicySpec as StartupPolicy
 import qualified Agent.Runtime.ConversationStoreSpec as ConversationStore
 import qualified Agent.Runtime.ConversationSessionSpec as ConversationSession
@@ -32,6 +34,8 @@ import Test.Hspec
 main :: IO ()
 main = hspec do
     Request.spec
+    ProviderRuntime.spec
+    Compaction.spec
     StartupPolicy.spec
     ConversationStore.spec
     ConversationSession.spec

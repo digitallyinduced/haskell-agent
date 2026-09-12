@@ -1,4 +1,4 @@
-module Agent.CLI.ProviderRuntimeSpec (spec) where
+module Agent.Runtime.ProviderRuntimeSpec (spec) where
 
 import Agent.Runtime.Session.Request (newSessionRequestState, readSessionRequestParams, setSessionRequestModel)
 import Agent.Runtime.Session (Persistence(..))
@@ -7,16 +7,21 @@ import Agent.Runtime.GatewayClient (GatewayCredential(..))
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.ByteString.Lazy as LBS
-import Agent.CLI.Compaction (CompactOutcome(..), CompactionInstall(..), reportedOccupancy)
-import Agent.CLI.ProviderRuntime
-import Agent.CLI.Session.ConversationStore (newConversationStore)
-import Agent.CLI.Session.History (readLivePreviousResponseId, readLiveTranscript)
+import Agent.Runtime.Compaction.Provider (CompactOutcome(..), CompactionInstall(..), reportedOccupancy)
+import Agent.Runtime.Providers (withProviderRuntime)
+import Agent.Runtime.Providers.Types
+import Agent.Runtime.ConversationStore (newConversationStore)
+import Agent.Runtime.Session.History (readLivePreviousResponseId, readLiveTranscript)
 import Agent.Provider (Provider(..), BillingMode(..), TokenProvider, tokenProvider)
 import Agent.Responses.Types (defaultResponseCreateParams)
 import Agent.OpenAI.Compaction (userTextItem, compactionTriggerItem)
 import qualified Agent.Responses.Types as Responses (ResponseCreateParams(model))
-import Control.Exception.Safe (throwString)
+import Control.Concurrent.Async (cancel, withAsync, waitCatch)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Exception.Safe (finally, throwIO, throwString)
+import Data.Either (isLeft)
 import Data.IORef (newIORef, readIORef, writeIORef)
+import System.Timeout (timeout)
 import Test.Hspec
 import qualified Agent.OpenRouter.Options as OpenRouter
 import qualified Network.Wai as Wai
@@ -102,6 +107,42 @@ spec = describe "provider runtime composition" do
                 `shouldReturn` Just "previous-response"
             readLiveTranscript host.compaction.conversationRef `shouldReturn` []
             readIORef host.compaction.contextTokensRef `shouldReturn` beforeOccupancy
+
+        it "propagates a consumer exception without resetting host-owned state" do
+            host <- newHost
+            let beforeOccupancy = Just (reportedOccupancy 1234 0)
+            writeIORef host.compaction.contextTokensRef beforeOccupancy
+            withProviderRuntime config host
+                (\_ -> throwIO (userError "consumer failed") :: IO ())
+                `shouldThrow` anyIOException
+            readLivePreviousResponseId host.compaction.conversationRef
+                `shouldReturn` Just "previous-response"
+            readIORef host.compaction.contextTokensRef `shouldReturn` beforeOccupancy
+            -- A failed consumer does not poison a later provider scope.
+            withProviderRuntime config host
+                (\runtime -> runtime.currentContextWindow)
+                `shouldReturn` Just 32_768
+
+        it "propagates cancellation and joins the consumer before returning" do
+            host <- newHost
+            entered <- newEmptyMVar
+            blocked <- newEmptyMVar
+            finalized <- newIORef False
+            let consumer _ =
+                    (putMVar entered () >> takeMVar blocked)
+                        `finally` writeIORef finalized True
+            withAsync (withProviderRuntime config host consumer) \worker -> do
+                timeout 5_000_000 (takeMVar entered)
+                    `shouldReturn` Just ()
+                -- The rendezvous avoids timing-based cancellation races.
+                result <- timeout 5_000_000 do
+                    cancel worker
+                    isLeft <$> waitCatch worker
+                result `shouldBe` Just True
+                readIORef finalized `shouldReturn` True
+            readLivePreviousResponseId host.compaction.conversationRef
+                `shouldReturn` Just "previous-response"
+            readLiveTranscript host.compaction.conversationRef `shouldReturn` []
 
 -- Construct a real runtime without CLI startup, persistence, or a subagent
 -- registry. Any accidental credential acquisition fails before network IO.

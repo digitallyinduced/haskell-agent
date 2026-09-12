@@ -1,4 +1,4 @@
-module Agent.CLI.Runtime.Orchestration.Providers.Common
+module Agent.Runtime.Providers.Common
     ( HttpProviderTransport(..)
     , withHttpProvider
     , decorateAutomaticCompact
@@ -8,7 +8,7 @@ module Agent.CLI.Runtime.Orchestration.Providers.Common
 import Agent.Runtime.Session.Request
     ( readSessionRequestParams
     )
-import Agent.CLI.Compaction
+import Agent.Runtime.Compaction.Provider
     ( CompactOutcome
     , OccupancySnapshot
     , boundCompletedToolContinuations
@@ -16,12 +16,12 @@ import Agent.CLI.Compaction
     , runResponsesCompactWithContextWindow
     , decorateCompactOutcomeWithTaskPlanWithin
     )
-import Agent.CLI.Runtime.Orchestration.Providers.Types
+import Agent.Runtime.Providers.Types
     ( ProviderHost(..), ProviderCompaction(..), ProviderRuntime(..)
     , ProviderAccountSelection(..), ProviderSubagents(..)
     )
-import Agent.CLI.Session.History (readLiveTranscript)
-import Agent.CLI.Session.Runtime.Types (SessionBackend(..))
+import Agent.Runtime.Session.History (readLiveTranscript)
+import Agent.Runtime.Session.Backend (SessionBackend(..))
 import Agent.Connectivity (withConnectionRecoveryOn)
 import Agent.Loop (Backend)
 import Data.IORef (IORef, newIORef)

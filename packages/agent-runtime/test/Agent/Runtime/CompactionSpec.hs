@@ -1,9 +1,9 @@
-module Agent.CLI.CompactionSpec (spec) where
+module Agent.Runtime.CompactionSpec (spec) where
 
-import Agent.CLI.CompactionSpec.Fixtures
-import qualified Agent.CLI.CompactionSpec.ManualOpenAI as ManualOpenAI
-import qualified Agent.CLI.CompactionSpec.TaskPlan as TaskPlan
-import Agent.CLI.Compaction
+import Agent.Runtime.CompactionSpec.Fixtures
+import qualified Agent.Runtime.CompactionSpec.ManualOpenAI as ManualOpenAI
+import qualified Agent.Runtime.CompactionSpec.TaskPlan as TaskPlan
+import Agent.Runtime.Compaction.Provider
     ( CompactOutcome(..)
     , CompactionInstall(..)
     , autoCompactBackendWith

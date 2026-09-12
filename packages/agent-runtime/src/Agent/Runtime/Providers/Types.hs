@@ -1,4 +1,4 @@
-module Agent.CLI.Runtime.Orchestration.Providers.Types
+module Agent.Runtime.Providers.Types
     ( ProviderConfig(..)
     , OpenAiConfig(..)
     , OpenAiAccounts(..)
@@ -14,10 +14,10 @@ module Agent.CLI.Runtime.Orchestration.Providers.Types
 import Agent.Runtime.Session.Request
     ( SessionRequestState
     )
-import Agent.CLI.Compaction (CompactOutcome, CompactionInstall, OccupancySnapshot)
+import Agent.Runtime.Compaction.Provider (CompactOutcome, CompactionInstall, OccupancySnapshot)
 import Agent.Runtime.GatewayClient (GatewayCredential)
-import Agent.CLI.Session.History (LiveConversation)
-import Agent.CLI.Session.Runtime.Types (SessionBackend)
+import Agent.Runtime.Session.History (LiveConversation)
+import Agent.Runtime.Session.Backend (SessionBackend)
 import Agent.Claude (ClaudeCodeAuth)
 import Agent.Claude.Control (ClaudeCodeHostHandlers)
 import Agent.Connectivity.NetworkPath (NetworkRecovery)

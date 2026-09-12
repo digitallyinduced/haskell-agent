@@ -16,12 +16,12 @@ import Agent.CLI.Claude
     ( ClaudeSessionRuntime(..)
     , installClaudeSessionRuntime
     )
-import Agent.CLI.Compaction
+import Agent.Runtime.Compaction.Provider
     ( AutomaticCompactionBoundary(..)
     , CompactOutcome(..)
     , CompactionInstall(CompactionInstalled)
     )
-import Agent.CLI.Compaction.Projection (occupancyOnTurnFinished)
+import Agent.Runtime.Compaction.Projection (occupancyOnTurnFinished)
 import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
 import Agent.CLI.Context (contextUsageTokens, formatContextReport)
 import Agent.Responses.LoopBackend (turnInputsToItems)
@@ -79,7 +79,7 @@ import Agent.CLI.Prompt
 import Agent.CLI.SessionState
 import Agent.CLI.Render
 import Agent.Runtime.Session
-import Agent.CLI.Session.History
+import Agent.Runtime.Session.History
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import qualified Agent.Runtime.Session.Observation as Observation
 import Agent.Runtime.Session.Inbox

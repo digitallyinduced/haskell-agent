@@ -17,7 +17,7 @@ import Agent.CLI.Runtime.Types ( RunResult )
 import Agent.CLI.Session.Attachments
     ( putImagePreview, queueAttachedImages, queueClipboardImages )
 import Agent.CLI.SessionState (removeImageAttachment, removeImageAttachmentAt)
-import Agent.CLI.Session.History
+import Agent.Runtime.Session.History
     ( modifyLiveAttachments )
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
 import Agent.Runtime.SessionState qualified as RuntimeState

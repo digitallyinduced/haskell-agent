@@ -16,7 +16,7 @@ import Agent.Runtime.Session.Request
     )
 import Agent.CLI.Approval (childApprove)
 import Agent.CLI.Btw (trimDanglingToolSuffix)
-import Agent.CLI.Compaction
+import Agent.Runtime.Compaction.Provider
     ( CompactionInstall(CompactionNotInstalled)
     , autoCompactBackendWith
     , autoCompactOpenAiBackendWithSenderHookAndDecorator
@@ -57,7 +57,7 @@ import Agent.CLI.Subagents.Runtime.Identity
 import Agent.CLI.Subagents.Runtime.Target
     (activeSubagentTargetError, unsupportedDialectMessage,
      validatePersistedSubagentTarget)
-import Agent.CLI.Subagents.Runtime.OpenAI
+import Agent.Runtime.Provider.OpenAI.Fresh
     (freshOpenAiBackend, freshOpenAiBackendWithTurnState)
 import Agent.CLI.SteeringInputs
     ( commitSteeringInputs

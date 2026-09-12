@@ -174,6 +174,6 @@ commandFailure command output =
     command
         <> " failed with "
         <> Text.pack (show output.gitCommandExitCode)
-        <> case Text.strip (Text.pack output.gitCommandStderr) of
+        <> case Text.strip output.gitCommandStderr of
             "" -> ""
             stderr -> ": " <> displayTerminalText stderr

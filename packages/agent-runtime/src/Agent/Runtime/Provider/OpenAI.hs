@@ -1,10 +1,10 @@
 -- | OpenAI persistent connection and serialized compaction backend.
-module Agent.CLI.Provider.OpenAI
+module Agent.Runtime.Provider.OpenAI
     ( OpenAiPersistentConnection(..)
     , lockedOpenAiSession
     ) where
 
-import Agent.CLI.Compaction
+import Agent.Runtime.Compaction.Provider
     ( CompactOutcome
     , CompactionInstall
     , OccupancySnapshot

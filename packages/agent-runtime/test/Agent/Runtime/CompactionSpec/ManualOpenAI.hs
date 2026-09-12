@@ -1,7 +1,7 @@
-module Agent.CLI.CompactionSpec.ManualOpenAI (spec) where
+module Agent.Runtime.CompactionSpec.ManualOpenAI (spec) where
 
-import Agent.CLI.Compaction (CompactOutcome(..), compactOpenAIWith)
-import Agent.CLI.CompactionSpec.Fixtures
+import Agent.Runtime.Compaction.Provider (CompactOutcome(..), compactOpenAIWith)
+import Agent.Runtime.CompactionSpec.Fixtures
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.OpenAI.Compaction
     ( assistantSummaryItem, compactionTriggerItem, hasCompactionCheckpoint

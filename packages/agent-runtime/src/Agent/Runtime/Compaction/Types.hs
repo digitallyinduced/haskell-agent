@@ -1,4 +1,4 @@
-module Agent.CLI.Compaction.Types
+module Agent.Runtime.Compaction.Types
     ( AutomaticCompactionBoundary(..)
     , CompactOutcome(..)
     , CompactionInstall(..)

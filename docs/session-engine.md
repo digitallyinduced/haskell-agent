@@ -25,6 +25,8 @@ ownership remains a separate session-owner/composition step.
   not an arbitrary CLI-options transformation. The server selects the restricted
   preset for sandbox turns; the desktop bridge retains the host preset.
 - `Compaction`: the installed automatic-compaction checkpoint.
+- `Compaction.Provider`: provider compaction, occupancy accounting, and
+  continuation bounding.
 - `TurnState`: preparation, conversation patches, interrupted-turn retention,
   response-chain invalidation, startup-context merging, and checkpoint rebasing.
 - `TurnEngine`: one pure finalization decision over a prepared turn and the
@@ -92,6 +94,36 @@ recovery resources, and their close/restart operations. The server imports
 process-resource operations directly from this package; CLI exports remain
 compatibility facades. Existing acquisition rollback, worker unmasking,
 cancel/join ownership, and shutdown order are preserved, not redesigned.
+
+## Implemented: frontend-neutral provider scopes
+
+`Agent.Runtime.Providers.withProviderRuntime` constructs OpenAI, xAI, Gemini,
+OpenRouter, and Claude backends in `agent-runtime`. `ProviderConfig` carries
+only the selected provider's configuration. `ProviderHost` supplies shared
+compaction state and network recovery; account presentation, preferences, and
+automatic-compaction installation remain explicit host operations.
+
+The callback receives a `ProviderRuntime`: a neutral `SessionBackend`, context
+window lookup, manual compaction, account-selection operations, and child
+transport capabilities. These operations are valid only within that callback.
+Persistent OpenAI connections, its account-switch worker, and Claude backend
+resources retain their existing scoped lifetimes and exception behavior.
+Disposable OpenAI side-call and child backends also belong to the runtime.
+
+`Agent.Runtime.Compaction.Provider` owns provider summarization, transcript
+installation, task-plan decoration, and occupancy policy. The lightweight
+`Agent.Runtime.Compaction` checkpoint type remains separate so turn-state
+modules do not depend on provider assembly. `Agent.Runtime.Session.History`
+owns live-conversation operations and persisted model-history reconstruction.
+`Agent.CLI.Session.History` now exposes only `hydrateUiHistory`, which projects
+persisted turns into terminal UI state. Provider and compaction regression tests
+live beside their runtime owner; package checks reject the retired CLI provider
+and compaction namespaces.
+
+This is a reusable provider scope, not a complete frontend-neutral startup
+entry point. CLI startup still chooses the provider and assembles session,
+tools, persistence, and presentation. Server and native adapters still use that
+CLI startup path; this extraction does not remove their CLI dependency.
 
 ## Remaining: move session composition and ownership out of the CLI
 

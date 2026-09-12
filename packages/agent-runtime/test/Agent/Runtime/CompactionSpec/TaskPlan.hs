@@ -1,12 +1,12 @@
-module Agent.CLI.CompactionSpec.TaskPlan (spec) where
+module Agent.Runtime.CompactionSpec.TaskPlan (spec) where
 
-import Agent.CLI.Compaction
+import Agent.Runtime.Compaction.Provider
     ( CompactOutcome(..)
     , decorateCompactOutcomeWithTaskPlan
     , decorateCompactOutcomeWithTaskPlanWithin
     , runProviderCompactWith
     )
-import Agent.CLI.CompactionSpec.Fixtures
+import Agent.Runtime.CompactionSpec.Fixtures
 import Agent.OpenAI.Compaction
     ( compactionTriggerItem, estimateRequestTokensWithItems
     , summarizationPrompt, userTextItem )

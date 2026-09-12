@@ -23,7 +23,7 @@ import Agent.CLI.Command
       ShellMode(ShellNone, ShellGhci, ShellBash, ShellBoth),
       SlashCatalog )
 import Agent.CLI.Command.Instructions ( initInstruction )
-import Agent.CLI.Compaction
+import Agent.Runtime.Compaction.Provider
     ( CompactOutcome(compactSummary, compactBeforeTokens,
                      compactAfterTokens, compactHistory) )
 import Agent.CLI.Context ( formatContextReport )
@@ -122,7 +122,7 @@ import Agent.Runtime.Session
 import Agent.CLI.Session.Attachments ( queueAttachedImages )
 import Agent.CLI.Session.Choices
     ( accountUsageText, showAccountUsage )
-import Agent.CLI.Session.History
+import Agent.Runtime.Session.History
     ( modifyLiveAttachments )
 import Agent.CLI.Session.Interaction ( runBtwQuestion )
 import Agent.CLI.Session.Selection

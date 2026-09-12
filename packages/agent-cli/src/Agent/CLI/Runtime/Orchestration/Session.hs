@@ -41,7 +41,7 @@ import Agent.CLI.CodeModeRuntime
 import Agent.Tools.CodeMode.Tool
     ( ToolMode(CodeOnlyToolMode, ConventionalToolMode)
     )
-import Agent.CLI.Compaction
+import Agent.Runtime.Compaction.Provider
     ( AutomaticCompactionBoundary
     , CompactOutcome
     , CompactionInstall(CompactionNotInstalled)
@@ -97,9 +97,9 @@ import Agent.Runtime.ProviderRequest
 import Agent.CLI.Resume
     ( SessionInitialContext(..)
     )
-import Agent.CLI.Runtime.Orchestration.Providers
+import Agent.Runtime.Providers
     ( withProviderRuntime )
-import Agent.CLI.Runtime.Orchestration.Providers.Types
+import Agent.Runtime.Providers.Types
     ( ProviderConfig(..), OpenAiConfig(..), OpenAiAccounts(..)
     , OpenRouterConfig(..), ClaudeConfig(..), ProviderHost(..)
     , ProviderCompaction(..), ProviderRuntime(..)
@@ -133,7 +133,7 @@ import Agent.Runtime.Session
       SessionMeta(metaId, metaPromptSnapshot, metaTitle),
       SessionTurn,
       SessionPromptSnapshot(..) )
-import Agent.CLI.Session.History
+import Agent.Runtime.Session.History
     ( LiveConversation
     , currentLiveTranscriptGeneration,
       durableTranscriptCheckpoint,
