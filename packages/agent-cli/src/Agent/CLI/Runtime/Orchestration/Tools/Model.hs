@@ -9,14 +9,14 @@ module Agent.CLI.Runtime.Orchestration.Tools.Model
 import Agent.Accounts.Auth (LoadedAuth(..), isGatewayLoadedAuth)
 import Agent.Runtime.Config (HarnessConfig)
 import Agent.Runtime.GatewayClient (cachedGatewayModels, gatewayCredentialIdentity)
-import Agent.CLI.GatewayModels (modelOptionsForGatewayModels, selectGatewayModelOption)
-import Agent.Runtime.ModelConfig (ResponsesConnection(..), builtinConnectionId)
-import Agent.Runtime.Models
-    ( ModelOption(..), ModelTarget(..), defaultModelFor, rawModelOption
-    , resolveConfiguredModel, resolvePersistedDialect )
+import Agent.Runtime.Startup.Gateway (modelOptionsForGatewayModels, selectGatewayModelOption)
+import Agent.Runtime.ModelConfig (ResponsesConnection(..))
+import Agent.Runtime.Models (ModelOption(..), ModelTarget(..))
+import Agent.Runtime.Startup.Model
+import Agent.Runtime.Startup.Policy
+    ( NativeApprovalMode(..), resolveNativeApproval, claudeBypassEnabled )
 import Agent.CLI.Options
-    ( ApprovalPolicy(..), CliOptions(..), Override(..), defaultEffortFor
-    , normalizeReasoningEffortForDialect, resolveApprovalPolicy )
+    ( ApprovalPolicy, CliOptions(..), Override(..), resolveApprovalPolicy )
 import Agent.CLI.Project (ProjectModel(..), ProjectSettings(..))
 import Agent.CLI.Runtime.Orchestration.Tools.Request
 import Agent.CLI.Runtime.Orchestration.Types
@@ -28,11 +28,11 @@ import Agent.CLI.Startup.Auth (markStartupStage, startupDie)
 import Agent.Dialect (Dialect, DialectId, dialectForId)
 import qualified Agent.OpenRouter as OpenRouter
 import Agent.Provider (Provider(..))
-import Agent.ReasoningEffort (parseReasoningEffort, reasoningEffortText)
+import Agent.ReasoningEffort (reasoningEffortText)
 import Agent.Responses.GenericClient (GenericClientOptions(..))
 import Control.Monad (when)
 import Data.IORef (readIORef)
-import Data.Maybe (fromMaybe, isJust, catMaybes)
+import Data.Maybe (isJust, catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -157,49 +157,31 @@ resolveToolModel AgentToolsRequest
     } =
     ToolModelRuntime{..}
   where
-    toolProvider = loaded.loadedProvider
-    fallbackModel =
-        defaultModelFor catalog toolProvider
-    unrestrictedModel =
-        fromMaybe
-            (maybe fallbackModel (.targetModelId) targetHint)
-            options.optModel
-    toolModel =
-        maybe
-            unrestrictedModel
-            (.modelTarget.targetModelId)
-            gatewaySelection
-    rawTarget = (rawModelOption toolProvider toolModel).modelTarget
-    inferredTarget0 =
-        maybe
-            (fromMaybe rawTarget targetHint)
-            (.modelTarget)
-            gatewaySelection
-    toolTransportModel = case customResponses of
-        Just _ ->
-            \name ->
-                case resolveConfiguredModel catalog name of
-                    Just option
-                        | option.modelTarget.targetConnectionId
-                            == inferredTarget0.targetConnectionId ->
-                            option.modelTarget.targetWireModelId
-                    _
-                        | name == toolModel ->
-                            inferredTarget0.targetWireModelId
-                        | otherwise -> name
-        _ -> case toolProvider of
-            OpenRouterProvider -> OpenRouter.mapModel openRouterOptions
-            _ -> id
-    toolInferredTarget =
-        inferredTarget0
-            { targetWireModelId =
-                if inferredTarget0.targetConnectionId
-                    == builtinConnectionId OpenRouterProvider
-                    && inferredTarget0.targetWireModelId
-                        == inferredTarget0.targetModelId
-                    then toolTransportModel toolModel
-                    else inferredTarget0.targetWireModelId
-            }
+    resolved = resolveStartupModel ModelStartupInputs
+        { startupProvider = loaded.loadedProvider
+        , startupCatalog = catalog
+        , startupRequestedModel = options.optModel
+        , startupTargetHint = targetHint
+        , startupGatewaySelection = gatewaySelection
+        , startupTransitionTarget = transitionTarget
+        , startupResumedModel = toResumedModel . fst <$> resumed
+        , startupRememberedTarget = (.projectModelTarget) <$> projectSettings.settingsLastModel
+        , startupRequestedEffort = options.optEffort
+        , startupCustomResponses = isJust customResponses
+        , startupOpenRouterMap = OpenRouter.mapModel openRouterOptions
+        }
+    toResumedModel meta = ResumedModel
+        { resumedProvider = meta.metaProvider
+        , resumedConnection = meta.metaConnection
+        , resumedModel = meta.metaModel
+        , resumedDialect = meta.metaDialect
+        , resumedTransportModel = meta.metaTransportModel
+        , resumedEffort = meta.metaEffort
+        }
+    toolProvider = resolved.resolvedProvider
+    toolModel = resolved.resolvedModel
+    toolTransportModel = resolved.resolvedTransportModel
+    toolInferredTarget = resolved.resolvedTarget
     toolCustomGenericOptions = do
         (_, responses) <- customResponses
         pure GenericClientOptions
@@ -209,86 +191,27 @@ resolveToolModel AgentToolsRequest
             , requestTimeoutSeconds =
                 responses.responsesRequestTimeoutSeconds
             }
-    persistedTarget = case fst <$> resumed of
-        Just meta ->
-            Just
-                ( meta.metaDialect
-                , meta.metaTransportModel
-                )
-        Nothing -> do
-            remembered <- projectSettings.settingsLastModel
-            let target = remembered.projectModelTarget
-            if target.targetProvider == toolProvider
-                then Just
-                    ( target.targetDialect
-                    , Just target.targetWireModelId
-                    )
-                else Nothing
-    resolvedPersistedTarget =
-        (\(storedDialect, storedTransportModel) ->
-            resolvePersistedDialect
-                storedDialect
-                storedTransportModel
-                toolInferredTarget)
-            <$> persistedTarget
-    mappedTargetChanged = maybe False snd resolvedPersistedTarget
-    toolDialectId = case gatewaySelection of
-        Just selected -> selected.modelTarget.targetDialect
-        Nothing -> case transitionTarget of
-            Just target -> target.targetDialect
-            Nothing -> case options.optModel of
-                Just _ -> toolInferredTarget.targetDialect
-                Nothing
-                    | mappedTargetChanged -> toolInferredTarget.targetDialect
-                    | otherwise ->
-                        maybe
-                            toolInferredTarget.targetDialect
-                            fst
-                            resolvedPersistedTarget
+    toolDialectId = resolved.resolvedDialect
     toolDialect = dialectForId toolDialectId
-    toolResumeTargetChanged = case fst <$> resumed of
-        Just meta ->
-            toolProvider /= meta.metaProvider
-                || toolInferredTarget.targetConnectionId /= meta.metaConnection
-                || toolModel /= meta.metaModel
-                || mappedTargetChanged
-                || toolDialectId /= meta.metaDialect
-        Nothing -> False
-    toolRefreshDialectContext = case fst <$> resumed of
-        Just meta -> toolDialectId /= meta.metaDialect
-        Nothing -> False
+    toolResumeTargetChanged = resolved.resolvedResumeTargetChanged
+    toolRefreshDialectContext = resolved.resolvedRefreshDialectContext
     toolLegacySubagentTarget =
         sessionLegacySubagentTarget . fst <$> resumed
-    effort =
-        normalizeReasoningEffortForDialect toolDialectId $
-            fromMaybe
-                (maybe
-                    (defaultEffortFor toolProvider)
-                    (either
-                        (const (defaultEffortFor toolProvider))
-                        id
-                        . parseReasoningEffort
-                        . (.metaEffort))
-                    (fst <$> resumed))
-                options.optEffort
-    toolEffortText = reasoningEffortText effort
-    toolPolicy = case startup.startupNativeHooks of
-        Just hooks -> case hooks.nativeInteractionMode of
-            NativeYolo -> ApproveAll
-            NativeAsk -> PromptMutating
-            NativePlan -> PromptMutating
+    toolEffortText = reasoningEffortText resolved.resolvedEffort
+    nativeApproval = (\hooks ->
+        ( case hooks.nativeInteractionMode of
+            NativeYolo -> NativeApprovalYolo
+            NativeAsk -> NativeApprovalAsk
+            NativePlan -> NativeApprovalPlan
+        , isJust hooks.nativeRegisterInteractionMode
+        )) <$> startup.startupNativeHooks
+    toolPolicy = case nativeApproval of
+        Just (mode, _) -> resolveNativeApproval mode
         Nothing ->
             resolveApprovalPolicy options isTty
                 projectSettings.settingsAutoApprove
-    toolClaudeBypassEnabled =
-        case startup.startupNativeHooks of
-            Just hooks ->
-                -- A live native mode must always pass through the host's
-                -- mutable approval policy, even when initially in Yolo.
-                case hooks.nativeRegisterInteractionMode of
-                    Just _ -> False
-                    Nothing -> hooks.nativeInteractionMode == NativeYolo
-            Nothing ->
-                options.optYolo /= Explicit False
-                    && (options.optYolo == Explicit True
-                        || projectSettings.settingsAutoApprove)
+    toolClaudeBypassEnabled = claudeBypassEnabled nativeApproval
+        (case options.optYolo of
+            Inherit -> Nothing
+            Explicit enabled -> Just enabled)
+        projectSettings.settingsAutoApprove
