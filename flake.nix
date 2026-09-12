@@ -1448,6 +1448,12 @@
                 # same runtime tools as the native build. The native build
                 # remains available as `agent-cli`.
                 packages.default = agentCliStaticExecutable;
+                # Standalone evaluation experiment; not part of the agent closure.
+                packages.microhs = pkgs.callPackage ./nix/microhs.nix { };
+                packages.microhs-native-json = pkgs.callPackage ./nix/microhs.nix { nativeJson = true; };
+                devShells.microhs-code-mode = pkgs.mkShell {
+                    packages = [ self.packages.${system}.microhs self.packages.${system}.microhs-native-json bun_1_4 pkgs.python3 ];
+                };
                 packages.agent-cli-static = agentCliStaticExecutable;
                 packages.agent-cli = agentCliExecutable;
                 packages.agent-telegram = agentTelegramExecutable;

@@ -1,0 +1,8 @@
+{ "native_json_parse", 1, mhs_native_json_parse },
+{ "native_json_free", 1, mhs_native_json_free },
+{ "native_json_root", 1, mhs_native_json_root },
+{ "native_json_kind", 1, mhs_native_json_kind },
+{ "native_json_length", 1, mhs_native_json_length },
+{ "native_json_text", 1, mhs_native_json_text },
+{ "native_json_child", 1, mhs_native_json_child },
+{ "native_json_next", 1, mhs_native_json_next },
