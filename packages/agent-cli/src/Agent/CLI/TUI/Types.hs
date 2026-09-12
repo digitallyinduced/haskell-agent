@@ -55,6 +55,7 @@ import Agent.CLI.Command
     , parseReplLineWithCatalog
     )
 import Agent.CLI.Dictation (DictationTarget)
+import Agent.CLI.TUI.Composer.Undo (UndoEntry)
 import Agent.CLI.Input.Types (ReplLine)
 import Agent.CLI.Interrupt (CtrlCDecision)
 import Agent.CLI.Permission (PermissionChoice)
@@ -539,8 +540,8 @@ data AppState = AppState
       -- | True while the previous composer key was a kill command, so a
       -- consecutive kill accumulates into the kill buffer readline-style.
     , appKillChain :: !Bool
-      -- | Editor undo log of (draft, cursor) states, most recent first.
-    , appUndo :: ![(Text, Int)]
+      -- | Compact editor undo snapshots, most recent first.
+    , appUndo :: ![UndoEntry]
     , appDictation :: !(Maybe DictationSession)
     , appSlashCatalog :: !SlashCatalog
     , appImagePreviews :: ![TuiImagePreview]

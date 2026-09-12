@@ -4,9 +4,25 @@ import Agent.TUI.TextWidth
 import qualified Data.Text as Text
 import qualified Graphics.Vty as V
 import Test.Hspec
+import Test.QuickCheck (elements, forAll, listOf, property)
 
 spec :: Spec
 spec = describe "terminal character width" do
+    it "preserves arbitrary printable ASCII and structural newlines" $
+        property $
+            forAll (listOf (elements ('\n' : [' ' .. '~']))) \characters ->
+                let text = Text.pack characters
+                in displayTerminalText text == text
+
+    it "does not bypass sanitization after a long ASCII prefix" do
+        let prefix = Text.replicate 1000 "source code "
+        displayTerminalText (prefix <> "\ESC\t\r\DEL")
+            `shouldBe` (prefix <> "␛⇥↵␡")
+        displayTerminalText (prefix <> "1\xfe0f\x20e3")
+            `shouldBe` (prefix <> displayTerminalText "1\xfe0f\x20e3")
+        displayTerminalText (prefix <> "e\x0301")
+            `shouldBe` (prefix <> "e\x0301")
+
     it "classifies ASCII, CJK, emoji, combining, and ambiguous characters" do
         charCellWidth 'a' `shouldBe` 1
         charCellWidth '界' `shouldBe` 2

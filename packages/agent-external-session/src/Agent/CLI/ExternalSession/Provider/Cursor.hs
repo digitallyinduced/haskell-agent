@@ -13,12 +13,13 @@ import Agent.CLI.ExternalSession.Types
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (IOException, tryAny, tryIO)
 import Control.Monad (filterM, foldM)
+import Control.Monad.Extra (firstJustM)
 import Crypto.Hash (Digest, MD5, hash)
 import Data.Aeson (Value(..))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -386,7 +387,7 @@ findDesktop _env reference databasePath = do
                                 , externalTextValue "title" header
                                 ]
                             )
-                            (Text.unpack <$> firstMaybe paths)
+                            (Text.unpack <$> listToMaybe paths)
                             (externalObjectValue "createdAt" header)
                             (externalObjectValue "lastUpdatedAt" header)
             _ -> pure Nothing
@@ -497,10 +498,10 @@ readCursorStore candidate maxToolChars = do
         else readCursorRows maxToolChars "Cursor blob(s)" \consume ->
                 withReadOnlyDatabase store \database -> do
                     columns <- tableColumns database "blobs"
-                    let keyColumn = firstMaybe
+                    let keyColumn = listToMaybe
                             [ name | name <- ["id", "key", "hash"],
                                 name `Set.member` columns ]
-                        dataColumn = firstMaybe
+                        dataColumn = listToMaybe
                             [ name | name <- ["data", "value", "blob"],
                                 name `Set.member` columns ]
                     case (keyColumn, dataColumn) of
@@ -745,7 +746,7 @@ cursorCallsAndResults maxToolChars value =
 
 cursorFirstUserTitle :: Value -> Maybe Text
 cursorFirstUserTitle root =
-    firstMaybe
+    listToMaybe
         [ value.externalTurnText
         | value <- fst (cursorTurns 100 root)
         , value.externalTurnRole == "user"
@@ -837,23 +838,9 @@ truthy = \case
 
 firstNonEmptyText :: [Maybe Text] -> Text
 firstNonEmptyText values =
-    fromMaybe "" $ firstMaybe
+    fromMaybe "" $ listToMaybe
         [ value | Just value <- values, not (Text.null value) ]
-
-firstMaybe :: [value] -> Maybe value
-firstMaybe [] = Nothing
-firstMaybe (value : _) = Just value
 
 lastMaybe :: [value] -> Maybe value
 lastMaybe [] = Nothing
 lastMaybe values = Just (last values)
-
-firstJustM
-    :: (input -> IO (Maybe output))
-    -> [input]
-    -> IO (Maybe output)
-firstJustM _ [] = pure Nothing
-firstJustM action (value : values) =
-    action value >>= \case
-        Just output -> pure (Just output)
-        Nothing -> firstJustM action values

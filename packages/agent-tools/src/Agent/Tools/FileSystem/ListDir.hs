@@ -36,6 +36,7 @@ import Agent.Tools.Types
     , withSharedToolResourceClaims
     )
 import Data.List (sortOn)
+import Data.Maybe (catMaybes)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -170,7 +171,7 @@ visibleEntries operations cwd path = do
             ignored <-
                 operations.findIgnoredPaths cwd
                     [path </> name | (name, _) <- candidates]
-            Right . foldr addVisible [] <$> traverse (classify ignored) candidates
+            Right . catMaybes <$> traverse (classify ignored) candidates
   where
     classify ignored (name, isDir)
         | Set.member (unsafeToFilePath (path </> name)) ignored = pure Nothing
@@ -178,9 +179,6 @@ visibleEntries operations cwd path = do
         | otherwise = do
             isLink <- operations.isEntrySymbolicLink (path </> name)
             pure $ Just (name, not isLink)
-
-    addVisible (Just entry) entries = entry : entries
-    addVisible Nothing entries = entries
 
 collectEntries
     :: ListDirOperations

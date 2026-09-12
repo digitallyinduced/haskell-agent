@@ -13,6 +13,7 @@ import Agent.CLI.ExternalSession.Types
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (tryAny)
 import Control.Monad (filterM, foldM, when)
+import Control.Monad.Extra (firstJustM)
 import Data.Aeson (Value(..), decodeStrict', encode)
 import qualified Data.Aeson.Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -24,7 +25,7 @@ import Data.IORef
     , writeIORef
     )
 import Data.List (maximumBy)
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Ord (comparing)
 import Data.Scientific (fromFloatDigits)
 import qualified Data.Set as Set
@@ -204,7 +205,7 @@ codexMetadata env path
                                 ]
                     firstUser =
                         fromMaybe "" $
-                            firstMaybe
+                            listToMaybe
                                 [ userText text
                                 | record <- records
                                 , externalTextValue "type" record
@@ -449,7 +450,7 @@ codexTurn maxToolChars payload =
                 call = HistoricalToolCall callId "mcp_call"
                     (jsonPreview maxToolChars arguments)
                 rawResult =
-                    firstMaybe
+                    listToMaybe
                         [ if key == "error"
                             then Object
                                 (KeyMap.singleton
@@ -506,7 +507,7 @@ codexTurn maxToolChars payload =
     callOnly name keys =
         let arguments =
                 fromMaybe payload
-                    (firstMaybe (mapMaybe (`externalObjectValue` payload) keys))
+                    (listToMaybe (mapMaybe (`externalObjectValue` payload) keys))
             call = HistoricalToolCall
                 (protocolCallId payload)
                 name
@@ -519,7 +520,7 @@ codexTurn maxToolChars payload =
     resultOnly =
         let rawOutput =
                 fromMaybe payload $
-                    firstMaybe $
+                    listToMaybe $
                         mapMaybe
                             (`externalObjectValue` payload)
                             ["output", "result", "tools", "response", "content"]
@@ -632,26 +633,12 @@ nonEmptyText text
 
 firstNonEmptyText :: [Maybe Text] -> Text
 firstNonEmptyText values =
-    fromMaybe "" $ firstMaybe
+    fromMaybe "" $ listToMaybe
         [ value
         | Just value <- values
         , not (Text.null value)
         ]
 
-firstMaybe :: [value] -> Maybe value
-firstMaybe [] = Nothing
-firstMaybe (value : _) = Just value
-
 lastMaybe :: [value] -> Maybe value
 lastMaybe [] = Nothing
 lastMaybe values = Just (last values)
-
-firstJustM
-    :: (input -> IO (Maybe output))
-    -> [input]
-    -> IO (Maybe output)
-firstJustM _ [] = pure Nothing
-firstJustM action (value : values) =
-    action value >>= \case
-        Just output -> pure (Just output)
-        Nothing -> firstJustM action values

@@ -76,7 +76,7 @@ import Data.IORef
     )
 import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (catMaybes, isJust)
+import Data.Maybe (catMaybes, isJust, mapMaybe)
 import Data.Ord (Down(..))
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -203,7 +203,7 @@ mcpFleetServerInfos fleet = do
 -- | Natural-language guidance servers provide for the model.
 mcpFleetInstructions :: McpFleet -> IO [(Text, Text)]
 mcpFleetInstructions fleet =
-    catMaybes . map instructionsOf <$> mcpFleetServerInfos fleet
+    mapMaybe instructionsOf <$> mcpFleetServerInfos fleet
   where
     instructionsOf :: (Text, McpServerInfo) -> Maybe (Text, Text)
     instructionsOf (name, info) = case info.serverInfoInstructions of
