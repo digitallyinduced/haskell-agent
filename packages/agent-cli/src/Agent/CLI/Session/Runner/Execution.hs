@@ -108,7 +108,7 @@ import Agent.Runtime.ModelConfig
     ( catalogSupportsAsyncToolCallsForTransport
     )
 import Agent.Runtime.Error
-import Agent.CLI.Dialects
+import Agent.Runtime.Tools.Dialects
 import Agent.CLI.Dictation (dictationTargetForSession)
 import Agent.CLI.TUI.App
 import Agent.CLI.TUI.Composer (appendFullscreenInput)

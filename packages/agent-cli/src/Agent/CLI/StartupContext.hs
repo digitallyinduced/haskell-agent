@@ -6,7 +6,7 @@ module Agent.CLI.StartupContext
     , loadAgentsContextWithPreload
     ) where
 
-import Agent.CLI.Dialects
+import Agent.Runtime.Tools.Dialects
     ( formatAgentsMdForDialect
     , globalAgentsHomeDir
     )

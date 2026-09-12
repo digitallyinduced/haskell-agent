@@ -125,6 +125,25 @@ entry point. CLI startup still chooses the provider and assembles session,
 tools, persistence, and presentation. Server and native adapters still use that
 CLI startup path; this extraction does not remove their CLI dependency.
 
+## Implemented: shared tool assembly and startup ownership
+
+`Agent.Runtime.Tools.Dialects` owns Codex/Grok coding-tool assembly and
+filtering. Frontends supply plan, secret, and image hooks; the shared module
+does not import CLI options or terminal presentation. CLI and server consumers
+use this module directly rather than a CLI facade.
+
+`Agent.Runtime.Tools.Resources` owns session teardown domains, and
+`Agent.Runtime.Tools.Startup` acquires the five tool domains concurrently with
+context preload. Typed `Acquire` inputs retain each completed resource in its
+domain; failed or cancelled startup joins sibling acquisitions before scopes
+unwind. Shutdown order remains activities, code mode, session lock, computer
+use, LSP, web fetch, MCP, coding tools, scratch storage.
+
+This is a bounded extraction, not the complete session entry point. Concrete
+MCP/scratch setup, host-specific tool groups, terminal hooks, and session launch
+still live in CLI orchestration. Server still depends on `agent-cli` until
+those remaining composition boundaries move. No new Cabal package is needed.
+
 ## Remaining: move session composition and ownership out of the CLI
 
 ### Conversation-state ownership

@@ -21,6 +21,11 @@ for package in "$cli" "$external_session" "$repository" "$bridge" "$runtime" \
   [[ -d "$package" ]] || fail "missing package directory: $package"
 done
 
+if [[ -e "$cli/src/Agent/CLI/Dialects.hs" \
+  || -e "$cli/src/Agent/CLI/Runtime/Orchestration/Tools/Resources.hs" ]]; then
+  fail "shared tool assembly and ownership must remain in agent-runtime"
+fi
+
 python3 "$root/scripts/check-package-graph.py" "$root"
 [[ ! -e "$root/packages/agent-cli-runtime/agent-cli-runtime.cabal" ]] \
   || fail "agent-cli-runtime must be replaced by agent-runtime"
@@ -157,6 +162,11 @@ for registration in \
 done
 
 required_files=(
+  packages/agent-runtime/src/Agent/Runtime/Tools/Dialects.hs
+  packages/agent-runtime/src/Agent/Runtime/Tools/Resources.hs
+  packages/agent-runtime/src/Agent/Runtime/Tools/Startup.hs
+  packages/agent-runtime/test/Agent/Runtime/Tools/ResourcesSpec.hs
+  packages/agent-runtime/test/Agent/Runtime/Tools/StartupSpec.hs
   packages/agent-runtime/src/Agent/Runtime/Providers.hs
   packages/agent-runtime/src/Agent/Runtime/Providers/Types.hs
   packages/agent-runtime/src/Agent/Runtime/Providers/Common.hs

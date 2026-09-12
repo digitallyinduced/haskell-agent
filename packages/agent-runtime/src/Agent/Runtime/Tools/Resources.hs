@@ -1,7 +1,6 @@
--- | Ownership for one invocation of the tool/session runtime, including
--- conversation resets. Process-owned services and independent sessions do
--- not belong here.
-module Agent.CLI.Runtime.Orchestration.Tools.Resources
+-- | Session-owned tool domains. Process services and independent sessions
+-- belong to their own owners, not these scopes.
+module Agent.Runtime.Tools.Resources
     ( SessionResourceScopes(..)
     , withSessionResourceScopes
     ) where
@@ -23,13 +22,10 @@ data SessionResourceScopes = SessionResourceScopes
     , activityResources :: ResourceScope
     }
 
--- | Establish ownership before starting concurrent acquisitions. Their
--- completion order cannot change dependency teardown order.
---
--- Acquire unwinds in reverse: join session activities, stop the code-mode
--- dispatcher, release the session lock, close tools, then remove scratch
--- storage. Each domain uses the existing resourcet finalizer machinery;
--- there is no separate cleanup registry or worker supervisor here.
+-- | Establish ownership before concurrent acquisition. Completion order must
+-- not affect teardown: join activities, stop code mode, release the session
+-- lock, close tools, then remove scratch storage. Existing resourcet machinery
+-- runs every domain finalizer even when one fails.
 withSessionResourceScopes :: (SessionResourceScopes -> IO a) -> IO a
 withSessionResourceScopes = Acquire.with acquireSessionResourceScopes
 

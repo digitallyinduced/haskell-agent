@@ -1,6 +1,6 @@
 module Main (main) where
 
-import Agent.CLI.Dialects (CodingTools(..), codingToolsFor)
+import Agent.Runtime.Tools.Dialects (CodingTools(..), codingToolsFor)
 import Agent.CLI.Options (defaultCliOptions)
 import Agent.CLI.PendingInputs
     ( PendingInputs

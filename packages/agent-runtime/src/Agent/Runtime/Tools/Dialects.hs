@@ -1,4 +1,4 @@
-module Agent.CLI.Dialects
+module Agent.Runtime.Tools.Dialects
     ( CodingTools(..)
     , codingToolsFor
     , codingToolsForWithTypes

@@ -1,6 +1,6 @@
-module Agent.CLI.SessionResourcesSpec (spec) where
+module Agent.Runtime.Tools.ResourcesSpec (spec) where
 
-import Agent.CLI.Runtime.Orchestration.Tools.Resources
+import Agent.Runtime.Tools.Resources
 import Agent.ResourceScope
     ( ResourceScope, allocateAcquire, registerResource, releaseResource )
 import Control.Concurrent.Async (Concurrently(..), cancel, race, withAsync)
