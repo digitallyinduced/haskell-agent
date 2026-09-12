@@ -21,6 +21,7 @@ module Agent.CLI.MacOS.ComputerBridge
     , invokeComputerSessionRequest
     , newComputerHost
     , newComputerSession
+    , computerToolSessionForAttachment
     , replaceComputerRegistration
     , resetComputerSessionAccessibility
     ) where
@@ -205,13 +206,21 @@ newComputerSession host =
 newComputerSessionWhenEnabled
     :: ComputerHost
     -> IO (Either Text (Maybe ComputerSession))
-newComputerSessionWhenEnabled host = mask_ do
+newComputerSessionWhenEnabled host = openComputerSession host 0
+
+openComputerSession
+    :: ComputerHost -> Word64 -> IO (Either Text (Maybe ComputerSession))
+openComputerSession host attachmentToken = mask_ do
     leased <- acquireCurrentGeneration host
     case leased of
-        Nothing -> pure (Right Nothing)
+        Nothing -> pure $ if attachmentToken == 0
+            then Right Nothing
+            else Left "The native computer host is unavailable for the attached window."
         Just (generation, registration) -> do
             opened <-
-                invokeComputerRaw registration operationOpen 0 False BS.empty
+                invokeComputerRaw registration
+                    (if attachmentToken == 0 then operationOpen else 6)
+                    attachmentToken False BS.empty
                     `onException` releaseGeneration host generation
             case opened of
                 Left err -> do
@@ -282,7 +291,13 @@ computerToolSessionWhenEnabled
     :: ComputerHost
     -> IO (Either Text (Maybe (AppTool, IO (), IO ())))
 computerToolSessionWhenEnabled host =
-    newComputerSessionWhenEnabled host >>= \case
+    computerToolSessionForAttachment host 0
+
+computerToolSessionForAttachment
+    :: ComputerHost -> Word64
+    -> IO (Either Text (Maybe (AppTool, IO (), IO ())))
+computerToolSessionForAttachment host token =
+    openComputerSession host token >>= \case
         Left err -> pure (Left err)
         Right Nothing -> pure (Right Nothing)
         Right (Just session) ->

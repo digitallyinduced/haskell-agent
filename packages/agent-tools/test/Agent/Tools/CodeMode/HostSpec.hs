@@ -43,9 +43,10 @@ import qualified Data.List
 import Data.IORef
 import qualified Data.Text as Text
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
-import System.Directory (doesFileExist, getTemporaryDirectory, removeFile)
+import System.Directory (doesFileExist, findExecutable, getTemporaryDirectory, removeFile)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.IO (hClose, hPutStr, openTempFile)
+import System.Info (os)
 import System.Posix.Signals (nullSignal, sigKILL, signalProcess)
 import System.Timeout (timeout)
 import Test.Hspec
@@ -88,7 +89,7 @@ withUnresponsiveWorker action = do
                 terminateFixture = void $ tryAny $
                     readProcessId >>= signalProcess sigKILL
                 config = (defaultCodeModeConfig script (\_ _ -> pure (Right Null)))
-                    { workerPoolSize = 1 }
+                    { workerPoolSize = 1, codeModeBackend = BunBackend }
             (do
                 action config terminateFixture
                 processId <- readProcessId
@@ -97,6 +98,70 @@ withUnresponsiveWorker action = do
 
 spec :: Spec
 spec = describe "code-mode Bun host" do
+    describe "backend selection" do
+        let base = defaultCodeModeConfig "missing-worker.mjs" (\_ _ -> pure (Right Null))
+        it "uses the platform default without falling back when its executable is missing" do
+            withoutEnvironment "AGENT_CODE_MODE_BACKEND" $
+                withoutEnvironment "AGENT_CODE_MODE_WORKER" do
+                    checkCodeModeAvailability base
+                        { bunExecutable = "/definitely/missing/bun"
+                        , nativeWorkerExecutable = "/definitely/missing/native-worker"
+                        } `shouldReturn` Left
+                            (if os == "darwin"
+                                then "JavaScriptCore worker executable was not found: /definitely/missing/native-worker"
+                                else "Bun runtime executable was not found: /definitely/missing/bun")
+        when (os == "darwin") $
+            it "executes the macOS default with no Bun or worker script available" do
+                override <- lookupEnv "AGENT_CODE_MODE_WORKER"
+                resolved <- findExecutable (maybe base.nativeWorkerExecutable id override)
+                executable <- maybe (expectationFailure "native worker missing" >> fail "native worker missing") pure resolved
+                withoutEnvironment "AGENT_CODE_MODE_BACKEND" $
+                    withoutEnvironment "AGENT_CODE_MODE_WORKER" $
+                        withEnvironmentOverride "PATH" "" do
+                            let config = base
+                                    { nativeWorkerExecutable = executable
+                                    , bunExecutable = "/definitely/missing/bun"
+                                    , workerPoolSize = 0
+                                    }
+                            checkCodeModeAvailability config `shouldReturn` Right ()
+                            withCodeModeHost config \host -> do
+                                result <- execCodeCell host "text('native default')" [] 1000
+                                case result of
+                                    Right CodeModeFinished {} -> pure ()
+                                    other -> expectationFailure (show other)
+        it "rejects an invalid automatic backend without fallback" do
+            withEnvironmentOverride "AGENT_CODE_MODE_BACKEND" "invalid" do
+                checkCodeModeAvailability base `shouldReturn`
+                    Left "invalid AGENT_CODE_MODE_BACKEND: invalid"
+        it "honors explicit Bun selection over the environment" do
+            withEnvironmentOverride "AGENT_CODE_MODE_BACKEND" "javascriptcore" do
+                checkCodeModeAvailability base
+                    { codeModeBackend = BunBackend
+                    , bunExecutable = "/definitely/missing/bun"
+                    } `shouldReturn`
+                        Left "Bun runtime executable was not found: /definitely/missing/bun"
+        it "honors a native executable override without requiring a Bun script" do
+            withEnvironmentOverride "AGENT_CODE_MODE_BACKEND" "javascriptcore" $
+                withEnvironmentOverride "AGENT_CODE_MODE_WORKER" "/definitely/missing/native-worker" do
+                    checkCodeModeAvailability base `shouldReturn`
+                        Left "JavaScriptCore worker executable was not found: /definitely/missing/native-worker"
+        it "reports native startup failure rather than executing Bun" do
+            withEnvironmentOverride "AGENT_CODE_MODE_WORKER" "/definitely/missing/native-worker" do
+                withCodeModeHost base
+                    { codeModeBackend = JavaScriptCoreBackend
+                    , workerPoolSize = 0
+                    } \host ->
+                        execCodeCell host "text('must not run')" [] 100 `shouldReturn`
+                            Left (CodeModeStartupError
+                                "JavaScriptCore worker executable was not found: /definitely/missing/native-worker")
+        it "snapshots automatic selection for the lifetime of a host" do
+            withEnvironmentOverride "AGENT_CODE_MODE_BACKEND" "invalid-at-acquisition" do
+                withCodeModeHost base { workerPoolSize = 0 } \host ->
+                    withEnvironmentOverride "AGENT_CODE_MODE_BACKEND" "bun" do
+                        execCodeCell host "text('must not run')" [] 100 `shouldReturn`
+                            Left (CodeModeStartupError
+                                "invalid AGENT_CODE_MODE_BACKEND: invalid-at-acquisition")
+
     it "defaults to two retained workers" do
         let config = defaultCodeModeConfig
                 "data/code-mode/worker.mjs"
@@ -922,7 +987,8 @@ spec = describe "code-mode Bun host" do
             `shouldBe` [True, True]
         toolSet.closeCodeModeToolSet
 
-    it "fails closed before advertising a missing worker" do
+    it "fails closed before advertising a missing worker" $
+      withEnvironmentOverride "AGENT_CODE_MODE_BACKEND" "bun" do
         let invoke _ = pure
                 (Right (ToolCallResult "nested" "value" FunctionCallKind BlockingToolCall [] Nothing))
         unavailable <- newCodeModeToolSet
@@ -1113,6 +1179,11 @@ waitForCompletionMarker host attempts = do
                 "completion-marker probe returned unexpected value: "
                     <> show value
             pure False
+
+withoutEnvironment :: String -> IO a -> IO a
+withoutEnvironment name action =
+    bracket (lookupEnv name <* unsetEnv name)
+        (maybe (unsetEnv name) (setEnv name)) (const action)
 
 withEnvironmentOverride :: String -> String -> IO a -> IO a
 withEnvironmentOverride name value action =
