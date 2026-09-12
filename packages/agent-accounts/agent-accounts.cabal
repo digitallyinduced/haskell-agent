@@ -60,6 +60,7 @@ library
                     , bytestring
                     , containers
                     , directory
+                    , extra >= 1.7
                     , filepath
                     , network-uri
                     , safe-exceptions

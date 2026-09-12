@@ -51,6 +51,30 @@ call asserts actual fresh user confirmation, not an automatic policy decision.
 An approved command can execute project code and spawn descendants; approval
 is not a guarantee that a build script is harmless.
 
+## Nested agent validation
+
+A CLI or GHCi agent launched by a sandboxed shell inherits that shell's
+restrictions. Its default scratch directory is a new sibling under
+`~/.haskell-agent/tmp/sessions`, whereas the parent sandbox permits only the
+parent session's scratch subtree. Session allocation can therefore fail with
+a filesystem permission error before the nested agent starts.
+
+The allocator retries only existing-name collisions. Other directory-creation
+errors retain their original filesystem diagnostic and filename, with
+`allocateSessionTemp` added to the operation context. Older revisions discarded
+these errors and reported `could not allocate a unique session temp directory`
+after 32 attempts; that message alone does not establish a name collision.
+
+Changing `TMPDIR` or `HASKELL_AGENT_TMPDIR` does not relocate session storage:
+the allocator derives scratch paths from the durable sessions root. Tests that
+call the session API can supply a root beneath `$TMPDIR`, for example
+`$TMPDIR/nested-validation/sessions`; its derived scratch directory is then
+`$TMPDIR/nested-validation/tmp/sessions`. For a live CLI using the default
+storage layout, preserve the failure and request `require_escalated` for the
+launch, including the creation of a dedicated tmux server if one is used.
+An already sandboxed tmux server retains its restrictions. Do not delete other
+sessions or weaken sibling-session isolation to make a live check pass.
+
 ## macOS acceptance check
 
 Run this check from a newly started, updated harness. A GHCi harness launched

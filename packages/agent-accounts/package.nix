@@ -1,6 +1,6 @@
 { mkDerivation, aeson, agent-claude, agent-core, agent-gemini
 , agent-json, agent-openai, agent-openrouter, agent-server-client
-, agent-xai, async, base, bytestring, containers, directory
+, agent-xai, async, base, bytestring, containers, directory, extra
 , filepath, hspec, lib, network-uri, safe-exceptions, stm, text
 , time, transformers, unix
 }:
@@ -11,8 +11,8 @@ mkDerivation {
   libraryHaskellDepends = [
     aeson agent-claude agent-core agent-gemini agent-json agent-openai
     agent-openrouter agent-server-client agent-xai base bytestring
-    containers directory filepath network-uri safe-exceptions stm text
-    time transformers unix
+    containers directory extra filepath network-uri safe-exceptions stm
+    text time transformers unix
   ];
   testHaskellDepends = [
     aeson agent-core agent-json async base bytestring directory

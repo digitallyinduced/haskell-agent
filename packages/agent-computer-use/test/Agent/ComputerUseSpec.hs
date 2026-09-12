@@ -2768,6 +2768,17 @@ spec = do
                 `shouldBe` Left
                     "Unsupported computer action: \"future_action\""
 
+        it "reports the first invalid action without evaluating later actions" do
+            validateComputerCall
+                exampleCall
+                    { computerActions =
+                        [ WaitAction
+                        , DragAction [] []
+                        , error "validation continued after the first error"
+                        ]
+                    }
+                `shouldBe` Left "Computer drag path is empty."
+
         it "prevalidates every coordinate against the selected display" do
             validateComputerCallForDisplay
                 (1440, 900)

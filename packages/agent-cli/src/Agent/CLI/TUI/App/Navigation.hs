@@ -379,18 +379,20 @@ mouseScrollLines = 3
 
 handleScrollbackKey :: V.Event -> EventM Name AppState ()
 handleScrollbackKey = \case
+    event@V.EvPaste{} -> editComposer event
+    -- Legacy terminals encode Ctrl-V as the C0 SYN character.
+    V.EvKey (V.KChar '\SYN') [] ->
+        editComposer (V.EvKey (V.KChar 'v') [V.MCtrl])
+    event@(V.EvKey (V.KChar 'v') modifiers)
+        | V.MCtrl `elem` modifiers || V.MMeta `elem` modifiers ->
+            editComposer event
     V.EvKey (V.KChar character) modifiers
         | isPrint character && all (== V.MShift) modifiers -> do
             -- Typing expresses intent to edit, even when transcript focus was
             -- retained across a terminal tab switch. The character already
             -- contains the effect of Shift; the composer expects text keys
             -- without modifiers.
-            focusComposer
-            Composer.handleComposerKey
-                applyLocalUiEventWith
-                handleCtrlC
-                scrollConversationPage
-                (V.EvKey (V.KChar character) [])
+            editComposer (V.EvKey (V.KChar character) [])
     V.EvKey V.KUp [] -> moveBlock (-1)
     V.EvKey V.KDown [] -> moveBlock 1
     V.EvKey V.KPageUp [] -> scrollConversationPage Up
@@ -418,6 +420,15 @@ handleScrollbackKey = \case
     V.EvKey V.KEsc [] -> focusComposer
     _ -> pure ()
   where
+    -- Reuse the composer's paste handling, including attachments and active
+    -- turns, instead of interpreting clipboard contents in navigation.
+    editComposer event = do
+        focusComposer
+        Composer.handleComposerKey
+            applyLocalUiEventWith
+            handleCtrlC
+            scrollConversationPage
+            event
     scroll = viewportScroll ConversationViewport
     moveBlock delta = do
         state <- get

@@ -35,6 +35,7 @@ import Codec.Picture.Types
     , pixelMap
     )
 import qualified Codec.Compression.Zlib.Internal as Zlib
+import Control.Monad (guard)
 import Control.Monad.ST.Lazy (runST)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
@@ -237,10 +238,10 @@ encodedImageHeader bytes
 
 pngHeader :: ByteString -> Maybe EncodedImageHeader
 pngHeader bytes = do
-    guardMaybe (ByteString.length bytes >= 33)
+    guard (ByteString.length bytes >= 33)
     chunkLength <- word32Be bytes 8
-    guardMaybe (chunkLength == 13)
-    guardMaybe (ByteString.take 4 (ByteString.drop 12 bytes) == "IHDR")
+    guard (chunkLength == 13)
+    guard (ByteString.take 4 (ByteString.drop 12 bytes) == "IHDR")
     width <- word32Be bytes 16
     height <- word32Be bytes 20
     bitDepth <- byteAt bytes 24
@@ -248,9 +249,9 @@ pngHeader bytes = do
     compressionMethod <- byteAt bytes 26
     filterMethod <- byteAt bytes 27
     interlaceMethod <- byteAt bytes 28
-    guardMaybe (compressionMethod == 0)
-    guardMaybe (filterMethod == 0)
-    guardMaybe (interlaceMethod == 0 || interlaceMethod == 1)
+    guard (compressionMethod == 0)
+    guard (filterMethod == 0)
+    guard (interlaceMethod == 0 || interlaceMethod == 1)
     (samplesPerPixel, decodedBytesPerPixel) <-
         pngColorLayout bitDepth colorType
     (validWidth, validHeight) <- validDimensions width height
@@ -280,19 +281,19 @@ pngColorLayout
 pngColorLayout bitDepth colorType =
     case colorType of
         0 -> do
-            guardMaybe (bitDepth `elem` [1, 2, 4, 8, 16])
+            guard (bitDepth `elem` [1, 2, 4, 8, 16])
             pure (1, if bitDepth == 16 then 2 else 1)
         2 -> do
-            guardMaybe (bitDepth == 8 || bitDepth == 16)
+            guard (bitDepth == 8 || bitDepth == 16)
             pure (3, if bitDepth == 16 then 6 else 3)
         3 -> do
-            guardMaybe (bitDepth `elem` [1, 2, 4, 8])
+            guard (bitDepth `elem` [1, 2, 4, 8])
             pure (1, 4)
         4 -> do
-            guardMaybe (bitDepth == 8 || bitDepth == 16)
+            guard (bitDepth == 8 || bitDepth == 16)
             pure (2, if bitDepth == 16 then 4 else 2)
         6 -> do
-            guardMaybe (bitDepth == 8 || bitDepth == 16)
+            guard (bitDepth == 8 || bitDepth == 16)
             pure (4, if bitDepth == 16 then 8 else 4)
         _ -> Nothing
 
@@ -344,12 +345,12 @@ pngImageDataChunks bytes =
     totalBytes = toInteger (ByteString.length bytes)
 
     go offset chunkCount sawImageData endedImageData chunks = do
-        guardMaybe (chunkCount < maximumPngChunkCount)
-        guardMaybe (offset + 12 <= totalBytes)
+        guard (chunkCount < maximumPngChunkCount)
+        guard (offset + 12 <= totalBytes)
         chunkLength <- word32Be bytes (fromInteger offset)
         let dataOffset = offset + 8
             nextOffset = dataOffset + chunkLength + 4
-        guardMaybe (nextOffset <= totalBytes)
+        guard (nextOffset <= totalBytes)
         let chunkType =
                 ByteString.take 4
                     (ByteString.drop (fromInteger (offset + 4)) bytes)
@@ -358,7 +359,7 @@ pngImageDataChunks bytes =
                     (ByteString.drop (fromInteger dataOffset) bytes)
         case chunkType of
             "IDAT" -> do
-                guardMaybe (not endedImageData)
+                guard (not endedImageData)
                 go
                     nextOffset
                     (chunkCount + 1)
@@ -366,9 +367,9 @@ pngImageDataChunks bytes =
                     False
                     (chunkData : chunks)
             "IEND" -> do
-                guardMaybe (chunkLength == 0)
-                guardMaybe sawImageData
-                guardMaybe (nextOffset == totalBytes)
+                guard (chunkLength == 0)
+                guard sawImageData
+                guard (nextOffset == totalBytes)
                 pure (reverse chunks)
             _ ->
                 go
@@ -478,7 +479,7 @@ jpegDimensions bytes = findMarker 2
             marker
                 | jpegStartOfFrame marker -> do
                     segmentLength <- word16Be bytes (markerOffset + 1)
-                    guardMaybe (segmentLength >= 7)
+                    guard (segmentLength >= 7)
                     height <- word16Be bytes (markerOffset + 4)
                     width <- word16Be bytes (markerOffset + 6)
                     validDimensions width height
@@ -487,10 +488,10 @@ jpegDimensions bytes = findMarker 2
                     findMarker (markerOffset + 1)
                 | otherwise -> do
                     segmentLength <- word16Be bytes (markerOffset + 1)
-                    guardMaybe (segmentLength >= 2)
+                    guard (segmentLength >= 2)
                     let next =
                             markerOffset + 1 + fromInteger segmentLength
-                    guardMaybe (next > markerOffset && next <= scanLimit)
+                    guard (next > markerOffset && next <= scanLimit)
                     findMarker next
 
     jpegStartOfFrame marker =
@@ -508,7 +509,7 @@ jpegDimensions bytes = findMarker 2
 
 validDimensions :: Integer -> Integer -> Maybe (Integer, Integer)
 validDimensions width height = do
-    guardMaybe (width > 0 && height > 0)
+    guard (width > 0 && height > 0)
     pure (width, height)
 
 word16Be :: ByteString -> Int -> Maybe Integer
@@ -573,27 +574,22 @@ parseImageDataUrl url = do
     let (metadata, payloadWithComma) = Text.breakOn "," url
         loweredMetadata = Text.toLower metadata
         base64Suffix = ";base64"
-    guardMaybe (not (Text.null payloadWithComma))
-    guardMaybe ("data:image/" `Text.isPrefixOf` loweredMetadata)
-    guardMaybe (base64Suffix `Text.isSuffixOf` loweredMetadata)
+    guard (not (Text.null payloadWithComma))
+    guard ("data:image/" `Text.isPrefixOf` loweredMetadata)
+    guard (base64Suffix `Text.isSuffixOf` loweredMetadata)
     let encodedPayload = Text.drop 1 payloadWithComma
-    guardMaybe
+    guard
         (Text.length encodedPayload
             <= maximumEncodedImageBase64Characters)
     let mime =
             Text.drop 5
                 (Text.dropEnd (Text.length base64Suffix) metadata)
-    guardMaybe (not (Text.null mime))
+    guard (not (Text.null mime))
     bytes <-
         either (const Nothing) Just
             (Base64.decode
                 (TextEncoding.encodeUtf8 encodedPayload))
     pure (mime, bytes)
-
-guardMaybe :: Bool -> Maybe ()
-guardMaybe condition
-    | condition = Just ()
-    | otherwise = Nothing
 
 dynamicImageWidth :: DynamicImage -> Int
 dynamicImageWidth = dynamicMap imageWidth
