@@ -27,6 +27,10 @@ if [[ -e "$cli/src/Agent/CLI/Dialects.hs" \
 fi
 
 python3 "$root/scripts/check-package-graph.py" "$root"
+if rg --line-number '^(data SessionInitialContext|resolveSessionInitialContext[^:]|agentsDiscoverOptions[^:]|mergeSkillCatalogs[^:])' \
+    "$cli/src/Agent/CLI/Resume.hs" "$cli/src/Agent/CLI/StartupContext.hs" "$cli/src/Agent/CLI/Skills.hs"; then
+  fail "startup context policy and catalog assembly must remain in agent-runtime"
+fi
 if rg --line-number '\b(newSubagentRegistry|closeSubagentRegistry|interruptActiveSubagents|grokRootChildModels|resolveModelOptionById)\b' \
     "$cli/src/Agent/CLI/Runtime/Orchestration/Tools/Collaboration.hs"; then
   fail "collaboration startup policy and registry ownership must remain in agent-runtime"
@@ -170,6 +174,8 @@ for registration in \
 done
 
 required_files=(
+  packages/agent-runtime/src/Agent/Runtime/Startup/Context.hs
+  packages/agent-runtime/test/Agent/Runtime/Startup/ContextSpec.hs
   packages/agent-runtime/src/Agent/Runtime/Mcp/Startup.hs
   packages/agent-runtime/src/Agent/Runtime/Collaboration.hs
   packages/agent-runtime/test/Agent/Runtime/CollaborationSpec.hs

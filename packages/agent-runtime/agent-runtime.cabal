@@ -115,6 +115,7 @@ library
                     , Agent.Runtime.SessionOwner
                     , Agent.Runtime.SessionState
                     , Agent.Runtime.StartupPolicy
+                    , Agent.Runtime.Startup.Context
                     , Agent.Runtime.Startup.Model
                     , Agent.Runtime.Startup.Policy
                     , Agent.Runtime.Startup.Gateway
@@ -266,6 +267,7 @@ test-suite agent-runtime-test
                     , Agent.Runtime.SessionSpec.Persistence
                     , Agent.Runtime.SessionSpec.ResponseItems
                     , Agent.Runtime.StartupPolicySpec
+                    , Agent.Runtime.Startup.ContextSpec
                     , Agent.Runtime.Startup.ModelSpec
                     , Agent.Runtime.Startup.PolicySpec
                     , Agent.Runtime.Startup.GatewaySpec

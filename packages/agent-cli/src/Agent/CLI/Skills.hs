@@ -45,6 +45,7 @@ import Agent.MCP.Types
     )
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Skills
+import Agent.Runtime.Startup.Context (mergeSkillCatalogs)
 import Agent.Tools.Types (ToolEnv, setToolSkillRoots)
 import Crypto.Hash (Digest, SHA256, hash)
 import Data.Aeson qualified as Aeson
@@ -156,12 +157,6 @@ loadMcpSkillsCatalog fleet = do
             registration.mcpSkillEntry.mcpSkillUri
             (entryResourceUris registration.mcpSkillEntry)
             value
-
-mergeSkillCatalogs :: SkillCatalog -> SkillCatalog -> SkillCatalog
-mergeSkillCatalogs local remote =
-    SkillCatalog
-        (local.catalogSkills <> remote.catalogSkills)
-        (local.catalogWarnings <> remote.catalogWarnings)
 
 -- | Resolve local content immediately or fetch and verify an MCP skill on
 -- demand. Remote instructions are never trusted merely because they appeared

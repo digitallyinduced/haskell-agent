@@ -197,6 +197,16 @@ The CLI retains credential loading, transcript persistence callbacks, worktree
 creation, and notification presentation. This session-integration layer remains
 in `agent-runtime`, without a new Cabal package or frontend dependencies.
 
+## Implemented: shared startup context preparation
+
+`Agent.Runtime.Startup.Context` owns transcript-derived initial-context and
+snapshot eligibility, instruction discovery, and startup skill-catalog assembly.
+Context preloading preserves host workspace restrictions and dialect refresh
+semantics, and overlaps independent reads with structured concurrency. The host
+supplies learned-skill storage access and remote catalog loading; terminal notices
+and context installation remain in CLI. Existing CLI entry points delegate or
+reexport for compatibility. This extraction adds no Cabal package.
+
 ## Remaining: move session composition and ownership out of the CLI
 
 ### Conversation-state ownership
