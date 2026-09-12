@@ -90,9 +90,9 @@ were accepted for rollout, not characterized as removal of all code-mode overhea
 `memory-comparison.py` measures fresh worker processes directly, separately from
 the Haskell host benchmark. It runs three alternating repetitions with 121 tool
 names, unique cell sources, no forced GC, and a 0.2-second post-workload idle
-interval. The comparison invokes Bun directly without the host's `--smol` and
-other startup flags; these measurements therefore do not establish exact
-production-pool memory savings.
+interval. Bun uses the production flags `--smol --no-install --no-env-file
+--no-addons`; both workers receive an empty environment (`env={}`). This matches
+worker startup configuration but still excludes the Haskell host and app.
 
 Reproduce after building the helper as above:
 
@@ -104,16 +104,16 @@ nix develop -c bash -c '
 ' -- "$native_worker"
 ```
 
-The corrected sample record reports the following medians. Memory is MiB
+The 18-case production-configuration record reports the following medians. Memory is MiB
 (bytes / 1,048,576); CPU is worker user + system seconds from kernel `wait4`
 accounting, including process startup and shutdown, excluding the Python driver.
 Idle-row CPU is **not** the CPU consumed solely during the idle observation.
 
 | Workload | Post-workload RSS: Bun / JSC | Physical footprint: Bun / JSC | Peak RSS: Bun / JSC | Worker CPU seconds: Bun / JSC |
 |---|---:|---:|---:|---:|
-| Idle, no cells | 20.75 / 13.28 | 10.45 / 7.14 | 21.16 / 13.30 | 0.0286 / 0.0119 |
-| 1,000 cells, one 16-byte call each | 50.55 / 39.52 | 27.45 / 13.48 | 50.81 / 39.53 | 0.2054 / 0.4389 |
-| 100 cells, one 1 MiB call each | 74.11 / 36.19 | 20.33 / 13.77 | 74.34 / 36.20 | 0.3512 / 0.3999 |
+| Idle, no cells | 21.33 / 13.14 | 10.23 / 6.97 | 21.64 / 13.16 | 0.0318 / 0.0130 |
+| 1,000 cells, one 16-byte call each | 49.23 / 39.34 | 23.97 / 13.06 | 49.41 / 39.36 | 0.2735 / 0.5365 |
+| 100 cells, one 1 MiB call each | 72.83 / 36.52 | 23.00 / 13.06 | 73.03 / 36.53 | 0.3934 / 0.4626 |
 
 RSS includes resident shared pages and must not be multiplied by worker count
 to infer whole-application memory. Physical footprint is a distinct kernel
@@ -122,13 +122,13 @@ volume or prove bounded memory over arbitrarily long sessions.
 
 The native worker uses less measured memory here but more CPU on both active
 workloads. Its 20 ms memory watchdog also increases idle interrupt wakeups:
-128 versus Bun's 3 over each three-second idle observation. The Python driver's
+129–130 versus Bun's 3 over each three-second idle observation. The Python driver's
 `wall_seconds` includes driver work and is not an end-to-end latency benchmark.
 The rollout accepts these CPU/wakeup and warm-latency costs; lower memory is not
 evidence of a universal efficiency improvement.
 
 Measurement sources: `javascriptcore-host-final-comparison.log` and
-`javascriptcore-memory-corrected.jsonl` from the rollout validation. The tables
+`javascriptcore-production-memory.jsonl` from the rollout validation. The tables
 above preserve their reported values and derived medians rather than requiring
 session-temporary artifacts to remain available.
 

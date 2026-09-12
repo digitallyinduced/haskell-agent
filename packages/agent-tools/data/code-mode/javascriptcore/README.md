@@ -150,8 +150,9 @@ cell cases improved. Cold-start improvements do not erase these costs.
 
 Separate three-repetition worker-only measurements showed lower native-worker
 RSS and physical footprint, but higher active-workload CPU and more idle
-interrupt wakeups from the memory watchdog. Those memory tests invoke Bun
-without the host's `--smol` flag and are not whole-application memory measurements.
+interrupt wakeups from the memory watchdog. Those memory tests use the production
+Bun flags `--smol --no-install --no-env-file --no-addons` and an empty environment
+for both workers, but are not whole-application memory measurements.
 See the [benchmark record](../../../benchmark/javascriptcore/README.md) for
 all final workload results, methodology, reproduction commands, and the distinct
 historical in-process prototype results.

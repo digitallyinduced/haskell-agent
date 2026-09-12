@@ -405,60 +405,60 @@ replenishPool host = do
 
 spawnIdleWorker :: CodeModeConfig -> Either Text (FilePath, [String]) -> IO (Either CodeModeError IdleWorker)
 spawnIdleWorker config command =
-  case command of
+    case command of
         Left err -> pure (Left (CodeModeStartupError err))
         Right (executable, arguments) -> do
-                    started <- try @_ @SomeException $ createWorkerProcess $
-                        (proc executable arguments)
-                            { std_in = CreatePipe
-                            , std_out = CreatePipe
-                            , std_err = CreatePipe
-                            , env = Just []
-                            , create_group = True
-                            }
-                    case started of
-                        Left err ->
-                            pure $ Left $ CodeModeStartupError $
-                                Text.pack (displayException err)
-                        Right
-                                ( Just input
-                                , Just output
-                                , Just stderr
-                                , processHandle
-                                ) -> do
-                            mapM_ configurePipe [input, output, stderr]
-                                `onException` stopIncompleteProcess
-                                    input output stderr processHandle
-                            writer <- newMVar ()
-                            stderrReader <- asyncWithUnmask
-                                (\unmask -> unmask (readAll stderr))
-                                `onException` stopIncompleteProcess
-                                    input output stderr processHandle
-                            let idleWorker = IdleWorker input output stderr
-                                    processHandle writer stderrReader
-                            (do
-                                startup <- race
-                                    (threadDelay
-                                        (max 1 config.startupTimeoutMs * 1000))
-                                    (try @_ @SomeException (BS8.hGetLine output))
-                                case startup of
-                                    Right (Right line) ->
-                                        case decodeProtocolMessage line of
-                                            Right WorkerReady -> pure (Right idleWorker)
-                                            _ -> stopIdleWorker idleWorker >> pure
-                                                (Left (CodeModeProtocolError
-                                                    "worker did not send ready"))
-                                    Right (Left err) -> stopIdleWorker idleWorker >> pure
-                                        (Left (CodeModeStartupError
-                                            (Text.pack (displayException err))))
-                                    Left () -> stopIdleWorker idleWorker >> pure
-                                        (Left (CodeModeStartupError
-                                            "code-mode worker did not become ready")))
-                                `onException` stopIdleWorker idleWorker
-                        Right (input, output, stderr, processHandle) -> do
-                            stopIncompleteProcessMaybe input output stderr processHandle
-                            pure $ Left $ CodeModeStartupError
-                                "failed to create all code-mode worker pipes"
+            started <- try @_ @SomeException $ createWorkerProcess $
+                (proc executable arguments)
+                    { std_in = CreatePipe
+                    , std_out = CreatePipe
+                    , std_err = CreatePipe
+                    , env = Just []
+                    , create_group = True
+                    }
+            case started of
+                Left err ->
+                    pure $ Left $ CodeModeStartupError $
+                        Text.pack (displayException err)
+                Right
+                        ( Just input
+                        , Just output
+                        , Just stderr
+                        , processHandle
+                        ) -> do
+                    mapM_ configurePipe [input, output, stderr]
+                        `onException` stopIncompleteProcess
+                            input output stderr processHandle
+                    writer <- newMVar ()
+                    stderrReader <- asyncWithUnmask
+                        (\unmask -> unmask (readAll stderr))
+                        `onException` stopIncompleteProcess
+                            input output stderr processHandle
+                    let idleWorker = IdleWorker input output stderr
+                            processHandle writer stderrReader
+                    (do
+                        startup <- race
+                            (threadDelay
+                                (max 1 config.startupTimeoutMs * 1000))
+                            (try @_ @SomeException (BS8.hGetLine output))
+                        case startup of
+                            Right (Right line) ->
+                                case decodeProtocolMessage line of
+                                    Right WorkerReady -> pure (Right idleWorker)
+                                    _ -> stopIdleWorker idleWorker >> pure
+                                        (Left (CodeModeProtocolError
+                                            "worker did not send ready"))
+                            Right (Left err) -> stopIdleWorker idleWorker >> pure
+                                (Left (CodeModeStartupError
+                                    (Text.pack (displayException err))))
+                            Left () -> stopIdleWorker idleWorker >> pure
+                                (Left (CodeModeStartupError
+                                    "code-mode worker did not become ready")))
+                        `onException` stopIdleWorker idleWorker
+                Right (input, output, stderr, processHandle) -> do
+                    stopIncompleteProcessMaybe input output stderr processHandle
+                    pure $ Left $ CodeModeStartupError
+                        "failed to create all code-mode worker pipes"
 
 createWorkerProcess
     :: CreateProcess
