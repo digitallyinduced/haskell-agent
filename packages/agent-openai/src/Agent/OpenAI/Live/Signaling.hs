@@ -28,6 +28,7 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Bifunctor (first)
 import qualified Data.ByteString as BS
 import Data.Char (isAsciiLower, isAsciiUpper, isDigit, isHexDigit)
+import Data.List (dropWhileEnd)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -96,7 +97,7 @@ gatewayLiveEndpoint baseUrl = do
         || not (null uri.uriQuery) || not (null uri.uriFragment)
         then invalid
         else Right (secure, authority.uriRegName, port,
-            reverse (dropWhile (== '/') (reverse uri.uriPath)) <> "/v1/voice")
+            dropWhileEnd (== '/') uri.uriPath <> "/v1/voice")
   where
     invalid = Left "Invalid gateway voice endpoint; HTTPS is required except on loopback."
 

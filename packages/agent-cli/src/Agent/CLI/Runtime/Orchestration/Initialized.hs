@@ -19,7 +19,7 @@ import Agent.CLI.AccountSelection
       prepareProviderAccounts,
       selectPreparedProviderAccount,
       selectProviderAccount )
-import Agent.CLI.Auth
+import Agent.Accounts.Auth
     ( LoadedAuth(loadedAccountLabel, LoadedAuth, loadedOpenAiPool,
                  loadedProvider, loadedTokenProvider, loadedSelectionId),
       gatewayAuthSelectionId,
@@ -31,11 +31,11 @@ import Agent.CLI.Auth
       loadAuthForAccount,
       probeLoadedAuthCredential,
       staticCredentialProvider )
-import Agent.CLI.Database.Store
+import Agent.Runtime.Database.Store
     ( DatabaseScopes
     , deriveDatabaseScopesWithNamespace
     )
-import Agent.CLI.GatewayClient
+import Agent.Runtime.GatewayClient
     ( GatewayCredential
     , GatewayModelAccess
     , gatewayCredentialIdentity
@@ -46,7 +46,7 @@ import Agent.CLI.GatewayClient
 import Agent.CLI.GatewayModels
     ( modelOptionsForGatewayModels, selectGatewayModelOption
     , withGatewayModelsForStartup )
-import Agent.CLI.ModelConfig
+import Agent.Runtime.ModelConfig
     ( ModelCatalog
     , catalogConnection,
       loadModelCatalogAt,
@@ -55,7 +55,7 @@ import Agent.CLI.ModelConfig
                      OrganizationGatewayConnection),
       ModelConnection(connectionId, connectionKind),
       ResponsesConnection(responsesApiKeyEnv, responsesApiKeyOptional) )
-import Agent.CLI.Models
+import Agent.Runtime.Models
     ( resolveConfiguredModel,
       resolveSavedModelTarget,
       validateResumedGatewayBoundary,
@@ -63,7 +63,7 @@ import Agent.CLI.Models
       ModelTarget(ModelTarget, targetWireModelId, targetConnectionId, targetProvider,
                   targetModelId, targetDialect) )
 import Agent.CLI.Options
-    ( CliOptions(optModel, optProvider, optSkills, optYolo) )
+    ( CliOptions(optModel, optProvider, optSkills, optYolo), Override(..) )
 import Agent.CLI.Project
     ( inheritProjectLastModel,
       loadProjectSettings,
@@ -99,19 +99,19 @@ import Agent.CLI.Runtime.Orchestration.Types
       NativeRunHooks(nativeDatabaseScopeNamespace, nativeWorkspaceDiscovery),
       nativePreparedDiscovery )
 import Agent.CLI.Runtime.Types ( DevResult, RunResult )
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( loadRecentSessionTurns,
       SessionMeta(metaId, metaProvider, metaConnection, metaModel,
                   metaTransportModel, metaDialect, metaGatewayIdentity),
       SessionTurn )
-import Agent.CLI.Session.History ( detectGitBranch )
+import Agent.Runtime.Session.History ( detectGitBranch )
 import Agent.CLI.Session.Runtime.Types
     ( StartupRuntime(startupToolEnv, startupStderr, startupStdout,
                      startupStdoutTty, startupStdinTty, startupFullscreen,
                      startupUiRuntimeRef, startupStdinControl, startupInterrupt,
                      startupDatabaseStore, startupNativeHooks,
                      startupStartedAt, startupTimings) )
-import Agent.CLI.SessionLock ( releaseSessionLock, SessionLock )
+import Agent.Runtime.SessionLock ( releaseSessionLock, SessionLock )
 import Agent.CLI.Skills ( loadSkillsCatalogQuiet )
 import Agent.CLI.Startup.Auth
     ( loadStartupAuth, loadStartupAuthFromResult, markStartupStage,
@@ -638,7 +638,7 @@ loadInitializedAuth request targets =
         (Nothing, Nothing) -> do
             (startupAuth, accountUsage) <- loadPreparedOrStartupAuth
                 request.initializedPreparedAuth
-                (options.optYolo
+                (options.optYolo == Explicit True
                     && targets.initializedCheckStartupUsageInBackground)
                 startup
                 request.initializedTransition

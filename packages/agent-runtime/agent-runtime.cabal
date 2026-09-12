@@ -1,0 +1,309 @@
+cabal-version:      3.0
+name:               agent-runtime
+version:            0.1.0.0
+synopsis:           Frontend-independent conversation and turn lifecycle
+description:        Shared conversation state, turn finalization, cancellation
+                    ownership, and request policy for agent frontends.
+license:            MIT
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           Development
+build-type:         Simple
+data-files:          config/models.default.json
+
+common common-options
+    default-language: GHC2021
+    default-extensions: BlockArguments
+                      , OverloadedStrings
+                      , OverloadedRecordDot
+                      , DuplicateRecordFields
+                      , NoFieldSelectors
+                      , LambdaCase
+                      , RecordWildCards
+                      , NamedFieldPuns
+                      , TypeApplications
+                      , ScopedTypeVariables
+    ghc-options:      -Wall
+                      -Wcompat
+                      -Werror=incomplete-patterns
+                      -Werror=incomplete-uni-patterns
+                      -Werror=missing-fields
+
+library
+    import:           common-options
+    hs-source-dirs:   src
+    autogen-modules:  Paths_agent_runtime
+    other-modules:    Agent.Runtime.Gateway.Account
+                    , Agent.Runtime.Provider.OpenAI
+                    , Agent.Runtime.Providers.Claude
+                    , Agent.Runtime.Providers.Common
+                    , Agent.Runtime.Providers.Gemini
+                    , Agent.Runtime.Providers.OpenAI
+                    , Agent.Runtime.Providers.OpenRouter
+                    , Agent.Runtime.Providers.XAI
+                    , Agent.Runtime.Compaction.Continuation
+                    , Agent.Runtime.ConversationStore.Lifecycle
+                    , Agent.Runtime.Gateway.Catalog
+                    , Agent.Runtime.Gateway.Dictation
+                    , Agent.Runtime.Gateway.Http
+                    , Agent.Runtime.Gateway.OAuth
+                    , Agent.Runtime.Gateway.OAuth.Protocol
+                    , Agent.Runtime.Gateway.Usage
+                    , Agent.Runtime.Session.Storage
+                    , Agent.Runtime.Session.Framing
+                    , Agent.Runtime.Session.TaskPlan
+                    , Agent.Runtime.Session.TempWorkspace
+                    , Agent.Runtime.Session.Transfer
+                    , Paths_agent_runtime
+    exposed-modules:  Agent.Runtime.AgentSessions.Process
+                    , Agent.Runtime.AgentSnapshot
+                    , Agent.Runtime.Browser
+                    , Agent.Runtime.Config
+                    , Agent.Runtime.Collaboration
+                    , Agent.Runtime.Compaction
+                    , Agent.Runtime.Compaction.Provider
+                    , Agent.Runtime.Compaction.Projection
+                    , Agent.Runtime.Compaction.Types
+                    , Agent.Runtime.Database
+                    , Agent.Runtime.Database.Store
+                    , Agent.Runtime.Duration
+                    , Agent.Runtime.Error
+                    , Agent.Runtime.GatewayBoundary
+                    , Agent.Runtime.GatewayBridge
+                    , Agent.Runtime.GatewayClient
+                    , Agent.Runtime.Host
+                    , Agent.Runtime.Json
+                    , Agent.Runtime.ManagedTurn
+                    , Agent.Runtime.McpConnectionCredentials
+                    , Agent.Runtime.McpConnectionRuntime
+                    , Agent.Runtime.McpOAuth
+                    , Agent.Runtime.McpOAuthStore
+                    , Agent.Runtime.Mcp.Startup
+                    , Agent.Runtime.ModelConfig
+                    , Agent.Runtime.Models
+                    , Agent.Runtime.NativeProcess
+                    , Agent.Runtime.Options
+                    , Agent.Runtime.Permission.Types
+                    , Agent.Runtime.Project
+                    , Agent.Runtime.ProviderRequest
+                    , Agent.Runtime.Providers
+                    , Agent.Runtime.Providers.Types
+                    , Agent.Runtime.Provider.OpenAI.Fresh
+                    , Agent.Runtime.Session.Backend
+                    , Agent.Runtime.Session
+                    , Agent.Runtime.Session.Activity
+                    , Agent.Runtime.Session.Codec
+                    , Agent.Runtime.Session.History
+                    , Agent.Runtime.Session.Preparation
+                    , Agent.Runtime.Session.Resources
+                    , Agent.Runtime.Session.Inbox
+                    , Agent.Runtime.Session.Observation
+                    , Agent.Runtime.Session.PullRequest
+                    , Agent.Runtime.Session.Request
+                    , Agent.Runtime.Session.StoreCodec
+                    , Agent.Runtime.Session.Threads
+                    , Agent.Runtime.Session.TitlePolicy
+                    , Agent.Runtime.Session.TurnRecord
+                    , Agent.Runtime.Session.Types
+                    , Agent.Runtime.SessionLock
+                    , Agent.Runtime.Transcription
+                    , Agent.Runtime.TurnRecord
+                    , Agent.Runtime.ConversationStore
+                    , Agent.Runtime.Request
+                    , Agent.Runtime.SessionOwner
+                    , Agent.Runtime.SessionState
+                    , Agent.Runtime.StartupPolicy
+                    , Agent.Runtime.Startup.Model
+                    , Agent.Runtime.Startup.Policy
+                    , Agent.Runtime.Startup.Gateway
+                    , Agent.Runtime.TurnEngine
+                    , Agent.Runtime.TurnExecution
+                    , Agent.Runtime.TurnState
+                    , Agent.Runtime.Tools.Dialects
+                    , Agent.Runtime.Tools.Resources
+                    , Agent.Runtime.Tools.Startup
+    build-depends:    agent-accounts >= 0.1 && < 0.2
+                    , agent-codex-dialect >= 0.1 && < 0.2
+                    , agent-grok-build-dialect >= 0.1 && < 0.2
+                    , agent-claude >= 0.1 && < 0.2
+                    , agent-connectivity >= 0.1 && < 0.2
+                    , agent-core >= 0.1 && < 0.2
+                    , agent-gemini >= 0.1 && < 0.2
+                    , agent-integration-api >= 0.1 && < 0.2
+                    , agent-json >= 0.1 && < 0.2
+                    , agent-mcp >= 0.1 && < 0.2
+                    , agent-openai >= 0.1 && < 0.2
+                    , agent-openrouter >= 0.1 && < 0.2
+                    , agent-process >= 0.1 && < 0.2
+                    , agent-responses >= 0.1 && < 0.2
+                    , agent-responses-types >= 0.1 && < 0.2
+                    , agent-server-client
+                    , agent-store >= 0.1 && < 0.2
+                    , agent-tools >= 0.1 && < 0.2
+                    , agent-xai >= 0.1 && < 0.2
+                    , aeson >= 2.0
+                    , async
+                    , base >= 4.17 && < 5
+                    , base64-bytestring
+                    , bytestring
+                    , containers
+                    , crypton
+                    , directory
+                    , entropy
+                    , filelock
+                    , filepath
+                    , hasql-pool
+                    , http-client
+                    , http-client-tls
+                    , http-types
+                    , memory
+                    , network
+                    , network-uri
+                    , process >= 1.6.26
+                    , resourcet
+                    , safe-exceptions
+                    , scientific
+                    , stm
+                    , text >= 2.0 && < 2.2
+                    , time
+                    , transformers
+                    , unix
+                    , vector
+                    , wai
+                    , warp
+
+test-suite conversation-lifecycle-test
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test/lifecycle src
+    main-is:          Spec.hs
+    other-modules:    Agent.Runtime.ConversationStore.Lifecycle
+    build-depends:    agent-core
+                    , agent-responses-types
+                    , base >= 4.17 && < 5
+                    , hspec >= 2.11 && < 2.12
+                    , text
+
+test-suite session-framing-test
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    ghc-options:      -threaded
+    hs-source-dirs:   test/framing src
+    main-is:          Spec.hs
+    other-modules:    Agent.Runtime.Session.Framing
+    build-depends:    aeson
+                    , async
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , hspec >= 2.11 && < 2.12
+                    , network
+                    , safe-exceptions
+
+test-suite session-temp-test
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test/session-temp src
+    main-is:          Spec.hs
+    other-modules:    Agent.Runtime.Session.TempWorkspace
+                    , Agent.Runtime.SessionLock
+                    , Agent.Runtime.Error
+                    , Agent.Runtime.Duration
+    build-depends:    agent-core
+                    , agent-json
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , containers
+                    , directory
+                    , filelock
+                    , filepath
+                    , hspec >= 2.11 && < 2.12
+                    , safe-exceptions
+                    , text
+                    , time
+                    , unix
+
+test-suite agent-runtime-test
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    ghc-options:      -threaded
+    other-modules:    Agent.Runtime.RequestSpec
+                    , Agent.Runtime.CollaborationSpec
+                    , Agent.Runtime.Mcp.StartupSpec
+                    , Agent.Runtime.Tools.DialectsSpec
+                    , Agent.Runtime.Tools.ResourcesSpec
+                    , Agent.Runtime.Tools.StartupSpec
+                    , Agent.Runtime.ProviderRuntimeSpec
+                    , Agent.Runtime.CompactionSpec
+                    , Agent.Runtime.CompactionSpec.Fixtures
+                    , Agent.Runtime.CompactionSpec.ManualOpenAI
+                    , Agent.Runtime.CompactionSpec.TaskPlan
+                    , Agent.Runtime.TurnStateSpec
+                    , Agent.Runtime.EnvironmentSpec
+                    , Agent.Runtime.ErrorSpec
+                    , Agent.Runtime.GatewayBridgeSpec
+                    , Agent.Runtime.GatewayBoundarySpec
+                    , Agent.Runtime.GatewayClientSpec
+                    , Agent.Runtime.ManagedTurnSpec
+                    , Agent.Runtime.ModelConfigSpec
+                    , Agent.Runtime.ModelsSpec
+                    , Agent.Runtime.NativeProcessSpec
+                    , Agent.Runtime.SessionActivitySpec
+                    , Agent.Runtime.SessionObservationSpec
+                    , Agent.Runtime.SessionInboxSpec
+                    , Agent.Runtime.SessionRequestSpec
+                    , Agent.Runtime.TurnRecordSpec
+                    , Agent.Runtime.SessionThreadsSpec
+                    , Agent.Runtime.SessionSpec
+                    , Agent.Runtime.Session.ResourcesSpec
+                    , Agent.Runtime.Session.PreparationSpec
+                    , Agent.Runtime.SessionSpec.Compatibility
+                    , Agent.Runtime.SessionSpec.Fixtures
+                    , Agent.Runtime.SessionSpec.JsonCodec
+                    , Agent.Runtime.SessionSpec.Persistence
+                    , Agent.Runtime.SessionSpec.ResponseItems
+                    , Agent.Runtime.StartupPolicySpec
+                    , Agent.Runtime.Startup.ModelSpec
+                    , Agent.Runtime.Startup.PolicySpec
+                    , Agent.Runtime.Startup.GatewaySpec
+                    , Agent.Runtime.ConversationStoreSpec
+                    , Agent.Runtime.ConversationSessionSpec
+                    , Agent.Runtime.TurnEngineSpec
+                    , Agent.Runtime.TurnExecutionSpec
+                    , Agent.Runtime.SessionOwnerSpec
+    build-depends:    agent-runtime
+                    , agent-accounts
+                    , agent-connectivity
+                    , agent-core
+                    , agent-mcp
+                    , agent-tools
+                    , agent-json
+                    , agent-openai
+                    , agent-openrouter
+                    , agent-responses
+                    , agent-responses-types
+                    , agent-store
+                    , agent-xai
+                    , aeson
+                    , async
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , containers
+                    , directory
+                    , filepath
+                    , hspec >= 2.11 && < 2.12
+                    , http-client
+                    , http-types
+                    , QuickCheck
+                    , resourcet
+                    , safe-exceptions
+                    , stm
+                    , text
+                    , time
+                    , transformers
+                    , unix
+                    , wai
+                    , warp

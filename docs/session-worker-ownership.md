@@ -2,7 +2,7 @@
 
 `Agent.Runtime.SessionOwner` owns background session-turn workers without
 depending on CLI, TUI, filesystem layout, providers, or transport messages.
-`Agent.CLI.Session.Threads` uses it in production and remains the compatibility
+`Agent.Runtime.Session.Threads` uses it in production and remains the compatibility
 adapter for text responses and external session/activity locks.
 
 The owner provides:

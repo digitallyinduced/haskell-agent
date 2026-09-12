@@ -15,7 +15,7 @@ import Agent.CLI.Notification
     ( AttentionRequest(InputRequested)
     , notifyAttention
     )
-import Agent.CLI.Error (formatApiErrorAt)
+import Agent.Runtime.Error (formatApiErrorAt)
 import Agent.CLI.Project (saveProjectAccount)
 import Agent.CLI.Recap (RecapRequest(RecapTurnSummary))
 import Agent.CLI.Provider.Switch
@@ -43,7 +43,8 @@ import Agent.CLI.Session.Interaction
 import Agent.CLI.Session.Retry (waitAndRetryPendingTurn)
 import Agent.CLI.SessionEnv (SessionEnv(..))
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
-import Agent.CLI.SteeringInputs (hasBackgroundCompletionWake)
+import Agent.CLI.SteeringInputs
+    ( hasSteeringInputWake, suppressUserSteeringWake )
 import Agent.CLI.Render
     ( RenderConfig(..)
     , putTextLn
@@ -184,6 +185,7 @@ finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \cas
             then pure RunQuit
             else continueAfterTurn continuation env
     TurnCancelled -> do
+        suppressUserSteeringWake env.sessionSteeringInputs
         case env.sessionFullscreen of
             Nothing -> putTrailingNewline env.sessionRender
             Just _ -> pure ()
@@ -278,11 +280,11 @@ continueAfterTurn continuation env
         queued <- case env.sessionFullscreen of
             Nothing -> pure False
             Just runtime -> hasQueuedFullscreenInput runtime
-        backgroundCompletion <-
-            hasBackgroundCompletionWake env.sessionSteeringInputs
+        steeringWake <-
+            hasSteeringInputWake env.sessionSteeringInputs
         failedTurn <- readIORef env.sessionLastFailedTurn
         let willWake = case env.sessionFullscreen of
-                Just _ -> backgroundCompletion && isNothing failedTurn
+                Just _ -> steeringWake && isNothing failedTurn
                 Nothing -> False
         when (not queued && not willWake) $
             notifyAttention env.sessionRender.renderStderr InputRequested

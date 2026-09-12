@@ -153,7 +153,7 @@ import Control.Applicative ((<|>))
 import Control.Concurrent.Async (race, wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forever, unless, void, when, (>=>))
-import Control.Concurrent.STM ( STM , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , writeTQueue , writeTVar )
+import Control.Concurrent.STM ( STM , TMVar , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , writeTQueue , writeTVar )
 import Agent.CLI.Notification
     ( AttentionRequest(PermissionRequested, SecretRequested)
     , notifyAttention
@@ -161,7 +161,7 @@ import Agent.CLI.Notification
 import Agent.CLI.Recap ( autoRecapAwayThreshold , autoRecapIdleThreshold , autoRecapRetryInterval )
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
-import Control.Exception.Safe (finally, mask, onException, throwIO, tryAny)
+import Control.Exception.Safe (bracket_, finally, mask, onException, throwIO, tryAny)
 import Control.Exception (AsyncException(UserInterrupt))
 import Data.Char (isControl, isSpace)
 import Data.Foldable (toList)
@@ -973,12 +973,11 @@ requestFullscreenPermissionOnce runtime workspace call = do
     reply <- newEmptyTMVarIO
     let summary = approvalToolCallPromptOnceRelative workspace call
     notifyAttention stderr PermissionRequested
-    enqueueAppEvent runtime
+    selected <- withFullscreenChoiceRequest runtime reply
         (AppAskChoice ChoicePlainDialog "Fresh approval required" summary 1
             [("Allow once", "Approve only this invocation"), ("Deny", "Do not run")]
             reply)
-    selected <- atomically (readTMVar reply)
-        `finally` enqueueAppEvent runtime (AppCloseChoice reply)
+        (atomically (readTMVar reply))
     pure $ Just case selected of
         Just 0 -> PermissionAllowOnce
         _ -> PermissionDeny
@@ -1020,9 +1019,9 @@ requestFullscreenPlanningChoice
     -> IO (Maybe Int)
 requestFullscreenPlanningChoice runtime body rows = do
     reply <- newEmptyTMVarIO
-    enqueueAppEvent runtime
+    withFullscreenChoiceRequest runtime reply
         (AppAskChoice ChoicePlanning "Planning question" body 0 rows reply)
-    atomically (readTMVar reply)
+        (atomically (readTMVar reply))
 
 requestFullscreenThemeChoice
     :: FullscreenRuntime
@@ -1031,9 +1030,9 @@ requestFullscreenThemeChoice
     -> IO (Maybe Int)
 requestFullscreenThemeChoice runtime initial rows = do
     reply <- newEmptyTMVarIO
-    enqueueAppEvent runtime
+    withFullscreenChoiceRequest runtime reply
         (AppAskChoice ChoiceTheme "Theme" "Choose a theme. Arrow keys preview it live; Enter applies it, Esc cancels." initial rows reply)
-    atomically (readTMVar reply)
+        (atomically (readTMVar reply))
 
 -- | Open a searchable choice whose right-hand value can be adjusted with
 -- left/right. Both returned indices refer to the original unfiltered row and
@@ -1068,9 +1067,22 @@ requestFullscreenChoiceWithBody
     -> IO (Maybe Int)
 requestFullscreenChoiceWithBody runtime title body initial rows = do
     reply <- newEmptyTMVarIO
-    enqueueAppEvent runtime
+    withFullscreenChoiceRequest runtime reply
         (AppAskChoice ChoiceDialog title body initial rows reply)
-    atomically (readTMVar reply)
+        (atomically (readTMVar reply))
+
+-- | Install cleanup before publishing the dialog. Closing is tied to its reply
+-- token, so a cancelled caller cannot close a replacement dialog.
+withFullscreenChoiceRequest
+    :: FullscreenRuntime
+    -> TMVar (Maybe Int)
+    -> AppEvent
+    -> IO a
+    -> IO a
+withFullscreenChoiceRequest runtime reply event =
+    bracket_
+        (enqueueAppEvent runtime event)
+        (enqueueAppEvent runtime (AppCloseChoice reply))
 
 -- | Show a choice overlay while waiting for an independent result. If the
 -- waiter finishes first, the overlay is closed without cancelling a later
@@ -1085,12 +1097,9 @@ requestFullscreenChoiceUntil
     -> IO (Either (Maybe Int) a)
 requestFullscreenChoiceUntil runtime title body initial rows wait = do
     reply <- newEmptyTMVarIO
-    enqueueAppEvent runtime
+    withFullscreenChoiceRequest runtime reply
         (AppAskChoice ChoiceDialog title body initial rows reply)
-    race
-        (atomically (readTMVar reply))
-        wait
-        `finally` enqueueAppEvent runtime (AppCloseChoice reply)
+        (race (atomically (readTMVar reply)) wait)
 
 -- | Open a read-only, scrollable Markdown document and wait for dismissal.
 requestFullscreenDocument
@@ -1100,9 +1109,9 @@ requestFullscreenDocument
     -> IO ()
 requestFullscreenDocument runtime title body = do
     reply <- newEmptyTMVarIO
-    enqueueAppEvent runtime
+    _ <- withFullscreenChoiceRequest runtime reply
         (AppAskChoice ChoiceDocument title body 0 [] reply)
-    _ <- atomically (readTMVar reply)
+        (atomically (readTMVar reply))
     pure ()
 
 -- | Open a choice overlay whose rows can be narrowed by typing. The returned
@@ -1116,9 +1125,9 @@ requestFullscreenFilterChoice
     -> IO (Maybe Int)
 requestFullscreenFilterChoice runtime title initial rows = do
     reply <- newEmptyTMVarIO
-    enqueueAppEvent runtime
+    withFullscreenChoiceRequest runtime reply
         (AppAskFilterChoice title initial rows reply)
-    atomically (readTMVar reply)
+        (atomically (readTMVar reply))
 
 requestFullscreenOnboarding
     :: FullscreenRuntime

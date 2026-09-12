@@ -13,10 +13,7 @@ copyright:          (c) 2026 digitally induced GmbH
 category:           Development
 build-type:         Simple
 extra-source-files: README.md
-                  , benchmark/ArtifactRetrieval.md
-                  , benchmark/ArtifactStorage.md
-data-files:         data/code-mode/worker.mjs
-                  , data/computer-use/protocol-v1.json
+data-files:         data/computer-use/protocol-v1.json
 
 common common-opts
     default-language: Haskell2010
@@ -45,9 +42,13 @@ library
                     , Agent.ClientIdentity
                     , Agent.Cancel
                     , Agent.Concurrent
+                    , Agent.Transcription.Receive
                     , Agent.ComputerUse.Protocol
                     , Agent.Dialect
                     , Agent.Error
+                    , Agent.Environment
+                    , Agent.ExceptionText
+                    , Agent.PrivateFileLock
                     , Agent.FileRetry
                     , Agent.InterAgentMessage
                     , Agent.Provider
@@ -70,41 +71,15 @@ library
                     , Agent.Subagents.Types
                     , Agent.Telemetry
                     , Agent.TextBuffer
+                    , Agent.Theme
                     , Agent.ToolArgs
                     , Agent.ToolDSL
                     , Agent.ToolDispatch
-                    , Agent.Tools.Background
-                    , Agent.Tools.CodeMode
-                    , Agent.Tools.CodeMode.Client
-                    , Agent.Tools.CodeMode.Host
-                    , Agent.Tools.CodeMode.Protocol
-                    , Agent.Tools.CodeMode.Tool
-                    , Agent.Tools.Dangerous
-                    , Agent.Tools.FileSystem
-                    , Agent.Tools.FileSystem.GitIgnore
-                    , Agent.Tools.FileSystem.Grep
-                    , Agent.Tools.FileSystem.ListDir
-                    , Agent.Tools.FileSystem.ReadFile
-                    , Agent.Tools.Ghci
-                    , Agent.Tools.Ghci.Classify
-                    , Agent.Tools.Ghci.Runtime
-                    , Agent.Tools.Ghci.Tool
-                    , Agent.Tools.IO
-                    , Agent.Tools.MultiAgents
-                    , Agent.Tools.OutputArtifact
                     , Agent.Tools.OutputArtifact.Memory
-                    , Agent.Tools.OutputArtifact.Retrieval
-                    , Agent.Tools.PlanMode
-                    , Agent.Tools.TaskPlan
-                    , Agent.Tools.Secret
                     , Agent.Tools.Scheduling
                     , Agent.Tools.ResourceArbiter
-                    , Agent.Tools.ShowImage
-                    , Agent.Tools.ShellReadOnly
-                    , Agent.Tools.ShellPermission
                     , Agent.Tools.Types
-                    , Agent.Tools.ViewImage
-                    , Agent.Tools.RenderChart
+                    , Agent.Transport.SSE
                     , Agent.Transport.WebSocket
     other-modules:    Agent.Image.Normalize
                     , Agent.Loop.Backend
@@ -112,20 +87,17 @@ library
                     , Agent.Loop.EventPump
                     , Agent.Loop.Input
                     , Agent.Loop.Internal
+                    , Agent.Loop.VisibleState
                     , Agent.Loop.Output
                     , Agent.Loop.TokenUsage
                     , Agent.Subagents.Registry.Internal.Core
                     , Agent.Subagents.Registry.Internal.Operations
                     , Agent.Subagents.Registry.Internal.Types
-                    , Agent.Tools.CodeMode.Host.Types
-                    , Agent.Tools.CodeMode.Host.Availability
-                    , Agent.Tools.CodeMode.Host.Worker
                     , Paths_agent_core
     autogen-modules:  Paths_agent_core
     hs-source-dirs:   src
     build-depends:    base >= 4.14 && < 5
                     , agent-json >= 0.1 && < 0.2
-                    , agent-process >= 0.1 && < 0.2
                     , agent-responses-types >= 0.1 && < 0.2
                     , aeson >= 2.0
                     , async >= 2.2.6 && < 2.3
@@ -135,15 +107,16 @@ library
                     , crypton-connection
                     , directory
                     , entropy
+                    , extra
                     , filepath
                     , JuicyPixels
-                    , process
+                    , filelock
+                    , process >= 1.6.26
                     , retry >= 0.9.3.1 && < 0.10
                     , resourcet
                     , safe-exceptions
                     , scientific
                     , stm
-                    , template-haskell
                     , text
                     , time
                     , tls
@@ -153,37 +126,6 @@ library
                     , websockets
                     , yaml
                     , zlib
-
-benchmark grep-streaming-bench
-    import:           common-opts
-    type:             exitcode-stdio-1.0
-    hs-source-dirs:   benchmark
-    main-is:          GrepStreaming.hs
-    ghc-options:      -O2 -rtsopts
-    build-depends:    agent-core
-                    , async
-                    , base >= 4.14 && < 5
-                    , bytestring
-                    , directory
-                    , filepath
-                    , process
-                    , safe-exceptions
-                    , time
-                    , unix
-
-benchmark output-artifact-bench
-    import:           common-opts
-    type:             exitcode-stdio-1.0
-    hs-source-dirs:   benchmark
-    main-is:          OutputArtifact.hs
-    ghc-options:      -O2 -rtsopts
-    build-depends:    agent-core
-                    , base >= 4.14 && < 5
-                    , bytestring
-                    , directory
-                    , filepath
-                    , safe-exceptions
-                    , text
 
 benchmark streaming-text-bench
     import:           common-opts
@@ -195,34 +137,6 @@ benchmark streaming-text-bench
                     , base >= 4.14 && < 5
                     , text
                     , text-builder >= 1.0 && < 1.1
-
-benchmark artifact-storage-bench
-    import:           common-opts
-    type:             exitcode-stdio-1.0
-    hs-source-dirs:   benchmark
-    main-is:          ArtifactStorage.hs
-    ghc-options:      -O2 -rtsopts
-    build-depends:    agent-core
-                    , base >= 4.14 && < 5
-                    , bytestring
-                    , directory
-                    , filepath
-                    , safe-exceptions
-                    , text
-
-benchmark read-file-streaming-bench
-    import:           common-opts
-    type:             exitcode-stdio-1.0
-    hs-source-dirs:   benchmark
-    main-is:          ReadFileStreaming.hs
-    ghc-options:      -O2 -rtsopts
-    build-depends:    agent-core
-                    , base >= 4.14 && < 5
-                    , bytestring
-                    , directory
-                    , filepath
-                    , text
-                    , unix
 
 benchmark tool-scheduling-bench
     import:           common-opts
@@ -286,30 +200,35 @@ benchmark concurrent-discovery-bench
     build-depends:    agent-core
                     , base >= 4.14 && < 5
 
-benchmark code-mode-pool-bench
+-- Compile the internal transition directly, without exposing it as public API.
+test-suite visible-loop-state-test
     import:           common-opts
     type:             exitcode-stdio-1.0
-    hs-source-dirs:   benchmark
-    main-is:          CodeModePool.hs
-    ghc-options:      -O2
-    build-depends:    agent-core
+    hs-source-dirs:   test-visible-state, src
+    main-is:          Spec.hs
+    other-modules:    Agent.Dialect
+                    , Agent.Error
+                    , Agent.Loop.DisplayJournal
+                    , Agent.Loop.EventPump
+                    , Agent.Loop.Output
+                    , Agent.Loop.TokenUsage
+                    , Agent.Loop.VisibleState
+                    , Agent.Provider
+                    , Agent.Telemetry
+                    , Agent.TextBuffer
+                    , Agent.ToolDispatch
+    build-depends:    agent-json
+                    , agent-responses-types
+                    , aeson
+                    , async
                     , base >= 4.14 && < 5
+                    , bytestring
+                    , containers
+                    , hspec
                     , safe-exceptions
+                    , stm
                     , text
                     , time
-
-benchmark artifact-retrieval-bench
-    import:           common-opts
-    type:             exitcode-stdio-1.0
-    hs-source-dirs:   benchmark src
-    main-is:          ArtifactRetrieval.hs
-    other-modules:    Agent.Tools.OutputArtifact.Retrieval
-    ghc-options:      -O2 -rtsopts
-    build-depends:    base >= 4.14 && < 5
-                    , aeson
-                    , bytestring
-                    , directory
-                    , text
 
 test-suite agent-core-test
     import:           common-opts
@@ -320,8 +239,6 @@ test-suite agent-core-test
                     , Agent.ClientIdentitySpec
                     , Agent.CancelSpec
                     , Agent.ComputerUse.ProtocolSpec
-                    , Agent.Tools.CodeMode.HostSpec
-                    , Agent.Tools.CodeMode.ProtocolSpec
                     , Agent.ConcurrentSpec
                     , Agent.DialectSpec
                     , Agent.ErrorSpec
@@ -341,27 +258,12 @@ test-suite agent-core-test
                     , Agent.SubagentsSpec
                     , Agent.Subagents.TaskPathSpec
                     , Agent.TextBufferSpec
+                    , Agent.Transcription.ReceiveSpec
                     , Agent.TelemetrySpec
                     , Agent.ToolArgsSpec
-                    , Agent.ToolDispatchSpec
-                    , Agent.Tools.DangerousSpec
-                    , Agent.Tools.FileSystem.GrepSpec
-                    , Agent.Tools.FileSystem.ListDirSpec
-                    , Agent.Tools.FileSystem.ReadFileSpec
-                    , Agent.Tools.GhciSpec
-                    , Agent.Tools.IOSpec
-                    , Agent.Tools.MultiAgentsSpec
-                    , Agent.Tools.OutputArtifactSpec
-                    , Agent.Tools.OutputArtifactMemorySpec
-                    , Agent.Tools.OutputArtifact.RetrievalSpec
-                    , Agent.Tools.PlanModeSpec
-                    , Agent.Tools.TaskPlanSpec
-                    , Agent.Tools.SecretSpec
-                    , Agent.Tools.ShowImageSpec
-                    , Agent.Tools.ViewImageSpec
-                    , Agent.Tools.RenderChartSpec
                     , Agent.Tools.ResourceArbiterSpec
                     , Agent.ToolDSLSpec
+                    , Agent.Transport.SSESpec
                     , Agent.Transport.WebSocketSpec
                     , Paths_agent_core
     autogen-modules:  Paths_agent_core

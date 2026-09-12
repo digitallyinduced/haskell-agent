@@ -40,12 +40,12 @@ import qualified Agent.CLI.AuthSpec as AuthSpec
 import qualified Agent.CLI.BtwSpec as BtwSpec
 import qualified Agent.CLI.CancelWatchSpec as CancelWatchSpec
 import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
+import qualified Agent.CLI.ClipboardTextSpec as ClipboardTextSpec
 import qualified Agent.CLI.ClaudeGatewayProxySpec as ClaudeGatewayProxySpec
 import qualified Agent.CLI.ClaudeSpec as ClaudeSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
 import qualified Agent.CLI.ComputerUseSpec as ComputerUseSpec
 import qualified Agent.CLI.ConfigSpec as ConfigSpec
-import qualified Agent.CLI.CompactionSpec as CompactionSpec
 import qualified Agent.CLI.ContextSpec as ContextSpec
 import qualified Agent.CLI.ConnectivitySpec as ConnectivitySpec
 import qualified Agent.CLI.DialectsSpec as DialectsSpec
@@ -59,6 +59,7 @@ import qualified Agent.CLI.GitDiffSpec as GitDiffSpec
 import qualified Agent.CLI.ImagePreviewSpec as ImagePreviewSpec
 import qualified Agent.CLI.ChartImageSpec as ChartImageSpec
 import qualified Agent.CLI.InputSpec as InputSpec
+import qualified Agent.CLI.InputHistorySpec as InputHistorySpec
 import qualified Agent.CLI.InterruptSpec as InterruptSpec
 import qualified Agent.CLI.VoiceAudioSpec as VoiceAudioSpec
 import qualified Agent.CLI.LoginSpec as LoginSpec
@@ -87,7 +88,6 @@ import qualified Agent.CLI.RecapSpec as RecapSpec
 import qualified Agent.CLI.ProviderFallbackSpec as ProviderFallbackSpec
 import qualified Agent.CLI.ProviderAvailabilitySpec as ProviderAvailabilitySpec
 import qualified Agent.CLI.ProviderTransitionSpec as ProviderTransitionSpec
-import qualified Agent.CLI.ProviderRuntimeSpec as ProviderRuntimeSpec
 import qualified Agent.CLI.RequestSpec as RequestSpec
 import qualified Agent.CLI.RenderSpec as RenderSpec
 import qualified Agent.CLI.ReplStatusSpec as ReplStatusSpec
@@ -96,7 +96,6 @@ import qualified Agent.CLI.ReviewSpec as ReviewSpec
 import qualified Agent.CLI.SecretSpec as SecretSpec
 import qualified Agent.CLI.SessionHistorySpec as SessionHistorySpec
 import qualified Agent.CLI.SessionStateSpec as SessionStateSpec
-import qualified Agent.CLI.SessionResourcesSpec as SessionResourcesSpec
 import qualified Agent.CLI.SessionTitleSpec as SessionTitleSpec
 import qualified Agent.CLI.SkillsSpec as SkillsSpec
 import qualified Agent.CLI.SubagentStoreSpec as SubagentStoreSpec
@@ -111,6 +110,7 @@ import qualified Agent.CLI.ToolsSpec as ToolsSpec
 import qualified Agent.CLI.TUIAppSpec as TUIAppSpec
 import qualified Agent.CLI.TUIBridgeSpec as TUIBridgeSpec
 import qualified Agent.CLI.TUIComposerSpec as TUIComposerSpec
+import qualified Agent.CLI.TUIComposerUndoSpec as TUIComposerUndoSpec
 import qualified Agent.CLI.TUIImagePreviewSpec as TUIImagePreviewSpec
 import qualified Agent.CLI.TUIHistorySpec as TUIHistorySpec
 import qualified Agent.CLI.TUIPropertySpec as TUIPropertySpec
@@ -183,12 +183,12 @@ specs = do
     BtwSpec.spec
     CancelWatchSpec.spec
     ClipboardSpec.spec
+    ClipboardTextSpec.spec
     ClaudeGatewayProxySpec.spec
     ClaudeSpec.spec
     CommandSpec.spec
     ComputerUseSpec.spec
     ConfigSpec.spec
-    CompactionSpec.spec
     ContextSpec.spec
     ConnectivitySpec.spec
     DialectsSpec.spec
@@ -202,6 +202,7 @@ specs = do
     ImagePreviewSpec.spec
     ChartImageSpec.spec
     InputSpec.spec
+    InputHistorySpec.spec
     InterruptSpec.spec
     VoiceAudioSpec.spec
     LoginSpec.spec
@@ -230,7 +231,6 @@ specs = do
     ProviderFallbackSpec.spec
     ProviderAvailabilitySpec.spec
     ProviderTransitionSpec.spec
-    ProviderRuntimeSpec.spec
     RequestSpec.spec
     RenderSpec.spec
     ReplStatusSpec.spec
@@ -246,7 +246,6 @@ specs = do
     TerminalSpec.spec
     TextLayoutSpec.spec
     SessionStateSpec.spec
-    SessionResourcesSpec.spec
     SessionTitleSpec.spec
     SkillsSpec.spec
     SubagentStoreSpec.spec
@@ -254,6 +253,7 @@ specs = do
     TUIAppSpec.spec
     TUIBridgeSpec.spec
     TUIComposerSpec.spec
+    TUIComposerUndoSpec.spec
     TUIImagePreviewSpec.spec
     TUIHistorySpec.spec
     TUIPropertySpec.spec

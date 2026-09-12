@@ -4,6 +4,8 @@ import Agent.CLI.InputBudget
     ( logicalTextBytes
     , logicalTurnInputBytes
     )
+import qualified Agent.CLI.PendingInputs.Model as Model
+import Control.Concurrent.Async (withAsync, cancel, waitCatch)
 import Agent.CLI.PendingInputs
     ( PendingNoticeKind(..)
     , clearPendingInputs
@@ -15,19 +17,24 @@ import Agent.CLI.PendingInputs
     , withPendingInputs
     )
 import Agent.CLI.SteeringInputs
-    ( awaitBackgroundCompletion
+    ( awaitSteeringInput
+    , clearSteeringInputs
     , commitSteeringInputs
     , dismissBackgroundCompletion
     , enqueueBackgroundCompletion
     , enqueueSteeringInputs
     , hasBackgroundCompletions
+    , hasSteeringInputWake
     , newSteeringInputs
     , readSteeringInputs
+    , readSteeringTurn
     , steeringInputCountLimit
+    , suppressUserSteeringWake
     )
 import Agent.Error (ApiError(..))
 import Agent.Loop
     ( Backend(..)
+    , BackendCallbacks(..)
     , BackendResult(..)
     , FileAttachment(..)
     , ImageAttachment(..)
@@ -36,6 +43,7 @@ import Agent.Loop
     , emptyBackendSnapshot
     , emptyTurnOutput
     , userMessageWithAttachments
+    , backendWithCallbacks
     )
 import Agent.ToolDispatch
     ( ToolCallKind(..)
@@ -59,6 +67,97 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+  describe "pending input pure lifecycle" do
+    it "retains the count budget through drain and retry, releasing it on commit" do
+        let full = foldl (\s _ -> fst (Model.enqueueInput (UserMessage "x") s))
+                Model.emptyPendingState [1 .. pendingInputCountLimit]
+            (inflight, batch) = Model.drain full
+            retried = fst (Model.requeue batch inflight)
+            (again, retryBatch) = Model.drain retried
+            committed = fst (Model.commit retryBatch again)
+        Model.retainedCount inflight `shouldBe` pendingInputCountLimit
+        Model.retainedBytes inflight `shouldBe` pendingInputCountLimit
+        snd (Model.enqueueInput (UserMessage "") inflight) `shouldSatisfy` isLeft
+        Model.batchInputs retryBatch `shouldBe` replicate pendingInputCountLimit (UserMessage "x")
+        Model.retainedCount committed `shouldBe` 0
+        Model.retainedBytes committed `shouldBe` 0
+        snd (Model.enqueueInput (UserMessage "new") committed) `shouldBe` Right ()
+
+    it "counts UTF-8 bytes in drained and newly queued inputs" do
+        let large = UserMessage (Text.replicate (pendingInputByteLimit `div` 2 - 1) "é")
+            (initial, accepted) = Model.enqueueInput large Model.emptyPendingState
+            (inflight, batch) = Model.drain initial
+            (full, acceptedLast) = Model.enqueueInput (UserMessage "é") inflight
+            committed = fst (Model.commit batch full)
+        accepted `shouldBe` Right ()
+        acceptedLast `shouldBe` Right ()
+        Model.retainedBytes full `shouldBe` pendingInputByteLimit
+        snd (Model.enqueueInput (UserMessage "x") full) `shouldSatisfy` isLeft
+        Model.retainedBytes committed `shouldBe` 2
+        Model.retainedCount committed `shouldBe` 1
+        queuedInputs committed `shouldBe` [UserMessage "é"]
+
+    it "invalidates in-flight batches on clear without releasing new-epoch budget" do
+        let old = fst (Model.enqueueInput (UserMessage "old") Model.emptyPendingState)
+            (inflight, batch) = Model.drain old
+            cleared = fst (Model.clearPendingState inflight)
+            fresh = fst (Model.enqueueInput (UserMessage "fresh") cleared)
+            staleFailure = fst (Model.requeue batch fresh)
+            staleSuccess = fst (Model.commit batch fresh)
+        map queuedInputs [cleared, staleFailure, staleSuccess]
+            `shouldBe` [[], [UserMessage "fresh"], [UserMessage "fresh"]]
+        map Model.retainedCount [cleared, staleFailure, staleSuccess]
+            `shouldBe` [0, 1, 1]
+        map Model.retainedBytes [cleared, staleFailure, staleSuccess]
+            `shouldBe` [0, 5, 5]
+
+    it "requeues ordered messages but only the newest in-flight MCP snapshot" do
+        let old = fst (Model.enqueueInput (UserMessage "old") Model.emptyPendingState)
+            notice = fst (Model.enqueueNotice PendingMcpNotice (UserMessage "connecting") old)
+            completion = fst (Model.enqueueNotice PendingSubagentNotice (UserMessage "done") notice)
+            (inflight, batch) = Model.drain completion
+            newer = fst (Model.enqueueNotice PendingMcpNotice (UserMessage "settled") inflight)
+            latest = fst (Model.enqueueNotice PendingMcpNotice (UserMessage "latest") newer)
+            current = fst (Model.enqueueInput (UserMessage "new") latest)
+            retried = fst (Model.requeue batch current)
+            expected = map UserMessage ["old", "done", "latest", "new"]
+            (drained, retryBatch) = Model.drain retried
+            committed = fst (Model.commit retryBatch drained)
+        queuedInputs retried `shouldBe` expected
+        Model.retainedCount retried `shouldBe` 4
+        Model.retainedBytes retried `shouldBe` sum (map logicalTurnInputBytes expected)
+        queuedInputs committed `shouldBe` []
+        Model.retainedBytes committed `shouldBe` 0
+
+    it "preserves the old notice on rejected replacement and resets omission reporting at drain and clear" do
+        let old = fst (Model.enqueueNotice PendingMcpNotice (UserMessage "old") Model.emptyPendingState)
+            oversized = UserMessage (Text.replicate (pendingInputByteLimit + 1) "x")
+            omit = Model.enqueueNotice PendingMcpNotice oversized
+            (reported, first) = omit old
+            (suppressed, second) = omit reported
+            (inflight, batch) = Model.drain suppressed
+            (reportedAgain, afterDrain) = omit inflight
+            retried = fst (Model.requeue batch reportedAgain)
+            (_, afterRetry) = omit retried
+            (_, afterClear) = omit (fst (Model.clearPendingState retried))
+        first `shouldBe` Left "Root input queue is full; one or more background notices were omitted."
+        second `shouldBe` Right ()
+        afterDrain `shouldBe` first
+        afterRetry `shouldBe` Right ()
+        afterClear `shouldBe` first
+        queuedInputs suppressed `shouldBe` [UserMessage "old"]
+        queuedInputs retried `shouldBe` [UserMessage "old"]
+        Model.retainedBytes retried `shouldBe` 3
+
+    it "commits only the drained batch, leaving arrivals for the next submission" do
+        let old = fst (Model.enqueueNotice PendingMcpNotice (UserMessage "old") Model.emptyPendingState)
+            (inflight, batch) = Model.drain old
+            current = fst (Model.enqueueNotice PendingMcpNotice (UserMessage "new") inflight)
+            committed = fst (Model.commit batch current)
+        queuedInputs committed `shouldBe` [UserMessage "new"]
+        Model.retainedCount committed `shouldBe` 1
+        Model.retainedBytes committed `shouldBe` 3
+
   describe "logicalTurnInputBytes" do
     it "counts ordered attachments and rich tool-result images" do
         let attached =
@@ -94,6 +193,71 @@ spec = do
                 + logicalTextBytes "high"
 
   describe "withPendingInputs" do
+    it "preserves recovery callbacks and requeues when a callback throws" do
+        pending <- newPendingInputs
+        enqueuePendingInput pending (UserMessage "old") `shouldReturn` Right ()
+        seen <- newIORef []
+        checkpoints <- newIORef []
+        let backend = withPendingInputs pending $ backendWithCallbacks
+                \state _ inputs callbacks -> do
+                    modifyIORef' seen (<> [inputs])
+                    callbacks.onRecoveryCheckpoint "checkpoint"
+                    pure $ Right BackendResult
+                        { backendOutput = emptyTurnOutput "ok" [] Nothing
+                        , backendState = state
+                        }
+            callbacks = BackendCallbacks
+                { onLoopEvent = const (pure ())
+                , onAsyncToolCall = const (pure ())
+                , onRecoveryCheckpoint = \value -> do
+                    modifyIORef' checkpoints (<> [value])
+                    enqueuePendingInput pending (UserMessage "arrival") `shouldReturn` Right ()
+                    ioError (userError "callback failed")
+                , onCompletedResponseItem = \_ _ -> pure ()
+                , onCancellationMode = const (pure ())
+                }
+        result <- tryAny $ backend.submitTurnWithCallbacks emptyBackendSnapshot Nothing
+            [UserMessage "parent"] callbacks
+        result `shouldSatisfy` isLeft
+        readIORef checkpoints `shouldReturn` ["checkpoint"]
+        _ <- backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
+        _ <- backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
+        readIORef seen `shouldReturn`
+            [ [UserMessage "old", UserMessage "parent"]
+            , [UserMessage "old", UserMessage "arrival"]
+            , []
+            ]
+
+    it "requeues after asynchronous cancellation and releases the lifecycle lock" do
+        pending <- newPendingInputs
+        enqueuePendingInput pending (UserMessage "old") `shouldReturn` Right ()
+        entered <- newEmptyMVar
+        blocked <- newEmptyMVar
+        let backend = withPendingInputs pending $ Backend
+                \_ _ _ _ -> putMVar entered () >> takeMVar blocked
+        timeout 2000000 (withAsync
+            (backend.submitTurn emptyBackendSnapshot Nothing [] (const (pure ())))
+            \worker -> do
+                takeMVar entered
+                enqueuePendingInput pending (UserMessage "new") `shouldReturn` Right ()
+                cancel worker
+                waitCatch worker >>= (\result -> result `shouldSatisfy` isLeft))
+            `shouldReturn` Just ()
+        seen <- newIORef []
+        let retry = withPendingInputs pending $ Backend
+                \state _ inputs _ -> do
+                    writeIORef seen inputs
+                    pure $ Right BackendResult
+                        { backendOutput = emptyTurnOutput "ok" [] Nothing
+                        , backendState = state
+                        }
+        timeout 2000000
+            (retry.submitTurn emptyBackendSnapshot Nothing [] (const (pure ())) >> pure ())
+            `shouldReturn` Just ()
+        readIORef seen `shouldReturn` [UserMessage "old", UserMessage "new"]
+        _ <- retry.submitTurn emptyBackendSnapshot Nothing [] (const (pure ()))
+        readIORef seen `shouldReturn` []
+
     it "commits queued inputs after a successful submission" do
         pending <- newPendingInputs
         enqueuePendingInput pending (UserMessage "child result")
@@ -361,6 +525,41 @@ spec = do
             all (`notElem` [UserMessage "omitted one", UserMessage "omitted two"])
 
   describe "SteeringInputs" do
+    it "snapshots idle guidance as turn text without consuming or duplicating inputs" do
+        steering <- newSteeringInputs
+        let guidance = [UserMessage "make a pr", UserMessage "include tests"]
+        enqueueSteeringInputs steering guidance `shouldReturn` Right ()
+        atomically (awaitSteeringInput steering)
+        readSteeringTurn steering `shouldReturn`
+            ("make a pr\n\ninclude tests", guidance)
+        -- A failed attempt can read the same inputs again. Only the normal
+        -- provider acknowledgement removes them.
+        readSteeringTurn steering `shouldReturn`
+            ("make a pr\n\ninclude tests", guidance)
+        readSteeringInputs steering `shouldReturn` guidance
+        commitSteeringInputs steering (length guidance)
+        readSteeringTurn steering `shouldReturn` ("", [])
+
+    it "preserves attachment guidance text but excludes background notices from user text" do
+        steering <- newSteeringInputs
+        let attached = userMessageWithAttachments "inspect this"
+                [ImageAttachmentItem (ImageAttachment "image/png" "abc")]
+            background = UserMessage "background tool completed"
+        enqueueBackgroundCompletion steering "tool" background
+            `shouldReturn` Right True
+        readSteeringTurn steering `shouldReturn` ("", [background])
+        enqueueSteeringInputs steering [attached] `shouldReturn` Right ()
+        readSteeringTurn steering `shouldReturn`
+            ("inspect this", [background, attached])
+
+    it "does not wake for an empty enqueue" do
+        steering <- newSteeringInputs
+        enqueueSteeringInputs steering [] `shouldReturn` Right ()
+        readSteeringInputs steering `shouldReturn` []
+        hasSteeringInputWake steering `shouldReturn` False
+        timeout 10000 (atomically (awaitSteeringInput steering))
+            `shouldReturn` Nothing
+
     it "bounds, commits, and admits steering inputs in order" do
         steering <- newSteeringInputs
         let queued =
@@ -379,12 +578,81 @@ spec = do
         readSteeringInputs steering `shouldReturn`
             drop 2 queued <> [UserMessage "new-1", UserMessage "new-2"]
 
-    it "wakes only for keyed background completions and dismisses them" do
+    it "wakes for ordinary input, retains it until commit, and does not hot-loop" do
+        steering <- newSteeringInputs
+        enqueueSteeringInputs steering [UserMessage "make a pr"]
+            `shouldReturn` Right ()
+        hasSteeringInputWake steering `shouldReturn` True
+        timeout 100000 (atomically (awaitSteeringInput steering))
+            `shouldReturn` Just ()
+        readSteeringInputs steering `shouldReturn` [UserMessage "make a pr"]
+        hasSteeringInputWake steering `shouldReturn` False
+        timeout 10000 (atomically (awaitSteeringInput steering))
+            `shouldReturn` Nothing
+        commitSteeringInputs steering 1
+        readSteeringInputs steering `shouldReturn` []
+
+    it "preserves the wake for guidance arriving after the active turn snapshot" do
+        steering <- newSteeringInputs
+        enqueueSteeringInputs steering [UserMessage "first"]
+            `shouldReturn` Right ()
+        snapshot <- readSteeringInputs steering
+        enqueueSteeringInputs steering [UserMessage "late"]
+            `shouldReturn` Right ()
+        commitSteeringInputs steering (length snapshot)
+        timeout 100000 (atomically (awaitSteeringInput steering))
+            `shouldReturn` Just ()
+        readSteeringInputs steering `shouldReturn` [UserMessage "late"]
+
+    it "does not wake for inputs already committed by the active turn" do
+        steering <- newSteeringInputs
+        enqueueSteeringInputs steering [UserMessage "consumed"]
+            `shouldReturn` Right ()
+        commitSteeringInputs steering 1
+        hasSteeringInputWake steering `shouldReturn` False
+        timeout 10000 (atomically (awaitSteeringInput steering))
+            `shouldReturn` Nothing
+
+    it "wakes again for new guidance after a previous wake was consumed" do
+        steering <- newSteeringInputs
+        enqueueSteeringInputs steering [UserMessage "first"]
+            `shouldReturn` Right ()
+        atomically (awaitSteeringInput steering)
+        enqueueSteeringInputs steering [UserMessage "second"]
+            `shouldReturn` Right ()
+        timeout 100000 (atomically (awaitSteeringInput steering))
+            `shouldReturn` Just ()
+        readSteeringInputs steering `shouldReturn`
+            [UserMessage "first", UserMessage "second"]
+        clearSteeringInputs steering
+        readSteeringInputs steering `shouldReturn` []
+        hasSteeringInputWake steering `shouldReturn` False
+
+    it "suppresses cancelled guidance wakes without dropping input or future wakes" do
+        steering <- newSteeringInputs
+        enqueueSteeringInputs steering [UserMessage "cancelled guidance"]
+            `shouldReturn` Right ()
+        suppressUserSteeringWake steering
+        hasSteeringInputWake steering `shouldReturn` False
+        readSteeringInputs steering `shouldReturn`
+            [UserMessage "cancelled guidance"]
+        enqueueSteeringInputs steering [UserMessage "new guidance"]
+            `shouldReturn` Right ()
+        hasSteeringInputWake steering `shouldReturn` True
+
+    it "preserves background wakes when suppressing cancelled guidance" do
+        steering <- newSteeringInputs
+        enqueueBackgroundCompletion steering "task-1" (UserMessage "completed")
+            `shouldReturn` Right True
+        suppressUserSteeringWake steering
+        hasSteeringInputWake steering `shouldReturn` True
+
+    it "deduplicates keyed background completions and dismisses them" do
         steering <- newSteeringInputs
         enqueueSteeringInputs steering [UserMessage "ordinary"]
             `shouldReturn` Right ()
-        timeout 10000 (atomically (awaitBackgroundCompletion steering))
-            `shouldReturn` Nothing
+        timeout 100000 (atomically (awaitSteeringInput steering))
+            `shouldReturn` Just ()
 
         enqueueBackgroundCompletion
             steering
@@ -397,9 +665,9 @@ spec = do
             (UserMessage "duplicate")
             `shouldReturn` Right False
         hasBackgroundCompletions steering `shouldReturn` True
-        timeout 100000 (atomically (awaitBackgroundCompletion steering))
+        timeout 100000 (atomically (awaitSteeringInput steering))
             `shouldReturn` Just ()
-        timeout 10000 (atomically (awaitBackgroundCompletion steering))
+        timeout 10000 (atomically (awaitSteeringInput steering))
             `shouldReturn` Nothing
         readSteeringInputs steering `shouldReturn`
             [UserMessage "ordinary", UserMessage "completed"]
@@ -407,3 +675,6 @@ spec = do
         dismissBackgroundCompletion steering "task-1"
         hasBackgroundCompletions steering `shouldReturn` False
         readSteeringInputs steering `shouldReturn` [UserMessage "ordinary"]
+
+queuedInputs :: Model.PendingState -> [TurnInput]
+queuedInputs = Model.batchInputs . snd . Model.drain

@@ -483,6 +483,7 @@ handleAppEvent = \case
         handleCloseChoiceEvent reply
     AppAskDynamicAdjustableFilterChoice title body initial rows reply -> do
         state <- get
+        liftIO (dismissPendingChoice state)
         liftIO (state.appRuntime.runtimeNativeProgress False)
         modify' \current -> current
             { appChoice = Just $ dynamicChoiceDialog reply $
@@ -953,11 +954,12 @@ handleAskChoiceEvent
     -> EventM Name AppState ()
 handleAskChoiceEvent presentation title body initial rows reply = do
     state <- get
+    liftIO (dismissPendingChoice state)
     liftIO (state.appRuntime.runtimeNativeProgress False)
     modify' \current ->
         current
             { appChoice = Just $ PendingDialog
-                (atomically . putTMVar reply . fmap (.choiceSelectionIndex))
+                (void . atomically . tryPutTMVar reply . fmap (.choiceSelectionIndex))
                 ChoiceOverlay
                 { choicePresentation = presentation
                 , choiceTitle = title
@@ -987,11 +989,12 @@ handleAskFilterChoiceEvent
     -> EventM Name AppState ()
 handleAskFilterChoiceEvent title initial rows reply = do
     state <- get
+    liftIO (dismissPendingChoice state)
     liftIO (state.appRuntime.runtimeNativeProgress False)
     modify' \current ->
         current
             { appChoice = Just $ PendingDialog
-                (atomically . putTMVar reply . fmap (.choiceSelectionIndex))
+                (void . atomically . tryPutTMVar reply . fmap (.choiceSelectionIndex))
                 ChoiceOverlay
                 { choicePresentation = ChoiceDialog
                 , choiceTitle = title
@@ -1005,7 +1008,7 @@ handleAskFilterChoiceEvent title initial rows reply = do
                 , choiceAdjustmentIndices = []
                 , choiceCloseOnTurnEnd = False
                 , choiceDynamic = Nothing
-                , choiceReply = Nothing
+                , choiceReply = Just (ChoiceReply reply)
                 }
             , appAgentHover = Nothing
             }
@@ -1019,6 +1022,7 @@ handleAskAdjustableFilterChoiceEvent
     -> EventM Name AppState ()
 handleAskAdjustableFilterChoiceEvent title initial adjustableRows reply = do
     state <- get
+    liftIO (dismissPendingChoice state)
     liftIO (state.appRuntime.runtimeNativeProgress False)
     let rows =
             [ (label, detail)
@@ -1039,7 +1043,7 @@ handleAskAdjustableFilterChoiceEvent title initial adjustableRows reply = do
     modify' \current ->
         current
             { appChoice = Just $ PendingDialog
-                (atomically . putTMVar reply . replySelection)
+                (void . atomically . tryPutTMVar reply . replySelection)
                 ChoiceOverlay
                 { choicePresentation = ChoiceDialog
                 , choiceTitle = title
@@ -1065,7 +1069,7 @@ dynamicChoiceDialog
     -> PendingDialog (Maybe ChoiceSelection -> IO ()) ChoiceOverlay
 dynamicChoiceDialog reply choice =
     PendingDialog
-        (\selected -> atomically $ putTMVar reply do
+        (\selected -> void $ atomically $ tryPutTMVar reply do
             selection <- selected
             dynamic <- choice.choiceDynamic
             key <- lookup selection.choiceSelectionIndex (zip [0 ..] dynamic.dynamicChoiceKeys)
@@ -1216,6 +1220,8 @@ handleNormalMouseDown
     -> EventM Name AppState ()
 handleNormalMouseDown name button =
     case (name, button) of
+        (ConversationLatest, V.BLeft) ->
+            resumeConversationFollow
         (ComposerModel, V.BLeft) ->
             Composer.handleControlMouseDown ComposerModel
         (ComposerEffort, V.BLeft) ->

@@ -30,6 +30,7 @@ import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IntMap
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Foldable (asum)
 import Data.Maybe (fromMaybe, isJust, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -293,14 +294,13 @@ resolveToolValue
     -> Maybe value
 resolveToolValue outputIndex identities byOutputIndex byIdentity fallback =
     (outputIndex >>= (`IntMap.lookup` byOutputIndex))
-        <|> firstJust
+        <|> asum
             [ Map.lookup identity byIdentity
             | Just identity <- identities
             ]
         <|> if hasLocator then Nothing else fallback
   where
     hasLocator = isJust outputIndex || any isJust identities
-    firstJust = foldr (<|>) Nothing
 
 -- Keep live previews useful without retaining unbounded repeated strict Text
 -- values for runaway calls. Shell previews only need one command line, while

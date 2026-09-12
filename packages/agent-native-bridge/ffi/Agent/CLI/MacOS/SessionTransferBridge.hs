@@ -6,9 +6,9 @@ module Agent.CLI.MacOS.SessionTransferBridge (withNativeSessionStore) where
 
 import Agent.CLI.MacOS.Marshalling
 import Agent.CLI.MacOS.NativeGatewayBoundary
-import Agent.CLI.GatewayClient (withGatewayCredentialLease)
-import Agent.CLI.Models (validateResumedGatewayBoundary)
-import Agent.CLI.Session
+import Agent.Runtime.GatewayClient (withGatewayCredentialLease)
+import Agent.Runtime.Models (validateResumedGatewayBoundary)
+import Agent.Runtime.Session
     ( SessionMeta(..), SessionTurn(..), SessionTurnPage(..)
     , SessionTransfer(..), SessionTransferEnvelope(..), TranscriptEffect(..)
     , forkSessionAtTurn, importSessionTransferRemapped

@@ -1,9 +1,9 @@
 module Agent.CLI.SubagentStoreSpec (spec) where
 
-import Agent.CLI.Compaction (estimatedOccupancy)
-import Agent.CLI.ModelConfig (organizationGatewayConnectionId)
+import Agent.Runtime.Compaction.Provider (estimatedOccupancy)
+import Agent.Runtime.ModelConfig (organizationGatewayConnectionId)
 import Agent.CLI.SubagentStore
-import Agent.CLI.Session (LegacySubagentTarget(..))
+import Agent.Runtime.Session (LegacySubagentTarget(..))
 import Agent.Dialect (DialectId(..))
 import Agent.Loop
     ( BackendSnapshot(..)
@@ -27,7 +27,7 @@ import Agent.CLI.Subagents.Runtime
     , usesOpenAiChildTransport
     , validatePersistedSubagentTarget
     )
-import Agent.CLI.Request (requestParams)
+import Agent.Runtime.ProviderRequest (requestParams)
 import Agent.GrokBuild.Dialect.Task (lookupAgentReasoningEffort)
 import Agent.Responses.Types
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)

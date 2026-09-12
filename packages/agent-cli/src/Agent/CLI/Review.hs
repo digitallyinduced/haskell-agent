@@ -14,6 +14,8 @@ import Agent.CLI.GitDiff
     , runSafeGit
     )
 import Agent.TUI.TextWidth (displayTerminalText)
+import Control.Monad (unless)
+import Control.Monad.Trans.Except (ExceptT(..), runExceptT, throwE)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -84,32 +86,24 @@ literal value =
 -- out branch is omitted because comparing it to HEAD cannot produce a useful
 -- branch review.
 listReviewBranches :: OsPath -> IO (Either Text [ReviewBranch])
-listReviewBranches cwd = do
-    repository <- requireWorkTree cwd
-    case repository of
-        Left err -> pure (Left err)
-        Right () ->
-            runSafeGit
-                cwd
-                []
-                [ "--no-pager"
-                , "for-each-ref"
-                , "--format=%(refname:short)%00%(HEAD)"
-                , "refs/heads/"
-                ] >>= \case
-                    Left err -> pure (Left err)
-                    Right output
-                        | output.gitCommandExitCode == ExitSuccess ->
-                            pure $
-                                Right
-                                    [ ReviewBranch branch
-                                    | (branch, current) <-
-                                        mapMaybe parseBranch
-                                            (Text.lines (gitOutputText output))
-                                    , not current
-                                    ]
-                        | otherwise ->
-                            pure (Left (commandFailure "git for-each-ref" output))
+listReviewBranches cwd = runExceptT do
+    requireWorkTree cwd
+    output <- ExceptT $ runSafeGit
+        cwd
+        []
+        [ "--no-pager"
+        , "for-each-ref"
+        , "--format=%(refname:short)%00%(HEAD)"
+        , "refs/heads/"
+        ]
+    unless (output.gitCommandExitCode == ExitSuccess) $
+        throwE (commandFailure "git for-each-ref" output)
+    pure
+        [ ReviewBranch branch
+        | (branch, current) <-
+            mapMaybe parseBranch (Text.lines (gitOutputText output))
+        , not current
+        ]
 
 parseBranch :: Text -> Maybe (Text, Bool)
 parseBranch line =
@@ -129,22 +123,17 @@ listReviewCommits
     :: OsPath
     -> Int
     -> IO (Either Text [ReviewCommit])
-listReviewCommits cwd requestedLimit = do
-    repository <- requireWorkTree cwd
-    case repository of
-        Left err -> pure (Left err)
-        Right () ->
-            runSafeGit cwd [] ["rev-parse", "--verify", "HEAD"] >>= \case
-                Left err -> pure (Left err)
-                Right headOutput
-                    | headOutput.gitCommandExitCode /= ExitSuccess ->
-                        pure (Right [])
-                    | otherwise ->
-                        loadCommits cwd (max 1 (min 200 requestedLimit))
+listReviewCommits cwd requestedLimit = runExceptT do
+    requireWorkTree cwd
+    headOutput <- ExceptT $
+        runSafeGit cwd [] ["rev-parse", "--verify", "HEAD"]
+    if headOutput.gitCommandExitCode /= ExitSuccess
+        then pure []
+        else loadCommits cwd (max 1 (min 200 requestedLimit))
 
-loadCommits :: OsPath -> Int -> IO (Either Text [ReviewCommit])
-loadCommits cwd limit =
-    runSafeGit
+loadCommits :: OsPath -> Int -> ExceptT Text IO [ReviewCommit]
+loadCommits cwd limit = do
+    output <- ExceptT $ runSafeGit
         cwd
         []
         [ "--no-pager"
@@ -152,16 +141,10 @@ loadCommits cwd limit =
         , "--max-count=" <> show limit
         , "--no-decorate"
         , "--pretty=format:%H%x00%h%x00%s%x1e"
-        ] >>= \case
-            Left err -> pure (Left err)
-            Right output
-                | output.gitCommandExitCode == ExitSuccess ->
-                    pure $
-                        Right
-                            (mapMaybe parseCommit
-                                (Text.splitOn "\x1e" (gitOutputText output)))
-                | otherwise ->
-                    pure (Left (commandFailure "git log" output))
+        ]
+    unless (output.gitCommandExitCode == ExitSuccess) $
+        throwE (commandFailure "git log" output)
+    pure (mapMaybe parseCommit (Text.splitOn "\x1e" (gitOutputText output)))
 
 parseCommit :: Text -> Maybe ReviewCommit
 parseCommit raw =
@@ -177,22 +160,20 @@ parseCommit raw =
                     }
         _ -> Nothing
 
-requireWorkTree :: OsPath -> IO (Either Text ())
-requireWorkTree cwd =
-    runSafeGit cwd [] ["rev-parse", "--is-inside-work-tree"] >>= \case
-        Left err -> pure (Left err)
-        Right output
-            | output.gitCommandExitCode == ExitSuccess
-            , Text.strip (gitOutputText output) == "true" ->
-                pure (Right ())
-            | otherwise ->
-                pure (Left "not a Git repository")
+requireWorkTree :: OsPath -> ExceptT Text IO ()
+requireWorkTree cwd = do
+    output <- ExceptT $
+        runSafeGit cwd [] ["rev-parse", "--is-inside-work-tree"]
+    unless
+        (output.gitCommandExitCode == ExitSuccess
+            && Text.strip (gitOutputText output) == "true") $
+        throwE "not a Git repository"
 
 commandFailure :: Text -> GitCommandOutput -> Text
 commandFailure command output =
     command
         <> " failed with "
         <> Text.pack (show output.gitCommandExitCode)
-        <> case Text.strip (Text.pack output.gitCommandStderr) of
+        <> case Text.strip output.gitCommandStderr of
             "" -> ""
             stderr -> ": " <> displayTerminalText stderr

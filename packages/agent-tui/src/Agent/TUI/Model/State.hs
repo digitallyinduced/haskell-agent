@@ -48,6 +48,7 @@ initialUiState = UiState
     , uiContextWindow = Nothing
     , uiPermission = Nothing
     , uiNotice = Nothing
+    , uiBackgroundTaskStatus = []
     , uiRetryCountdown = Nothing
     , uiNoticeElapsedMillis = 0
     , uiElapsedMillis = 0

@@ -4,8 +4,8 @@
 
 `Agent.Runtime.TurnRecord` carries the engine's opaque `ModelItems` and
 `DisplayItems` projections through successful and interrupted turn persistence.
-Only `Agent.CLI.Session.TurnRecord.sessionTurnFromRecord`, a compatibility
-adapter owned by `agent-cli-runtime`, unwraps them into the existing `SessionTurn`
+Only `Agent.Runtime.Session.TurnRecord.sessionTurnFromRecord`, a compatibility
+adapter owned by `agent-runtime`, unwraps them into the existing `SessionTurn`
 storage format. Display-only activity cannot be passed as canonical history.
 The persisted schema is unchanged.
 
@@ -16,7 +16,7 @@ ownership remains a separate session-owner/composition step.
 
 ## Implemented: frontend-neutral turn lifecycle
 
-`agent-cli-runtime` owns the lifecycle policy in `Agent.Runtime.*`:
+`agent-runtime` owns the lifecycle policy in `Agent.Runtime.*`:
 
 - `Request`: typed native turn requests and validation, independent of
   `CliOptions`. Existing CLI exports remain compatibility reexports.
@@ -25,6 +25,8 @@ ownership remains a separate session-owner/composition step.
   not an arbitrary CLI-options transformation. The server selects the restricted
   preset for sandbox turns; the desktop bridge retains the host preset.
 - `Compaction`: the installed automatic-compaction checkpoint.
+- `Compaction.Provider`: provider compaction, occupancy accounting, and
+  continuation bounding.
 - `TurnState`: preparation, conversation patches, interrupted-turn retention,
   response-chain invalidation, startup-context merging, and checkpoint rebasing.
 - `TurnEngine`: one pure finalization decision over a prepared turn and the
@@ -47,6 +49,25 @@ that handler; clear thinking and capture timing; consume the restart request;
 finalize. A failure after loop execution must not retroactively roll it back.
 
 ### Native startup policy boundary
+
+`Agent.Runtime.Startup.Model` resolves typed model startup inputs into model
+identity, transport mapping, dialect, reasoning effort, and resume/context
+invalidation decisions. Its resume input contains only the persisted fields
+used by those decisions. Gateway selections remain authoritative; remembered
+project dialects only apply to the matching provider, and changed custom-model
+wire mappings invalidate the previous target using the existing rules.
+
+`Agent.Runtime.Startup.Policy` owns approval defaults, native interaction-mode
+approval, Claude bypass eligibility, and dialect effort normalization. A live
+native interaction-mode callback always prevents provider-side Claude bypass,
+including when the initial mode is Yolo. `Agent.Runtime.Startup.Gateway` owns
+pure gateway catalog projection and model selection; saved aliases are hints,
+not an authority for the provider assigned by the current gateway catalog.
+
+The CLI translates `CliOptions`, native hooks, project settings, and session
+metadata into these inputs. It retains credential/catalog IO, startup messages,
+and provider client-option construction. This is not yet a shared session
+startup entry point, and does not remove the server's CLI dependency.
 
 `Agent.CLI.NativeRuntime` remains the legacy execution adapter. It translates
 the native startup policy after preparing typed requests or legacy arguments.
@@ -85,14 +106,96 @@ Background session workers now use a frontend-independent typed owner; see
 [session worker ownership](session-worker-ownership.md) for admission,
 cancellation, notification ordering, and the remaining composition boundary.
 
-`agent-cli-runtime` also owns `Agent.CLI.NativeProcess` and
-`Agent.CLI.Session.Threads`. These retain the legacy shared-module namespace,
-but belong to the runtime package, not `agent-cli`. They own process allocation,
+`agent-runtime` also owns `Agent.Runtime.NativeProcess` and
+`Agent.Runtime.Session.Threads`. These frontend-neutral modules own process allocation,
 the tracked cleanup worker, session-thread registration, MCP and network
 recovery resources, and their close/restart operations. The server imports
 process-resource operations directly from this package; CLI exports remain
 compatibility facades. Existing acquisition rollback, worker unmasking,
 cancel/join ownership, and shutdown order are preserved, not redesigned.
+
+## Implemented: frontend-neutral provider scopes
+
+`Agent.Runtime.Providers.withProviderRuntime` constructs OpenAI, xAI, Gemini,
+OpenRouter, and Claude backends in `agent-runtime`. `ProviderConfig` carries
+only the selected provider's configuration. `ProviderHost` supplies shared
+compaction state and network recovery; account presentation, preferences, and
+automatic-compaction installation remain explicit host operations.
+
+The callback receives a `ProviderRuntime`: a neutral `SessionBackend`, context
+window lookup, manual compaction, account-selection operations, and child
+transport capabilities. These operations are valid only within that callback.
+Persistent OpenAI connections, its account-switch worker, and Claude backend
+resources retain their existing scoped lifetimes and exception behavior.
+Disposable OpenAI side-call and child backends also belong to the runtime.
+
+`Agent.Runtime.Compaction.Provider` owns provider summarization, transcript
+installation, task-plan decoration, and occupancy policy. The lightweight
+`Agent.Runtime.Compaction` checkpoint type remains separate so turn-state
+modules do not depend on provider assembly. `Agent.Runtime.Session.History`
+owns live-conversation operations and persisted model-history reconstruction.
+`Agent.CLI.Session.History` now exposes only `hydrateUiHistory`, which projects
+persisted turns into terminal UI state. Provider and compaction regression tests
+live beside their runtime owner; package checks reject the retired CLI provider
+and compaction namespaces.
+
+This is a reusable provider scope, not a complete frontend-neutral startup
+entry point. CLI startup still chooses the provider and assembles session,
+tools, persistence, and presentation. Server and native adapters still use that
+CLI startup path; this extraction does not remove their CLI dependency.
+
+## Implemented: shared tool assembly and startup ownership
+
+`Agent.Runtime.Tools.Dialects` owns Codex/Grok coding-tool assembly and
+filtering. Frontends supply plan, secret, and image hooks; the shared module
+does not import CLI options or terminal presentation. CLI and server consumers
+use this module directly rather than a CLI facade.
+
+`Agent.Runtime.Tools.Resources` owns session teardown domains, and
+`Agent.Runtime.Tools.Startup` acquires the five tool domains concurrently with
+context preload. Typed `Acquire` inputs retain each completed resource in its
+domain; failed or cancelled startup joins sibling acquisitions before scopes
+unwind. Shutdown order remains activities, code mode, session lock, computer
+use, LSP, web fetch, MCP, coding tools, scratch storage.
+
+This is a bounded extraction, not the complete session entry point. Concrete
+host-specific tool groups, terminal hooks, and session launch
+still live in CLI orchestration. Server still depends on `agent-cli` until
+those remaining composition boundaries move. No new Cabal package is needed.
+
+## Implemented: shared session resource preparation
+
+`Agent.Runtime.Session.Preparation` owns deferred persistence creation and
+resumed-session retargeting through a typed `PersistenceRequest`.
+`Agent.Runtime.Session.Resources` restores task plans and image history,
+allocates scratch storage, and owns temporary-directory leases and cleanup.
+Partial acquisition failures and cancellation unwind the same resource scope.
+
+CLI supplies resume notices, fullscreen history wiring, external-session tool
+construction, and a repository worktree lease hook. CLI options are translated
+at the adapter boundary; the runtime request contains no terminal or CLI types.
+Stale-resource housekeeping remains in the host composition layer.
+
+## Implemented: shared MCP startup
+
+`Agent.Runtime.Mcp.Startup` maps harness configuration into MCP server
+configuration and owns blocking/progressive fleet acquisition and lease cleanup.
+Host hooks are cleared when startup fails or is cancelled and after lease release.
+The CLI adapter retains progress rendering, pending notices, interactive
+elicitation, integration endpoint discovery, and stale-resource housekeeping.
+Protocol and transport implementations remain in `agent-mcp`; no new package is
+introduced for this session-integration layer.
+
+## Implemented: shared collaboration startup
+
+`Agent.Runtime.Collaboration` owns child-model policy, live gateway child-target
+resolution, concurrency-limit precedence, and scoped subagent registry ownership.
+Teardown interrupts active children before the host snapshots their state and
+closes the registry even if snapshotting fails. Gateway resolution reads the
+current host-supplied catalog and fails closed when that catalog is unavailable.
+The CLI retains credential loading, transcript persistence callbacks, worktree
+creation, and notification presentation. This session-integration layer remains
+in `agent-runtime`, without a new Cabal package or frontend dependencies.
 
 ## Remaining: move session composition and ownership out of the CLI
 
@@ -139,7 +242,7 @@ conversation slot. Pending-state references are not otherwise exposed.
 
 These extractions provide turn execution, process resources, and conversation
 state, not a complete headless session owner. The dependency graph still includes
-`agent-server -> agent-cli -> agent-cli-runtime`. The server still calls
+`agent-server -> agent-cli -> agent-runtime`. The server still calls
 `Agent.CLI.NativeRuntime.runNativeTurn`, which lowers native requests into
 `CliOptions` internally. The public native hook uses `nativeStartupPolicy`
 rather than exposing those options.
@@ -203,9 +306,9 @@ replaying the model projection in memory with the finalized previous-response
 patch applied (including chain invalidation), not a persisted frontend round trip;
 compaction uses an installed checkpoint, not a live summarization provider.
 
-`Agent.CLI.NativeProcessSpec` covers cleanup-worker ownership and session-worker
+`Agent.Runtime.NativeProcessSpec` covers cleanup-worker ownership and session-worker
 joining through the shared process handle: all three examples pass through
-`cabal repl --offline agent-cli-runtime:test:agent-cli-runtime-test`.
+`cabal repl --offline agent-runtime:test:agent-runtime-test`.
 These tests do not establish full CLI/server parity.
 
 The server's `SupervisorSpec` and `ApplicationSpec` pass through its Cabal test
@@ -239,12 +342,12 @@ Reproduce the package-aware load from the repository root in the Nix toolchain:
 
 ```sh
 printf ':show modules\n:quit\n' | cabal repl --offline \
-  agent-cli-runtime:lib:agent-cli-runtime \
+  agent-runtime:lib:agent-runtime \
   agent-cli:lib:agent-cli agent-server:lib:agent-server
 ```
 
 For the database-backed rerun, first provide a permitted short `TMPDIR`, then
-open `cabal repl --offline agent-cli-runtime:test:agent-cli-runtime-test`
+open `cabal repl --offline agent-runtime:test:agent-runtime-test`
 and run `:main`. For CLI session integration, open
 `cabal repl --offline agent-cli:test:agent-cli-test`, import
 `Test.Hspec` and `Agent.CLI.AgentSessionsSpec` qualified, and run

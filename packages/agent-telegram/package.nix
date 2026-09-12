@@ -1,8 +1,8 @@
-{ mkDerivation, aeson, agent-cli-runtime, agent-core, agent-json
+{ mkDerivation, aeson, agent-core, agent-json, agent-runtime
 , agent-store, async, base, bytestring, containers, directory
 , filelock, filepath, hspec, http-client, http-client-tls
 , http-types, lib, optparse-applicative, process, retry
-, safe-exceptions, temporary, text, time, unix, vector
+, safe-exceptions, split, temporary, text, time, unix, vector
 }:
 mkDerivation {
   pname = "agent-telegram";
@@ -11,10 +11,10 @@ mkDerivation {
   isLibrary = true;
   isExecutable = true;
   libraryHaskellDepends = [
-    aeson agent-cli-runtime agent-core agent-json agent-store async
-    base bytestring containers directory filelock filepath http-client
+    aeson agent-core agent-json agent-runtime agent-store async base
+    bytestring containers directory filelock filepath http-client
     http-client-tls http-types optparse-applicative process retry
-    safe-exceptions text time unix vector
+    safe-exceptions split text time unix vector
   ];
   executableHaskellDepends = [ base ];
   testHaskellDepends = [

@@ -6,6 +6,7 @@ module Agent.CLI.AgentViewport
     , AgentTarget(..)
     , AgentViewportEnv(..)
     , AgentViewportState(..)
+    , agentSnapshot
     , agentDisplayName
     , agentEntryTreeLabel
     , agentEntryTreeLabelWithGlyph
@@ -37,6 +38,8 @@ import Agent.CLI.Render
     ( renderToolOutputValue
     , summarizeToolCallRelative
     )
+import qualified Agent.Runtime.AgentSnapshot as Snapshot
+import Agent.Runtime.AgentSnapshot (AgentStep(..), AgentStepState(..))
 import Agent.CLI.AgentViewport.Status
     ( agentStatusGlyph
     , formatAgentStatus
@@ -89,25 +92,20 @@ data AgentTarget
     | AgentNative !Text
     deriving (Eq, Ord, Show)
 
-data AgentStepState
-    = AgentStepRunning
-    | AgentStepCompleted
-    | AgentStepFailed
-    | AgentStepInfo
-    deriving (Eq, Show)
-
-data AgentStep = AgentStep
-    { agentStepState :: !AgentStepState
-    , agentStepTitle :: !Text
-    , agentStepDetail :: !(Maybe Text)
-    }
-    deriving (Eq, Show)
-
 -- | A flattened tree row with presentation metadata derived from the whole
 -- hierarchy. Renderers consume these rows without rescanning later entries.
 data AgentTreeRow = AgentTreeRow
     { treeRowEntry :: !AgentEntry
     , treeRowPrefix :: !Text
+    }
+
+-- | Only metadata, never terminal presentation state, is exposed to hosts.
+agentSnapshot :: AgentEntry -> Snapshot.AgentSnapshot
+agentSnapshot entry = Snapshot.AgentSnapshot
+    { agentPath = entry.agentPath
+    , agentStatus = entry.agentStatus
+    , agentModel = entry.agentModel
+    , agentSteps = entry.agentSteps
     }
 
 data AgentEntry = AgentEntry

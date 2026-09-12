@@ -4,13 +4,10 @@ module Agent.CLI.Runtime.Orchestration.Tools.Mcp
     , acquireMcpRuntime
     ) where
 
-import Agent.CLI.Config
-    ( HarnessConfig(..), McpServerConfig(..)
-    , mcpServersForRuntime, useProgressiveMcp, mcpUsesConnectionCredentials )
+import Agent.Runtime.Mcp.Startup
 import Agent.CLI.FileUri (fileUri)
 import Agent.CLI.IntegrationGateway (integrationEndpointServers)
 import Agent.CLI.McpElicitation (cliMcpElicitation)
-import Agent.CLI.McpOAuthStore (mcpOAuthStorePath)
 import Agent.CLI.McpStatus
     ( formatMcpInstructionsNotice, formatMcpModelNoticeFor
     , formatMcpProgress, summarizeMcpStatuses )
@@ -33,11 +30,9 @@ import qualified Agent.MCP as MCP
 import Agent.OsPath (unsafeToFilePath)
 import Agent.TUI.Model (UiEvent(..))
 import Agent.Tools.Types (withToolHumanInputWait)
-import Control.Exception.Safe
-    ( SomeException, bracketOnError, finally, onException, try )
+import Control.Exception.Safe (catch)
 import Control.Monad (forM_, unless, when)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef, writeIORef)
-import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -60,55 +55,14 @@ mcpConfiguration AgentToolsRequest
     } ToolStartup
     { toolNativeCapabilities = nativeCapabilities
     , toolHarnessConfig = harnessConfig
-    } =
-    ( serverConfigs
-    , useProgressiveMcp
-        harnessConfig.configMcpInitStrategy
-        (isOneShot options)
-    )
-  where
-    serverConfigs =
-        [ MCP.McpServerConfig
-            { MCP.mcpServerName = label
-            , MCP.mcpServerConnection = fmap (\identifier -> MCP.McpConnectionIdentity
-                identifier config.mcpConnectionGeneration config.mcpDisplayName)
-                (if mcpUsesConnectionCredentials config then config.mcpConnectionId else Nothing)
-            , MCP.mcpServerUrl = config.mcpUrl
-            , MCP.mcpServerCommand = Text.unpack config.mcpCommand
-            , MCP.mcpServerArgs = map Text.unpack config.mcpArgs
-            , MCP.mcpServerCwd =
-                Just $
-                    maybe (unsafeToFilePath cwd) Text.unpack config.mcpCwd
-            , MCP.mcpServerEnv =
-                [ (Text.unpack name, Text.unpack value)
-                | (name, value) <- Map.toAscList config.mcpEnv
-                ] <> case (mcpUsesConnectionCredentials config, config.mcpUrl) of
-                    (False, Just url)
-                        | Map.notMember
-                            "MCP_OAUTH_TOKEN_FILE"
-                            config.mcpEnv ->
-                            [ ( "MCP_OAUTH_TOKEN_FILE"
-                              , unsafeToFilePath
-                                    (mcpOAuthStorePath home url)
-                              )
-                            ]
-                    _ -> []
-            , MCP.mcpServerStartupTimeoutSeconds =
-                config.mcpStartupTimeoutSeconds
-            , MCP.mcpServerRequestTimeoutSeconds =
-                config.mcpRequestTimeoutSeconds
-            , MCP.mcpServerProtocol = config.mcpProtocol
-            , MCP.mcpServerRootsEnabled = config.mcpRoots
-            , MCP.mcpServerSamplingEnabled = config.mcpSampling
-            , MCP.mcpServerLogLevel = config.mcpLogLevel
-            , MCP.mcpServerExcludedTools = []
-            }
-        | (label, config) <-
-            mcpServersForRuntime
-                nativeCapabilities.nativeMcpTools
-                nativeCapabilities.nativeHostExtensions
-                harnessConfig
-        ]
+    } = resolveMcpConfiguration McpConfigurationRequest
+        { mcpConfigCwd = cwd
+        , mcpConfigHome = home
+        , mcpConfigHarness = harnessConfig
+        , mcpConfigToolsEnabled = nativeCapabilities.nativeMcpTools
+        , mcpConfigHostExtensions = nativeCapabilities.nativeHostExtensions
+        , mcpConfigOneShot = isOneShot options
+        }
 
 acquireMcpRuntime
     :: AgentToolsRequest windowTitleResult
@@ -144,36 +98,40 @@ acquireMcpRuntime request@AgentToolsRequest
             [(integrationsMcpConfig name, server) | (name, server) <- localServers]
         -- Include the in-memory name in the reported configuration too: callers
         -- use this list to decide whether MCP tools exist at all.
-        runtimeMcpServerConfigs = configuredServers <> remoteServers
-            <> map fst inMemoryServers
-        transportServers = configuredServers <> remoteServers
+        mcpRequest = McpStartupRequest
+            { mcpStartupTransportServers = configuredServers <> remoteServers
+            , mcpStartupInMemoryServers = inMemoryServers
+            , mcpStartupProgressive = configuredProgressive
+            }
+        runtimeMcpServerConfigs = startupServerConfigs mcpRequest
         runtimeProgressiveMcp = configuredProgressive
     startStaleResourceCleanup request sessionTmp
     mcpStatusPhaseRef <- newIORef (Nothing :: Maybe Bool)
     mcpFleetRef <- newIORef (Nothing :: Maybe MCP.McpFleet)
-    writeIORef processRuntime.processMcpElicitation
-        (if isOneShot options || not isTty
-            then Nothing
-            else Just \elicitation ->
-                withToolHumanInputWait baseToolEnv $
-                    cliMcpElicitation stdinControl uiRuntimeRef elicitation)
-    writeIORef processRuntime.processMcpRoots $
-        Just \_serverName ->
-            pure
-                [ MCP.McpRoot
-                    { MCP.rootUri = fileUri (unsafeToFilePath request.cwd)
-                    , MCP.rootName = Nothing
-                    }
-                ]
-    writeIORef processRuntime.processMcpSampling $
-        if any
-            (\MCP.McpServerConfig
-                { MCP.mcpServerSamplingEnabled = samplingEnabled
-                } -> samplingEnabled)
-            runtimeMcpServerConfigs
-            then Just \_ ->
-                pure (Left "MCP sampling is unavailable until the model session is ready")
-            else Nothing
+    let installMcpHostHooks = do
+            writeIORef processRuntime.processMcpElicitation
+                (if isOneShot options || not isTty
+                    then Nothing
+                    else Just \elicitation ->
+                        withToolHumanInputWait baseToolEnv $
+                            cliMcpElicitation stdinControl uiRuntimeRef elicitation)
+            writeIORef processRuntime.processMcpRoots $
+                Just \_serverName ->
+                    pure
+                        [ MCP.McpRoot
+                            { MCP.rootUri = fileUri (unsafeToFilePath request.cwd)
+                            , MCP.rootName = Nothing
+                            }
+                        ]
+            writeIORef processRuntime.processMcpSampling $
+                if any
+                    (\MCP.McpServerConfig
+                        { MCP.mcpServerSamplingEnabled = samplingEnabled
+                        } -> samplingEnabled)
+                    runtimeMcpServerConfigs
+                    then Just \_ ->
+                        pure (Left "MCP sampling is unavailable until the model session is ready")
+                    else Nothing
     let clearMcpHostHooks = do
             writeIORef processRuntime.processMcpElicitation Nothing
             writeIORef processRuntime.processMcpRoots Nothing
@@ -227,64 +185,12 @@ acquireMcpRuntime request@AgentToolsRequest
                         "Loading tools: "
                             <> Text.intercalate ", " names
                             <> "…")
-        acquireMcpLease =
-            try @_ @SomeException
-                (if null inMemoryServers
-                    then
-                        if runtimeProgressiveMcp
-                            then
-                                MCP.acquireMcpFleetProgressive
-                                    mcpSupervisor
-                                    reportProgressiveMcp
-                                    runtimeMcpServerConfigs
-                            else
-                                MCP.acquireMcpFleetWithProgress
-                                    mcpSupervisor
-                                    reportBlockingMcp
-                                    runtimeMcpServerConfigs
-                    else
-                        if runtimeProgressiveMcp
-                            then
-                                MCP.acquireMcpFleetProgressiveWithInMemory
-                                    mcpSupervisor
-                                    reportProgressiveMcp
-                                    transportServers
-                                    inMemoryServers
-                            else
-                                MCP.acquireMcpFleetWithInMemory
-                                    mcpSupervisor
-                                    reportBlockingMcp
-                                    transportServers
-                                    inMemoryServers)
-                >>= \case
-                    Left exception ->
-                        startupDie startup
-                            ("Failed to initialize MCP tools: "
-                                <> Text.pack (show exception))
-                    Right lease -> pure lease
-    bracketOnError
-        (acquireMcpLease `onException` clearMcpHostHooks)
-        (\lease ->
-            MCP.releaseMcpFleetLease lease
-                `finally` clearMcpHostHooks)
-        \runtimeMcpLease -> finishRuntime runtimeMcpLease.mcpLeaseFleet
-            (MCP.releaseMcpFleetLease runtimeMcpLease
-                `finally` clearMcpHostHooks)
-
-integrationsMcpConfig :: Text -> MCP.McpServerConfig
-integrationsMcpConfig serverName = MCP.McpServerConfig
-    { MCP.mcpServerName = serverName
-    , MCP.mcpServerUrl = Nothing
-    , MCP.mcpServerCommand = ""
-    , MCP.mcpServerArgs = []
-    , MCP.mcpServerCwd = Nothing
-    , MCP.mcpServerEnv = []
-    , MCP.mcpServerStartupTimeoutSeconds = 10
-    , MCP.mcpServerRequestTimeoutSeconds = 60
-    , MCP.mcpServerProtocol = MCP.McpProtocolModern
-    , MCP.mcpServerRootsEnabled = False
-    , MCP.mcpServerSamplingEnabled = False
-    , MCP.mcpServerLogLevel = Nothing
-    , MCP.mcpServerExcludedTools = []
-    , MCP.mcpServerConnection = Nothing
-    }
+    acquireMcpStartup mcpSupervisor mcpRequest McpStartupHooks
+        { mcpInstallHostHooks = installMcpHostHooks
+        , mcpClearHostHooks = clearMcpHostHooks
+        , mcpReportBlocking = reportBlockingMcp
+        , mcpReportProgressive = reportProgressiveMcp
+        } finishRuntime
+        `catch` \(McpStartupError exception) ->
+            startupDie startup
+                ("Failed to initialize MCP tools: " <> Text.pack (show exception))

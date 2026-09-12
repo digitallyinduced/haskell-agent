@@ -42,7 +42,7 @@ module Agent.CLI.Terminal
     ) where
 
 import Agent.CLI.FileUri (fileUri)
-import Agent.CLI.Environment (lookupNonEmpty)
+import Agent.Environment (lookupNonEmpty)
 import Control.Exception.Safe (bracket_)
 import qualified Data.ByteString.Base64 as Base64
 import Data.Char (ord, toLower, toUpper)
@@ -145,7 +145,7 @@ isSshSession =
 
 remoteLinkInstructions :: Text
 remoteLinkInstructions =
-    "Over SSH, use your terminal's Open Link action (usually Cmd-click on macOS or Ctrl-click on Linux/Windows) to open this URL on your local computer."
+    "Over SSH, use your terminal's Open Link action to open this URL on your local computer. In Ghostty on macOS, use Cmd+Shift+click."
 
 formatTerminalCapabilities :: TerminalCapabilities -> Text
 formatTerminalCapabilities capabilities =

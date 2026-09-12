@@ -22,19 +22,19 @@ import Agent.CLI.AgentSessions
                            toolsGatewayIdentity, toolsCwd, toolsEffort,
                            toolsCurrentSessionId, toolsLaunchTurn, toolsPrepareSessionWait,
                            toolsDeliverToOwner) )
-import Agent.CLI.Auth (isGatewayLoadedAuth)
-import qualified Agent.CLI.ComputerUse as ComputerUse
-import Agent.CLI.Config (HarnessConfig(..))
-import Agent.CLI.Database ( databaseTools )
-import Agent.CLI.Database.Store
+import Agent.Accounts.Auth (isGatewayLoadedAuth)
+import qualified Agent.ComputerUse as ComputerUse
+import Agent.Runtime.Config (HarnessConfig(..))
+import Agent.Runtime.Database ( databaseTools )
+import Agent.Runtime.Database.Store
     (databaseToolsEnvForStore)
-import Agent.CLI.Dialects
+import Agent.Runtime.Tools.Dialects
     ( CodingTools(..),
       codingToolsForWithTypes,
       filterBashTools,
       filterGhciTools )
-import Agent.CLI.Error ( formatException )
-import Agent.CLI.GatewayBridge ( managedGatewayTools )
+import Agent.Runtime.Error ( formatException )
+import Agent.Runtime.GatewayBridge ( managedGatewayTools )
 import Agent.CLI.LearnedSkills ( learnedSkillTools )
 import Agent.CLI.LearnedSkills.Store
     ( learnedSkillToolsEnvForStore
@@ -49,8 +49,8 @@ import Agent.Integration.API
     , acquireIntegrationRuntime
     )
 import Agent.OsPath (unsafeToFilePath)
-import Agent.CLI.ModelConfig (builtinConnectionId)
-import Agent.CLI.Models (ModelTarget(targetConnectionId, targetWireModelId))
+import Agent.Runtime.ModelConfig (builtinConnectionId)
+import Agent.Runtime.Models (ModelTarget(targetConnectionId, targetWireModelId))
 import Agent.CLI.Options
     ( isOneShot, resolveComputerUseEnabled
     , CliOptions(optGhci, optBash, optSkills)
@@ -81,7 +81,7 @@ import Agent.CLI.Runtime.Orchestration.Session ( AgentSessionRequest(..)
 import Agent.CLI.Runtime.Orchestration.Startup
     ( reportStartupWarning )
 import Agent.CLI.Runtime.Types (RunResult)
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( SessionHandle(sessionDir, sessionMeta), SessionMeta(metaId)
     , SessionTurn(turnAssistantText) )
 import Agent.CLI.Session.Runtime.Types
@@ -89,11 +89,11 @@ import Agent.CLI.Session.Runtime.Types
     , StartupRuntime(startupDatabaseStore, startupNativeHooks, startupStdinTty) )
 import Agent.CLI.Session.Selection
     ( currentSessionId, reservedSessionId )
-import Agent.CLI.Session.Inbox
+import Agent.Runtime.Session.Inbox
     ( deliverSessionInboxMessage
     , inboxUnavailableError
     )
-import Agent.CLI.SessionLock
+import Agent.Runtime.SessionLock
     ( acquireSessionLock,
       releaseSessionLock,
       sessionLockFilePath,
@@ -120,8 +120,10 @@ import Agent.ResourceScope
     , registerResource
     , logSlowCleanup
     )
-import Agent.CLI.Runtime.Orchestration.Tools.Resources
+import Agent.Runtime.Tools.Resources
     ( SessionResourceScopes(..), withSessionResourceScopes )
+import Agent.Runtime.Tools.Startup
+    ( ToolAcquisitions(..), ToolStartupResources(..), acquireToolStartup )
 import Agent.Skills
     ( SkillCatalog(..)
     , SkillInvocation
@@ -139,7 +141,7 @@ import Agent.Tools.Types
     , ToolEnv(..)
     , appToolsFromGroups
     )
-import Control.Concurrent.Async ( Concurrently(..), concurrently )
+import Control.Concurrent.Async ( concurrently )
 import Control.Exception.Safe
     ( SomeException, mask_, throwIO, try )
 import Control.Monad ( forM_, when, void )
@@ -161,15 +163,6 @@ import qualified Data.Text as Text (unpack, pack)
 data LocalToolRuntime = LocalToolRuntime
     { localCoding :: CodingTools
     , localInitialSkills :: SkillCatalog
-    }
-
-data StartupResources = StartupResources
-    { startupMcp :: McpRuntime
-    , startupLocalTools :: LocalToolRuntime
-    , startupWebFetch :: Maybe WebFetchRuntime
-    , startupLsp :: LspStartup
-    , startupComputerUse :: Maybe ComputerUse.ComputerUseRuntime
-    , startupInitialContext :: (SessionInitialContext, InitialContextPreload)
     }
 
 data CodingRuntime = CodingRuntime
@@ -228,42 +221,26 @@ runAgentTools request = withSessionResourceScopes \resources -> do
                 collaborationRuntime)
             (logSlowCleanup "session temporary resources" . (.scratchCleanup))
     integrationRuntime <- acquireSessionIntegrationRuntime request
-    let acquireOwnedMcp =
-            snd <$> allocateAcquire resources.mcpResources
-                (mkAcquire
-                    (acquireMcpRuntime
-                        request toolStartup toolModelRuntime
-                        collaborationRuntime scratchRuntime integrationRuntime)
-                    (logSlowCleanup "session MCP resources" . (.runtimeCloseMcp)))
-        acquireOwnedCoding =
-            snd <$> allocateAcquire resources.codingResources
-                (acquireLocalToolRuntime
-                    request toolModelRuntime toolHostHooks
-                    collaborationRuntime scratchRuntime)
-        acquireOwnedWebFetch =
-            snd <$> allocateAcquire resources.webFetchResources
-                (mkAcquire
-                    (acquireWebFetchRuntime request toolStartup toolModelRuntime)
-                    (logSlowCleanup "web fetch runtime" . mapM_ closeWebFetchRuntime))
-        acquireOwnedLsp =
-            snd <$> allocateAcquire resources.lspResources
-                (mkAcquire
-                    (acquireLspStartup request toolStartup toolModelRuntime)
-                    (logSlowCleanup "language server runtime" . mapM_ closeLspRuntime . (.lspStartupRuntime)))
-        acquireOwnedComputerUse =
-            snd <$> allocateAcquire resources.computerUseResources
-                (mkAcquire
-                    (acquireComputerUseRuntime toolModelRuntime)
-                    (logSlowCleanup "computer use runtime" . mapM_ ComputerUse.closeComputerUseRuntime))
-    -- Startup is concurrent; resource scopes determine shutdown order.
-    startupResources <- runConcurrently $
-        StartupResources
-            <$> Concurrently acquireOwnedMcp
-            <*> Concurrently acquireOwnedCoding
-            <*> Concurrently acquireOwnedWebFetch
-            <*> Concurrently acquireOwnedLsp
-            <*> Concurrently acquireOwnedComputerUse
-            <*> Concurrently (prepareInitialContextPreload request toolModelRuntime)
+    startupResources <- acquireToolStartup resources ToolAcquisitions
+        { acquireMcp = mkAcquire
+            (acquireMcpRuntime
+                request toolStartup toolModelRuntime
+                collaborationRuntime scratchRuntime integrationRuntime)
+            (logSlowCleanup "session MCP resources" . (.runtimeCloseMcp))
+        , acquireCoding = acquireLocalToolRuntime
+            request toolModelRuntime toolHostHooks
+            collaborationRuntime scratchRuntime
+        , acquireWebFetch = mkAcquire
+            (acquireWebFetchRuntime request toolStartup toolModelRuntime)
+            (logSlowCleanup "web fetch runtime" . mapM_ closeWebFetchRuntime)
+        , acquireLsp = mkAcquire
+            (acquireLspStartup request toolStartup toolModelRuntime)
+            (logSlowCleanup "language server runtime" . mapM_ closeLspRuntime . (.lspStartupRuntime))
+        , acquireComputerUse = mkAcquire
+            (acquireComputerUseRuntime toolModelRuntime)
+            (logSlowCleanup "computer use runtime" . mapM_ ComputerUse.closeComputerUseRuntime)
+        , preloadContext = prepareInitialContextPreload request toolModelRuntime
+        }
     let mcpRuntime = startupResources.startupMcp
         localToolRuntime = startupResources.startupLocalTools
         webFetchRuntime = startupResources.startupWebFetch

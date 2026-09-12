@@ -43,7 +43,7 @@ import Agent.CLI.TUI.Types
       FullscreenRuntime(runtimeWaveTrough, runtimeMotionMode,
                         runtimeNativeImagePreviews, runtimeColor),
       activeTheme,
-      Name(ConversationBodyCache, CodeBlockCache, MarkdownProseCache, ConversationBlock,
+      Name(ConversationBodyCache, CodeBlockCache, MarkdownProseCache, ConversationBlock, ConversationMessage,
            ConversationBlockCache, ConversationImage, CodeCopy,
            MarkdownLink) )
 import Agent.CLI.Terminal ()
@@ -387,7 +387,9 @@ drawBlock state target ui block =
             padBottom (Pad 1) $
                 clickable
                     (ConversationBlock target block.blockId)
-                    hoveredRow
+                    ((if block.blockKind == BlockUser || block.blockKind == BlockAssistant
+                        then reportExtent (ConversationMessage target block.blockId)
+                        else id) hoveredRow)
     in if cacheableBlock state target ui block
         then cached
             (ConversationBlockCache
@@ -638,8 +640,9 @@ blockStateGlyph state target block
 
 shellBlockTitle :: UiBlock -> Text
 shellBlockTitle block
+    | block.blockTitle == "$ exec" = "JavaScript execution"
     | block.blockExpanded = block.blockTitle
-    | block.blockTitle `notElem` ["$ ghci", "$ exec"] = block.blockTitle
+    | block.blockTitle /= "$ ghci" = block.blockTitle
     | Text.null invocation = block.blockTitle
     | otherwise = block.blockTitle <> " · " <> invocation
   where

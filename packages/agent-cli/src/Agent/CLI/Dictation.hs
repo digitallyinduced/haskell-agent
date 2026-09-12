@@ -19,14 +19,14 @@ module Agent.CLI.Dictation
     , transcribeAudio
     ) where
 
-import Agent.CLI.Auth
+import Agent.Accounts.Auth
     ( LoadedAuth(..)
     , loadAuth
     , loadOpenAiDictationAuth
     )
 import Agent.CLI.Dictation.Capture (withBufferedCapture)
-import Agent.CLI.Transcription (transcribeAudio)
-import Agent.CLI.GatewayClient
+import Agent.Runtime.Transcription (transcribeAudio)
+import Agent.Runtime.GatewayClient
     ( GatewayModelAccess
     , transcribeGatewayPcm
     )

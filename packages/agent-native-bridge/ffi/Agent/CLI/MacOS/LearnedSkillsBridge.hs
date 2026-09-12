@@ -5,10 +5,10 @@
 -- | Read-only learned-skill catalog callbacks, with request-scoped stores.
 module Agent.CLI.MacOS.LearnedSkillsBridge () where
 
-import Agent.CLI.Database.Store (applicableDatabaseScopes, deriveDatabaseScopes)
+import Agent.Runtime.Database.Store (applicableDatabaseScopes, deriveDatabaseScopes)
 import Agent.CLI.MacOS.Marshalling (decodeInput, withText)
 import Agent.CLI.Project (resolveProjectRoot)
-import Agent.CLI.Session (sessionsRoot)
+import Agent.Runtime.Session (sessionsRoot)
 import Agent.CLI.SessionAdmin (managedPostgresConfigForHome)
 import Agent.Store.Postgres (closeStore, openStore, trustedPool)
 import Agent.Store.Postgres.Scope (Scope(..), scopeKindText)

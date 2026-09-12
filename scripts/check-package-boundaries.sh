@@ -6,17 +6,37 @@ cli="$root/packages/agent-cli"
 external_session="$root/packages/agent-external-session"
 repository="$root/packages/agent-repository"
 bridge="$root/packages/agent-native-bridge"
-runtime="$root/packages/agent-cli-runtime"
+runtime="$root/packages/agent-runtime"
 integration_api="$root/packages/agent-integration-api"
+core="$root/packages/agent-core"
 
 fail() {
   echo "package boundary check failed: $*" >&2
   exit 1
 }
 
-for package in "$cli" "$external_session" "$repository" "$bridge" "$runtime"; do
+for package in "$cli" "$external_session" "$repository" "$bridge" "$runtime" \
+  "$core" "$root/packages/agent-accounts" "$root/packages/agent-computer-use" \
+  "$root/packages/agent-tools"; do
   [[ -d "$package" ]] || fail "missing package directory: $package"
 done
+
+if [[ -e "$cli/src/Agent/CLI/Dialects.hs" \
+  || -e "$cli/src/Agent/CLI/Runtime/Orchestration/Tools/Resources.hs" ]]; then
+  fail "shared tool assembly and ownership must remain in agent-runtime"
+fi
+
+python3 "$root/scripts/check-package-graph.py" "$root"
+if rg --line-number '\b(newSubagentRegistry|closeSubagentRegistry|interruptActiveSubagents|grokRootChildModels|resolveModelOptionById)\b' \
+    "$cli/src/Agent/CLI/Runtime/Orchestration/Tools/Collaboration.hs"; then
+  fail "collaboration startup policy and registry ownership must remain in agent-runtime"
+fi
+if rg --line-number 'MCP\.(acquireMcpFleet|releaseMcpFleetLease)' \
+    "$cli/src/Agent/CLI/Runtime/Orchestration/Tools/Mcp.hs"; then
+  fail "MCP startup lease ownership must remain in agent-runtime"
+fi
+[[ ! -e "$root/packages/agent-cli-runtime/agent-cli-runtime.cabal" ]] \
+  || fail "agent-cli-runtime must be replaced by agent-runtime"
 
 # Public builds must remain usable without any proprietary integration source.
 [[ ! -e "$root/packages/agent-integrations" ]] \
@@ -36,26 +56,46 @@ if rg --line-number 'Agent\.(CLI|Mail|Integrations)(\.|[[:space:]])' \
   fail "integration API gained product or frontend dependencies"
 fi
 
-# The session lifecycle kernel is frontend-independent, even while the legacy
-# composition root is being incrementally migrated out of agent-cli.
-if sed -n '/^library$/,/^test-suite /p' "$runtime/agent-cli-runtime.cabal" \
-    | sed -n '/build-depends:/,$p' \
-    | rg --line-number '\bagent-(cli|tui)([[:space:],><=]|$)'; then
-  fail "headless runtime gained a CLI/TUI dependency"
-fi
+# Lower packages must neither implement nor import frontend modules.
+for name in agent-core agent-accounts agent-computer-use agent-tools agent-runtime; do
+  source_dirs=("$root/packages/$name/src")
+  [[ ! -d "$root/packages/$name/test" ]] || source_dirs+=("$root/packages/$name/test")
+  if rg --line-number '^[[:space:]]*(module|import)[[:space:]]+(qualified[[:space:]]+)?Agent\.(CLI|TUI)(\.|[[:space:]])' \
+    "${source_dirs[@]}" --glob '*.hs'; then
+    fail "frontend types leaked into $name"
+  fi
+done
 
-if rg --line-number '^import[[:space:]]+(qualified[[:space:]]+)?Agent\.(CLI|TUI)(\.|[[:space:]])' \
-  "$runtime/src/Agent/Runtime" "$runtime/test/Agent/Runtime"; then
-  fail "frontend types leaked into the session lifecycle kernel"
-fi
+# Core owns contracts, scheduling and output memory, not concrete tool handlers.
+while IFS= read -r file; do
+  case "${file#"$core/src/"}" in
+    Agent/Tools/Types.hs|Agent/Tools/Scheduling.hs|Agent/Tools/ResourceArbiter.hs|Agent/Tools/OutputArtifact/Memory.hs) ;;
+    *) fail "concrete tool implementation returned to core: $file" ;;
+  esac
+done < <(find "$core/src/Agent/Tools" -type f -name '*.hs')
 
-# Shared resources and session policy retain legacy module names, but their
-# implementations must stay in the runtime. CLI facades may import them,
-# not redefine them.
-for module_path in Agent/CLI/NativeProcess.hs Agent/CLI/Session/Threads.hs Agent/CLI/Session/PullRequest.hs; do
+# Shared resources and session policy have frontend-neutral module names.
+for module_path in Agent/Runtime/NativeProcess.hs Agent/Runtime/Session/Threads.hs Agent/Runtime/Session/PullRequest.hs; do
   [[ -f "$runtime/src/$module_path" ]] || fail "missing shared resource: $module_path"
   [[ ! -e "$cli/src/$module_path" ]] || fail "resource implementation returned to CLI: $module_path"
+  [[ ! -e "$cli/src/${module_path/Runtime/CLI}" ]] || fail "legacy resource implementation returned to CLI: $module_path"
 done
+
+# Provider construction and model-history compaction have one runtime owner,
+# not legacy CLI implementations or reexport facades.
+if rg --line-number \
+  'Agent\.CLI\.(Compaction|ProviderRuntime|Provider\.OpenAI|Subagents\.Runtime\.OpenAI|Runtime\.Orchestration\.Providers)(\.|[^[:alnum:]_]|$)' \
+  "$root/packages" --glob '*.hs' --glob '*.cabal'; then
+  fail "provider or compaction ownership returned to a retired CLI namespace"
+fi
+
+# This is deliberately a presentation-only module. Live transcript operations
+# must be imported from Agent.Runtime.Session.History instead of reexported here.
+if ! rg --quiet --multiline \
+  'module[[:space:]]+Agent\.CLI\.Session\.History[[:space:]]*\([[:space:]]*hydrateUiHistory[[:space:]]*\)[[:space:]]+where' \
+  "$cli/src/Agent/CLI/Session/History.hs"; then
+  fail "CLI session history must expose only UI hydration"
+fi
 
 moved_modules=(
   Agent.CLI.BrowserTools
@@ -73,7 +113,7 @@ moved_modules=(
 if rg --line-number 'CliOptions|Agent\.CLI\.Options|nativePrepareOptions' \
   "$root/packages/agent-server/src/Agent/Server/Runtime.hs" \
   "$root/packages/agent-cli/src/Agent/CLI/Runtime/Orchestration/Types.hs" \
-  "$root/packages/agent-cli-runtime/src/Agent/Runtime/StartupPolicy.hs"; then
+  "$root/packages/agent-runtime/src/Agent/Runtime/StartupPolicy.hs"; then
   fail "native startup contracts and server runtime must not depend on CLI options"
 fi
 
@@ -117,6 +157,10 @@ if rg --line-number '\bagent-cli([[:space:],><=]|$)' \
 fi
 
 for registration in \
+  packages/agent-accounts \
+  packages/agent-computer-use \
+  packages/agent-tools \
+  packages/agent-runtime \
   packages/agent-external-session \
   packages/agent-repository \
   packages/agent-native-bridge; do
@@ -126,11 +170,45 @@ for registration in \
 done
 
 required_files=(
-  packages/agent-cli-runtime/src/Agent/Runtime/StartupPolicy.hs
-  packages/agent-cli-runtime/src/Agent/Runtime/ConversationStore.hs
-  packages/agent-cli-runtime/src/Agent/Runtime/SessionState.hs
-  packages/agent-cli-runtime/test/Agent/Runtime/ConversationStoreSpec.hs
-  packages/agent-cli-runtime/test/Agent/Runtime/ConversationSessionSpec.hs
+  packages/agent-runtime/src/Agent/Runtime/Mcp/Startup.hs
+  packages/agent-runtime/src/Agent/Runtime/Collaboration.hs
+  packages/agent-runtime/test/Agent/Runtime/CollaborationSpec.hs
+  packages/agent-runtime/test/Agent/Runtime/Mcp/StartupSpec.hs
+  packages/agent-runtime/src/Agent/Runtime/Session/Preparation.hs
+  packages/agent-runtime/src/Agent/Runtime/Session/Resources.hs
+  packages/agent-runtime/test/Agent/Runtime/Session/ResourcesSpec.hs
+  packages/agent-runtime/src/Agent/Runtime/Tools/Dialects.hs
+  packages/agent-runtime/src/Agent/Runtime/Tools/Resources.hs
+  packages/agent-runtime/src/Agent/Runtime/Tools/Startup.hs
+  packages/agent-runtime/src/Agent/Runtime/Startup/Model.hs
+  packages/agent-runtime/src/Agent/Runtime/Startup/Policy.hs
+  packages/agent-runtime/src/Agent/Runtime/Startup/Gateway.hs
+  packages/agent-runtime/test/Agent/Runtime/Tools/ResourcesSpec.hs
+  packages/agent-runtime/test/Agent/Runtime/Tools/StartupSpec.hs
+  packages/agent-runtime/src/Agent/Runtime/Providers.hs
+  packages/agent-runtime/src/Agent/Runtime/Providers/Types.hs
+  packages/agent-runtime/src/Agent/Runtime/Providers/Common.hs
+  packages/agent-runtime/src/Agent/Runtime/Providers/OpenAI.hs
+  packages/agent-runtime/src/Agent/Runtime/Providers/XAI.hs
+  packages/agent-runtime/src/Agent/Runtime/Providers/Gemini.hs
+  packages/agent-runtime/src/Agent/Runtime/Providers/OpenRouter.hs
+  packages/agent-runtime/src/Agent/Runtime/Providers/Claude.hs
+  packages/agent-runtime/src/Agent/Runtime/Provider/OpenAI.hs
+  packages/agent-runtime/src/Agent/Runtime/Provider/OpenAI/Fresh.hs
+  packages/agent-runtime/src/Agent/Runtime/Compaction.hs
+  packages/agent-runtime/src/Agent/Runtime/Compaction/Provider.hs
+  packages/agent-runtime/src/Agent/Runtime/Compaction/Types.hs
+  packages/agent-runtime/src/Agent/Runtime/Compaction/Projection.hs
+  packages/agent-runtime/src/Agent/Runtime/Compaction/Continuation.hs
+  packages/agent-runtime/src/Agent/Runtime/Session/Backend.hs
+  packages/agent-runtime/src/Agent/Runtime/Session/History.hs
+  packages/agent-runtime/test/Agent/Runtime/ProviderRuntimeSpec.hs
+  packages/agent-runtime/test/Agent/Runtime/CompactionSpec.hs
+  packages/agent-runtime/src/Agent/Runtime/StartupPolicy.hs
+  packages/agent-runtime/src/Agent/Runtime/ConversationStore.hs
+  packages/agent-runtime/src/Agent/Runtime/SessionState.hs
+  packages/agent-runtime/test/Agent/Runtime/ConversationStoreSpec.hs
+  packages/agent-runtime/test/Agent/Runtime/ConversationSessionSpec.hs
   packages/agent-external-session/src/Agent/CLI/ExternalSession.hs
   packages/agent-external-session/src/Agent/CLI/ExternalSession/Content.hs
   packages/agent-external-session/src/Agent/CLI/ExternalSession/JSONL.hs

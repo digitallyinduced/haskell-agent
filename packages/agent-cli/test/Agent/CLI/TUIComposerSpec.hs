@@ -1,6 +1,6 @@
 module Agent.CLI.TUIComposerSpec (spec) where
 
-import Agent.CLI.Auth (LoadedAuth(..), staticCredentialProvider)
+import Agent.Accounts.Auth (LoadedAuth(..), staticCredentialProvider)
 import Agent.CLI.Dictation
     ( DictationAuthError(..)
     , DictationBackend(..)
@@ -11,7 +11,7 @@ import Agent.CLI.Dictation
     , insertDictation
     , selectDictationBackend
     )
-import Agent.CLI.GatewayClient (newGatewayModelAccessWith)
+import Agent.Runtime.GatewayClient (newGatewayModelAccessWith)
 import Agent.CLI.Command (CopyRequest(..), ReplAction(..))
 import Agent.Provider
     ( BillingMode(..)
@@ -25,7 +25,15 @@ import Agent.CLI.Input
     )
 import Agent.CLI.TUI.Composer
 import Agent.CLI.TUI.Types
-import Agent.Loop (ImageAttachment(..))
+import Agent.CLI.SteeringInputs
+    ( awaitSteeringInput
+    , commitSteeringInputs
+    , enqueueSteeringInputs
+    , hasSteeringInputWake
+    , newSteeringInputs
+    , readSteeringInputs
+    )
+import Agent.Loop (ImageAttachment(..), TurnInput(..))
 import Agent.TUI.Model
     ( NoticeKind(..)
     , PromptState(..)
@@ -128,6 +136,34 @@ spec = describe "fullscreen composer" do
             "WHERE listings.agent_id = $1"
             `shouldBe` Just (True, "WHERE listings.agent_id = $1")
         steeringPrompt initialUiState True "not running"
+            `shouldBe` Nothing
+
+    it "steers plain and explicit prompts while a turn is running" do
+        let running = initialUiState { uiRunning = True }
+        steeringPrompt running False "inspect the tests"
+            `shouldBe` Just (False, "inspect the tests")
+        steeringPrompt running False "/steer inspect the tests"
+            `shouldBe` Just (False, "inspect the tests")
+        steeringPrompt running True "/steer keep  spaces\nand newlines"
+            `shouldBe` Just (True, "keep  spaces\nand newlines")
+        steeringPrompt initialUiState False "/steer inspect the tests"
+            `shouldBe` Nothing
+        steeringPrompt running False "/steer"
+            `shouldBe` Nothing
+
+    it "keeps explicit queued prompts out of steering and immediate commands" do
+        let running = initialUiState { uiRunning = True }
+        steeringPrompt running False "/queue inspect the tests"
+            `shouldBe` Nothing
+        steeringPrompt running True "/queue keep  spaces\nand newlines"
+            `shouldBe` Nothing
+        steeringPrompt initialUiState False "/queue inspect the tests"
+            `shouldBe` Nothing
+        immediateReplCommand running (ReplText "/queue inspect the tests")
+            `shouldBe` Nothing
+        immediateReplCommand running (ReplPasted "/queue inspect the tests")
+            `shouldBe` Nothing
+        immediateBtwQuestion running (ReplText "/queue inspect the tests")
             `shouldBe` Nothing
 
     it "keeps prompts with images out of text-only steering" do
@@ -656,6 +692,41 @@ spec = describe "fullscreen composer" do
                 (pure ("provider unavailable" :: Text))
         fmap (.fullscreenInputLine) result
             `shouldBe` Right (ReplText "submitted")
+
+    it "wakes an idle prompt reader for late guidance without consuming the input" do
+        buffer <- newFullscreenInputBuffer
+        steering <- newSteeringInputs
+        let readPrompt = fmap (fmap (.fullscreenInputLine)) $ atomically $
+                takeFullscreenInputOr buffer (awaitSteeringInput steering)
+        withAsync readPrompt \reader -> do
+            timeout 20_000 (wait reader) `shouldReturn` Nothing
+            enqueueSteeringInputs steering [UserMessage "make a pr"]
+                `shouldReturn` Right ()
+            timeout 1_000_000 (wait reader) `shouldReturn` Just (Left ())
+        readSteeringInputs steering `shouldReturn` [UserMessage "make a pr"]
+        hasSteeringInputWake steering `shouldReturn` False
+        timeout 20_000 readPrompt `shouldReturn` Nothing
+        commitSteeringInputs steering 1
+        readSteeringInputs steering `shouldReturn` []
+
+    it "leaves a simultaneous guidance wake intact when a submitted prompt wins" do
+        buffer <- newFullscreenInputBuffer
+        steering <- newSteeringInputs
+        atomically (appendFullscreenInput buffer (input (ReplText "submitted")))
+            `shouldReturn` Right ()
+        enqueueSteeringInputs steering [UserMessage "guidance"]
+            `shouldReturn` Right ()
+        let readPrompt = fmap (fmap (.fullscreenInputLine)) $ atomically $
+                takeFullscreenInputOr buffer (awaitSteeringInput steering)
+        result <- readPrompt
+        result `shouldBe` Right (ReplText "submitted")
+        hasSteeringInputWake steering `shouldReturn` True
+        readSteeringInputs steering `shouldReturn` [UserMessage "guidance"]
+        -- The explicit turn consumes this guidance through the normal loop;
+        -- its commit must remove the edge, avoiding a redundant synthetic turn.
+        commitSteeringInputs steering 1
+        hasSteeringInputWake steering `shouldReturn` False
+        timeout 20_000 readPrompt `shouldReturn` Nothing
 
     it "bounds queued prompts and admits another after consumption" do
         buffer <- newFullscreenInputBuffer

@@ -146,8 +146,8 @@ paired samples.
 Run the optimized benchmark on Linux at representative resolutions:
 
 ```console
-nix develop -c cabal build --offline agent-cli:bench:portal-capture-bench
-bin=$(nix develop -c cabal list-bin agent-cli:bench:portal-capture-bench)
+nix develop -c cabal build --offline agent-computer-use:bench:portal-capture-bench
+bin=$(nix develop -c cabal list-bin agent-computer-use:bench:portal-capture-bench)
 nix develop -c "$bin" 1920 1080 3000 8 5 +RTS -T
 nix develop -c "$bin" 3840 2160 3000 8 5 +RTS -T
 ```

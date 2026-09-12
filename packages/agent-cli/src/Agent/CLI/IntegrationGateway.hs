@@ -7,7 +7,7 @@ module Agent.CLI.IntegrationGateway
     , integrationEndpointServers
     ) where
 
-import Agent.CLI.GatewayClient (GatewayCredential(..))
+import Agent.Runtime.GatewayClient (GatewayCredential(..))
 import Agent.Integration.API (IntegrationAuthority(..), IntegrationEndpoint(..))
 import Agent.MCP (McpServerConfig(..), McpProtocolPreference(..), McpToolServer)
 import qualified Data.Set as Set

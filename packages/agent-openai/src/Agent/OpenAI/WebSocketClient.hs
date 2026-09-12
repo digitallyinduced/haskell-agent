@@ -416,14 +416,13 @@ runConnectionAttemptWithPolicyAndTurnState retryPolicy sharedTurnState
             WebSocket.retryTransientWsConnectWithPolicy
                 retryPolicy
                 \connected ->
-                    runCredentialWebSocket endpoint headers \conn -> do
+                    WebSocket.withOwnedWebSocketSession
+                        WebSocket.defaultWebSocketSessionOptions
+                        (runCredentialWebSocket endpoint headers)
+                        \session -> do
                         connected
-                        WebSocket.withWebSocketSession
-                            WebSocket.defaultWebSocketSessionOptions
-                            conn
-                            (\session -> do
-                                turnState <- maybe newCodexTurnState pure sharedTurnState
-                                action (CodexWsConn session turnState) credential)
+                        turnState <- maybe newCodexTurnState pure sharedTurnState
+                        action (CodexWsConn session turnState) credential
 
 data WebSocketEndpoint = WebSocketEndpoint
     { endpointSecure :: !Bool

@@ -1,6 +1,7 @@
 module Agent.CLI.AgentViewportSpec (spec) where
 
 import Agent.CLI.AgentViewport
+import qualified Agent.Runtime.AgentSnapshot as Snapshot
 import Agent.Json (rawJsonFromEncoding)
 import Agent.CLI.Picker (PickerKey(..))
 import Agent.Responses.Types
@@ -36,6 +37,20 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "agentSnapshot" do
+        it "preserves host metadata independently of terminal transcripts" do
+            let entry = rootEntry
+                    { agentTranscript = ["terminal-only transcript"]
+                    , agentSteps = [AgentStep AgentStepRunning "working" (Just "detail")]
+                    }
+            agentSnapshot entry `shouldBe` Snapshot.AgentSnapshot
+                { agentPath = entry.agentPath
+                , agentStatus = entry.agentStatus
+                , agentModel = entry.agentModel
+                , agentSteps = entry.agentSteps
+                }
+            agentSnapshot (entry { agentTranscript = ["different transcript"] })
+                `shouldBe` agentSnapshot entry
     describe "renderAgentTree" do
         it "stays hidden until a child agent exists" do
             renderAgentTree False AgentRoot [rootEntry] `shouldBe` ""

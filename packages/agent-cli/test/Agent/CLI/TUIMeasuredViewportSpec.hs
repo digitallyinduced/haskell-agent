@@ -2,13 +2,15 @@
 
 module Agent.CLI.TUIMeasuredViewportSpec (spec) where
 
-import Agent.CLI.TUI.MeasuredViewport (measuredViewport)
+import Agent.CLI.TUI.MeasuredViewport (measuredViewport, measuredViewportWithFooter)
+import Agent.CLI.TUI.Scroll (conversationMessagesBelow, conversationMessagesBelowLabel)
 import Brick
     ( App(..)
     , AttrMap
     , BrickEvent(..)
     , CursorLocation
     , EventM
+    , Extent(..)
     , Location(..)
     , VScrollbarRenderer(..)
     , ViewportType(Vertical)
@@ -36,6 +38,7 @@ import Brick
     , showCursor
     , showFirstCursor
     , txtWrap
+    , txt
     , vBox
     , viewport
     , viewportScroll
@@ -73,9 +76,10 @@ data Name
     = Transcript
     | Chunk !Int
     | ChunkCache !Int
+    | NewerGap
     deriving (Eq, Ord, Show)
 
-data Renderer = Ordinary | Measured | OrdinaryScrollbar | MeasuredScrollbar
+data Renderer = Ordinary | Measured | OrdinaryScrollbar | MeasuredScrollbar | MeasuredFooter
 
 data ScriptEvent
     = ScrollBy !Int
@@ -89,6 +93,41 @@ data ScriptEvent
 spec :: Spec
 spec =
     describe "measuredViewport" do
+        it "drops the lower-bound marker after scrolling past a newer-history gap" do
+            let content =
+                    [ reportExtent (Chunk 0) $ vBox (replicate 4 (txt "history"))
+                    , reportExtent NewerGap (txt "unloaded history")
+                    , reportExtent (Chunk 1) $ vBox (replicate 4 (txt "live message"))
+                    ]
+            (beforeGap, _) <- runScript MeasuredFooter (40, 5) content [Stop]
+            snd (last beforeGap) `shouldContain` "1+ Messages"
+            (afterGap, _) <- runScript MeasuredFooter (40, 5) content
+                [ScrollBy 2, Stop]
+            snd (last afterGap) `shouldContain` "1 Message"
+            snd (last afterGap) `shouldNotContain` "+ Messages"
+            (bottom, _) <- runScript MeasuredFooter (40, 5) content
+                [ScrollEnd, Stop]
+            snd (last bottom) `shouldNotContain` "Message"
+
+        it "counts offscreen cached message extents after scrolling and resizing" do
+            let content =
+                    [ cached (ChunkCache index) $
+                        reportExtent (Chunk index) $
+                            vBox (replicate 3 (txt "message"))
+                    | index <- [0 .. 3]
+                    ]
+            (initial, _) <- runScript MeasuredFooter (40, 5) content [Stop]
+            snd (last initial) `shouldContain` "3 Messages"
+            (scrolled, _) <- runScript MeasuredFooter (40, 5) content
+                [ScrollBy 3, Stop]
+            snd (last scrolled) `shouldContain` "2 Messages"
+            (resized, _) <- runScript MeasuredFooter (40, 5) content
+                [Resize (40, 10), Stop]
+            snd (last resized) `shouldContain` "1 Message"
+            (bottom, _) <- runScript MeasuredFooter (40, 5) content
+                [ScrollEnd, Stop]
+            snd (last bottom) `shouldNotContain` "Message"
+
         it "uses an oracle which detects rendered text differences" do
             first <- runScript Ordinary (20, 3)
                 [txtWrap "expected text"] [Stop]
@@ -245,6 +284,8 @@ runScriptChoosing chooseCursor renderer initialBounds content script = do
                         ( map (concatMap spanCharacters . toList) $
                             toList (displayOpsForPic picture bounds)
                         , V.picCursor picture
+                        , map (map snd . concatMap spanCharacters . toList) $
+                            toList (displayOpsForPic picture bounds)
                         )
                 modifyIORef' picturesRef ((bounds, normalized) :)
                 displayContext <- V.mkDisplayContext output output bounds
@@ -367,6 +408,8 @@ drawRenderer renderer content =
     joinBorders $ case renderer of
         Ordinary -> viewport Transcript Vertical (vBox content)
         Measured -> measuredViewport Transcript 0 content
+        MeasuredFooter ->
+            measuredViewportWithFooter Transcript 0 (Just drawFooter) content
         OrdinaryScrollbar ->
             withVScrollBarRenderer testScrollbarRenderer $
                 withVScrollBars OnRight $
@@ -375,6 +418,24 @@ drawRenderer renderer content =
             withVScrollBarRenderer testScrollbarRenderer $
                 withVScrollBars OnRight $
                     measuredViewport Transcript 1 content
+  where
+    drawFooter bottom measuredExtents =
+        maybe (txt " ") txt $
+            conversationMessagesBelowLabel
+                (or
+                    [ height > 0 && top + height > bottom
+                    | extent <- measuredExtents
+                    , extent.extentName == NewerGap
+                    , let Location (_, top) = extent.extentUpperLeft
+                    , let (_, height) = extent.extentSize
+                    ]) $
+                conversationMessagesBelow bottom
+                    [ (top, height)
+                    | extent <- measuredExtents
+                    , Chunk _ <- [extent.extentName]
+                    , let Location (_, top) = extent.extentUpperLeft
+                    , let (_, height) = extent.extentSize
+                    ]
 
 testScrollbarRenderer :: VScrollbarRenderer Name
 testScrollbarRenderer =

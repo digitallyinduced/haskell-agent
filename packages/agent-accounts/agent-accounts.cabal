@@ -1,0 +1,93 @@
+cabal-version:      3.0
+name:               agent-accounts
+version:            0.1.0.0
+synopsis:           Shared harness accounts and credential ownership
+description:        Provider credential resolution and refresh coordination,
+                    private credential storage, gateway credential leases,
+                    and frontend-independent account selection.
+license:            MIT
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           System
+build-type:         Simple
+
+common common-options
+    default-language: GHC2021
+    default-extensions: BlockArguments
+                      , OverloadedStrings
+                      , OverloadedRecordDot
+                      , DuplicateRecordFields
+                      , NoFieldSelectors
+                      , LambdaCase
+                      , RecordWildCards
+                      , NamedFieldPuns
+                      , TypeApplications
+                      , ScopedTypeVariables
+    ghc-options:      -Wall
+                      -Wcompat
+                      -Widentities
+                      -Werror=incomplete-patterns
+                      -Werror=incomplete-uni-patterns
+                      -Werror=missing-fields
+                      -Wincomplete-record-updates
+                      -Wpartial-fields
+                      -Wno-name-shadowing
+
+library
+    import:           common-options
+    hs-source-dirs:   src
+    exposed-modules:  Agent.Accounts.Auth
+                    , Agent.Accounts.CredentialStore
+                    , Agent.Accounts.Gateway.Credentials
+                    , Agent.Accounts.Gateway.Origin
+                    , Agent.Accounts.Selection
+    other-modules:    Agent.Accounts.Auth.Gemini
+                    , Agent.Accounts.Auth.Grok
+                    , Agent.Accounts.Auth.OpenAI
+                    , Agent.Accounts.Auth.Types
+    build-depends:    agent-claude >= 0.1 && < 0.2
+                    , agent-core >= 0.1 && < 0.2
+                    , agent-gemini >= 0.1 && < 0.2
+                    , agent-json >= 0.1 && < 0.2
+                    , agent-openai >= 0.1 && < 0.2
+                    , agent-openrouter >= 0.1 && < 0.2
+                    , agent-server-client
+                    , agent-xai >= 0.1 && < 0.2
+                    , aeson >= 2.0
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , containers
+                    , directory
+                    , extra >= 1.7
+                    , filepath
+                    , network-uri
+                    , safe-exceptions
+                    , stm
+                    , text >= 2.0 && < 2.2
+                    , time
+                    , transformers
+                    , unix
+
+test-suite agent-accounts-test
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    ghc-options:      -threaded
+    other-modules:    Agent.Accounts.CredentialStoreSpec
+                    , Agent.Accounts.SelectionSpec
+    build-depends:    agent-accounts
+                    , agent-core
+                    , agent-json
+                    , aeson
+                    , async
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , directory
+                    , filepath
+                    , hspec >= 2.11 && < 2.12
+                    , safe-exceptions
+                    , text
+                    , unix

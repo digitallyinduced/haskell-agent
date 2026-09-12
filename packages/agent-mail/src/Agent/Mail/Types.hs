@@ -63,6 +63,7 @@ import Data.Aeson
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.Types as AesonTypes
+import Agent.Mail.Utf8 (truncateUtf8, utf8Length)
 import qualified Data.ByteString as BS
 import Data.Char
     ( isAlphaNum
@@ -73,7 +74,6 @@ import Data.Char
     )
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEncoding
 import Data.Time
     ( Day
     , UTCTime
@@ -1104,19 +1104,6 @@ validDateRange after before =
 parseIsoDay :: Text -> Maybe Day
 parseIsoDay value =
     parseTimeM True defaultTimeLocale "%F" (Text.unpack value)
-
-utf8Length :: Text -> Int
-utf8Length = BS.length . TextEncoding.encodeUtf8
-
-truncateUtf8 :: Int -> Text -> Text
-truncateUtf8 limit = decodePrefix . BS.take (max 0 limit) . TextEncoding.encodeUtf8
-  where
-    decodePrefix bytes =
-        case TextEncoding.decodeUtf8' bytes of
-            Right value -> value
-            Left _
-                | BS.null bytes -> ""
-                | otherwise -> decodePrefix (BS.init bytes)
 
 boundedOpaque :: Text -> Text
 boundedOpaque = truncateUtf8 maximumOpaqueReferenceBytes

@@ -44,7 +44,7 @@ module Agent.MCP.OAuth
       -- * Token endpoint requests
     , TokenExchange(..), exchangeAuthorizationCodeWith, exchangeAuthorizationCode
     , RefreshRequest(..), refreshAccessTokenWith, refreshAccessToken
-    , oauthCallbackSuccessPage
+    , OAuthCallbackPage(..), oauthCallbackPage, oauthCallbackSuccessPage
       -- * Persisted token records
     , OAuthTokenFile(..), OAuthTokenFileExtra(..), emptyOAuthTokenFileExtra
     , loadOAuthTokenFile, loadOAuthTokenFileExtra, loadOAuthTokenRecord
@@ -63,7 +63,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlphaNum, isSpace, toLower)
-import Data.Maybe (fromMaybe, isJust, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Encoding
@@ -205,7 +205,7 @@ instance Aeson.FromJSON OAuthTokenFileExtra where
             <*> o Aeson..:? "redirect_uri"
 
 tokenExtraPairs :: OAuthTokenFileExtra -> [AesonTypes.Pair]
-tokenExtraPairs extra = mapMaybe id
+tokenExtraPairs extra = catMaybes
     [ ("issuer" Aeson..=) <$> extra.extraIssuer
     , ("scope" Aeson..=) <$> extra.extraScope
     , ("resource" Aeson..=) <$> extra.extraResource
@@ -387,9 +387,7 @@ probeAuthorizationChallenge manager endpoint = do
             let challenges = [value | (name, value) <- HC.responseHeaders response, name == "WWW-Authenticate"]
             in Right AuthorizationProbe
                 { probeStatus = statusCode (responseStatus response)
-                , probeChallenge = case mapMaybe parseWwwAuthenticate challenges of
-                    challenge : _ -> Just challenge
-                    [] -> Nothing
+                , probeChallenge = listToMaybe (mapMaybe parseWwwAuthenticate challenges)
                 }
 
 -- ---------------------------------------------------------------------------
@@ -950,15 +948,28 @@ responseBodyText response =
     let body = Text.strip (decodeLenient (LBS.toStrict (LBS.take 2048 (responseBody response))))
     in if Text.null body then "(empty response body)" else body
 
+-- | Fixed presentation states: callback parameters must never become page copy.
+data OAuthCallbackPage
+    = OAuthCallbackReceived
+    | OAuthCallbackRejected
+    | OAuthCallbackNotFound
+    | OAuthCallbackMethodNotAllowed
+    | OAuthCallbackFailed
+    deriving (Eq, Show)
+
 -- | UTF-8 receipt page served by the interactive OAuth callback listener.
 -- Receipt does not imply permission was granted or the token exchange succeeded.
 -- Render fixed application copy only, never callback parameters.
 oauthCallbackSuccessPage :: LBS.ByteString
-oauthCallbackSuccessPage = LBS.fromStrict $ Encoding.encodeUtf8 $ Text.concat
+oauthCallbackSuccessPage = oauthCallbackPage OAuthCallbackReceived
+
+-- | Branded callback pages with fixed, credential-free instructions.
+oauthCallbackPage :: OAuthCallbackPage -> LBS.ByteString
+oauthCallbackPage presentation = LBS.fromStrict $ Encoding.encodeUtf8 $ Text.concat
     [ "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
     , "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
     , "<meta name=\"color-scheme\" content=\"light dark\">"
-    , "<title>Authorization response received · Haskell Agent</title><style>"
+    , "<title>", documentTitle, " · Haskell Agent</title><style>"
     , ":root{color-scheme:light dark;--background:#f5f7fb;--surface:#fff;"
     , "--text:#192231;--secondary:#606b7c;--border:#e5e9f0;"
     , "--status-background:#edf3ff;--status-color:#2460dc}"
@@ -978,6 +989,7 @@ oauthCallbackSuccessPage = LBS.fromStrict $ Encoding.encodeUtf8 $ Text.concat
     , ".status{display:grid;place-items:center;width:64px;height:64px;margin:0 auto 24px;"
     , "border-radius:50%;background:var(--status-background);color:var(--status-color)}"
     , ".status svg{width:30px;height:30px}"
+    , ".status.error{background:#fff0e6;color:#a34112}"
     , "h1{margin:0 0 14px;font-size:27px;line-height:1.2;letter-spacing:-.8px;font-weight:650;"
     , "text-wrap:balance}p{margin:0;color:var(--secondary);font-size:15px;line-height:1.65;"
     , "text-wrap:pretty}.next-step{margin-top:28px;padding-top:24px;border-top:1px solid var(--border)}"
@@ -986,17 +998,54 @@ oauthCallbackSuccessPage = LBS.fromStrict $ Encoding.encodeUtf8 $ Text.concat
     , "@media(max-width:380px){.card{padding:32px 22px}h1{font-size:24px}}"
     , "@media(prefers-color-scheme:dark){:root{--background:#11151c;--surface:#1b212b;"
     , "--text:#edf1f8;--secondary:#a4afc0;--border:#303947;"
-    , "--status-background:#243653;--status-color:#9bbfff}}"
+    , "--status-background:#243653;--status-color:#9bbfff}"
+    , ".status.error{background:#442c22;color:#ffb68e}}"
     , "</style></head><body><main class=\"confirmation\">"
     , "<header class=\"brand\"><span class=\"brand-mark\" aria-hidden=\"true\">λ</span>"
     , "Haskell Agent</header><section class=\"card\" aria-labelledby=\"confirmation-title\">"
-    , "<div class=\"status\" aria-hidden=\"true\">"
+    , "<div class=\"status", if presentation == OAuthCallbackReceived then "" else " error"
+    , "\" aria-hidden=\"true\">"
     , "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\""
     , " stroke-linecap=\"round\" stroke-linejoin=\"round\">"
-    , "<path d=\"M9 10 4 15l5 5M4 15h10a6 6 0 0 0 0-12\"/></svg></div>"
-    , "<h1 id=\"confirmation-title\">Return to Haskell Agent</h1>"
-    , "<p>Your authorization response was received.</p>"
+    , if presentation == OAuthCallbackReceived
+        then "<path d=\"M9 10 4 15l5 5M4 15h10a6 6 0 0 0 0-12\"/>"
+        else "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 7v6m0 4h.01\"/>"
+    , "</svg></div>"
+    , "<h1 id=\"confirmation-title\">", heading, "</h1>"
+    , "<p>", message, "</p>"
     , "<div class=\"next-step\"><strong>Continue in the app</strong>"
-    , "<p>Return to the app to check the connection status.</p></div></section>"
+    , "<p>", nextStep, "</p></div></section>"
     , "<p class=\"footer\">You can safely close this tab.</p></main></body></html>"
     ]
+  where
+    (documentTitle, heading, message, nextStep) = case presentation of
+        OAuthCallbackReceived ->
+            ( "Authorization response received"
+            , "Return to Haskell Agent"
+            , "Your authorization response was received."
+            , "Return to the app to check the connection status."
+            )
+        OAuthCallbackRejected ->
+            ( "Invalid authorization response"
+            , "Invalid authorization response"
+            , "This response could not be verified. Your sign-in is still waiting."
+            , "Return to the original sign-in tab to continue, or check the connection status in the app."
+            )
+        OAuthCallbackNotFound ->
+            ( "Page not found"
+            , "Page not found"
+            , "This address is not an authorization callback."
+            , "Return to the original sign-in tab to continue, or check the connection status in the app."
+            )
+        OAuthCallbackMethodNotAllowed ->
+            ( "Request not supported"
+            , "Request not supported"
+            , "This authorization callback does not support that request method."
+            , "Return to the original sign-in tab to continue, or check the connection status in the app."
+            )
+        OAuthCallbackFailed ->
+            ( "Connection unsuccessful"
+            , "Haskell Agent could not connect"
+            , "The authorization response could not be accepted."
+            , "Return to Haskell Agent to see the error and try again."
+            )

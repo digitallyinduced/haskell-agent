@@ -11,12 +11,12 @@ module Agent.CLI.Subagents.Runtime
     , runXaiSubagent, resolveGatewaySubagentTarget, grokSpawnedChildIdentity
     , usesOpenAiChildTransport, validatePersistedSubagentTarget
     ) where
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( readSessionRequestParams
     )
 import Agent.CLI.Approval (childApprove)
 import Agent.CLI.Btw (trimDanglingToolSuffix)
-import Agent.CLI.Compaction
+import Agent.Runtime.Compaction.Provider
     ( CompactionInstall(CompactionNotInstalled)
     , autoCompactBackendWith
     , autoCompactOpenAiBackendWithSenderHookAndDecorator
@@ -32,8 +32,8 @@ import Agent.CLI.Prompt
     , systemPrompt
     , systemPromptForTools
     )
-import Agent.CLI.Request (requestParams)
-import Agent.CLI.Session (LegacySubagentTarget(..))
+import Agent.Runtime.ProviderRequest (requestParams)
+import Agent.Runtime.Session (LegacySubagentTarget(..))
 import Agent.CLI.SubagentStore
     ( SubagentDiskFields(..)
     , SubagentDiskMeta(..)
@@ -57,7 +57,7 @@ import Agent.CLI.Subagents.Runtime.Identity
 import Agent.CLI.Subagents.Runtime.Target
     (activeSubagentTargetError, unsupportedDialectMessage,
      validatePersistedSubagentTarget)
-import Agent.CLI.Subagents.Runtime.OpenAI
+import Agent.Runtime.Provider.OpenAI.Fresh
     (freshOpenAiBackend, freshOpenAiBackendWithTurnState)
 import Agent.CLI.SteeringInputs
     ( commitSteeringInputs
@@ -66,11 +66,11 @@ import Agent.CLI.SteeringInputs
     , newSteeringInputs
     , readSteeringInputs
     )
-import Agent.CLI.ModelConfig
+import Agent.Runtime.ModelConfig
     (connectionSupportsDialect, organizationGatewayConnectionId)
 import Agent.CLI.Tools
     (hostedSearchToolNames, requireToolRegistry, schemasFromAppTools)
-import Agent.CLI.Dialects
+import Agent.Runtime.Tools.Dialects
     ( CodingTools(..)
     , codingToolsFor
     , filterBashTools

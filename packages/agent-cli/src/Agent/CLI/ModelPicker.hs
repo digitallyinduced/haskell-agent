@@ -9,6 +9,10 @@ module Agent.CLI.ModelPicker
     , pickModelStateWithEffort
     , pickModelStateWithEffortAndUsage
     , pickModelStateWithUpdates
+    , ModelPickerSnapshot
+    , ModelPickerRefresh
+    , resolveModelPickerRefresh
+    , withModelPickerRefresh
     , refreshModelPickerState
     , formatCatalogListing
     , initialModelPickerState
@@ -21,11 +25,11 @@ module Agent.CLI.ModelPicker
     , decodePickerKey
     ) where
 
-import Agent.CLI.ModelConfig
+import Agent.Runtime.ModelConfig
     ( ModelCatalog
     , organizationGatewayConnectionId
     )
-import Agent.CLI.Models
+import Agent.Runtime.Models
 import Agent.CLI.Options
     ( defaultEffortFor
     , normalizeReasoningEffortForDialect
@@ -52,7 +56,6 @@ import Control.Monad (join, unless)
 import Control.Concurrent.Async (withAsync)
 import Control.Concurrent.STM (atomically, newEmptyTMVarIO, takeTMVar, tryTakeTMVar, putTMVar)
 import Data.Char (isPrint)
-import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (elemIndex, findIndex)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -218,6 +221,33 @@ pickModelStateWithEffortAndUsage color currentEffort usage models = do
                     state0
             pure (join result)
 
+-- | Catalog, usage, and notice from one consistent refresh checkpoint.
+type ModelPickerSnapshot = (PickerState, Map.Map Text Text, Text)
+
+-- | Return the final snapshot, optionally publishing intermediate snapshots.
+-- 'Nothing' means no update; after publishing, return the latest snapshot.
+-- Callbacks must finish before the refresh returns.
+type ModelPickerRefresh =
+    (ModelPickerSnapshot -> IO ()) -> IO (Maybe ModelPickerSnapshot)
+
+-- | Non-interactive consumers need only the final result, not a callback log.
+resolveModelPickerRefresh
+    :: ModelPickerSnapshot -> ModelPickerRefresh -> IO ModelPickerSnapshot
+resolveModelPickerRefresh initial refresh =
+    fromMaybe initial <$> refresh (const (pure ()))
+
+-- | Scope the refresh worker and its conflated channel to the consumer.
+-- A final result is also an update, even if no intermediate was published.
+withModelPickerRefresh
+    :: ModelPickerRefresh -> (IO ModelPickerSnapshot -> IO a) -> IO a
+withModelPickerRefresh refresh consume = do
+    updates <- newEmptyTMVarIO
+    let publish snapshot = atomically do
+            _ <- tryTakeTMVar updates
+            putTMVar updates snapshot
+    withAsync (refresh publish >>= maybe (pure ()) publish) \_ ->
+        consume (atomically (takeTMVar updates))
+
 -- | A private, conflated update channel belongs to this invocation only.
 -- Network workers never draw directly or race the terminal's input decoder.
 pickModelStateWithUpdates
@@ -226,7 +256,7 @@ pickModelStateWithUpdates
     -> Text
     -> Map.Map Text Text
     -> PickerState
-    -> ((PickerState -> Map.Map Text Text -> Text -> IO ()) -> IO ())
+    -> ModelPickerRefresh
     -> IO (Maybe ModelPickerSelection)
 pickModelStateWithUpdates color currentEffort notice usage models refresh = do
     isTty <- hIsTerminalDevice stdin
@@ -234,21 +264,15 @@ pickModelStateWithUpdates color currentEffort notice usage models refresh = do
         then do
             -- A non-interactive listing cannot redraw after it is printed.
             -- Resolve the refresh first rather than printing a cold empty cache.
-            latest <- newIORef (models, usage, notice)
-            refresh \nextModels nextUsage nextNotice ->
-                writeIORef latest (nextModels, nextUsage, nextNotice)
-            (nextModels, nextUsage, nextNotice) <- readIORef latest
+            (nextModels, nextUsage, nextNotice) <-
+                resolveModelPickerRefresh (models, usage, notice) refresh
             unless (Text.null nextNotice) $
                 Text.hPutStrLn stderr (displayPickerText nextNotice)
             pickModelStateWithEffortAndUsage color currentEffort nextUsage nextModels
         else do
-            updates <- newEmptyTMVarIO
             let initial =
                     ((initialModelPickerState currentEffort models)
                         { modelPickerUsage = usage }, notice)
-                publish nextModels nextUsage nextNotice = atomically do
-                    _ <- tryTakeTMVar updates
-                    putTMVar updates (nextModels, nextUsage, nextNotice)
                 render (state, message) =
                     renderModelPickerFrame color state
                         <> "\n" <> roleMuted color (displayPickerText message)
@@ -256,10 +280,10 @@ pickModelStateWithUpdates color currentEffort notice usage models refresh = do
                     fmap (, message) (applyModelPickerEvent (toEvent key) state)
                 apply (nextModels, nextUsage, nextNotice) (state, _) =
                     (refreshModelPickerState currentEffort nextModels nextUsage state, nextNotice)
-            result <- withAsync (refresh publish) \_ ->
+            result <- withModelPickerRefresh refresh \nextUpdate ->
                 Picker.runOverlayWithDecoderAndUpdates
                     decodeModelPickerKey render step
-                    (atomically (takeTMVar updates)) apply initial
+                    nextUpdate apply initial
             pure (result >>= fst)
 
 -- | Preserve the filter, focused model identity, and each model's effort when

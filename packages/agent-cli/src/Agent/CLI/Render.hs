@@ -11,6 +11,10 @@ module Agent.CLI.Render
     , stateThinkingVisible
     , stateToolCalls
     , RenderConfig(..)
+    , ToolRenderInputs(..)
+    , ToolRenderEvent(..)
+    , ToolRenderCommand(..)
+    , stepToolRender
     , clearThinking
     , commitThinking
     , emptyMarkdownStreamState
@@ -80,12 +84,12 @@ import Agent.CLI.Progress
     , wrapOscForTmux
     )
 import Agent.CLI.Terminal (fileUri)
-import Agent.CLI.Error
+import Agent.Runtime.Error
     ( formatApiError
     , formatApiErrorAt
     , formatApiErrorPersistedAt
     )
-import Agent.CLI.ComputerUse (summarizeComputerToolCall)
+import Agent.ComputerUse (summarizeComputerToolCall)
 import Agent.CLI.Style
     ( agentBackground
     , glyphCancel
@@ -646,95 +650,109 @@ renderEventUnlocked config = \case
     ModelContextReset ->
         pure ()
 
+-- | The tool-lifecycle slice of the renderer's pure decision layer. These
+-- decisions need settings, but neither wall time nor terminal dimensions.
+data ToolRenderInputs = ToolRenderInputs
+    { toolRenderColor :: !Bool
+    , toolRenderWorkspace :: !Text
+    , toolRenderShowThinking :: !Bool
+    }
+
+data ToolRenderEvent
+    = RenderToolStarted ToolCall
+    | RenderToolUpdated ToolCall
+    | RenderToolFinished ToolCallResult
+
+data ToolRenderCommand
+    = WriteToolLine Text
+    | RefreshToolThinking
+    deriving (Eq, Show)
+
+-- | Run after committing thinking for a start event. The returned state is
+-- committed BEFORE interpreting commands: a failed write must not roll back
+-- call registration/removal. Spinner visibility is deliberately not predicted;
+-- its interpreter owns the existing lifecycle and partial-progress checkpoints.
+stepToolRender
+    :: ToolRenderInputs
+    -> ToolRenderEvent
+    -> RenderState
+    -> (RenderState, [ToolRenderCommand])
+stepToolRender inputs event state =
+    case event of
+        RenderToolStarted call ->
+            ( register call
+            , (if Map.member call.callId state.stateToolCalls
+                    || isTodoTool call.name
+                then []
+                else callLines call)
+                <> [RefreshToolThinking | inputs.toolRenderShowThinking]
+            )
+        -- Complete an early streamed placeholder once; the execution-time
+        -- start is then deduplicated by the registered call id.
+        RenderToolUpdated call ->
+            ( register call
+            , if maybe False (Text.null . Text.strip . (.arguments))
+                    (Map.lookup call.callId state.stateToolCalls)
+                    && not (Text.null (Text.strip call.arguments))
+                    && not (isTodoTool call.name)
+                then callLines call
+                else []
+            )
+        RenderToolFinished result ->
+            let previous = Map.lookup result.callId state.stateToolCalls
+                formatted = maybe result.output
+                    (\call -> formatToolOutputRelative
+                        inputs.toolRenderWorkspace call result.output)
+                    previous
+                commands = case previous of
+                    Just call | isTodoTool call.name -> []
+                    _ -> [WriteToolLine (roleToolOutput inputs.toolRenderColor
+                            (truncateToolOutput formatted))]
+            in ( state{stateToolCalls = Map.delete result.callId state.stateToolCalls}
+               , commands
+               )
+  where
+    register call =
+        state
+            { stateToolCalls = Map.insert call.callId call state.stateToolCalls
+            , stateActivity = summarizeToolCallRelative inputs.toolRenderWorkspace call
+            }
+    callLines call =
+        WriteToolLine (formatToolStartedRelative
+            inputs.toolRenderColor inputs.toolRenderWorkspace call)
+        : [ WriteToolLine extra
+          | let extra = formatToolBodyRelative
+                    inputs.toolRenderColor inputs.toolRenderWorkspace call
+          , not (Text.null extra)
+          ]
+
 renderToolStartedUnlocked :: RenderConfig -> ToolCall -> IO ()
 renderToolStartedUnlocked config call = do
+    -- Keep this effect before the pure step, not in a batched state update:
+    -- committing a thought can fail after clearing its buffer.
     commitThinkingUnlocked config
-    alreadyVisible <- modifyRenderState config \state ->
-        ( state
-            { stateToolCalls = Map.insert call.callId call state.stateToolCalls
-            , stateActivity =
-                summarizeToolCallRelative config.renderWorkspace call
-            }
-        , Map.member call.callId state.stateToolCalls
-        )
-    unless (alreadyVisible || isTodoTool call.name) do
-        putTextLn config.renderStderr
-            (formatToolStartedRelative
-                config.renderColor
-                config.renderWorkspace
-                call)
-        let extra =
-                formatToolBodyRelative
-                    config.renderColor
-                    config.renderWorkspace
-                    call
-        unless (Text.null extra) do
-            putTextLn config.renderStderr extra
-    when config.renderShowThinking do
-        visible <- (.stateThinkingVisible) <$> readRenderState config
-        if visible
-            then paintThinkingFrame config
-            else startThinkingSpinnerUnlocked config
+    renderToolEventUnlocked config (RenderToolStarted call)
 
 renderToolFinishedUnlocked :: RenderConfig -> ToolCallResult -> IO ()
-renderToolFinishedUnlocked config result = do
-    calls <- modifyRenderState config \state ->
-        ( state{stateToolCalls = Map.delete result.callId state.stateToolCalls}
-        , state.stateToolCalls
-        )
-    let maybeCall = Map.lookup result.callId calls
-        formatted = maybe result.output
-            (\call ->
-                formatToolOutputRelative
-                    config.renderWorkspace
-                    call
-                    result.output)
-            maybeCall
-        painted = case maybeCall of
-            Just call
-                | isTodoTool call.name -> Nothing
-            _ ->
-                Just
-                    (roleToolOutput
-                        config.renderColor
-                        (truncateToolOutput formatted))
-    case painted of
-        Nothing -> pure ()
-        Just line -> putTextLn config.renderStderr line
+renderToolFinishedUnlocked config result =
+    renderToolEventUnlocked config (RenderToolFinished result)
 
 renderToolUpdatedUnlocked :: RenderConfig -> ToolCall -> IO ()
-renderToolUpdatedUnlocked config call = do
-    previous <- modifyRenderState config \state ->
-        ( state
-            { stateToolCalls =
-                Map.insert call.callId call state.stateToolCalls
-            , stateActivity =
-                summarizeToolCallRelative config.renderWorkspace call
-            }
-        , Map.lookup call.callId state.stateToolCalls
-        )
-    -- An early streamed start may only show a placeholder. Append the
-    -- canonical rendering once when the done item supplies arguments;
-    -- the later execution-time ToolStarted is deduplicated by call id.
-    when
-        ( maybe False
-            (Text.null . Text.strip . (.arguments))
-            previous
-            && not (Text.null (Text.strip call.arguments))
-            && not (isTodoTool call.name)
-        ) do
-            putTextLn config.renderStderr
-                (formatToolStartedRelative
-                    config.renderColor
-                    config.renderWorkspace
-                    call)
-            let extra =
-                    formatToolBodyRelative
-                        config.renderColor
-                        config.renderWorkspace
-                        call
-            unless (Text.null extra) do
-                putTextLn config.renderStderr extra
+renderToolUpdatedUnlocked config call =
+    renderToolEventUnlocked config (RenderToolUpdated call)
+
+renderToolEventUnlocked :: RenderConfig -> ToolRenderEvent -> IO ()
+renderToolEventUnlocked config event = do
+    let inputs = ToolRenderInputs
+            config.renderColor config.renderWorkspace config.renderShowThinking
+    commands <- modifyRenderState config (stepToolRender inputs event)
+    forM_ commands \case
+        WriteToolLine line -> putTextLn config.renderStderr line
+        RefreshToolThinking -> do
+            visible <- (.stateThinkingVisible) <$> readRenderState config
+            if visible
+                then paintThinkingFrame config
+                else startThinkingSpinnerUnlocked config
 
 -- | Style assistant markdown when color is enabled; otherwise return plain text.
 -- The terminal theme owns the default assistant background.
@@ -1078,7 +1096,7 @@ toolChrome name = case canonicalToolName name of
     "shell_command" -> ToolChromeShell
     "write_stdin" -> ToolChrome "Continued" ToolDetailMuted
     "run_ghci" -> ToolChromeShell
-    "exec" -> ToolChrome "$ exec" ToolDetailNone
+    "exec" -> ToolChrome "JavaScript execution" ToolDetailNone
     "get_task_output" -> ToolChrome "Read" ToolDetailMuted
     "wait_tasks" -> ToolChrome "Waited" ToolDetailMuted
     "kill_task" -> ToolChrome "Killed" ToolDetailMuted
@@ -1125,7 +1143,7 @@ formatToolBody color = formatToolBodyRelative color ""
 
 formatToolBodyRelative :: Bool -> Text -> ToolCall -> Text
 formatToolBodyRelative color workspace call = case canonicalToolName call.name of
-    "exec" -> roleToolCommand color call.arguments
+    "exec" -> ""
     _ ->
         Text.intercalate "\n" $
             map (paintDiffRelative color workspace) (toolCallDiffs call)

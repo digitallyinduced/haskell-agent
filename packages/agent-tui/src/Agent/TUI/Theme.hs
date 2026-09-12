@@ -90,28 +90,16 @@ module Agent.TUI.Theme
     ) where
 
 import Agent.Syntax (SyntaxClass(..))
+import Agent.Theme
 import Agent.TUI.Motion (MotionMode(..), pulseBrightness)
 import Brick (AttrMap, AttrName, attrMap, attrName)
 import Control.Applicative ((<|>))
 import Data.Bits ((.|.))
 import Data.Maybe (fromMaybe)
 import Data.Word (Word8)
-import Data.Text (Text)
-import qualified Data.Text as Text
 import Text.Read (readMaybe)
 import qualified Graphics.Vty as V
 import Graphics.Vty.Attributes.Color (Color(..))
-
--- | Built-in fullscreen color schemes.  'Auto' delegates to the terminal's
--- configured palette, preserving the pre-theme behavior.
-data ThemeKind
-    = Auto
-    | Midnight
-    | Daylight
-    | TokyoNight
-    | RosePineMoon
-    | OscuraMidnight
-    deriving (Eq, Ord, Show, Read, Enum, Bounded)
 
 data ThemePalette = ThemePalette
     { themePaletteBackground :: !V.Color
@@ -131,54 +119,6 @@ data ThemePalette = ThemePalette
     , themePaletteWarning :: !V.Color
     , themePaletteCyan :: !V.Color
     }
-
-themeKindText :: ThemeKind -> Text
-themeKindText = \case
-    Auto -> "Auto"
-    Midnight -> "Midnight"
-    Daylight -> "Daylight"
-    TokyoNight -> "Tokyo Night"
-    RosePineMoon -> "Rose Pine Moon"
-    OscuraMidnight -> "Oscura Midnight"
-
-parseThemeKind :: Text -> Maybe ThemeKind
-parseThemeKind raw =
-    case Text.toCaseFold (Text.strip raw) of
-        "auto" -> Just Auto
-        "system" -> Just Auto
-        "midnight" -> Just Midnight
-        "night" -> Just Midnight
-        "daylight" -> Just Daylight
-        "day" -> Just Daylight
-        "tokyonight" -> Just TokyoNight
-        "tokyo-night" -> Just TokyoNight
-        "tokyo night" -> Just TokyoNight
-        "rosepine-moon" -> Just RosePineMoon
-        "rose pine moon" -> Just RosePineMoon
-        "rosé pine moon" -> Just RosePineMoon
-        "oscuramidnight" -> Just OscuraMidnight
-        "oscura-midnight" -> Just OscuraMidnight
-        "oscura midnight" -> Just OscuraMidnight
-        _ -> Nothing
-
-themeKindRows :: [(Text, Text)]
-themeKindRows =
-    [ (themeKindText kind, themeDescription kind)
-    | kind <- [Auto, Midnight, Daylight, TokyoNight, RosePineMoon, OscuraMidnight]
-    ]
-  where
-    themeDescription = \case
-        Auto -> "Use the terminal's native colors"
-        Midnight -> "Dark blue-violet"
-        Daylight -> "Light warm paper"
-        TokyoNight -> "Dark indigo"
-        RosePineMoon -> "Dark rose and lavender"
-        OscuraMidnight -> "Deep black with cyan accents"
-
-themeKindAt :: Int -> ThemeKind
-themeKindAt index =
-    [Auto, Midnight, Daylight, TokyoNight, RosePineMoon, OscuraMidnight]
-        !! max 0 (min 5 index)
 
 fixedThemePalette :: ThemeKind -> Maybe ThemePalette
 fixedThemePalette = \case

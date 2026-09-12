@@ -13,15 +13,10 @@ import Agent.CLI.ExternalSession.Types
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (tryAny)
 import Control.Monad (filterM)
+import Control.Monad.Extra (firstJustM)
 import Data.Aeson (Value(..), decodeStrict', encode)
 import qualified Data.ByteString.Lazy as LBS
-import Data.IORef
-    ( IORef
-    , modifyIORef'
-    , newIORef
-    , readIORef
-    )
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding
@@ -44,7 +39,7 @@ discoverClaude env cwd = do
                 filter isClaudeTranscript . concat
                     <$> traverse directoryChildren projectDirectories
     safePaths <- filterM (isSafeFile projects) paths
-    candidates <- mapMaybe id <$> traverse (claudeMetadata env) safePaths
+    candidates <- catMaybes <$> traverse (claudeMetadata env) safePaths
     filterM (\candidate ->
         maybe (pure False) (`samePath` cwd) candidate.candidateCwd)
         candidates
@@ -195,15 +190,15 @@ readClaude env candidate maxToolChars =
                                 record
                         pure (nextState, JsonlContinue)
             leaf <- claudeLeaf database
-            stateRef <- newIORef ClaudeReadState
-                { claudeTurnsFromLeaf = []
-                , claudeLastUser = Nothing
-                , claudeLastAssistant = Nothing
-                , claudeSkipped = indexState.claudeIndexUnindexable
-                , claudeOmissions = mempty
-                }
-            mapM_ (walkClaudeChain database maxToolChars stateRef) leaf
-            state <- readIORef stateRef
+            let initialState = ClaudeReadState
+                    { claudeTurnsFromLeaf = []
+                    , claudeLastUser = Nothing
+                    , claudeLastAssistant = Nothing
+                    , claudeSkipped = indexState.claudeIndexUnindexable
+                    , claudeOmissions = mempty
+                    }
+            state <- maybe (pure initialState)
+                (walkClaudeChain database maxToolChars initialState) leaf
             let unsafeWarnings =
                     [ warning
                         "unsafe_records_skipped"
@@ -326,13 +321,13 @@ data ClaudeReadState = ClaudeReadState
 walkClaudeChain
     :: Database
     -> Int
-    -> IORef ClaudeReadState
+    -> ClaudeReadState
     -> Text
-    -> IO ()
-walkClaudeChain database maxToolChars stateRef = go
+    -> IO ClaudeReadState
+walkClaudeChain database maxToolChars = go
   where
-    go uuid
-        | Text.null uuid = pure ()
+    go !state uuid
+        | Text.null uuid = pure state
         | otherwise = do
             execute database
                 "INSERT OR IGNORE INTO claude_visited (uuid) VALUES (?)"
@@ -346,19 +341,14 @@ walkClaudeChain database maxToolChars stateRef = go
                         [SQLText uuid]
                     case rows of
                         ([parent, payload] : _) -> do
-                            case decodePayload payload of
-                                Nothing ->
-                                    modifyIORef' stateRef \state ->
-                                        state
-                                            { claudeSkipped =
-                                                state.claudeSkipped + 1
-                                            }
-                                Just record ->
-                                    modifyIORef' stateRef
-                                        (addClaudeTurn maxToolChars record)
-                            go (sqlDataText parent)
-                        _ -> pure ()
-                _ -> pure ()
+                            let nextState = case decodePayload payload of
+                                    Nothing -> state
+                                        { claudeSkipped = state.claudeSkipped + 1 }
+                                    Just record ->
+                                        addClaudeTurn maxToolChars record state
+                            go nextState (sqlDataText parent)
+                        _ -> pure state
+                _ -> pure state
 
 decodePayload :: SQLData -> Maybe Value
 decodePayload = \case
@@ -497,7 +487,7 @@ truthy = \case
 
 firstNonEmptyText :: [Maybe Text] -> Text
 firstNonEmptyText values =
-    fromMaybe "" $ firstMaybe
+    fromMaybe "" $ listToMaybe
         [ value
         | Just value <- values
         , not (Text.null value)
@@ -507,17 +497,3 @@ nonEmptyText :: Text -> Maybe Text
 nonEmptyText value
     | Text.null value = Nothing
     | otherwise = Just value
-
-firstMaybe :: [value] -> Maybe value
-firstMaybe [] = Nothing
-firstMaybe (value : _) = Just value
-
-firstJustM
-    :: (input -> IO (Maybe output))
-    -> [input]
-    -> IO (Maybe output)
-firstJustM _ [] = pure Nothing
-firstJustM action (value : values) =
-    action value >>= \case
-        Just output -> pure (Just output)
-        Nothing -> firstJustM action values

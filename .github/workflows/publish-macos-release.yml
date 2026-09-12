@@ -117,8 +117,8 @@ jobs:
           ((macho_count > 0))
 
           test -f "$bundle/share/agent-cli/skills/add-model/SKILL.md"
-          test -f "$bundle/share/agent-cli-runtime/config/models.default.json"
-          test -f "$bundle/share/agent-core/data/code-mode/worker.mjs"
+          test -f "$bundle/share/agent-runtime/config/models.default.json"
+          test -f "$bundle/share/agent-tools/data/code-mode/worker.mjs"
           find "$bundle/share/skylighting/xml" -type f -print -quit | grep -q .
 
           short_root="/var/tmp/haskell-agent-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"

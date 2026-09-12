@@ -80,8 +80,8 @@ import Data.Aeson
     )
 import qualified Data.Aeson.Key as Key
 import Data.Aeson.Types (Pair)
-import Data.List (find, sortOn)
-import Data.Maybe (fromMaybe)
+import Data.List (find, findIndex, sortOn)
+import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Scientific (Scientific)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -771,7 +771,7 @@ availableModelPresets chatGptMode response =
         ]
   where
     markDefault presets =
-        case findIndexBy (.showInPicker) presets <|> firstIndex presets of
+        case findIndex (.showInPicker) presets <|> firstIndex presets of
             Nothing -> presets
             Just selected ->
                 [ preset { isDefault = index == selected }
@@ -780,7 +780,7 @@ availableModelPresets chatGptMode response =
 
 defaultModelSlug :: [ModelPreset] -> Maybe Text
 defaultModelSlug presets =
-    (.model) <$> (find (.isDefault) presets <|> firstMay presets)
+    (.model) <$> (find (.isDefault) presets <|> listToMaybe presets)
 
 findModelInfo :: Text -> ModelsResponse -> Maybe ModelInfo
 findModelInfo requested response =
@@ -992,21 +992,9 @@ modelInfoFields info =
 maybeField :: ToJSON value => Text -> Maybe value -> [Pair]
 maybeField name = maybe [] (\value -> [Key.fromText name .= value])
 
-findIndexBy :: (value -> Bool) -> [value] -> Maybe Int
-findIndexBy predicate = go 0
-  where
-    go _ [] = Nothing
-    go index (value : rest)
-        | predicate value = Just index
-        | otherwise = go (index + 1) rest
-
 firstIndex :: [value] -> Maybe Int
 firstIndex [] = Nothing
 firstIndex (_ : _) = Just 0
-
-firstMay :: [value] -> Maybe value
-firstMay [] = Nothing
-firstMay (value : _) = Just value
 
 longestPrefix :: Text -> [ModelInfo] -> Maybe ModelInfo
 longestPrefix requested =

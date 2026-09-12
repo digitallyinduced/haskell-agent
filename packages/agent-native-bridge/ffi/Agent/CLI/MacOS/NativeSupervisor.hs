@@ -42,8 +42,8 @@ import Agent.CLI.MacOS.NativeSessionCommands
 import Agent.CLI.MacOS.TurnEvents
 import Agent.CLI.MacOS.TurnExecution (runNativeTurn)
 import Agent.CLI.MacOS.TurnState
-import qualified Agent.CLI.GatewayBoundary as GatewayBoundary
-import Agent.CLI.GatewayClient
+import qualified Agent.Runtime.GatewayBoundary as GatewayBoundary
+import Agent.Runtime.GatewayClient
     ( withGatewayCredentialLease, withGatewayCredentialTurnLease )
 import Agent.CLI.McpAdmin
     ( McpAdminError, McpAdminSnapshot(..), restartMcpAdminServer )

@@ -12,8 +12,8 @@ module Agent.Server.Runtime.SessionCodec
     , integerToInt64
     ) where
 
-import Agent.CLI.Models (ModelOption(..), ModelTarget(..))
-import Agent.CLI.Session
+import Agent.Runtime.Models (ModelOption(..), ModelTarget(..))
+import Agent.Runtime.Session
     ( SessionMeta(..)
     , SessionTurn(..)
     , SessionTurnPage(..)

@@ -122,7 +122,7 @@ blockCodeLanguage :: UiBlock -> Maybe Text
 blockCodeLanguage block
     | block.blockKind /= BlockShell = Nothing
     | Text.null (Text.strip block.blockDetail) = Nothing
-    | block.blockTitle == "$ exec" = Just "javascript"
+    | block.blockTitle `elem` ["JavaScript execution", "$ exec"] = Just "javascript"
     | otherwise = Just "haskell"
 
 outputLooksFailed :: Text -> Bool

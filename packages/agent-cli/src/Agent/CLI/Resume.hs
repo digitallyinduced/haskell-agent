@@ -43,8 +43,8 @@ module Agent.CLI.Resume
     ) where
 
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
-import Agent.CLI.Models (validateResumedGatewayBoundary)
-import Agent.CLI.Session
+import Agent.Runtime.Models (validateResumedGatewayBoundary)
+import Agent.Runtime.Session
     ( SessionMeta(..)
     , SessionTurn(..)
     , SessionTurnPage(..)
@@ -53,8 +53,8 @@ import Agent.CLI.Session
     , loadSessionMeta
     , loadSessionResumeStats
     )
-import Agent.CLI.Session.History (foldSessionItems)
-import Agent.CLI.Session.Types (TranscriptEffect(..))
+import Agent.Runtime.Session.History (foldSessionItems)
+import Agent.Runtime.Session.Types (TranscriptEffect(..))
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
 import Agent.OpenAI.Compaction (hasReloadedGeneratedContextItems)
 import Agent.CLI.TextLayout
@@ -68,6 +68,7 @@ import Agent.Responses.Types (ResponseItem(..))
 import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Postgres.Session (ConversationSearchResult(..))
 import Control.Monad (forM)
+import Control.Monad.Trans.Except (ExceptT(..), runExceptT)
 import Data.Char (isAlphaNum)
 import Data.Containers.ListUtils (nubOrd)
 import qualified Data.Map.Strict as Map
@@ -231,21 +232,11 @@ publishResumeHistoryAfterBoundary boundaryResult publish =
         Right () -> publish >> pure (Right ())
 
 loadResumeEntry :: StorePool -> OsPath -> Text -> IO (Either Text ResumeEntry)
-loadResumeEntry pool root sessionId =
-    loadSessionMeta pool root sessionId >>= \case
-        Left err -> pure (Left err)
-        Right meta ->
-            loadRecentSessionTurns pool root sessionId 50 >>= \case
-                Left err -> pure (Left err)
-                Right page ->
-                    loadSessionResumeStats pool root sessionId >>= \case
-                        Left err -> pure (Left err)
-                        Right stats ->
-                            pure $ Right $
-                                resumeEntryFromPage
-                                    meta
-                                    stats
-                                    (map snd page.pageTurns)
+loadResumeEntry pool root sessionId = runExceptT do
+    meta <- ExceptT $ loadSessionMeta pool root sessionId
+    page <- ExceptT $ loadRecentSessionTurns pool root sessionId 50
+    stats <- ExceptT $ loadSessionResumeStats pool root sessionId
+    pure $ resumeEntryFromPage meta stats (map snd page.pageTurns)
 
 -- | Build a loaded resume entry from a bounded transcript page plus
 -- full-session aggregates. Counts and the first prompt describe the whole

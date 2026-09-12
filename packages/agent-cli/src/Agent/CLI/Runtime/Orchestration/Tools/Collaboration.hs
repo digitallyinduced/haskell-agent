@@ -6,11 +6,12 @@ module Agent.CLI.Runtime.Orchestration.Tools.Collaboration
     , installCollaborationCallbacks
     ) where
 
-import Agent.CLI.Auth (LoadedAuth(..), hasOpenAiAuth, loadAuth)
-import Agent.CLI.Config (HarnessConfig(..))
-import Agent.CLI.GatewayClient (cachedGatewayModels)
+import Agent.Accounts.Auth (LoadedAuth(..), hasOpenAiAuth, loadAuth)
+import Agent.Runtime.Config (HarnessConfig(..))
+import Agent.Runtime.Collaboration
+import Agent.Runtime.GatewayClient (cachedGatewayModels)
 import Agent.CLI.GatewayModels (modelOptionsForGatewayModels)
-import Agent.CLI.Models (ModelOption(..), ModelTarget(..), resolveModelOptionById)
+import Agent.Runtime.Models (ModelOption, ModelTarget(..))
 import Agent.CLI.Options (CliOptions(..))
 import Agent.CLI.PendingInputs
     ( PendingInputs, PendingNoticeKind(..), enqueuePendingInput
@@ -21,36 +22,31 @@ import Agent.CLI.Runtime.Orchestration.Startup (reportStartupWarning)
 import Agent.CLI.Runtime.Orchestration.Tools.Model
 import Agent.CLI.Runtime.Orchestration.Tools.Request
 import Agent.CLI.Runtime.Orchestration.Types (NativeRunCapabilities(..))
-import Agent.CLI.Session (Persistence(..))
-import Agent.CLI.SessionLock (SessionLock)
+import Agent.Runtime.Session (Persistence(..))
+import Agent.Runtime.SessionLock (SessionLock)
 import Agent.CLI.Subagents.Runtime
     ( flushAllSubagentSnapshots, persistAndEvictSubagentSessionWithStatus
     , prepareCollaborationSpawn, restoreAgentFromDisk )
 import Agent.CLI.Subagents.Runtime.Types (SubagentSession, SubagentStoreRoot)
 import Agent.CLI.Worktree (createManagedWorktree, removeWorktree)
-import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs, grokRootChildModels)
-import Agent.Loop (TurnInput(..), LoopError(..))
+import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
+import Agent.Loop (TurnInput(..))
 import Agent.Provider (Provider(..), TokenProvider, tokenProviderBillingMode)
 import Agent.Responses.Types (ResponseItem)
-import Agent.ResourceScope (logSlowCleanup)
 import Agent.Subagents
-    ( RootTurnId, SubagentId, SubagentRegistry, SubagentConfig(..)
-    , closeSubagentRegistry, defaultMaxConcurrent, defaultSubagentConfig
-    , formatCompletionNotice, interruptActiveSubagents, newSubagentRegistry
+    ( RootTurnId, SubagentId, SubagentRegistry
+    , formatCompletionNotice
     , setSubagentOnComplete, setSubagentOnSettled )
 import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.Tools.MultiAgents
     ( CollaborationModelTarget(..), MultiAgentContext(..), SubagentWorktree(..) )
-import Control.Applicative ((<|>))
-import Control.Exception.Safe (finally)
 import Control.Monad.IO.Class (liftIO)
-import Data.Acquire (Acquire, mkAcquire)
+import Data.Acquire (Acquire)
 import Data.IORef (IORef, newIORef, readIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, isJust, isNothing)
+import Data.Maybe (isJust)
 import Data.Text (Text)
-import qualified Data.Text as Text
 import System.OsPath (OsPath)
 
 data CollaborationRuntime = CollaborationRuntime
@@ -119,87 +115,44 @@ acquireCollaborationRuntime AgentToolsRequest
         liftIO $ newIORef (Nothing :: Maybe (IO [ResponseItem]))
     collaborationPendingNotices <- liftIO newPendingInputs
     collaborationAgentTypes <- liftIO $ newIORef Map.empty
-    let maxConcurrentAgents =
-            fromMaybe defaultMaxConcurrent $
-                options.optMaxConcurrentAgents
-                    <|> projectSettings.settingsMaxConcurrentAgents
-                    <|> harnessConfig.configMaxConcurrentAgents
-        finalizeRegistry registry = logSlowCleanup "collaboration agents" $
-            -- Persistence needs the interrupted agents' final state, but a
-            -- failed snapshot must never leave their supervisors alive while
-            -- the session releases dependent tool resources.
-            (do
-                interruptActiveSubagents registry
-                flushAllSubagentSnapshots
-                    collaborationSubagentStoreRoot
-                    registry
-                    collaborationSubagentSessions
-                    collaborationAgentTypes)
-                `finally` closeSubagentRegistry registry
-    collaborationRegistry <- mkAcquire
-        (newSubagentRegistry
-            defaultSubagentConfig { maxConcurrent = maxConcurrentAgents }
-            cwd
-            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
-            (\_ _ -> pure ()))
-        finalizeRegistry
+    collaborationRegistry <- acquireCollaborationRegistry
+        (resolveMaxConcurrentAgents
+            options.optMaxConcurrentAgents
+            projectSettings.settingsMaxConcurrentAgents
+            harnessConfig.configMaxConcurrentAgents)
+        cwd
+        (\registry ->
+            flushAllSubagentSnapshots
+                collaborationSubagentStoreRoot
+                registry
+                collaborationSubagentSessions
+                collaborationAgentTypes)
     collaborationRootTurnRef <- liftIO $ newIORef (Nothing :: Maybe RootTurnId)
     collaborationOpenAiChild <- liftIO $
-        if not nativeCapabilities.nativeCollaboration
-            || isJust gatewayAllowedChildModels
-            then pure Nothing
-            else case provider of
-                XAIProvider -> do
-                    available <- hasOpenAiAuth
-                    if not available
-                        then pure Nothing
-                        else loadAuth (Just OpenAIProvider) >>= \case
-                            Left _ -> pure Nothing
-                            Right openaiLoaded ->
-                                pure (Just openaiLoaded.loadedTokenProvider)
-                _ -> pure Nothing
-    let collaborationAllowedChildModels =
-            case gatewayAllowedChildModels of
-                Just modelIds -> Just modelIds
-                Nothing -> case provider of
-                    XAIProvider ->
-                        Just
-                            (grokRootChildModels
-                                (isJust collaborationOpenAiChild))
-                    _ -> Nothing
-        collaborationChildModelAllowed
-            | Just resolve <- collaborationGatewayChildModelOption =
-                Just \modelId -> isJust <$> resolve modelId
-            | otherwise = Nothing
-        collaborationResolveChildModel
-            | Just resolve <- collaborationGatewayChildModelOption =
-                Just \modelId ->
-                    fmap toCollaborationTarget <$> resolve modelId
-            | otherwise = Nothing
-        toCollaborationTarget option =
-            let target = option.modelTarget
-            in CollaborationModelTarget
-                { collaborationTargetProvider = target.targetProvider
-                , collaborationTargetConnection = target.targetConnectionId
-                , collaborationTargetEffectiveModel =
-                    target.targetWireModelId
-                , collaborationTargetDialect = target.targetDialect
-                }
-        collaborationGatewayChildModelOption
-            | isNothing gatewayAllowedChildModels = Nothing
-            | otherwise =
-                Just \requested ->
-                    readIORef gatewayModelsRef >>= \case
-                        Nothing -> pure Nothing
-                        Just access ->
-                            cachedGatewayModels access >>= \case
-                                Nothing -> pure Nothing
-                                Just models ->
-                                    pure
-                                        (resolveModelOptionById
-                                            (modelOptionsForGatewayModels
-                                                catalog models)
-                                            (Text.strip requested))
+        if shouldLoadOpenAiChild nativeCapabilities.nativeCollaboration
+            gatewayAllowedChildModels provider
+            then do
+                available <- hasOpenAiAuth
+                if not available
+                    then pure Nothing
+                    else loadAuth (Just OpenAIProvider) >>= \case
+                        Left _ -> pure Nothing
+                        Right openaiLoaded ->
+                            pure (Just openaiLoaded.loadedTokenProvider)
+            else pure Nothing
+    let childModels = resolveCollaborationModels
+            provider
+            gatewayAllowedChildModels
+            (isJust collaborationOpenAiChild)
+            (readIORef gatewayModelsRef >>= \case
+                Nothing -> pure Nothing
+                Just access ->
+                    fmap (modelOptionsForGatewayModels catalog)
+                        <$> cachedGatewayModels access)
+        collaborationAllowedChildModels = childModels.childAllowedModels
+        collaborationChildModelAllowed = childModels.childModelAllowed
+        collaborationResolveChildModel = childModels.childResolveModel
+        collaborationGatewayChildModelOption = childModels.childGatewayModelOption
         sendToRoot message = do
             enqueuePendingInput
                 collaborationPendingNotices

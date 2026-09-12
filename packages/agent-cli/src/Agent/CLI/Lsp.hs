@@ -7,7 +7,7 @@ module Agent.CLI.Lsp
     , lspRuntimeTool
     , encodeLspFrame
     ) where
-import Agent.CLI.Config
+import Agent.Runtime.Config
     ( LspConfig(..)
     , LspServerConfig(..)
     )
@@ -77,6 +77,7 @@ import Control.Monad
     , void
     , when
     )
+import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Except
     ( ExceptT(..)
     , runExceptT
@@ -608,75 +609,59 @@ synchronizeDocument
     -> FilePath
     -> Text
     -> IO (Either Text ())
-synchronizeDocument client path uri = do
-    contentResult <- tryAny (BS.readFile path)
-    case contentResult of
-        Left exception ->
-            pure . Left $
-                "lsp could not read file contents: "
-                    <> exceptionText exception
-        Right bytes
-            | BS.length bytes > maxLspDocumentBytes ->
-                pure . Left $
-                    "lsp document exceeds "
-                        <> Text.pack (show maxLspDocumentBytes)
-                        <> " bytes"
-            | otherwise -> do
-                versions <-
-                    readIORef client.clientDocumentVersions
-                let previous = Map.lookup path versions
-                    version = maybe 1 (+ 1) previous
-                    content =
-                        Text.decodeUtf8With lenientDecode bytes
-                    extension =
-                        Text.pack (FilePath.takeExtension path)
-                    languageId =
-                        Map.findWithDefault
-                            ""
-                            extension
-                            client.clientConfig.lspExtensionToLanguage
-                    notification =
-                        case previous of
-                            Nothing ->
-                                ( "textDocument/didOpen"
-                                , Aeson.object
-                                    [ "textDocument" .= Aeson.object
-                                        [ "uri" .= uri
-                                        , "languageId" .= languageId
-                                        , "version" .= version
-                                        , "text" .= content
-                                        ]
-                                    ]
-                                )
-                            Just _ ->
-                                ( "textDocument/didChange"
-                                , Aeson.object
-                                    [ "textDocument" .= Aeson.object
-                                        [ "uri" .= uri
-                                        , "version" .= version
-                                        ]
-                                    , "contentChanges" .=
-                                        [ Aeson.object
-                                            ["text" .= content]
-                                        ]
-                                    ]
-                                )
-                sent <-
-                    uncurry
-                        (sendNotificationWithin
-                            client
-                            requestTimeoutMilliseconds)
-                        notification
-                case sent of
-                    Left err ->
-                        pure . Left $
-                            "failed to synchronize file with LSP server: "
-                                <> err
-                    Right () -> do
-                        writeIORef
-                            client.clientDocumentVersions
-                            (Map.insert path version versions)
-                        pure (Right ())
+synchronizeDocument client path uri = runExceptT do
+    bytes <- withExceptT
+        (\exception -> "lsp could not read file contents: " <> exceptionText exception)
+        (ExceptT (tryAny (BS.readFile path)))
+    when (BS.length bytes > maxLspDocumentBytes) $
+        throwE $
+            "lsp document exceeds "
+                <> Text.pack (show maxLspDocumentBytes)
+                <> " bytes"
+    versions <- liftIO (readIORef client.clientDocumentVersions)
+    let previous = Map.lookup path versions
+        version = maybe 1 (+ 1) previous
+        content = Text.decodeUtf8With lenientDecode bytes
+        extension = Text.pack (FilePath.takeExtension path)
+        languageId =
+            Map.findWithDefault
+                ""
+                extension
+                client.clientConfig.lspExtensionToLanguage
+        notification =
+            case previous of
+                Nothing ->
+                    ( "textDocument/didOpen"
+                    , Aeson.object
+                        [ "textDocument" .= Aeson.object
+                            [ "uri" .= uri
+                            , "languageId" .= languageId
+                            , "version" .= version
+                            , "text" .= content
+                            ]
+                        ]
+                    )
+                Just _ ->
+                    ( "textDocument/didChange"
+                    , Aeson.object
+                        [ "textDocument" .= Aeson.object
+                            [ "uri" .= uri
+                            , "version" .= version
+                            ]
+                        , "contentChanges" .=
+                            [ Aeson.object ["text" .= content]
+                            ]
+                        ]
+                    )
+    withExceptT ("failed to synchronize file with LSP server: " <>) $
+        ExceptT $
+            uncurry
+                (sendNotificationWithin client requestTimeoutMilliseconds)
+                notification
+    liftIO $
+        writeIORef
+            client.clientDocumentVersions
+            (Map.insert path version versions)
 
 requestTimeoutMilliseconds :: Int
 requestTimeoutMilliseconds = 30000

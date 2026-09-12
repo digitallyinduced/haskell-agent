@@ -6,6 +6,33 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "fullscreen conversation scrolling" do
+    describe "messages below the viewport" do
+        it "counts completely hidden and partially visible messages" do
+            conversationMessagesBelow 10 [(0, 4), (4, 6), (8, 5), (15, 3)]
+                `shouldBe` 2
+
+        it "does not count zero-height messages or a message ending at the boundary" do
+            conversationMessagesBelow 10 [(5, 5), (20, 0)]
+                `shouldBe` 0
+
+        it "updates when scrolling, resizing, or appending a message" do
+            let messages = [(0, 5), (6, 5), (12, 5)]
+            conversationMessagesBelow 7 messages `shouldBe` 2
+            conversationMessagesBelow 12 messages `shouldBe` 1
+            conversationMessagesBelow 17 messages `shouldBe` 0
+            conversationMessagesBelow 17 (messages <> [(18, 4)]) `shouldBe` 1
+
+        it "formats singular, plural, and unloaded-history lower bounds" do
+            conversationMessagesBelowLabel False 1
+                `shouldBe` Just "↓ 1 Message · Click to resume"
+            conversationMessagesBelowLabel False 12
+                `shouldBe` Just "↓ 12 Messages · Click to resume"
+            conversationMessagesBelowLabel True 1
+                `shouldBe` Just "↓ 1+ Messages · Click to resume"
+            conversationMessagesBelowLabel True 0
+                `shouldBe` Just "↓ 0+ Messages · Click to resume"
+            conversationMessagesBelowLabel False 0 `shouldBe` Nothing
+
     describe "conversationScrollGesture" do
         it "ignores scrolling when an empty session has no viewport" do
             conversationScrollGesture False 3 Nothing

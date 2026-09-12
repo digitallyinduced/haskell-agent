@@ -113,7 +113,7 @@ reduceUi event state = case event of
                 , uiCursor = 0
                 , uiFollow = True
                 , uiNotice =
-                    Just (progressNotice "Steering the current turn…")
+                    Just (progressNotice "Guidance queued…")
                 , uiNoticeElapsedMillis = 0
                 }
     UiInputQueued text ->
@@ -176,6 +176,8 @@ reduceUi event state = case event of
         state { uiBranch = branch, uiCwd = cwd, uiWorkspaceRoot = workspace }
     UiSetNotice notice ->
         state { uiNotice = notice, uiNoticeElapsedMillis = 0 }
+    UiSetBackgroundTaskStatus rows ->
+        state { uiBackgroundTaskStatus = rows }
     UiMoveSelection delta ->
         moveSelection delta state
     UiSelectBlock ident ->
@@ -299,6 +301,7 @@ clearConversation state =
         , uiShellPolls = Map.empty
         , uiRetryCountdown = Nothing
         , uiTodos = []
+        , uiBackgroundTaskStatus = []
         , uiGenerating = False
         , uiGenerationChars = 0
         , uiGenerationMillis = 0
@@ -784,15 +787,17 @@ finishVisibleTool result state =
                 _ -> state.uiTodos
         next =
             state
-                { uiRunning = True
-                , uiAwaitingInput = False
-                , uiActivity = "Thinking…"
+                { uiActivity =
+                    if state.uiRunning
+                        then "Thinking…"
+                        else state.uiActivity
                 , uiToolCalls =
                     Map.delete result.callId state.uiToolCalls
                 , uiTodos = todos
                 }
     in case activeCall of
-        Nothing -> next
+        -- Nested or late completions are not evidence of an active turn.
+        Nothing -> state
         Just (blockIndex, call)
             | blockIndex < Seq.length state.uiBlocks
             , Just _ <- trackedShellOwner call next ->

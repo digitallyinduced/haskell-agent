@@ -15,7 +15,7 @@ module Agent.CLI.AgentViewport.Runtime
 
 import Agent.CLI.AgentViewport
     ( AgentEntry(..)
-    , AgentStep
+    , AgentStep(..)
     , AgentTarget(..)
     , AgentViewportEnv(..)
     , agentStepsForStatusRelative
@@ -124,7 +124,7 @@ newAgentViewportRuntime config = do
                     , cached.cachedVariant == variant ->
                         pure cached.cachedSteps
                 _ -> do
-                    let steps = build items
+                    let steps = detachCachedSteps (build items)
                     atomicModifyIORef' stepCache \current ->
                         ( Map.insert target (AgentStepCache
                             { cachedTranscript = transcriptName
@@ -304,6 +304,15 @@ releaseAgent config = \case
     AgentNative _ -> pure ()
     AgentChild agentId ->
         config.viewportConfigReleaseChild agentId
+
+-- Cached previews outlive cold child transcripts. A one-word preview produced
+-- by Text.unwords can still be a slice of the entire source message. Copy the
+-- displayed text so consuming the previews releases those source arrays.
+detachCachedSteps :: [AgentStep] -> [AgentStep]
+detachCachedSteps = map \step -> step
+    { agentStepTitle = Text.copy step.agentStepTitle
+    , agentStepDetail = Text.copy <$> step.agentStepDetail
+    }
 
 materializeChild
     :: Text

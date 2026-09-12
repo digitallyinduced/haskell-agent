@@ -17,11 +17,11 @@ module Agent.CLI.McpConnection
     , probeMcpConnection
     ) where
 
-import Agent.CLI.Config (HarnessConfig(..), McpServerConfig(..), withHarnessConfigSnapshot, mcpUsesConnectionCredentials)
+import Agent.Runtime.Config (HarnessConfig(..), McpServerConfig(..), withHarnessConfigSnapshot, mcpUsesConnectionCredentials)
 import Agent.CLI.McpAdmin
-import Agent.CLI.McpConnectionCredentials (loadMcpConnectionRecord, saveMcpConnectionRecord, deleteMcpConnectionRecord)
-import Agent.CLI.McpConnectionRuntime (invalidateMcpConnectionRuntimes, observeMcpConnectionInfo)
-import Agent.CLI.McpOAuth (McpOAuthHost(..), authorizeMcpWith, defaultLoginOptions)
+import Agent.Runtime.McpConnectionCredentials (CredentialRuntime, loadMcpConnectionRecord, saveMcpConnectionRecord, deleteMcpConnectionRecord)
+import Agent.Runtime.McpConnectionRuntime (invalidateMcpConnectionRuntimes, observeMcpConnectionInfo)
+import Agent.Runtime.McpOAuth (McpOAuthHost(..), authorizeMcpWith, defaultLoginOptions)
 import Agent.MCP (McpProtocolPreference(..))
 import qualified Agent.MCP as MCP
 import Agent.MCP.OAuth (OAuthTokenFile(..), OAuthTokenFileExtra)
@@ -50,12 +50,12 @@ data McpConnection = McpConnection
     deriving (Eq, Show)
 
 authorizeMcpConnection
-    :: OsPath -> Word64 -> Text -> (Text -> IO (Either Text ()))
+    :: CredentialRuntime -> OsPath -> Word64 -> Text -> (Text -> IO (Either Text ()))
     -> IO (Either McpAdminError (McpAdminSnapshot McpConnection))
-authorizeMcpConnection = authorizeMcpConnectionWith McpConnectionAuthorizationHost
-    { connectionLoadCredential = loadMcpConnectionRecord
+authorizeMcpConnection credentials = authorizeMcpConnectionWith McpConnectionAuthorizationHost
+    { connectionLoadCredential = loadMcpConnectionRecord credentials
     , connectionSaveCredential = \identifier (record, extra) ->
-        saveMcpConnectionRecord identifier record extra
+        saveMcpConnectionRecord credentials identifier record extra
     , connectionProbe = probeMcpConnection
     }
 
@@ -267,9 +267,9 @@ setMcpConnectionEnabled home expected identifier enabled = do
         Right server { mcpEnabled = enabled, mcpConnectionGeneration = Just generation }
 
 removeMcpConnection
-    :: OsPath -> Word64 -> Text
+    :: CredentialRuntime -> OsPath -> Word64 -> Text
     -> IO (Either McpAdminError (McpAdminSnapshot ()))
-removeMcpConnection = removeMcpConnectionWith deleteMcpConnectionRecord
+removeMcpConnection credentials = removeMcpConnectionWith (deleteMcpConnectionRecord credentials)
 
 removeMcpConnectionWith
     :: (Text -> IO (Either Text ())) -> OsPath -> Word64 -> Text

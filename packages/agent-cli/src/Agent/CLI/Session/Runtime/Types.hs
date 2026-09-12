@@ -8,7 +8,7 @@ module Agent.CLI.Session.Runtime.Types
     , StartupRuntime(..)
     ) where
 
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( SessionRequestState
     )
 import Agent.CLI.ActiveAccount (ActiveAccountRef)
@@ -18,25 +18,25 @@ import Agent.CLI.AgentViewport
     , AgentTarget
     )
 import Agent.CLI.Claude (ClaudeSessionRuntimeSlot)
-import Agent.CLI.Config (HarnessConfig)
-import Agent.CLI.Session.History (LiveConversation)
+import Agent.Runtime.Config (HarnessConfig)
+import Agent.Runtime.Session.History (LiveConversation)
 import Agent.CLI.Session.Workspace (WorkspaceContext)
-import Agent.CLI.Btw (BtwBackendFactory)
+import Agent.Runtime.Session.Backend (SessionBackend(..))
 import Agent.CLI.CodeModeRuntime
     ( CodeModeSessionRuntime
     , CodexCatalogSession
     )
-import Agent.CLI.Compaction
+import Agent.Runtime.Compaction.Provider
     ( AutomaticCompactionBoundary
     , CompactOutcome
     , CompactionInstall
     , OccupancySnapshot
     )
-import Agent.CLI.Database.Store (DatabaseScopes)
-import Agent.CLI.GatewayClient (GatewayModelAccess)
+import Agent.Runtime.Database.Store (DatabaseScopes)
+import Agent.Runtime.GatewayClient (GatewayModelAccess)
 import Agent.CLI.Interrupt (InterruptState)
-import Agent.CLI.ManagedTurn (ManagedTurnRequest)
-import Agent.CLI.ModelConfig (ModelCatalog)
+import Agent.Runtime.ManagedTurn (ManagedTurnRequest)
+import Agent.Runtime.ModelConfig (ModelCatalog)
 import Agent.Connectivity.NetworkPath (NetworkRecovery)
 import Agent.OpenAI.Models.Types (ModelInfo)
 import Agent.CLI.Options
@@ -46,7 +46,7 @@ import Agent.CLI.Options
 import Agent.CLI.ProviderTransition (PendingTurn)
 import Agent.CLI.Runtime.Orchestration.Types (NativeRunHooks)
 import Agent.CLI.PendingInputs (PendingInputs)
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( LegacySubagentTarget
     , Persistence
     , SessionHandle
@@ -63,8 +63,7 @@ import Agent.Error (ApiError)
 import Agent.GrokBuild.Dialect.Runtime (GrokRuntimeControl)
 import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.Loop
-    ( Backend
-    , ImageAttachment
+    ( ImageAttachment
     , TokenUsage
     , TurnInput
     )
@@ -106,13 +105,6 @@ import Data.Time.Clock
     )
 import System.IO (Handle)
 import System.OsPath (OsPath)
-
-data SessionBackend = SessionBackend
-    { backend :: !Backend
-    , btwBackend :: !BtwBackendFactory
-    , interruptBackend :: !(IO ())
-    , resetBackendState :: !(IO ())
-    }
 
 -- | Side-effect-free startup reads that can be prepared while independent
 -- tool resources initialize. Their warnings and model-facing formatting are

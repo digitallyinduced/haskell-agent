@@ -4,7 +4,7 @@ import Agent.Error (ApiError(..))
 import Agent.Responses.SSE
 import qualified Agent.Responses.Codec as Codec
 import Agent.Responses.Types
-import Control.Monad (foldM)
+import Control.Monad (foldM, forM_)
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.ByteString as BS
@@ -61,6 +61,28 @@ spec = describe "Responses SSE decoder" do
                 <> "data: " <> completedJson <> "\n\n"
         eventTypes events `shouldBe` [EventResponseCompleted]
 
+    it "uses the first event override and skips malformed JSON across every split and EOF" do
+        let body =
+                "data: {not-json}\r\n\r\nevent: response.first\r\n"
+                <> "event: response.second\r\ndata:{\"vendor_field\":true}\r\n\r\n"
+                <> "event: response.first\r\ndata:{\"type\":\"response.wrong\"}\r\n\r\n"
+                <> "data: {also-not-json}"
+        forM_ [0 .. BS.length body] \offset -> do
+            events <- decodeChunks [BS.take offset body, "", BS.drop offset body]
+            eventTypes events `shouldBe` [StreamEventUnknown "response.first"]
+        events <- decodeChunks (map BS.singleton (BS.unpack body))
+        eventTypes events `shouldBe` [StreamEventUnknown "response.first"]
+
+    it "keeps the Responses limit error label" do
+        fmap snd (feedSseDecoder newSseDecoder (BS.replicate (64 * 1024 * 1024 + 1) 97))
+            `shouldBe` Left (JsonDecodeError "Responses SSE event exceeds 67108864 bytes" "")
+
+    it "rejects invalid UTF-8 in non-data lines on EOF" do
+        parseSseEventsBytes ": \xc3" `shouldSatisfy` \case
+            Left (JsonDecodeError message _) ->
+                "Invalid UTF-8 in Responses SSE event: " `Text.isPrefixOf` message
+            _ -> False
+
     it "accepts Unicode whitespace around the done sentinel" do
         events <- expectRight $ parseSseEvents $
             "data: \x2003[DONE]\x2003\n\n" <> completedBlock
@@ -98,6 +120,32 @@ spec = describe "Responses SSE decoder" do
                     `shouldSatisfy`
                         Text.isInfixOf "\"x-codex-turn-state\":\"direct\""
             [] -> expectationFailure "expected turn-state events"
+
+    it "keeps turn-state precedence and falls back through absent fields" do
+        let nested =
+                "\"headers\":{\"x-codex-turn-state\":\"nested\",\"turn_state\":\"nested-alias\"}"
+            fields =
+                [ "\"x-codex-turn-state\":\"direct\",\"turn_state\":\"alias\"," <> nested
+                , "\"turn_state\":\"alias\"," <> nested
+                , nested
+                , "\"headers\":{\"turn_state\":\"nested-alias\"}"
+                , "\"headers\":{}"
+                , "\"x-codex-turn-state\":\"\",\"turn_state\":\"alias\"," <> nested
+                ]
+        events <- expectRight $ parseSseEvents $ Text.concat
+            [ sseBlock "response.output_text.done"
+                ("{\"type\":\"response.output_text.done\"," <> field <> "}")
+            | field <- fields
+            ]
+        [turnState | OtherResponseStreamEvent { turnState } <- events]
+            `shouldBe`
+                [ Just "direct"
+                , Just "alias"
+                , Just "nested"
+                , Just "nested-alias"
+                , Nothing
+                , Just ""
+                ]
 
     it "round-trips typed Codex rate limits through Aeson encoding" do
         let payload =

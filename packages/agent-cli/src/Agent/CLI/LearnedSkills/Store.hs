@@ -6,7 +6,7 @@ module Agent.CLI.LearnedSkills.Store
     , successfulLearnedSkillsPreload
     ) where
 
-import Agent.CLI.Database.Store
+import Agent.Runtime.Database.Store
     ( DatabaseScopes
     , applicableDatabaseScopes
     , scopeForDatabase
