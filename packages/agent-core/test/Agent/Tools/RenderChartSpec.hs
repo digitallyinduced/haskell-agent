@@ -33,6 +33,48 @@ spec = describe "Agent.Tools.RenderChart" do
             renderChartResult (document kind "number" [point (Number 1) (-4)])
                 `shouldSatisfy` isRight) ["line", "bar", "area", "scatter"]
 
+    it "derives exact singleton fallbacks for every kind and axis type" do
+        mapM_ (\(kind, axis, coordinate) ->
+            (renderChartResult (document kind axis [point coordinate (-4)])
+                >>= maybe (Left "Missing fallback") Right . chartResultFallback)
+                `shouldBe` Right (Text.intercalate "\n"
+                    (["Revenue [" <> kind <> " chart]", "X: ; Y: Revenue (EUR)"]
+                    <> (if axis == "category" then ["Categories: April"] else [])
+                    <> ["Sales: 1 point; range -4.000 to -4.000"])))
+            [(kind, axis, coordinate)
+            | kind <- ["line", "bar", "area", "scatter"]
+            , (axis, coordinate) <- [("number", Number 1), ("category", String "April")
+                , ("timestamp", String "2026-09-07T12:30:00.123Z")]
+            ]
+
+    it "preserves category order, deduplication, series counts and ranges" do
+        let input = "{\"version\":1,\"kind\":\"bar\",\"title\":\"Revenue\",\"subtitle\":null,\"x_axis\":{\"type\":\"category\",\"label\":null},\"y_axis\":{\"type\":null,\"unit\":null},\"series\":[{\"name\":\"Sales\",\"points\":[{\"x\":\" B \",\"y\":0},{\"x\":\"A\",\"y\":-2},{\"x\":\"B\",\"y\":3}]},{\"name\":\"Costs\",\"points\":[{\"x\":\"C\",\"y\":1}]}]}"
+        case renderChartResult input of
+            Left err -> expectationFailure (Text.unpack err)
+            Right output -> do
+                chartResultSummary output `shouldBe`
+                    Just "Rendered Revenue — bar chart; 2 series, 4 points."
+                chartResultFallback output `shouldBe` Just (Text.intercalate "\n"
+                    ["Revenue [bar chart]", "X: ; Y: ", "Categories: B, A, C"
+                    , "Sales: 3 points; range -2.000 to 3.000"
+                    , "Costs: 1 point; range 1.000 to 1.000"])
+
+    it "ignores stored summary prose and rejects empty persisted point collections" do
+        let envelope input = "{\"type\":\"chart\",\"summary\":false,\"chart\":" <> input <> "}"
+            valid = document "bar" "number" [point (Number 1) 0]
+        chartResultSummary (envelope valid) `shouldBe`
+            Just "Rendered Revenue — bar chart; 1 series, 1 point."
+        chartResultFallback (envelope valid) `shouldBe`
+            Just "Revenue [bar chart]\nX: ; Y: Revenue (EUR)\nSales: 1 point; range 0 to 0"
+        mapM_ (\project -> project (envelope (document "bar" "number" [])) `shouldBe` Nothing)
+            [chartResultDocument, chartResultSummary, chartResultFallback]
+
+    it "retains exact wire numbers rather than encoding validated Doubles" do
+        let input = Text.replace "\"y\":2" "\"y\":9007199254740993" $
+                document "bar" "number" [point (Number 1) 2]
+        (renderChartResult input >>= maybe (Left "Missing document") Right . chartResultDocument)
+            `shouldBe` Right input
+
     it "keeps every Unicode category in the accessible chart fallback" do
         let labels = ["地域" <> Text.pack (show index) | index <- [1 :: Int .. 12]]
             input = document "bar" "category" [point (String label) 2 | label <- labels]
@@ -75,6 +117,17 @@ spec = describe "Agent.Tools.RenderChart" do
         renderChartResult (document "scatter" "number" points) `shouldSatisfy` isRight
         renderChartResult (document "line" "number" [point (Number 1) 1, point (Number 1) 2])
             `shouldSatisfy` isLeft
+
+    it "bounds total points across nonempty series" do
+        let input count = encodeText (object
+                [ "version" .= (1 :: Int), "kind" .= ("bar" :: Text), "title" .= ("Revenue" :: Text)
+                , "x_axis" .= object ["type" .= ("number" :: Text)]
+                , "y_axis" .= object []
+                , "series" .= [object ["name" .= name, "points" .= replicate size (point (Number 1) 2)]
+                    | (name, size) <- [("Sales" :: Text, 1000), ("Costs", count)]]
+                ])
+        renderChartResult (input 1000) `shouldSatisfy` isRight
+        renderChartResult (input 1001) `shouldSatisfy` isLeft
 
     it "rejects timestamps more precise than milliseconds for every kind" do
         let points = map (\timestamp -> point (String timestamp) 2)
@@ -120,6 +173,9 @@ spec = describe "Agent.Tools.RenderChart" do
                 , "y_axis" .= object [], "series" .= values
                 ])
         renderChartResult (input [series ("Sales" :: Text), series "Sales"]) `shouldSatisfy` isLeft
+        renderChartResult (input ([] :: [Value])) `shouldSatisfy` isLeft
+        renderChartResult (input [series (Text.pack (show index)) | index <- [1 :: Int .. 8]])
+            `shouldSatisfy` isRight
         renderChartResult (input [series (Text.pack (show index)) | index <- [1 :: Int .. 9]])
             `shouldSatisfy` isLeft
 
