@@ -16,7 +16,7 @@ import Control.Monad (filterM)
 import Control.Monad.Extra (firstJustM)
 import Data.Aeson (Value(..), decodeStrict', encode)
 import qualified Data.ByteString.Lazy as LBS
-import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding
@@ -39,7 +39,7 @@ discoverClaude env cwd = do
                 filter isClaudeTranscript . concat
                     <$> traverse directoryChildren projectDirectories
     safePaths <- filterM (isSafeFile projects) paths
-    candidates <- mapMaybe id <$> traverse (claudeMetadata env) safePaths
+    candidates <- catMaybes <$> traverse (claudeMetadata env) safePaths
     filterM (\candidate ->
         maybe (pure False) (`samePath` cwd) candidate.candidateCwd)
         candidates

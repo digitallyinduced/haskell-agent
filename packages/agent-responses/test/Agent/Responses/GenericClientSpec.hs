@@ -117,6 +117,14 @@ spec = do
                 `shouldBe`
                     ProviderError RateLimitError "slow" (Just 12)
 
+        it "prefers a retry delay from the error body over the header" do
+            classifyFailure
+                429
+                (Just 12)
+                "{\"error\":{\"type\":\"rate_limit_error\",\"message\":\"slow\",\"retry_after\":3}}"
+                `shouldBe`
+                    ProviderError RateLimitError "slow" (Just 3)
+
     describe "retryTransientResultWithPolicy" do
         it "retries transient failures before any event is emitted" do
             attempts <- newIORef (0 :: Int)

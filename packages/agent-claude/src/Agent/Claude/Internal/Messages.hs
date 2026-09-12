@@ -59,6 +59,7 @@ import Claude.Agent.SDK.Types
     , messageUuid
     , modelUsageToUsage
     )
+import Control.Monad (join)
 import qualified Data.Aeson as AesonValue
 import qualified Data.Aeson.Encoding as Aeson
 import qualified Data.ByteString.Base64 as Base64
@@ -355,7 +356,7 @@ jsonTextField key raw =
                                     then Nothing
                                     else Just value
                         _ -> pure Nothing)
-                    >>= pure . (>>= id))
+                    >>= pure . join)
             raw
 
 appendUnknownWarning

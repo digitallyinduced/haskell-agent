@@ -22,7 +22,8 @@ import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Except (ExceptT(..), except, runExceptT, throwE)
 import qualified Data.ByteString as ByteString
-import Data.List (intercalate, sort)
+import Data.List (intercalate)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -115,7 +116,7 @@ executableFilterOverrides cwd = do
 
 configuredFilterDrivers :: Text -> [Text]
 configuredFilterDrivers raw =
-    deduplicate . sort $
+    Set.toAscList . Set.fromList $
         foldMap driverForKey
             (filter (not . Text.null) (Text.splitOn "\0" raw))
   where
@@ -123,10 +124,6 @@ configuredFilterDrivers raw =
         case Text.stripSuffix ".clean" key of
             Just driver -> [driver]
             Nothing -> maybe [] pure (Text.stripSuffix ".process" key)
-
-    deduplicate [] = []
-    deduplicate (first : rest) =
-        first : deduplicate (dropWhile (== first) rest)
 
 runUntrackedDiff
     :: OsPath

@@ -13,7 +13,7 @@ import Control.Applicative ((<|>))
 import Control.Monad (filterM)
 import Data.Aeson (Value(..))
 import qualified Data.Aeson.KeyMap as KeyMap
-import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Vector as Vector
@@ -29,7 +29,7 @@ discoverGrok env cwd = do
     let sessions = env.externalGrokRoot </> "sessions"
     encodedDirectories <- directoryChildren sessions
     sessionDirectories <- concat <$> traverse directoryChildren encodedDirectories
-    mapMaybe id <$> traverse (metadataInDirectory env) sessionDirectories
+    catMaybes <$> traverse (metadataInDirectory env) sessionDirectories
         >>= filterM (candidateMatchesCwd cwd)
 
 findGrokById
@@ -54,7 +54,7 @@ discoverAllGrok env = do
     let sessions = env.externalGrokRoot </> "sessions"
     encodedDirectories <- directoryChildren sessions
     sessionDirectories <- concat <$> traverse directoryChildren encodedDirectories
-    mapMaybe id <$> traverse (metadataInDirectory env) sessionDirectories
+    catMaybes <$> traverse (metadataInDirectory env) sessionDirectories
 
 metadataInDirectory
     :: ExternalSessionEnv
