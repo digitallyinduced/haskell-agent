@@ -679,6 +679,66 @@ spec = describe "Agent.Tools.IO" do
     it "preserves oversized foreground output in an artifact" do
         withTempDir checkForegroundOutputArtifact
 
+    it "drains both pipes after capture and artifact storage limits are reached" do
+        withTempDir \dir -> do
+            requireProcessSandbox
+            let osDir = fromFilePath dir
+            base <- defaultToolEnv osDir
+            setToolSessionTmp base (Just osDir)
+            let env = base { toolStdoutCap = 64, toolOutputArtifactCap = 128 }
+            result <- checkBothPipesDrain env osDir
+            let checkArtifact :: Text.Text -> Maybe OutputArtifact -> Expectation
+                checkArtifact expected = \case
+                    Nothing -> expectationFailure "expected capped output artifact"
+                    Just artifact -> do
+                        artifact.artifactObservedBytes `shouldBe` 262144
+                        artifact.artifactStoredBytes `shouldBe` 128
+                        artifact.artifactTruncated `shouldBe` True
+                        readOutputArtifact env artifact.artifactHandle
+                            `shouldReturn` Right (Text.replicate 64 expected)
+            checkArtifact "x\n" result.commandStdoutArtifact
+            checkArtifact "y\n" result.commandStderrArtifact
+
+    it "drains both capped pipes when artifact storage is unavailable" do
+        withTempDir \dir -> do
+            requireProcessSandbox
+            let osDir = fromFilePath dir
+            base <- defaultToolEnv osDir
+            setToolSessionTmp base Nothing
+            result <- checkBothPipesDrain (base { toolStdoutCap = 64 }) osDir
+            result.commandStdoutArtifact `shouldBe` Nothing
+            result.commandStderrArtifact `shouldBe` Nothing
+
+    it "drains both capped pipes when creating an artifact fails" do
+        withTempDir \dir -> do
+            requireProcessSandbox
+            let osDir = fromFilePath dir
+            base <- defaultToolEnv osDir
+            setToolSessionTmp base (Just osDir)
+            -- A regular file at the artifact-directory path fails reliably,
+            -- including when the tests run as a privileged user.
+            writeFile (dir </> "tool-output-artifacts") "not a directory"
+            result <- checkBothPipesDrain (base { toolStdoutCap = 64 }) osDir
+            result.commandStdoutArtifact `shouldBe` Nothing
+            result.commandStderrArtifact `shouldBe` Nothing
+
+    it "preserves UTF-8 through a capture limit inside a code point" do
+        withTempDir \dir -> do
+            requireProcessSandbox
+            let osDir = fromFilePath dir
+            base <- defaultToolEnv osDir
+            setToolSessionTmp base (Just osDir)
+            let env = base { toolStdoutCap = 2 }
+            result <- runShellCommand env osDir "printf 'a\\342\\202\\254z'" 5000
+            result.commandExitCode `shouldBe` Just 0
+            result.commandStdout `shouldSatisfy` Text.isPrefixOf "a\xfffd"
+            case result.commandStdoutArtifact of
+                Nothing -> expectationFailure "expected complete UTF-8 artifact"
+                Just artifact -> do
+                    artifact.artifactObservedBytes `shouldBe` 5
+                    readOutputArtifact env artifact.artifactHandle
+                        `shouldReturn` Right "a€z"
+
     it "collects both output streams from a background shell command" do
         withTempDir checkBackgroundOutput
 
@@ -769,6 +829,25 @@ checkForegroundOutputCap dir = do
     result <- runShellCommand env osDir "yes x | head -c 262144" 5000
     Text.length result.commandStdout `shouldSatisfy` (< 128)
     result.commandStdout `shouldSatisfy` Text.isInfixOf "[truncated"
+
+checkBothPipesDrain env osDir = do
+    -- Each producer exceeds a pipe buffer by a wide margin. Both must reach
+    -- EOF even when no more bytes can be retained for the user.
+    result <- runShellCommand env osDir
+        "(yes x | head -c 262144) & (yes y | head -c 262144 >&2) & wait"
+        5000
+    result.commandTimedOut `shouldBe` False
+    result.commandCancelled `shouldBe` False
+    result.commandExitCode `shouldBe` Just 0
+    result.commandStdout `shouldSatisfy`
+        Text.isPrefixOf (Text.replicate 32 "x\n")
+    result.commandStderr `shouldSatisfy`
+        Text.isPrefixOf (Text.replicate 32 "y\n")
+    mapM_ (\output -> do
+        Text.length output `shouldSatisfy` (< 128)
+        output `shouldSatisfy` Text.isInfixOf "[truncated")
+        [result.commandStdout, result.commandStderr]
+    pure result
 
 checkBackgroundOutputArtifact dir = do
     requireProcessSandbox

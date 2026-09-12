@@ -99,6 +99,8 @@ import Control.Exception.Safe
     , tryAny
     )
 import Control.Monad (unless, void, when)
+import Control.Monad.IO.Class (liftIO)
+import Data.Conduit (ConduitT, await, runConduit, yield, (.|))
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
@@ -107,6 +109,7 @@ import Data.IORef
     , writeIORef
     )
 import Data.Maybe (fromMaybe)
+import Data.Void (Void)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.ByteString as BS
@@ -825,6 +828,9 @@ data DrainedOutput = DrainedOutput
 
 -- | Read a process stream in chunks. The live snapshot remains bounded; once
 -- it overflows, the complete stream is spilled to a session artifact.
+-- Keep raw bytes throughout capture/spill: decoding belongs to snapshot
+-- rendering, not the transport. The process owner still owns the handle and
+-- the concurrent stdout/stderr readers.
 drainHandle
     :: ToolEnv
     -> Text
@@ -838,25 +844,32 @@ drainHandle env _source handle ref recentRef = do
             readIORef writerRef >>= mapM_ (\writer -> do
                 _ <- finishOutputArtifact writer
                 pure ())
-    go writerRef Nothing False `onException` cleanup
+    runConduit (sourceProcessBytesC handle .| captureOutputC writerRef Nothing False)
+        `onException` cleanup
   where
     cap = env.toolStdoutCap
 
-    go writerRef writer disabled = do
-        chunk <- BS.hGetSome handle 8192
-        if BS.null chunk
-            then do
-                captured <- readIORef ref
-                artifact <- traverse finishOutputArtifact writer
-                writeIORef writerRef Nothing
-                pure DrainedOutput
-                    { drainedCaptured = captured
-                    , drainedArtifact = artifact
-                    }
-            else do
+    -- Unlike a take/limit conduit, this sink must await EOF even after the
+    -- capture cap is reached or spilling fails, otherwise the child can block
+    -- forever on a full pipe. Spill before publishing the bounded snapshot.
+    captureOutputC
+        :: IORef (Maybe OutputArtifactWriter)
+        -> Maybe OutputArtifactWriter
+        -> Bool
+        -> ConduitT BS.ByteString Void IO DrainedOutput
+    captureOutputC writerRef writer disabled = await >>= \case
+        Nothing -> liftIO do
+            captured <- readIORef ref
+            artifact <- traverse finishOutputArtifact writer
+            writeIORef writerRef Nothing
+            pure DrainedOutput
+                { drainedCaptured = captured
+                , drainedArtifact = artifact
+                }
+        Just chunk -> do
+            (nextWriter, nextDisabled) <- liftIO do
                 before <- readIORef ref
-                (nextWriter, nextDisabled) <-
-                    spillChunk writer disabled before chunk
+                next@(nextWriter, _) <- spillChunk writer disabled before chunk
                 writeIORef writerRef nextWriter
                 atomicModifyIORef' ref \soFar ->
                     (appendCapturedBytes cap chunk soFar, ())
@@ -865,7 +878,8 @@ drainHandle env _source handle ref recentRef = do
                         atomicModifyIORef' recent \soFar ->
                             (appendRecentBytes cap chunk soFar, ()))
                     recentRef
-                go writerRef nextWriter nextDisabled
+                pure next
+            captureOutputC writerRef nextWriter nextDisabled
 
     spillChunk
         :: Maybe OutputArtifactWriter
@@ -894,6 +908,17 @@ drainHandle env _source handle ref recentRef = do
                             Left _ -> do
                                 abortOutputArtifact writer
                                 pure (Nothing, True)
+
+-- | Demand-driven reads from a borrowed process pipe. No queue, text decoding,
+-- or handle finalizer is introduced; exceptions reach the process supervisor.
+sourceProcessBytesC :: Handle -> ConduitT () BS.ByteString IO ()
+sourceProcessBytesC handle = go
+  where
+    go = do
+        chunk <- liftIO (BS.hGetSome handle 8192)
+        unless (BS.null chunk) do
+            yield chunk
+            go
 
 emptyCapturedBytes :: CapturedBytes
 emptyCapturedBytes = CapturedBytes
