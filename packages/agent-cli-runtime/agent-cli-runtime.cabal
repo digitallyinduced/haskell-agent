@@ -50,6 +50,7 @@ library
                     , Agent.CLI.Gateway.Origin
                     , Agent.CLI.Gateway.Usage
                     , Agent.CLI.Session.Storage
+                    , Agent.CLI.Session.Framing
                     , Agent.CLI.Session.TaskPlan
                     , Agent.CLI.Session.TempWorkspace
                     , Agent.CLI.Session.Transfer
@@ -142,6 +143,21 @@ library
                     , vector
                     , wai
                     , warp
+
+test-suite session-framing-test
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    ghc-options:      -threaded
+    hs-source-dirs:   test/framing src
+    main-is:          Spec.hs
+    other-modules:    Agent.CLI.Session.Framing
+    build-depends:    aeson
+                    , async
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , hspec >= 2.11 && < 2.12
+                    , network
+                    , safe-exceptions
 
 test-suite agent-cli-runtime-test
     import:           common-options

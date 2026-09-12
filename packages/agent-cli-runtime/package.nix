@@ -26,7 +26,7 @@ mkDerivation {
   testHaskellDepends = [
     aeson agent-core agent-json agent-openai agent-responses
     agent-responses-types agent-store async base bytestring containers
-    directory filepath hspec http-client http-types QuickCheck
+    directory filepath hspec http-client http-types network QuickCheck
     safe-exceptions stm text time unix wai warp
   ];
   description = "Headless shared runtime for agent frontends";
