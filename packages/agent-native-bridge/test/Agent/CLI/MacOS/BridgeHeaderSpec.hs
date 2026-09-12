@@ -6,6 +6,7 @@ import Foreign.C.Types (CInt(..), CSize(..))
 import Foreign.Ptr (Ptr, FunPtr, nullFunPtr, nullPtr, freeHaskellFunPtr)
 import Foreign.Marshal.Utils (fillBytes)
 import Control.Exception.Safe (bracket)
+import Control.Concurrent.Async (mapConcurrently)
 import qualified Data.ByteString as BS
 import Agent.CLI.MacOS.ConnectionBridge
     (withSnapshot, ConnectionSecretCallback, connectionSecretStore)
@@ -56,6 +57,9 @@ spec = do
     describe "native syntax highlighting ABI" do
         it "preserves UTF-8 ranges, classifies Haskell, and validates fallback inputs" do
             syntaxAbiSmoke `shouldReturn` 0
+        it "supports concurrent engine-independent requests" do
+            mapConcurrently (const syntaxAbiSmoke) [1 .. 8 :: Int]
+                `shouldReturn` replicate 8 0
     describe "native connection secure store" do
         it "fails closed when the native secure store is absent" do
             connectionSecretStore nullFunPtr nullPtr "scope"
