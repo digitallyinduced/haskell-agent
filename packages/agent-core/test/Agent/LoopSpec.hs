@@ -28,9 +28,15 @@ import Agent.Tools.Scheduling
     , ToolSchedulingPlan(..)
     , schedulingPlansConflict
     )
+import Agent.Tools.IO
+    ( RunningCommand(..)
+    , startShellCommandWithCompletion
+    , stopShellCommand
+    )
 import Agent.Tools.Types
     ( ApprovalRule(..)
     , ToolExecutionPolicy(..)
+    , defaultToolEnv
     , jsonAppToolWithExecution
     , toolExecutionPolicyFor
     , withAsyncToolCalls
@@ -54,16 +60,18 @@ import Codec.Picture
 import Codec.Picture.Types (convertImage)
 import qualified Codec.Compression.Zlib as Zlib
 import Control.Concurrent (forkIO, threadDelay)
-import Control.Concurrent.Async (cancel, wait, withAsync)
+import Control.Concurrent.Async (cancel, poll, wait, withAsync)
 import Control.Concurrent.MVar
     ( newEmptyMVar
     , putMVar
     , readMVar
     , takeMVar
+    , tryPutMVar
     , tryReadMVar
     )
 import qualified Control.Exception as Exception
-import Control.Monad (when)
+import qualified Control.Exception.Safe as Safe
+import Control.Monad (void, when)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Bits (complement, shiftR, xor, (.&.))
@@ -81,6 +89,7 @@ import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
+import Data.Time.Clock (getCurrentTime)
 import Data.Word (Word32)
 import System.Timeout (timeout)
 import System.OsPath (unsafeEncodeUtf)
@@ -1464,6 +1473,62 @@ spec = describe "runLoop" do
             timeout concurrencyProbeMicros (wait running)
                 `shouldReturn` Just (Left (LoopCancelled []))
             readMVar handlerFinished `shouldReturn` ()
+
+    it "joins asynchronous command cleanup after provider credentials are exhausted" do
+        let workdir = unsafeEncodeUtf "."
+        env <- defaultToolEnv workdir
+        callbackStarted <- newEmptyMVar
+        callbackFinished <- newEmptyMVar
+        releaseCallback <- newEmptyMVar
+        commandStarted <- newEmptyMVar
+        releaseHandler <- newEmptyMVar
+        cleanupMask <- newEmptyMVar
+        handlerFinished <- newEmptyMVar
+        retryAt <- getCurrentTime
+        let providerFailure = CredentialsExhausted retryAt []
+            call = asyncFunctionToolCall "async-command" "command" "{}"
+            acquire =
+                startShellCommandWithCompletion env workdir "true"
+                    (\_ ->
+                        (putMVar callbackStarted () >> readMVar releaseCallback)
+                            `Safe.finally` putMVar callbackFinished ())
+                    >>= either (Safe.throwString . Text.unpack) pure
+            release command = do
+                Exception.getMaskingState >>= putMVar cleanupMask
+                stopShellCommand command
+                putMVar handlerFinished ()
+            tool = asyncNoArgsTool "command" $
+                Safe.bracket acquire release \command -> do
+                    putMVar commandStarted command
+                    readMVar releaseHandler
+                    pure (Right "unexpected completion")
+            backend = backendWithCallbacks \_ _ _ callbacks -> do
+                callbacks.onAsyncToolCall call
+                void (readMVar commandStarted)
+                readMVar callbackStarted
+                pure (Left providerFailure)
+            unblock = do
+                void (tryPutMVar releaseCallback ())
+                void (tryPutMVar releaseHandler ())
+        config0 <- testConfig backend
+        let config = config0 { loopTools = registryFromTools [tool] }
+        withAsync (runLoop config Nothing "go") \running ->
+            (do
+                timeout 3000000 (readMVar cleanupMask)
+                    `shouldReturn` Just Exception.MaskedUninterruptible
+                -- Escape can arrive while provider failure is already
+                -- unwinding the asynchronous tool-manager scope.
+                requestCancel config.loopCancel
+                timeout 3000000 (wait running)
+                    `shouldReturn` Just (Left (LoopTransport providerFailure))
+                tryReadMVar handlerFinished `shouldReturn` Just ()
+                tryReadMVar callbackFinished `shouldReturn` Just ()
+                command <- readMVar commandStarted
+                poll command.runningSupervisor
+                    >>= (`shouldSatisfy` maybe False (const True)))
+            -- Release gates before withAsync joins a regressed worker, so the
+            -- expected timeout failure cannot strand the rest of the suite.
+            `Safe.finally` unblock
 
     it "cancels promptly while an admitted async call is awaiting approval" do
         approvalStarted <- newEmptyMVar

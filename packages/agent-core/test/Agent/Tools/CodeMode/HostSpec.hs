@@ -34,8 +34,8 @@ import Control.Concurrent
     , tryPutMVar
     )
 import Control.Concurrent.Async (cancel, wait, withAsync)
-import Control.Exception.Safe (bracket, finally, throwIO, uninterruptibleMask_)
-import Control.Monad (void)
+import Control.Exception.Safe (bracket, finally, onException, throwIO, tryAny, uninterruptibleMask_)
+import Control.Monad (void, when)
 import Data.Aeson (Value(..))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -43,10 +43,57 @@ import qualified Data.List
 import Data.IORef
 import qualified Data.Text as Text
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
-import System.Directory (doesFileExist)
+import System.Directory (doesFileExist, getTemporaryDirectory, removeFile)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.IO (hClose, hPutStr, openTempFile)
+import System.Posix.Signals (nullSignal, sigKILL, signalProcess)
 import System.Timeout (timeout)
 import Test.Hspec
+
+-- Keep the failure case finite too: a regression must report a failed bound,
+-- not strand Hspec in the same uninterruptible finalizer as the application.
+assertShutdownCompletes :: IO () -> IO () -> IO ()
+assertShutdownCompletes terminateFixture shutdown =
+    withAsync shutdown \closing -> do
+        completed <- timeout 4000000 (wait closing)
+            `onException` terminateFixture
+        when (completed == Nothing) terminateFixture
+        wait closing
+        completed `shouldBe` Just ()
+
+withUnresponsiveWorker :: (CodeModeConfig -> IO () -> IO ()) -> IO ()
+withUnresponsiveWorker action = do
+    directory <- getTemporaryDirectory
+    bracket
+        (do
+            (script, handle) <- openTempFile directory "code-mode-shutdown.mjs"
+            hPutStr handle $ unlines
+                [ "import { writeFileSync } from 'node:fs';"
+                , "import { fileURLToPath } from 'node:url';"
+                , "process.on('SIGINT', () => {});"
+                , "process.on('SIGTERM', () => {});"
+                , "writeFileSync(fileURLToPath(import.meta.url) + '.pid', String(process.pid));"
+                , "console.log(JSON.stringify({jsonrpc: '2.0', method: 'ready'}));"
+                , "console.log(JSON.stringify({jsonrpc: '2.0', id: 'entered', method: 'tool/call', params: {name: 'entered', arguments: {}}}));"
+                , "process.stdin.resume();"
+                , "setInterval(() => {}, 1000);"
+                ]
+            hClose handle
+            pure script)
+        (\script -> do
+            void $ tryAny (removeFile (script <> ".pid"))
+            removeFile script)
+        \script -> do
+            let readProcessId = read <$> readFile (script <> ".pid")
+                terminateFixture = void $ tryAny $
+                    readProcessId >>= signalProcess sigKILL
+                config = (defaultCodeModeConfig script (\_ _ -> pure (Right Null)))
+                    { workerPoolSize = 1 }
+            (do
+                action config terminateFixture
+                processId <- readProcessId
+                signalProcess nullSignal processId `shouldThrow` anyIOException)
+                `finally` terminateFixture
 
 spec :: Spec
 spec = describe "code-mode Bun host" do
@@ -73,6 +120,29 @@ spec = describe "code-mode Bun host" do
                 withAsync (run (putMVar entered () >> takeMVar blocked)) \running -> do
                     timeout 5000000 (readMVar entered) `shouldReturn` Just ()
                     cancel running
+
+        it "escalates shutdown of an idle worker that ignores termination signals" $
+            withUnresponsiveWorker \config terminateFixture ->
+                assertShutdownCompletes terminateFixture $
+                    withCodeModeHost config (const (pure ()))
+
+        it "escalates cancellation of an executing worker that ignores termination signals" $
+            withUnresponsiveWorker \config terminateFixture -> do
+                entered <- newEmptyMVar
+                let activeConfig = config
+                        { workerPoolSize = 0
+                        , toolHandler = \_ _ ->
+                            putMVar entered () >> pure (Right Null)
+                        }
+                withCodeModeHost activeConfig \host ->
+                    withAsync
+                        (execCodeCell host "await new Promise(() => {});" ["entered"] 60000)
+                        \running -> (do
+                            timeout 5000000 (readMVar entered) `shouldReturn` Just ()
+                            assertShutdownCompletes terminateFixture (cancel running)
+                            terminateCodeCell host "1" `shouldReturn`
+                                Left (CodeModeUnknownCell "1"))
+                            `onException` terminateFixture
 
     it "resolves the bundled worker independently of the current directory" do
         worker <- bundledCodeModeWorkerPath

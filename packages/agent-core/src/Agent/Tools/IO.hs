@@ -77,6 +77,8 @@ import Control.Concurrent.Async
     , concurrently
     , race
     , withAsync
+    , withAsyncWithUnmask
+    , wait
     , waitCatch
     )
 import Control.Concurrent.MVar
@@ -748,7 +750,14 @@ interruptShellCommand running =
             void $ try @_ @SomeException (signalProcessGroup sigINT groupId)
 
 stopShellCommand :: RunningCommand -> IO ()
-stopShellCommand running = do
+stopShellCommand running =
+    -- Safe finalizers enter uninterruptibly masked. Give the shutdown races
+    -- an interruptible child so they can cancel their losing waits, while
+    -- keeping the entire cleanup scoped and joined by the caller.
+    withAsyncWithUnmask (\unmask -> unmask (stopRunningCommand running)) wait
+
+stopRunningCommand :: RunningCommand -> IO ()
+stopRunningCommand running = do
     closeRunningStdin running
     finished <- tryReadMVar running.runningResult
     case finished of
