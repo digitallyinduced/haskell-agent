@@ -30,7 +30,7 @@ import Control.Concurrent.Async (race)
 import Control.Concurrent.MVar (withMVar)
 import Control.Concurrent.STM
 import Control.Exception.Safe (finally)
-import Control.Monad (void)
+import Control.Monad (filterM, void)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -272,7 +272,7 @@ interruptActiveSubagents registry =
             wasClosed <- readTVar registry.registryClosed
             writeTVar registry.registryClosed True
             agents <- Map.elems <$> readTVar registry.registryAgents
-            records <- filterMSTM isActiveRecord agents
+            records <- filterM isActiveRecord agents
             pure (wasClosed, records)
         (do
             settled <- mapConcurrentlyBounded 8
@@ -319,14 +319,6 @@ data InterruptDisposition
     = InterruptUnchanged
     | InterruptSettled
     | InterruptWait
-
-filterMSTM :: (a -> STM Bool) -> [a] -> STM [a]
-filterMSTM predicate = fmap reverse . go []
-  where
-    go kept [] = pure kept
-    go kept (value : rest) = do
-        include <- predicate value
-        go (if include then value : kept else kept) rest
 
 -- | Re-admit a previously persisted agent that is not currently in the
 -- in-memory map (e.g. after close, or across a process restart within the

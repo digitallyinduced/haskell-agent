@@ -213,6 +213,22 @@ spec = do
                 readIORef calls `shouldReturn`
                     ["/v1internal:loadCodeAssist"]
 
+        it "strips trailing base URL slashes and prefers the returned project" do
+            calls <- newIORef []
+            withLoopbackApplication (pure (existingUserApp calls)) \port -> do
+                let options = (testCodeAssistOptions port)
+                        { baseUrl = localBaseUrl port <> "/v1internal///"
+                        , configuredProject = Just "configured-project"
+                        }
+                result <- setupCodeAssist options "bearer"
+                result `shouldBe` Right CodeAssistUser
+                    { projectId = "managed-project"
+                    , userTier = "free-tier"
+                    , userTierName = Just "Gemini Code Assist"
+                    }
+                readIORef calls `shouldReturn`
+                    ["/v1internal:loadCodeAssist"]
+
         it "prefers paid-tier metadata for an existing account" do
             withLoopbackApplication (pure paidUserApp) \port ->
                 setupCodeAssist (testCodeAssistOptions port) "bearer"
