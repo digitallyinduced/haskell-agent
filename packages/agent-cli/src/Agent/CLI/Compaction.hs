@@ -139,6 +139,7 @@ import Control.Applicative ((<|>))
 import Control.Exception.Safe (mask, onException)
 import Control.Monad (when)
 import Data.IORef (IORef, readIORef, writeIORef)
+import Data.List (partition)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -1564,13 +1565,7 @@ autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
                             continuationInputs
                             callbacks
 
-    partitionCompletedTools =
-        foldr
-            (\input (completed, pending) ->
-                if isCompletedTool input
-                    then (input : completed, pending)
-                    else (completed, input : pending))
-            ([], [])
+    partitionCompletedTools = partition isCompletedTool
 
     installSubmitAndTrack restore rollback oldSnapshot outcome inputs callbacks = do
         let compactedHistory = outcome.compactHistory
