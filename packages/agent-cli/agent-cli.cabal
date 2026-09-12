@@ -110,7 +110,6 @@ library
                     , Agent.CLI.Runtime.Repl.Attachments
                     , Agent.CLI.Runtime.Repl.Commands
                     , Agent.CLI.Runtime.Repl.Context
-                    , Agent.CLI.Runtime.Repl.MetaConsole
                     , Agent.CLI.Runtime.Repl.Selection
                     , Agent.CLI.Runtime.Repl.Session
                     , Agent.CLI.Runtime.Repl.Transcript
@@ -156,6 +155,7 @@ library
                     , Agent.CLI.TUI.Render.Workspace
                     , Paths_agent_cli
     exposed-modules:  Agent.CLI
+                    , Agent.CLI.Runtime.Repl.MetaConsole
                     , Agent.CLI.Session.Choices
                     , Agent.CLI.TUI.Keyboard
                     , Agent.CLI.IntegrationGateway
