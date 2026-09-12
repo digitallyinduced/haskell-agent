@@ -111,6 +111,7 @@ import qualified Agent.CLI.ToolsSpec as ToolsSpec
 import qualified Agent.CLI.TUIAppSpec as TUIAppSpec
 import qualified Agent.CLI.TUIBridgeSpec as TUIBridgeSpec
 import qualified Agent.CLI.TUIComposerSpec as TUIComposerSpec
+import qualified Agent.CLI.TUIComposerUndoSpec as TUIComposerUndoSpec
 import qualified Agent.CLI.TUIImagePreviewSpec as TUIImagePreviewSpec
 import qualified Agent.CLI.TUIHistorySpec as TUIHistorySpec
 import qualified Agent.CLI.TUIPropertySpec as TUIPropertySpec
@@ -254,6 +255,7 @@ specs = do
     TUIAppSpec.spec
     TUIBridgeSpec.spec
     TUIComposerSpec.spec
+    TUIComposerUndoSpec.spec
     TUIImagePreviewSpec.spec
     TUIHistorySpec.spec
     TUIPropertySpec.spec

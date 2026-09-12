@@ -12,6 +12,7 @@ category:           Development
 build-type:         Simple
 extra-source-files: README.md
                   , benchmark/FullscreenMarkdown.md
+                  , benchmark/TerminalText.md
 
 common common-options
     default-language: GHC2021
@@ -91,6 +92,20 @@ test-suite agent-tui-test
                     , containers >= 0.6 && < 0.8
                     , hspec >= 2.11 && < 2.12
                     , QuickCheck >= 2.14 && < 2.16
+                    , text
+                    , vty
+
+benchmark terminal-text-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          TerminalText.hs
+    ghc-options:      -O2 -rtsopts
+    other-modules:    TerminalTextCandidate
+                    , TerminalTextBaseline
+    build-depends:    base
+                    , deepseq
+                    , safe-exceptions
                     , text
                     , vty
 

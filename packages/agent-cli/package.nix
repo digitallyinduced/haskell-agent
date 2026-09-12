@@ -55,8 +55,8 @@ mkDerivation {
     aeson agent-cli-runtime agent-core agent-json agent-mcp
     agent-openai agent-responses agent-responses-types agent-store
     agent-tui ansi-terminal async base brick bytestring colour
-    containers deepseq directory filepath JuicyPixels process
-    safe-exceptions stm text time unix vty
+    containers deepseq directory filepath JuicyPixels mtl process
+    safe-exceptions stm text time transformers unix vty
   ];
   description = "Command-line interface for the universal agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";
