@@ -191,6 +191,34 @@ benchmark display-journal-bench
                     , text
                     , time
 
+benchmark display-journal-retention-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark, src
+    main-is:          DisplayJournalRetention.hs
+    other-modules:    Agent.Dialect
+                    , Agent.Error
+                    , Agent.Loop.DisplayJournal
+                    , Agent.Loop.EventPump
+                    , Agent.Loop.Output
+                    , Agent.Loop.TokenUsage
+                    , Agent.Provider
+                    , Agent.Telemetry
+                    , Agent.TextBuffer
+                    , Agent.ToolDispatch
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-json
+                    , agent-responses-types
+                    , aeson
+                    , async
+                    , base >= 4.14 && < 5
+                    , bytestring
+                    , containers
+                    , safe-exceptions
+                    , stm
+                    , text
+                    , time
+
 benchmark concurrent-discovery-bench
     import:           common-opts
     type:             exitcode-stdio-1.0

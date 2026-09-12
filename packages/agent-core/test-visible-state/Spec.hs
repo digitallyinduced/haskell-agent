@@ -2,7 +2,10 @@ module Main (main) where
 
 import Agent.Loop.Output
 import Agent.Loop.VisibleState
-import Agent.ToolDispatch (functionToolCall)
+import Agent.ToolDispatch
+    ( functionToolCall, setToolCallArguments, ToolCallResult(..)
+    , ToolCallKind(..), ToolCallMode(..)
+    )
 import Test.Hspec
 
 main :: IO ()
@@ -85,6 +88,50 @@ main = hspec $ describe "VisibleLoopState event sequences" do
         visibleDisplayEvents state `shouldBe`
             [ToolStarted call, TextDelta "prior", ResponseRestarted "retry", TextDelta "current"]
         visibleAssistantText state `shouldBe` Just "prior\n\ncurrent"
+
+    it "keeps only the latest alternating argument snapshot" do
+        let first = setToolCallArguments "partial" call
+            latest = setToolCallArguments "complete" call
+        visibleDisplayEvents (events
+            [TurnStarted, ToolStarted call, ToolUpdated first,
+             ToolArgumentsUpdated latest, ToolUpdated latest]) `shouldBe`
+            [ToolStarted call, ToolUpdated latest]
+
+    it "does not collapse text boundaries while superseding snapshots" do
+        visibleDisplayEvents (events
+            [ TurnStarted, TextDelta "before", ToolOutputUpdated "c1" "old"
+            , TextDelta "between", ToolOutputUpdated "c1" "new"
+            , ToolOutputUpdated "c1" "latest", TextDelta "after"
+            ]) `shouldBe`
+            [ TextDelta "before", TextDelta "between"
+            , ToolOutputUpdated "c1" "latest", TextDelta "after"
+            ]
+
+    it "retains other calls and earlier attempts when snapshots repeat" do
+        visibleDisplayEvents (events
+            [ TurnStarted, ToolOutputUpdated "c1" "prior"
+            , ResponseRestarted "retry", ToolOutputUpdated "c1" "first"
+            , ToolOutputUpdated "c2" "other", ToolOutputUpdated "c1" "second"
+            , ToolOutputUpdated "c1" "latest", ToolRetracted "c1"
+            ]) `shouldBe`
+            [ ToolOutputUpdated "c1" "prior", ResponseRestarted "retry"
+            , ToolOutputUpdated "c2" "other"
+            ]
+
+    it "preserves repeated finishes and output arriving after the final finish" do
+        let finished output = ToolCallResult
+                { callId = "c1", output, callKind = FunctionCallKind
+                , toolResultMode = BlockingToolCall, toolResultImages = []
+                , toolResultOutcome = Nothing
+                }
+            first = finished "first"
+            second = finished "second"
+        visibleDisplayEvents (events
+            [ TurnStarted, ToolOutputUpdated "c1" "old", ToolFinished first
+            , ToolOutputUpdated "c1" "between", ToolFinished second
+            , ToolOutputUpdated "c1" "late", ToolOutputUpdated "c1" "latest"
+            ]) `shouldBe`
+            [ToolFinished first, ToolFinished second, ToolOutputUpdated "c1" "latest"]
 
     it "uses an empty snapshot at commit before completion is painted" do
         -- The IO commit checkpoint installs this value directly, not via a
