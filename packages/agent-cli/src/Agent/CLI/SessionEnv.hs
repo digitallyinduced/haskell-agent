@@ -9,6 +9,7 @@ import Agent.CLI.Session.Request
     ( SessionRequestState
     )
 import Agent.CLI.ActiveAccount (ActiveAccountRef)
+import Agent.Tools.Background (BackgroundTaskStatus)
 import Agent.CLI.CancelWatch (StdinControl)
 import Agent.CLI.Interrupt (InterruptState)
 import Agent.CLI.AgentViewport (AgentViewportEnv)
@@ -71,6 +72,7 @@ data SessionInboxRuntime = SessionInboxRuntime
 data SessionEnv = SessionEnv
     { sessionLoop :: !LoopConfig
     , sessionSteeringInputs :: !SteeringInputs
+    , sessionReadBackgroundTasks :: !(IO [BackgroundTaskStatus])
     , sessionModelInfo :: !(Maybe ModelInfo)
     , sessionBtwBackend :: !BtwBackendFactory
     , sessionQueueRecap :: !(RecapRequest -> IO ())

@@ -18,6 +18,7 @@ module Agent.Tools.CodeMode.Host
     , execCodeCell
     , execCodeCellWithTools
     , newCodeModeHost
+    , readRunningCodeCells
     , terminateCodeCell
     , waitCodeCell
     , withCodeModeHost
@@ -102,7 +103,7 @@ import Control.Exception.Safe
     , onException
     , try
     )
-import Control.Monad (void)
+import Control.Monad (filterM, void)
 import Data.Aeson (ToJSON(toJSON), Value(..), object, (.=))
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
@@ -116,6 +117,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Vector as Vector
+import Data.Maybe (isNothing)
+import Data.Time.Clock (UTCTime, getCurrentTime)
 import System.IO
     ( BufferMode(..)
     , Handle
@@ -266,6 +269,15 @@ activeCellLimitError host = CodeModeResourceError $
     "too many active code-mode cells (limit "
         <> Text.pack (show (activeCellLimit host))
         <> ")"
+
+-- | Read activity without consuming output or claiming a cell's observer.
+-- Completed cells remain retained until an explicit wait, but are not running.
+readRunningCodeCells :: CodeModeHost -> IO [(Text, UTCTime)]
+readRunningCodeCells host = withMVar host.hostCells \cells -> do
+    running <- atomically $ filterM
+        (fmap isNothing . tryReadTMVar . (.cellResult))
+        (Map.elems cells)
+    pure [(cell.cellIdentifier, cell.cellStartedAt) | cell <- running]
 
 waitCodeCell
     :: CodeModeHost
@@ -504,6 +516,7 @@ startCellFromProcess host identifier tools alreadyReady
                                     stopIncompleteProcess
                                         input output stderr processHandle
                             observation <- newMVar CellIdle
+                            startedAt <- getCurrentTime
                             stderrReader <-
                                 case (alreadyReady, existingStderr) of
                                     (True, Just reader) -> pure reader
@@ -553,6 +566,7 @@ startCellFromProcess host identifier tools alreadyReady
                                 Right (Right ()) ->
                                     pure $ Right Cell
                                         { cellIdentifier = identifier
+                                        , cellStartedAt = startedAt
                                         , cellInput = input
                                         , cellOutput = output
                                         , cellErrorOutput = stderr

@@ -2,9 +2,13 @@ module Agent.Tools.IOSpec (spec) where
 
 import Agent.Cancel (requestCancel)
 import Agent.Tools.Background
-    ( consumeCompletion
+    ( BackgroundTaskStatus(..)
+    , consumeCompletion
     , newCompletionGate
     , publishCompletion
+    , readBackgroundTasks
+    , registerBackgroundTask
+    , removeBackgroundTask
     , suppressCompletion
     , systemReminder
     )
@@ -85,6 +89,29 @@ fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = describe "Agent.Tools.IO" do
+    describe "background task status" do
+        it "preserves task age on repeated registration and reads without consumption" do
+            env <- defaultToolEnv (fromFilePath ".")
+            registerBackgroundTask env "shell:1" "release build" True
+            initial <- readBackgroundTasks env
+            map (.taskLabel) initial `shouldBe` ["release build"]
+            map (.taskAutoResume) initial `shouldBe` [True]
+            registerBackgroundTask env "shell:1" "replacement label" False
+            readBackgroundTasks env `shouldReturn` initial
+            readBackgroundTasks env `shouldReturn` initial
+
+        it "keeps independent tasks and removes completed entries idempotently" do
+            env <- defaultToolEnv (fromFilePath ".")
+            registerBackgroundTask env "shell:1" "build" True
+            registerBackgroundTask env "cell:1" "script" False
+            removeBackgroundTask env "shell:1"
+            remaining <- readBackgroundTasks env
+            map (.taskKey) remaining `shouldBe` ["cell:1"]
+            map (.taskAutoResume) remaining `shouldBe` [False]
+            removeBackgroundTask env "shell:1"
+            removeBackgroundTask env "cell:1"
+            readBackgroundTasks env `shouldReturn` []
+
     describe "background completion delivery" do
         it "publishes once and lets one explicit result dismiss it" do
             events <- newIORef ([] :: [Text.Text])

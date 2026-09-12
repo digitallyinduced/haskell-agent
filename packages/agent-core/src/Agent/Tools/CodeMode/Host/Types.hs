@@ -14,6 +14,7 @@ import Data.Aeson (Value)
 import qualified Data.Map.Strict as Map
 import Data.IORef (IORef)
 import Data.Text (Text)
+import Data.Time.Clock (UTCTime)
 import System.IO (Handle)
 import System.Posix.Types (ProcessGroupID)
 import System.Process (ProcessHandle)
@@ -102,6 +103,7 @@ data WorkerProcessHandle = WorkerProcessHandle
 
 data Cell = Cell
     { cellIdentifier :: !Text
+    , cellStartedAt :: !UTCTime
     , cellInput :: !Handle
     , cellOutput :: !Handle
     , cellErrorOutput :: !Handle

@@ -1,7 +1,6 @@
 -- | Meta Console planning, approval, and host-side action execution.
 module Agent.CLI.Runtime.Repl.MetaConsole
     ( handleMetaConsoleRequest
-    , collectMetaSecretsWith
     ) where
 
 import Agent.CLI.Command
@@ -27,6 +26,7 @@ import Agent.CLI.Runtime.MetaConsole
     ( MetaSecretValue(..)
     , applyMetaConfigActions
     , buildMetaContext
+    , collectMetaSecretsWith
     , isMetaConfigAction
     , metaConfigRequiresRestart
     , runMetaPlanner
@@ -67,8 +67,6 @@ import Agent.TUI.Model
 import Control.Exception.Safe
     ( displayException, finally, tryAny )
 import Control.Monad ( foldM )
-import Control.Monad.IO.Class ( liftIO )
-import Control.Monad.Trans.Except ( ExceptT, runExceptT, throwE )
 import Data.Aeson ( Value )
 import Data.IORef ( readIORef )
 import Data.Text ( Text )
@@ -295,46 +293,6 @@ collectMetaSecrets
     -> IO (Either Text [MetaSecretValue])
 collectMetaSecrets runtime =
     collectMetaSecretsWith (promptMetaSecret runtime)
-
--- | Collect in action order, stopping at the first cancelled prompt.
-collectMetaSecretsWith
-    :: (Text -> Text -> IO (Maybe Text))
-    -> [Meta.MetaAction]
-    -> IO (Either Text [MetaSecretValue])
-collectMetaSecretsWith prompt actions =
-    runExceptT $ foldM (collectOneMetaSecret prompt) [] actions
-
-collectOneMetaSecret
-    :: (Text -> Text -> IO (Maybe Text))
-    -> [MetaSecretValue]
-    -> Meta.MetaAction
-    -> ExceptT Text IO [MetaSecretValue]
-collectOneMetaSecret prompt values action = case action of
-    Meta.MetaSetMcpSecretEnv server key -> do
-        value <- requireSecret
-            ("secret input for MCP server '" <> server <> "' was cancelled")
-            ("MCP " <> server <> " · " <> key)
-            ("Enter the value for environment variable "
-                <> key
-                <> " on MCP server "
-                <> server
-                <> ". It stays local and is never sent to the model.")
-        pure (values <> [MetaMcpSecretValue server key value])
-    Meta.MetaSetLspSecretEnv server key -> do
-        value <- requireSecret
-            ("secret input for LSP server '" <> server <> "' was cancelled")
-            ("LSP " <> server <> " · " <> key)
-            ("Enter the value for environment variable "
-                <> key
-                <> " on LSP server "
-                <> server
-                <> ". It stays local and is never sent to the model.")
-        pure (values <> [MetaLspSecretValue server key value])
-    _ -> pure values
-  where
-    requireSecret cancelled title body = do
-        value <- liftIO $ prompt title body
-        maybe (throwE cancelled) pure value
 
 promptMetaSecret
     :: MetaConsoleRuntime

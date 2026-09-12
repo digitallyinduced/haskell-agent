@@ -15,6 +15,51 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "xAI transcription events" do
+    it "replaces partial hypotheses rather than appending them" do
+        callbacks <- newIORef []
+        withTranscriptServer
+            [ "{\"type\":\"transcript.partial\",\"text\":\"hel\"}"
+            , "{\"type\":\"transcript.partial\",\"text\":\"hello\"}"
+            , "{\"type\":\"transcript.partial\",\"text\":\"hello world\",\"speech_final\":true}"
+            , "{\"type\":\"transcript.done\",\"text\":\"\"}"
+            ]
+            (\connection -> transcribeOnConnection connection (const (pure ()))
+                (\text -> modifyIORef' callbacks (<> [text])))
+            `shouldReturn` "hello world"
+        readIORef callbacks `shouldReturn` ["hel", "hello", "hello world", "hello world"]
+
+    it "rejects readiness errors before producing audio" do
+        produced <- newIORef False
+        withRawTranscriptServer
+            (\connection -> WS.sendTextData connection
+                ("{\"type\":\"error\",\"message\":\"not ready\"}" :: Text))
+            (\connection ->
+                transcribeOnConnection connection
+                    (const (modifyIORef' produced (const True)))
+                    (const (pure ()))
+                    `shouldThrow` (\err -> ioeGetErrorString err == "not ready"))
+        readIORef produced `shouldReturn` False
+
+    it "propagates transport closure before completion" do
+        withRawTranscriptServer
+            (\connection -> do
+                WS.sendTextData connection ("{\"type\":\"transcript.created\"}" :: Text)
+                _ <- WS.receiveData connection :: IO Text
+                WS.sendClose connection ("early" :: Text)
+                (WS.receiveData connection :: IO Text) `shouldThrow` anyException)
+            (\connection ->
+                transcribeOnConnection connection (const (pure ())) (const (pure ()))
+                    `shouldThrow` (\(_ :: WS.ConnectionException) -> True))
+
+    it "closes the connection when the audio producer fails" do
+        withRawTranscriptServer
+            (\connection -> do
+                WS.sendTextData connection ("{\"type\":\"transcript.created\"}" :: Text)
+                (WS.receiveData connection :: IO Text) `shouldThrow` anyException)
+            (\connection ->
+                transcribeOnConnection connection (const (fail "producer failed")) (const (pure ()))
+                    `shouldThrow` (\err -> ioeGetErrorString err == "producer failed"))
+
     it "cancels a receiver blocked in a transcript callback" do
         entered <- newEmptyMVar
         blocked <- newEmptyMVar
@@ -80,6 +125,22 @@ spec = describe "xAI transcription events" do
 
 withTranscriptServer :: [Text] -> (WS.Connection -> IO a) -> IO a
 withTranscriptServer events action =
+    withRawTranscriptServer
+        (\connection -> do
+            mapM_ (WS.sendTextData connection)
+                [ "invalid JSON"
+                , "{\"type\":\"future.event\"}"
+                , "{\"type\":\"transcript.created\"}"
+                :: Text
+                ]
+            (WS.receiveData connection :: IO Text)
+                `shouldReturn` "{\"type\":\"audio.done\"}"
+            mapM_ (WS.sendTextData connection) events
+            (WS.receiveData connection :: IO Text) `shouldThrow` anyException)
+        action
+
+withRawTranscriptServer :: (WS.Connection -> IO ()) -> (WS.Connection -> IO a) -> IO a
+withRawTranscriptServer serve action =
     requireLoopbackListener >>
     bracket (WS.makeListenSocket "127.0.0.1" 0) Socket.close \listener -> do
         Socket.SockAddrInet port _ <- Socket.getSocketName listener
@@ -88,14 +149,12 @@ withTranscriptServer events action =
                 flip finally (Socket.close socket) do
                     pending <- WS.makePendingConnection socket WS.defaultConnectionOptions
                     connection <- WS.acceptRequest pending
-                    WS.sendTextData connection ("{\"type\":\"transcript.created\"}" :: Text)
-                    (WS.receiveData connection :: IO Text)
-                        `shouldReturn` "{\"type\":\"audio.done\"}"
-                    mapM_ (WS.sendTextData connection) events
-                    (WS.receiveData connection :: IO Text) `shouldThrow` anyException
+                    serve connection
         withAsync server \worker -> do
-            result <- Timeout.timeout (5 * 1_000_000) $
-                WS.runClient "127.0.0.1" (fromIntegral port) "/" action
+            result <- Timeout.timeout (5 * 1_000_000) do
+                value <- WS.runClient "127.0.0.1" (fromIntegral port) "/" action
+                wait worker
+                pure value
             case result of
                 Nothing -> expectationFailure "transcription timed out" >> fail "timeout"
-                Just value -> wait worker >> pure value
+                Just value -> pure value
