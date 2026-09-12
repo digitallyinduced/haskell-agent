@@ -90,6 +90,7 @@
                     include = [
                         "app"
                         "benchmark"
+                        "internal"
                         "src"
                         "test"
                         "agent-openai.cabal"
