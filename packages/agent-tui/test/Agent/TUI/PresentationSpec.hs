@@ -730,6 +730,13 @@ spec = describe "tool presentation" do
                 \□ Investigate Codex\n\
                 \✗ Skip leftover work"
 
+    it "keeps todo previews on the first entry and handles empty lists" do
+        let preview = todoCallPreview . functionToolCall "todo" "todo_write"
+        preview "{\"todos\":[]}" `shouldBe` ""
+        preview "{\"todos\":[{\"content\":\"First\"},{\"content\":\"Second\"}]}"
+            `shouldBe` "First"
+        preview "{\"todos\":[{}, {\"content\":\"Second\"}]}" `shouldBe` ""
+
     it "formats Codex update_plan output as the same checklist" do
         let call = functionToolCall "plan" "update_plan" "{\"plan\":[]}"
         toolCallTitle call `shouldBe` "update_plan"

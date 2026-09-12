@@ -89,7 +89,6 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
     )
-import Control.Applicative ((<|>))
 import Control.Concurrent
     ( MVar
     , modifyMVar_
@@ -108,6 +107,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isControl, isDigit)
+import Data.Foldable (asum)
 import qualified Data.List.NonEmpty as NonEmpty
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -735,7 +735,7 @@ validateComputerCall call
         Left "Computer call exceeds the 10-action limit."
     | exceedsList 64 call.pendingSafetyChecks =
         Left "Computer call exceeds the 64-safety-check limit."
-    | Just err <- firstJust
+    | Just err <- asum
         (map validateSafetyCheck call.pendingSafetyChecks
             <> map validateAction call.computerActions) =
         Left err
@@ -760,7 +760,7 @@ hasNonFinalScreenshot actions =
 validateComputerCallForDisplay :: (Int, Int) -> ComputerCall -> Either Text ()
 validateComputerCallForDisplay (width, height) call = do
     validateComputerCall call
-    case firstJust (map validatePoint (computerPoints call.computerActions)) of
+    case asum (map validatePoint (computerPoints call.computerActions)) of
         Just err -> Left err
         Nothing -> Right ()
   where
@@ -874,9 +874,6 @@ blockedComputerKeyCombination platform keys =
     shortcut value = \case
         Input.ComputerShortcutKey key -> key == value
         _ -> False
-
-firstJust :: [Maybe value] -> Maybe value
-firstJust = foldr (<|>) Nothing
 
 exceedsList :: Int -> [value] -> Bool
 exceedsList limit = not . null . drop limit
@@ -1536,7 +1533,7 @@ computerToolCallBlocked call
         case Json.decodeText computerToolInputDecoder call.arguments of
             Left _ -> Nothing
             Right input ->
-                firstJust
+                asum
                     [ blockedComputerKeyCombination os keys
                     | KeypressAction keys <- input.toolComputerActions
                     ]
