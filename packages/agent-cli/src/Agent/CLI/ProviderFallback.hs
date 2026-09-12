@@ -19,7 +19,7 @@ import Agent.Provider (BillingMode(..), Provider(..))
 import Data.Containers.ListUtils (nubOrdOn)
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.List (sortOn)
+import Data.List (find, sortOn)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime)
@@ -165,12 +165,12 @@ fallbackCandidates catalog unavailable current currentModel err
                         ranked
         | otherwise = []
     currentPriority =
-        (.modelFallbackPriority) =<< safeHead
-            (filter
+        (.modelFallbackPriority) =<<
+            find
                 (\option ->
                     option.modelTarget.targetProvider == current
                         && option.modelTarget.targetModelId == currentModel)
-                ranked)
+                ranked
     otherProviderFallbacks =
         filter
             (\option ->
@@ -180,10 +180,6 @@ fallbackCandidates catalog unavailable current currentModel err
                     && option.modelTarget.targetProvider
                         `Set.notMember` unavailable)
             (nubOrdOn (.modelTarget.targetProvider) ranked)
-
-    safeHead = \case
-        [] -> Nothing
-        value : _ -> Just value
 
 -- | A structured provider response that says the selected model or feature is
 -- unavailable. Unlike a bare HTTP 403, this is safe to recover from by trying

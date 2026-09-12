@@ -50,7 +50,7 @@ mkOpenAIError errorType message code retryAfter =
     ProviderError
         (classifyErrorType errorType message code)
         (appendErrorCode code message)
-        (retryAfter `orElse` retryAfterFromMessage message)
+        (retryAfter <|> retryAfterFromMessage message)
 
 classifyErrorType :: ErrorType -> Text -> Maybe Text -> ErrorType
 classifyErrorType errorType message code
@@ -279,7 +279,3 @@ mentionsMissingFunctionCallOutput :: Text -> Bool
 mentionsMissingFunctionCallOutput =
     Text.isInfixOf "no tool output found for function call"
         . Text.toLower
-
-orElse :: Maybe a -> Maybe a -> Maybe a
-orElse (Just value) _ = Just value
-orElse Nothing fallback = fallback

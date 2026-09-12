@@ -42,6 +42,7 @@ import Data.IntSet (IntSet)
 import qualified Data.List as List
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
+import Data.Foldable (asum)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -623,7 +624,7 @@ findIdentityIndex
     -> StreamAssemblyState
     -> Maybe Int
 findIdentityIndex identities state =
-    foldr (<|>) Nothing (map findValue values)
+    asum (map findValue values)
   where
     values = [identity | Just identity <- identities]
     findValue identity =

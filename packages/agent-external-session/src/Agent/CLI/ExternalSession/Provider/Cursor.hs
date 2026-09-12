@@ -19,6 +19,7 @@ import Data.Aeson (Value(..))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
+import Data.List (dropWhileEnd)
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -244,7 +245,7 @@ cursorProjectSlug =
     trimDashes . map (\character ->
         if isAsciiAlphaNumeric character then character else '-')
   where
-    trimDashes = reverse . dropWhile (== '-') . reverse . dropWhile (== '-')
+    trimDashes = dropWhileEnd (== '-') . dropWhile (== '-')
     isAsciiAlphaNumeric character =
         character >= 'A' && character <= 'Z'
             || character >= 'a' && character <= 'z'

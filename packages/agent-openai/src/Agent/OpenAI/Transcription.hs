@@ -67,6 +67,7 @@ import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
+import Data.List (dropWhileEnd)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -995,7 +996,7 @@ chatGPTStreamEndpointAt websocketUrl = do
 
 dropTrailingSlashes :: String -> String
 dropTrailingSlashes =
-    reverse . dropWhile (== '/') . reverse
+    dropWhileEnd (== '/')
 
 ignoreSynchronousException :: IO () -> IO ()
 ignoreSynchronousException action =
