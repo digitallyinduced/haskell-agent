@@ -28,10 +28,11 @@ import System.IO.Temp (withSystemTempDirectory)
 import Agent.CLI.GatewayClient (GatewayCredential(..))
 import Agent.CLI.IntegrationGateway (gatewayIntegrationMcpConfig)
 import Agent.CLI.Options
-    ( CliOptions(..)
+    ( CliOptions(..), Override(..)
     , CodeModeOption(..)
     , ScreenMode(..)
     , defaultCliOptions
+    , resolveComputerUseEnabled
     )
 import Agent.Runtime.StartupPolicy
 import Control.Monad (forM_)
@@ -120,6 +121,23 @@ spec = describe "nativeTurnOptions" do
             (unsafeEncodeUtf "/admitted") conflictingOptions
             `shouldBe` conflictingOptions
 
+    it "preserves host computer-use opt-in and always disables restricted turns" do
+        forM_ [Inherit, Explicit False, Explicit True] \computer ->
+            forM_ [False, True] \tty ->
+                forM_ [False, True] \oneShot -> do
+                    let options = defaultCliOptions
+                            { optComputerUse = computer
+                            , optPrompt = if oneShot then Just "hi" else Nothing
+                            }
+                        cwd = unsafeEncodeUtf "/admitted"
+                        host = applyNativeStartupPolicy hostNativeStartupPolicy cwd options
+                        restricted = applyNativeStartupPolicy restrictedNativeStartupPolicy cwd options
+                        expected = case computer of
+                            Inherit -> tty && not oneShot
+                            Explicit enabled -> enabled
+                    resolveComputerUseEnabled host tty `shouldBe` expected
+                    resolveComputerUseEnabled restricted tty `shouldBe` False
+
     it "enforces every restricted startup setting against conflicting options" do
         let cwd = unsafeEncodeUtf "/admitted"
             actual = applyNativeStartupPolicy restrictedNativeStartupPolicy cwd
@@ -127,13 +145,12 @@ spec = describe "nativeTurnOptions" do
             expected = conflictingOptions
                 { optCwd = Just cwd
                 , optWorktree = False
-                , optYolo = False
-                , optNoYolo = True
+                , optYolo = Explicit False
                 , optPromptFile = Nothing
                 , optManagedTurnFile = Nothing
                 , optAgentsMd = False
                 , optSkills = False
-                , optComputerUse = False
+                , optComputerUse = Explicit False
                 , optCodeMode = CodeModeDisabled
                 }
         actual `shouldBe` expected
@@ -180,12 +197,11 @@ spec = describe "nativeTurnOptions" do
                         options.optGhci `shouldBe` lowered.optGhci
                         options.optBash `shouldBe` lowered.optBash
                         options.optCwd `shouldBe` Just request.nativeTurnCwd
-                        options.optYolo `shouldBe` False
-                        options.optNoYolo `shouldBe` True
+                        options.optYolo `shouldBe` Explicit False
                         options.optWorktree `shouldBe` False
                         options.optPromptFile `shouldBe` Nothing
                         options.optManagedTurnFile `shouldBe` Nothing
-                        options.optComputerUse `shouldBe` False
+                        options.optComputerUse `shouldBe` Explicit False
 
     it "lowers a new typed turn without enabling native-only capabilities" do
         let cwd = unsafeEncodeUtf "/tmp/project"
@@ -209,10 +225,9 @@ spec = describe "nativeTurnOptions" do
         options.optCwd `shouldBe` Just cwd
         options.optEffort `shouldBe` Just EffortHigh
         options.optSaveSession `shouldBe` True
-        options.optNoYolo `shouldBe` True
-        options.optYolo `shouldBe` False
+        options.optYolo `shouldBe` Explicit False
         options.optWorktree `shouldBe` False
-        options.optComputerUse `shouldBe` False
+        options.optComputerUse `shouldBe` Explicit False
         options.optGhci `shouldBe` False
         options.optBash `shouldBe` False
         options.optScreenMode `shouldBe` ScreenMinimal
@@ -270,8 +285,7 @@ spec = describe "nativeTurnOptions" do
                 (baseRequest
                     { nativeTurnInteractionMode = NativeYolo }
                 )
-        options.optYolo `shouldBe` False
-        options.optNoYolo `shouldBe` True
+        options.optYolo `shouldBe` Explicit False
 
     it "rejects an invalid resume in auto-approval mode under either policy" do
         forM_ [hostNativeStartupPolicy, restrictedNativeStartupPolicy] \policy -> do
@@ -333,13 +347,12 @@ conflictingOptions :: CliOptions
 conflictingOptions = defaultCliOptions
     { optCwd = Just (unsafeEncodeUtf "/untrusted")
     , optWorktree = True
-    , optYolo = True
-    , optNoYolo = False
+    , optYolo = Explicit True
     , optPromptFile = Just (unsafeEncodeUtf "/untrusted/prompt")
     , optManagedTurnFile = Just (unsafeEncodeUtf "/untrusted/turn")
     , optAgentsMd = True
     , optSkills = True
-    , optComputerUse = True
+    , optComputerUse = Explicit True
     , optCodeMode = CodeModeEnabled
     , optPrompt = Just "preserve supplied input"
     , optResume = Just "preserve-session"

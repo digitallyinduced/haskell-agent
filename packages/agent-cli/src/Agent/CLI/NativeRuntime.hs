@@ -56,6 +56,7 @@ import Agent.Loop
 import Agent.CLI.Options
     ( Command(..)
     , CliOptions(..)
+    , Override(..)
     , CodeModeOption(..)
     , ScreenMode(..)
     , defaultCliOptions
@@ -224,8 +225,7 @@ nativeTurnOptions request = do
             , optModel = request.nativeTurnModel
             , optCwd = Just request.nativeTurnCwd
             , optWorktree = False
-            , optYolo = False
-            , optNoYolo = True
+            , optYolo = Explicit False
             , optEffort = request.nativeTurnEffort
             , optPrompt = Just request.nativeTurnPrompt
             , optPromptFile = Nothing
@@ -236,7 +236,7 @@ nativeTurnOptions request = do
             , optSaveSession = True
             , optGhci = nativeGhciEnabled request.nativeTurnShellMode
             , optBash = nativeBashEnabled request.nativeTurnShellMode
-            , optComputerUse = False
+            , optComputerUse = Explicit False
             , optScreenMode = ScreenMinimal
             , optMotionMode = MotionOff
             , optMessageClock = clock
@@ -325,11 +325,10 @@ applyNativeStartupPolicy policy cwd = restrictContext . restrictFacilities
         TurnScopedFacilities -> options
             { optCwd = Just cwd
             , optWorktree = False
-            , optYolo = False
-            , optNoYolo = True
+            , optYolo = Explicit False
             , optPromptFile = Nothing
             , optManagedTurnFile = Nothing
-            , optComputerUse = False
+            , optComputerUse = Explicit False
             , optCodeMode = CodeModeDisabled
             }
 
