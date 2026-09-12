@@ -159,7 +159,7 @@ unwind. Shutdown order remains activities, code mode, session lock, computer
 use, LSP, web fetch, MCP, coding tools, scratch storage.
 
 This is a bounded extraction, not the complete session entry point. Concrete
-MCP setup, host-specific tool groups, terminal hooks, and session launch
+host-specific tool groups, terminal hooks, and session launch
 still live in CLI orchestration. Server still depends on `agent-cli` until
 those remaining composition boundaries move. No new Cabal package is needed.
 
@@ -175,6 +175,16 @@ CLI supplies resume notices, fullscreen history wiring, external-session tool
 construction, and a repository worktree lease hook. CLI options are translated
 at the adapter boundary; the runtime request contains no terminal or CLI types.
 Stale-resource housekeeping remains in the host composition layer.
+
+## Implemented: shared MCP startup
+
+`Agent.Runtime.Mcp.Startup` maps harness configuration into MCP server
+configuration and owns blocking/progressive fleet acquisition and lease cleanup.
+Host hooks are cleared when startup fails or is cancelled and after lease release.
+The CLI adapter retains progress rendering, pending notices, interactive
+elicitation, integration endpoint discovery, and stale-resource housekeeping.
+Protocol and transport implementations remain in `agent-mcp`; no new package is
+introduced for this session-integration layer.
 
 ## Remaining: move session composition and ownership out of the CLI
 

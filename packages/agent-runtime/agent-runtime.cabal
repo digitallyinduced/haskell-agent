@@ -79,6 +79,7 @@ library
                     , Agent.Runtime.McpConnectionRuntime
                     , Agent.Runtime.McpOAuth
                     , Agent.Runtime.McpOAuthStore
+                    , Agent.Runtime.Mcp.Startup
                     , Agent.Runtime.ModelConfig
                     , Agent.Runtime.Models
                     , Agent.Runtime.NativeProcess
@@ -229,6 +230,7 @@ test-suite agent-runtime-test
     main-is:          Spec.hs
     ghc-options:      -threaded
     other-modules:    Agent.Runtime.RequestSpec
+                    , Agent.Runtime.Mcp.StartupSpec
                     , Agent.Runtime.Tools.DialectsSpec
                     , Agent.Runtime.Tools.ResourcesSpec
                     , Agent.Runtime.Tools.StartupSpec
@@ -274,6 +276,7 @@ test-suite agent-runtime-test
                     , agent-accounts
                     , agent-connectivity
                     , agent-core
+                    , agent-mcp
                     , agent-tools
                     , agent-json
                     , agent-openai
