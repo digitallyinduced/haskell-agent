@@ -34,6 +34,7 @@ import Data.Aeson (Value(..))
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (IORef, readIORef, writeIORef)
 import Data.List (isPrefixOf, sort)
+import qualified Data.List.Split as Split
 import Data.Functor ((<&>))
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, fromMaybe)
@@ -760,7 +761,4 @@ pathIsAllowed root path = do
 chunksOf :: Int -> [a] -> [[a]]
 chunksOf size values
     | size <= 0 = []
-    | null values = []
-    | otherwise =
-        let (chunk, rest) = splitAt size values
-        in chunk : chunksOf size rest
+    | otherwise = Split.chunksOf size values

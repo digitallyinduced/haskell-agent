@@ -342,7 +342,7 @@ library
                     , aeson >= 2.0
                     , ansi-terminal >= 1.0
                     , async
-                    , base >= 4.17 && < 5
+                    , base >= 4.19 && < 5
                     , base64-bytestring
                     , brick >= 2.9 && < 3
                     , bytestring

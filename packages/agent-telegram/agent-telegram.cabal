@@ -77,6 +77,7 @@ library
                     , process >= 1.6.26
                     , retry >= 0.9.3.1 && < 0.10
                     , safe-exceptions
+                    , split >= 0.2 && < 0.3
                     , text >= 2.0 && < 2.2
                     , time
                     , unix
