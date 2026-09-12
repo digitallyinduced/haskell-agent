@@ -88,6 +88,80 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "runLoop" do
+    describe "completed output recovery" do
+        it "retains completed items on an exception and ignores late callbacks" do
+            escaped <- newEmptyMVar
+            let backend = backendWithCallbacks \_ _ _ callbacks -> do
+                    callbacks.onCompletedResponseItem stateMarker Nothing
+                    putMVar escaped callbacks.onCompletedResponseItem
+                    Exception.throwIO (userError "stream stopped")
+            config <- testConfig backend
+            execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+            execution.executionState `shouldBe`
+                (turnInputsToItems [UserMessage "hello"] <> [stateMarker])
+            late <- takeMVar escaped
+            late stateMarker Nothing
+            stored <- config.loopBackendState.readBackendState
+            stored.backendItems `shouldBe` execution.executionState
+            stored.backendContinuation `shouldBe` Nothing
+
+        it "retains the actual async result for a recovered completed call after cancellation" do
+            finished <- newEmptyMVar
+            joined <- newEmptyMVar
+            invocations <- newIORef (0 :: Int)
+            let call = asyncFunctionToolCall "saved" "save" "{}"
+                item = either (error . show) id $
+                    Json.decodeEither responseItemDecoder
+                        "{\"type\":\"function_call\",\"call_id\":\"saved\",\"name\":\"save\",\"arguments\":\"{}\",\"status\":\"completed\",\"async\":true}"
+                completed = (functionResult "saved" "file saved exactly once")
+                    { toolResultMode = AsyncToolCall }
+                tool = asyncNoArgsTool "save" do
+                    modifyIORef' invocations (+ 1)
+                    pure (Right "file saved exactly once")
+                backend = backendWithCallbacks \_ _ _ callbacks ->
+                    (do
+                        callbacks.onCancellationMode CancelSubmission
+                        callbacks.onCompletedResponseItem item (Just call)
+                        callbacks.onAsyncToolCall call
+                        threadDelay maxBound
+                        pure (Left (ConnectionError "unexpected provider return")))
+                    `Exception.finally` putMVar joined ()
+            config0 <- testConfig backend
+            let config = config0
+                    { loopTools = registryFromTools [tool]
+                    , loopOnEvent = \case
+                        ToolFinished result -> putMVar finished result
+                        _ -> pure ()
+                    }
+            withAsync (runLoopInputsDetailed config Nothing [UserMessage "fix it"]) \running -> do
+                timeout concurrencyProbeMicros (takeMVar finished)
+                    `shouldReturn` Just completed
+                requestCancel config.loopCancel
+                execution <- timeout concurrencyProbeMicros (wait running)
+                    >>= maybe (fail "cancel did not join the provider") pure
+                execution.executionProgress `shouldBe` ResponseCommitted
+                execution.executionState `shouldBe`
+                    (turnInputsToItems [UserMessage "fix it"] <> [item])
+                execution.executionPendingInputs `shouldBe` [CompletedTool completed]
+                execution.executionResult `shouldBe` Left (LoopCancelled [completed])
+                stored <- config.loopBackendState.readBackendState
+                stored.backendItems `shouldBe` execution.executionState
+                stored.backendContinuation `shouldBe` Nothing
+                tryReadMVar joined `shouldReturn` Just ()
+            readIORef invocations `shouldReturn` 1
+
+        mapM_ (\event ->
+            it ("discards completed items on " <> show event) do
+                let backend = backendWithCallbacks \_ _ _ callbacks -> do
+                        callbacks.onCompletedResponseItem stateMarker Nothing
+                        callbacks.onLoopEvent event
+                        pure (Left (ConnectionError "offline"))
+                config <- testConfig backend
+                execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+                execution.executionState `shouldBe` []
+                execution.executionProgress `shouldBe` NoResponseCommitted)
+            [ResponseAttemptDiscarded, ResponseRestarted "retry"]
+
     describe "interruption recovery checkpoints" do
         it "retains explicit recovery separately from unfinished display output" do
             let backend = backendWithCallbacks \_ _ _ callbacks -> do
@@ -172,6 +246,7 @@ spec = describe "runLoop" do
             reset <- newEmptyMVar
             let backend = backendWithCallbacks \_ _ _ callbacks -> do
                     callbacks.onRecoveryCheckpoint "obsolete work"
+                    callbacks.onCompletedResponseItem stateMarker Nothing
                     joinReset <- takeMVar reset
                     joinReset
                     pure (Left (ConnectionError "offline"))
