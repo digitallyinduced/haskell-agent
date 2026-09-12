@@ -183,6 +183,7 @@ import Control.Concurrent.STM
     , readTVar
     , readTMVar
     , newEmptyTMVarIO
+    , putTMVar
     , newTChanIO
     , retry
     , tryReadTMVar
@@ -582,6 +583,30 @@ spec = do
                 `shouldBe` Just [("Current", "")]
 
     describe "idle choice closure" do
+        it "replaces a choice whose reply has already completed without blocking" do
+            runtime <- newScriptRuntime initialUiState
+            previous <- newEmptyTMVarIO
+            current <- newEmptyTMVarIO
+            atomically (putTMVar previous (Just 0))
+            result <- timeout 1_000_000 $
+                runFullscreenScriptWithState
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    [ FullscreenScriptApp
+                        (AppAskChoice ChoiceDialog "Completed approval" "" 0
+                            [("Allow", "")] previous)
+                    , FullscreenScriptApp
+                        (AppAskChoice ChoiceDialog "Current question" "" 0
+                            [("Continue", "")] current)
+                    , FullscreenScriptHalt
+                    ]
+            case result of
+                Nothing -> expectationFailure "replacing a completed reply blocked the event loop"
+                Just (_, replaced) ->
+                    fmap (.dialogOverlay.choiceTitle) replaced.appChoice
+                        `shouldBe` Just "Current question"
+            atomically (tryReadTMVar previous) `shouldReturn` Just (Just 0)
+            atomically (tryReadTMVar current) `shouldReturn` Nothing
+
         it "releases a displaced plan approval without approving it" do
             runtime <- newScriptRuntime initialUiState
             approval <- newEmptyTMVarIO
