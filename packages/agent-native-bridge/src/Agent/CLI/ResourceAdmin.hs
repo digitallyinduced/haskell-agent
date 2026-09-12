@@ -24,12 +24,12 @@ module Agent.CLI.ResourceAdmin
     , historyResourceSkill
     ) where
 
-import Agent.CLI.Database.Store
+import Agent.Runtime.Database.Store
     ( DatabaseScopes
     , applicableDatabaseScopes
     , scopeForDatabase
     )
-import Agent.CLI.Database (DatabaseScope(..))
+import Agent.Runtime.Database (DatabaseScope(..))
 import Agent.Store.Postgres (Store, trustedPool)
 import Agent.Store.Postgres.Scope
     ( Scope(..)

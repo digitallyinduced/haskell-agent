@@ -8,7 +8,7 @@ module Agent.CLI.Runtime.Repl
     , preparePromptSkillInputsWithPaste
     ) where
 
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( readSessionRequestParams
     )
 import Agent.CLI.ActiveAccount
@@ -23,7 +23,7 @@ import Agent.CLI.Command
 import Agent.ReasoningEffort (reasoningEffortText)
 import Agent.CLI.Dictation
     ( dictationTargetForSession )
-import Agent.CLI.GatewayClient
+import Agent.Runtime.GatewayClient
     ( GatewayModelAccess
     , cachedGatewayModels
     , fetchGatewayUsage
@@ -35,7 +35,7 @@ import Agent.CLI.Input
     , readReplLineWithCatalogForTarget
     )
 import Agent.OpenAI.Models.Types (ModelInfo(..), modelServiceTierForRequest)
-import Agent.CLI.Models ( catalogModelIds )
+import Agent.Runtime.Models ( catalogModelIds )
 import Agent.CLI.SteeringInputs
     ( awaitBackgroundCompletion
     , hasBackgroundCompletions
@@ -110,7 +110,7 @@ import Agent.TUI.Model
 import Agent.Tools.PlanMode
     ( PlanModeEnv(planStateRef),
       PlanModeState(PlanPending, PlanActive) )
-import Agent.CLI.Session.Inbox (releaseInboxPending)
+import Agent.Runtime.Session.Inbox (releaseInboxPending)
 import Control.Concurrent.Async ( race, withAsync )
 import Control.Concurrent.MVar ( withMVar )
 import Control.Concurrent.STM (atomically, orElse, retry, takeTMVar, tryTakeTMVar)

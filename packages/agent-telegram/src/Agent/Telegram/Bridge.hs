@@ -9,7 +9,7 @@ module Agent.Telegram.Bridge
     , telegramActivityMessageText
     ) where
 
-import Agent.CLI.GatewayBridge
+import Agent.Runtime.GatewayBridge
     ( ManagedActivity(..)
     , ManagedBridgeResponse(..)
     , managedBridgeActivityPath
@@ -17,7 +17,7 @@ import Agent.CLI.GatewayBridge
     , writeManagedBridgeResponse
     , writeManagedBridgeResponseAt
     )
-import Agent.CLI.ManagedTurn (ManagedTurnRequest(..))
+import Agent.Runtime.ManagedTurn (ManagedTurnRequest(..))
 import Agent.Json (RawJson, rawJsonBytes, rawJsonDecoder)
 import qualified Agent.Json.Decode as Hermes
 import Agent.FileRetry (retryOnFileBusy)

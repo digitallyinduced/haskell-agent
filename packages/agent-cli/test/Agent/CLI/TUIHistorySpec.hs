@@ -4,10 +4,10 @@
 
 module Agent.CLI.TUIHistorySpec (spec) where
 
-import Agent.CLI.Session.StoreCodec (fromStoredResponseItem, toStoredResponseItem)
+import Agent.Runtime.Session.StoreCodec (fromStoredResponseItem, toStoredResponseItem)
 import Agent.Loop (LoopEvent(..))
 import Agent.ToolDispatch (ToolOutcome(..), functionToolCall)
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( SessionTurn(..)
     , TranscriptEffect(..)
     )
@@ -17,7 +17,7 @@ import Agent.CLI.TUI.Composer (composerScrollbackAvailable)
 import Agent.CLI.TUI.SessionHistory (sessionHistoryTurn, sessionTurnPullRequestURL)
 import Agent.CLI.TUI.App (remapHistoryPage)
 import Agent.Tools.RenderChart (renderChartResult)
-import Agent.CLI.Session.PullRequest (sessionTurnPullRequestURLs)
+import Agent.Runtime.Session.PullRequest (sessionTurnPullRequestURLs)
 import Agent.Responses.LoopBackend (toolResultToItem)
 import Agent.Responses.Types
 import Agent.ToolDispatch

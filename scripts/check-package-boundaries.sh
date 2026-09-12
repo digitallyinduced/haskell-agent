@@ -6,17 +6,24 @@ cli="$root/packages/agent-cli"
 external_session="$root/packages/agent-external-session"
 repository="$root/packages/agent-repository"
 bridge="$root/packages/agent-native-bridge"
-runtime="$root/packages/agent-cli-runtime"
+runtime="$root/packages/agent-runtime"
 integration_api="$root/packages/agent-integration-api"
+core="$root/packages/agent-core"
 
 fail() {
   echo "package boundary check failed: $*" >&2
   exit 1
 }
 
-for package in "$cli" "$external_session" "$repository" "$bridge" "$runtime"; do
+for package in "$cli" "$external_session" "$repository" "$bridge" "$runtime" \
+  "$core" "$root/packages/agent-accounts" "$root/packages/agent-computer-use" \
+  "$root/packages/agent-tools"; do
   [[ -d "$package" ]] || fail "missing package directory: $package"
 done
+
+python3 "$root/scripts/check-package-graph.py" "$root"
+[[ ! -e "$root/packages/agent-cli-runtime/agent-cli-runtime.cabal" ]] \
+  || fail "agent-cli-runtime must be replaced by agent-runtime"
 
 # Public builds must remain usable without any proprietary integration source.
 [[ ! -e "$root/packages/agent-integrations" ]] \
@@ -36,25 +43,29 @@ if rg --line-number 'Agent\.(CLI|Mail|Integrations)(\.|[[:space:]])' \
   fail "integration API gained product or frontend dependencies"
 fi
 
-# The session lifecycle kernel is frontend-independent, even while the legacy
-# composition root is being incrementally migrated out of agent-cli.
-if sed -n '/^library$/,/^test-suite /p' "$runtime/agent-cli-runtime.cabal" \
-    | sed -n '/build-depends:/,$p' \
-    | rg --line-number '\bagent-(cli|tui)([[:space:],><=]|$)'; then
-  fail "headless runtime gained a CLI/TUI dependency"
-fi
+# Lower packages must neither implement nor import frontend modules.
+for name in agent-core agent-accounts agent-computer-use agent-tools agent-runtime; do
+  source_dirs=("$root/packages/$name/src")
+  [[ ! -d "$root/packages/$name/test" ]] || source_dirs+=("$root/packages/$name/test")
+  if rg --line-number '^[[:space:]]*(module|import)[[:space:]]+(qualified[[:space:]]+)?Agent\.(CLI|TUI)(\.|[[:space:]])' \
+    "${source_dirs[@]}" --glob '*.hs'; then
+    fail "frontend types leaked into $name"
+  fi
+done
 
-if rg --line-number '^import[[:space:]]+(qualified[[:space:]]+)?Agent\.(CLI|TUI)(\.|[[:space:]])' \
-  "$runtime/src/Agent/Runtime" "$runtime/test/Agent/Runtime"; then
-  fail "frontend types leaked into the session lifecycle kernel"
-fi
+# Core owns contracts, scheduling and output memory, not concrete tool handlers.
+while IFS= read -r file; do
+  case "${file#"$core/src/"}" in
+    Agent/Tools/Types.hs|Agent/Tools/Scheduling.hs|Agent/Tools/ResourceArbiter.hs|Agent/Tools/OutputArtifact/Memory.hs) ;;
+    *) fail "concrete tool implementation returned to core: $file" ;;
+  esac
+done < <(find "$core/src/Agent/Tools" -type f -name '*.hs')
 
-# Shared resources and session policy retain legacy module names, but their
-# implementations must stay in the runtime. CLI facades may import them,
-# not redefine them.
-for module_path in Agent/CLI/NativeProcess.hs Agent/CLI/Session/Threads.hs Agent/CLI/Session/PullRequest.hs; do
+# Shared resources and session policy have frontend-neutral module names.
+for module_path in Agent/Runtime/NativeProcess.hs Agent/Runtime/Session/Threads.hs Agent/Runtime/Session/PullRequest.hs; do
   [[ -f "$runtime/src/$module_path" ]] || fail "missing shared resource: $module_path"
   [[ ! -e "$cli/src/$module_path" ]] || fail "resource implementation returned to CLI: $module_path"
+  [[ ! -e "$cli/src/${module_path/Runtime/CLI}" ]] || fail "legacy resource implementation returned to CLI: $module_path"
 done
 
 moved_modules=(
@@ -73,7 +84,7 @@ moved_modules=(
 if rg --line-number 'CliOptions|Agent\.CLI\.Options|nativePrepareOptions' \
   "$root/packages/agent-server/src/Agent/Server/Runtime.hs" \
   "$root/packages/agent-cli/src/Agent/CLI/Runtime/Orchestration/Types.hs" \
-  "$root/packages/agent-cli-runtime/src/Agent/Runtime/StartupPolicy.hs"; then
+  "$root/packages/agent-runtime/src/Agent/Runtime/StartupPolicy.hs"; then
   fail "native startup contracts and server runtime must not depend on CLI options"
 fi
 
@@ -117,6 +128,10 @@ if rg --line-number '\bagent-cli([[:space:],><=]|$)' \
 fi
 
 for registration in \
+  packages/agent-accounts \
+  packages/agent-computer-use \
+  packages/agent-tools \
+  packages/agent-runtime \
   packages/agent-external-session \
   packages/agent-repository \
   packages/agent-native-bridge; do
@@ -126,11 +141,11 @@ for registration in \
 done
 
 required_files=(
-  packages/agent-cli-runtime/src/Agent/Runtime/StartupPolicy.hs
-  packages/agent-cli-runtime/src/Agent/Runtime/ConversationStore.hs
-  packages/agent-cli-runtime/src/Agent/Runtime/SessionState.hs
-  packages/agent-cli-runtime/test/Agent/Runtime/ConversationStoreSpec.hs
-  packages/agent-cli-runtime/test/Agent/Runtime/ConversationSessionSpec.hs
+  packages/agent-runtime/src/Agent/Runtime/StartupPolicy.hs
+  packages/agent-runtime/src/Agent/Runtime/ConversationStore.hs
+  packages/agent-runtime/src/Agent/Runtime/SessionState.hs
+  packages/agent-runtime/test/Agent/Runtime/ConversationStoreSpec.hs
+  packages/agent-runtime/test/Agent/Runtime/ConversationSessionSpec.hs
   packages/agent-external-session/src/Agent/CLI/ExternalSession.hs
   packages/agent-external-session/src/Agent/CLI/ExternalSession/Content.hs
   packages/agent-external-session/src/Agent/CLI/ExternalSession/JSONL.hs

@@ -3,7 +3,7 @@
 -- | The native-only, accessibility-first macOS computer service.
 --
 -- The standalone CLI computer backend intentionally remains in
--- "Agent.CLI.ComputerUse". Native turns use this module's semantic JSON
+-- "Agent.ComputerUse". Native turns use this module's semantic JSON
 -- protocol instead: models name stable AX elements and never provide pixels.
 module Agent.CLI.MacOS.ComputerBridge
     ( ComputerCallback
@@ -25,7 +25,7 @@ module Agent.CLI.MacOS.ComputerBridge
     , resetComputerSessionAccessibility
     ) where
 
-import Agent.CLI.ComputerUse.Accessibility
+import Agent.ComputerUse.Accessibility
     ( AccessibilityDeltaState
     , AccessibilityObservation(..)
     , advanceAccessibilityObservation

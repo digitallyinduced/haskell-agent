@@ -1,6 +1,6 @@
 module Agent.CLI.ClaudeGatewayProxy (withClaudeGatewayProxy) where
 
-import Agent.CLI.GatewayClient
+import Agent.Runtime.GatewayClient
     ( GatewayCredential(..)
     , validateGatewayCredential
     )

@@ -3,7 +3,7 @@ module Agent.CLI.MacOS.MobileGatewaySpec (spec) where
 
 import Agent.CLI.MacOS.MobileGateway (validPairingID)
 import qualified Agent.CLI.MacOS.MobileGateway as Mobile
-import Agent.CLI.GatewayClient (GatewayCredential(..), saveGatewayCredential, loadGatewayCredential)
+import Agent.Runtime.GatewayClient (GatewayCredential(..), saveGatewayCredential, loadGatewayCredential)
 import Agent.CLI.MacOS.MobileGatewayBridge
 import Control.Concurrent.MVar
 import Control.Exception.Safe (bracket)

@@ -2,7 +2,7 @@ module Agent.CLI.AgentSessions.Render
     ( renderAgentSession
     ) where
 
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( SessionActivity(..)
     , SessionMeta(..)
     , SessionTurn(..)

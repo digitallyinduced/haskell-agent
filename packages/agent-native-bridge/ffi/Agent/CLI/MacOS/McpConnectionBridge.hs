@@ -14,7 +14,7 @@ import Agent.CLI.MacOS.McpConnectionOperation (startMcpConnectionOperation)
 import Agent.CLI.MacOS.McpCredentialStore (ensureNativeMcpCredentialStore)
 import Agent.CLI.McpAdmin (McpAdminError(..), McpAdminSnapshot(..))
 import Agent.CLI.McpConnection
-import Agent.CLI.McpConnectionRuntime (readMcpConnectionIcons)
+import Agent.Runtime.McpConnectionRuntime (readMcpConnectionIcons)
 import qualified Agent.MCP as MCP
 import Data.Maybe (fromMaybe)
 import Control.Monad (forM_, when)

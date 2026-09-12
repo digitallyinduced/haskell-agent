@@ -54,6 +54,7 @@ library
     other-modules:    Agent.GrokBuild.Dialect.Json
     hs-source-dirs:   src
     build-depends:    agent-core >= 0.1 && < 0.2
+                    , agent-tools >= 0.1 && < 0.2
                     , agent-json >= 0.1 && < 0.2
                     , aeson >= 2.0
                     , async
@@ -77,6 +78,8 @@ benchmark workflow-snapshots-bench
     ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
     build-depends:    agent-grok-build-dialect
                     , agent-core
+                    , agent-tools
+                    , agent-tools
                     , aeson
                     , async
                     , base >= 4.14 && < 5

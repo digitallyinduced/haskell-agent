@@ -88,6 +88,7 @@ library
     hs-source-dirs:   src
     build-depends:    base                  >= 4.14 && < 5
                     , agent-core            >= 0.1 && < 0.2
+                    , agent-tools           >= 0.1 && < 0.2
                     , agent-json            >= 0.1 && < 0.2
                     , agent-responses       >= 0.1 && < 0.2
                     , agent-responses-types >= 0.1 && < 0.2
@@ -160,6 +161,7 @@ test-suite agent-openai-test
     ghc-options:      -threaded
     build-depends:    base >= 4.14 && < 5
                     , agent-core
+                    , agent-tools
                     , agent-json
                     , agent-openai
                     , agent-responses

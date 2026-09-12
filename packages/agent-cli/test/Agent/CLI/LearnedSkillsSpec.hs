@@ -1,7 +1,7 @@
 module Agent.CLI.LearnedSkillsSpec (spec) where
 
 import Agent.CLI (learnAboutUserOnboardingPrompt)
-import Agent.CLI.Database (DatabaseScope(..))
+import Agent.Runtime.Database (DatabaseScope(..))
 import Agent.CLI.LearnedSkills
 import Agent.CLI.LearnedSkills.Store
     ( loadLearnedSkillsWithPreload

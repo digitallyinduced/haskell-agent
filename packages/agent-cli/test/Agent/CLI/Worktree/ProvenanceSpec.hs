@@ -1,7 +1,7 @@
 module Agent.CLI.Worktree.ProvenanceSpec (spec) where
 
-import Agent.CLI.Session.Types (SessionMeta(..))
-import Agent.CLI.SessionLock (sessionLockPath, sessionActivityLockPath)
+import Agent.Runtime.Session.Types (SessionMeta(..))
+import Agent.Runtime.SessionLock (sessionLockPath, sessionActivityLockPath)
 import Agent.CLI.Worktree.Provenance
 import Agent.CLI.Worktree.ReadOnlyLock (withExistingReadOnlyLock)
 import Agent.Dialect (DialectId(..))

@@ -25,7 +25,7 @@ module Agent.CLI.Worktree
     , WorktreeProgress(..)
     ) where
 
-import Agent.CLI.Config
+import Agent.Runtime.Config
     ( HarnessConfig(..)
     , WorktreeConfig(..)
     , loadHarnessConfig

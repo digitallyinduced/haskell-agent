@@ -1,6 +1,6 @@
 module Agent.CLI.MetaConsoleRuntimeSpec (spec) where
 
-import Agent.CLI.Config
+import Agent.Runtime.Config
     ( HarnessConfig(..)
     , LspConfig(..)
     , LspServerConfig(..)

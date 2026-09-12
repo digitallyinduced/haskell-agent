@@ -11,11 +11,11 @@ module Agent.CLI.Runtime.Orchestration.Providers.Types
     , ProviderSubagents(..)
     ) where
 
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( SessionRequestState
     )
 import Agent.CLI.Compaction (CompactOutcome, CompactionInstall, OccupancySnapshot)
-import Agent.CLI.GatewayClient (GatewayCredential)
+import Agent.Runtime.GatewayClient (GatewayCredential)
 import Agent.CLI.Session.History (LiveConversation)
 import Agent.CLI.Session.Runtime.Types (SessionBackend)
 import Agent.Claude (ClaudeCodeAuth)

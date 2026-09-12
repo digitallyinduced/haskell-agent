@@ -5,15 +5,15 @@ module Agent.CLI.SessionEnv
     , SessionEnv(..)
     ) where
 
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( SessionRequestState
     )
 import Agent.CLI.ActiveAccount (ActiveAccountRef)
 import Agent.CLI.CancelWatch (StdinControl)
 import Agent.CLI.Interrupt (InterruptState)
 import Agent.CLI.AgentViewport (AgentViewportEnv)
-import Agent.CLI.GatewayClient (GatewayModelAccess)
-import Agent.CLI.ModelConfig (ModelCatalog)
+import Agent.Runtime.GatewayClient (GatewayModelAccess)
+import Agent.Runtime.ModelConfig (ModelCatalog)
 import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.Recap (RecapRequest)
 import Agent.CLI.Command (ShellMode)
@@ -23,9 +23,9 @@ import Agent.CLI.Compaction
     )
 import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
-import Agent.CLI.Session (Persistence, SessionHandle)
-import Agent.CLI.Session.Inbox (SessionInbox)
-import Agent.CLI.Session.Observation (SessionObservationPublisher)
+import Agent.Runtime.Session (Persistence, SessionHandle)
+import Agent.Runtime.Session.Inbox (SessionInbox)
+import Agent.Runtime.Session.Observation (SessionObservationPublisher)
 import Agent.Runtime.SessionState (SessionState)
 import Agent.CLI.Session.Workspace (WorkspaceContext)
 import Agent.CLI.SessionTitle (SessionTitleManager)

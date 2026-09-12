@@ -7,24 +7,24 @@ module Agent.CLI.Login.Internal.ProviderConnection
     , storeConnectedCredential
     ) where
 
-import Agent.CLI.Auth
+import Agent.Accounts.Auth
     ( GrokAuthState(..)
     , grokAuthStateToJson
     , openAIOAuthClientId
     , openaiAuthStateFromJson
     , xaiOAuthClientId
     )
-import Agent.CLI.Auth.Gemini (geminiAuthStateToJson)
-import Agent.CLI.CredentialStore
+import Agent.Accounts.Auth (geminiAuthStateToJson)
+import Agent.Accounts.CredentialStore
     ( ManagedAuthKind(..)
     , ManagedCredential(..)
     , ManagedSecret(..)
     , newManagedCredentialId
     , upsertManagedCredential
     )
-import Agent.CLI.Environment (lookupNonEmpty)
+import Agent.Environment (lookupNonEmpty)
 import Agent.CLI.Login.Internal.Accounts (openAIAccountEmail)
-import Agent.CLI.Login.Internal.Browser (openBrowser)
+import Agent.Runtime.Browser (openBrowser)
 import Agent.CLI.Login.Internal.Dashboard
     ( LoginNotice
     , noticeFromResult

@@ -6,7 +6,7 @@ module Agent.CLI.MacOS.MobileGateway
     , openRelay, closeRelay, sendRelay, receiveRelay, validPairingID
     ) where
 
-import Agent.CLI.GatewayClient
+import Agent.Runtime.GatewayClient
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (race_)
 import Control.Concurrent.STM

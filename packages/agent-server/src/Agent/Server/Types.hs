@@ -44,7 +44,7 @@ module Agent.Server.Types
     , archiveFilterText
     ) where
 
-import Agent.CLI.GatewayBoundary (GatewayBoundary(..))
+import Agent.Runtime.GatewayBoundary (GatewayBoundary(..))
 import Agent.Loop (ImageAttachment(..))
 import Agent.Server.Identifier (isUUIDText)
 import Control.Monad (unless, when)

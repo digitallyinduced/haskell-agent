@@ -1,6 +1,6 @@
 module Agent.CLI.McpConnectionSpec (spec) where
 
-import Agent.CLI.Config (HarnessConfig(..), McpServerConfig(..), loadHarnessConfig, harnessConfigPath, saveHarnessConfig, mcpUsesConnectionCredentials)
+import Agent.Runtime.Config (HarnessConfig(..), McpServerConfig(..), loadHarnessConfig, harnessConfigPath, saveHarnessConfig, mcpUsesConnectionCredentials)
 import Control.Concurrent.Async (concurrently)
 import Agent.CLI.McpAdmin
 import Agent.CLI.McpConnection

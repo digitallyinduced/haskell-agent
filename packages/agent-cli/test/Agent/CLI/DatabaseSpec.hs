@@ -1,8 +1,8 @@
 module Agent.CLI.DatabaseSpec (spec) where
 
-import Agent.CLI.Database
+import Agent.Runtime.Database
 import Agent.CLI.Database.Storage
-import Agent.CLI.Database.Store
+import Agent.Runtime.Database.Store
     ( DatabaseBrowsePage(..)
     , databaseToolsEnvForStore
     , deriveDatabaseScopes

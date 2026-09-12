@@ -3,7 +3,7 @@ module Agent.CLI.AgentSessions.WaitGraph
     ( withSessionWaitEdge
     ) where
 
-import Agent.CLI.PrivateFileLock (withPrivateFileLock)
+import Agent.PrivateFileLock (withPrivateFileLock)
 import Agent.OsPath (unsafeToFilePath)
 import Control.Exception.Safe (bracket, finally, onException)
 import Control.Monad (forM)

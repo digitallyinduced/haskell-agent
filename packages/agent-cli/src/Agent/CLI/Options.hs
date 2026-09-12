@@ -39,7 +39,7 @@ import Agent.ReasoningEffort
     , parseReasoningEffort
     )
 import qualified Agent.ReasoningEffort as ReasoningEffort
-import Agent.CLI.Runtime.Options
+import Agent.Runtime.Options
     ( ApprovalPolicy(..)
     , GatewayCommand(..)
     , defaultEffortFor

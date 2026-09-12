@@ -3,7 +3,7 @@
 -- | Account-list and connection callbacks exposed to native hosts.
 module Agent.CLI.MacOS.AccountBridge () where
 
-import Agent.CLI.CredentialStore (deleteManagedCredential, setManagedCredentialEnabled)
+import Agent.Accounts.CredentialStore (deleteManagedCredential, setManagedCredentialEnabled)
 import Agent.CLI.Login
     ( AccountBilling(..)
     , AccountUsage(..)

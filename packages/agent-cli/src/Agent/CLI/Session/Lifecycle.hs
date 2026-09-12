@@ -15,7 +15,7 @@ import Agent.CLI.Notification
     ( AttentionRequest(InputRequested)
     , notifyAttention
     )
-import Agent.CLI.Error (formatApiErrorAt)
+import Agent.Runtime.Error (formatApiErrorAt)
 import Agent.CLI.Project (saveProjectAccount)
 import Agent.CLI.Recap (RecapRequest(RecapTurnSummary))
 import Agent.CLI.Provider.Switch

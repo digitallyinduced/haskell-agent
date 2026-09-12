@@ -43,8 +43,8 @@ module Agent.CLI.Resume
     ) where
 
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
-import Agent.CLI.Models (validateResumedGatewayBoundary)
-import Agent.CLI.Session
+import Agent.Runtime.Models (validateResumedGatewayBoundary)
+import Agent.Runtime.Session
     ( SessionMeta(..)
     , SessionTurn(..)
     , SessionTurnPage(..)
@@ -54,7 +54,7 @@ import Agent.CLI.Session
     , loadSessionResumeStats
     )
 import Agent.CLI.Session.History (foldSessionItems)
-import Agent.CLI.Session.Types (TranscriptEffect(..))
+import Agent.Runtime.Session.Types (TranscriptEffect(..))
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
 import Agent.OpenAI.Compaction (hasReloadedGeneratedContextItems)
 import Agent.CLI.TextLayout

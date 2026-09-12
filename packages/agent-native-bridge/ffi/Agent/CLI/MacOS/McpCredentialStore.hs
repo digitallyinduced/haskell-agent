@@ -3,7 +3,7 @@
 module Agent.CLI.MacOS.McpCredentialStore (ensureNativeMcpCredentialStore) where
 
 import Agent.CLI.MacOS.McpKeychain
-import Agent.CLI.McpConnectionCredentials
+import Agent.Runtime.McpConnectionCredentials
     ( McpCredentialStore(..), installMcpCredentialStore )
 import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar)
 import Control.Monad (unless)

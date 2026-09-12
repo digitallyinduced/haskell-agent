@@ -2,7 +2,7 @@
 module Agent.CLI.MacOS.EngineLifecycle (workerLifecycle) where
 
 import Agent.CLI.MacOS.BrowserBridge (BrowserHost)
-import Agent.CLI.GatewayClient (registerGatewayCredentialInvalidator)
+import Agent.Runtime.GatewayClient (registerGatewayCredentialInvalidator)
 import Agent.CLI.MacOS.BundledIntegrations
     (bundledIntegrationProvider, bundledOrganizationIntegrationProvider)
 import Agent.CLI.MacOS.ComputerBridge (ComputerHost)

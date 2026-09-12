@@ -17,7 +17,7 @@ module Agent.CLI.MacOS.TurnState
     , cancelTurn
     ) where
 
-import qualified Agent.CLI.AgentViewport as Viewport
+import qualified Agent.Runtime.AgentSnapshot as Viewport
 import Agent.CLI.MacOS.InteractionState
     ( InteractionRuntime(..), PendingInteraction(..), cancelledInteractionResolution )
 import Agent.CLI.MacOS.NativeRequest (TurnStart, turnStartCleanupId)
@@ -84,7 +84,7 @@ data TurnControl = TurnControl
     , turnControlApprovalCounter :: !(TVar Int)
     , turnControlInteractionCounter :: !(TVar Int)
     , turnControlAllowedTools :: !(TVar (Set.Set Text))
-    , turnControlAgentSnapshot :: !(TVar (IO [Viewport.AgentEntry]))
+    , turnControlAgentSnapshot :: !(TVar (IO [Viewport.AgentSnapshot]))
     , turnControlInteractions :: !InteractionRuntime
     }
 

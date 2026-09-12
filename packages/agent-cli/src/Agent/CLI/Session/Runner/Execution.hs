@@ -5,8 +5,8 @@ module Agent.CLI.Session.Runner.Execution
     , runSession
     , applyNativeInteractionMode
     ) where
-import qualified Agent.CLI.Session.Activity as Activity
-import Agent.CLI.Session.Request
+import qualified Agent.Runtime.Session.Activity as Activity
+import Agent.Runtime.Session.Request
     ( readSessionRequestParams
     , readSessionRequestModel
     , modifySessionRequestOptions
@@ -26,17 +26,17 @@ import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
 import Agent.CLI.Context (contextUsageTokens, formatContextReport)
 import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types (ResponseCreateParams(model))
-import Agent.CLI.ComputerUse (computerToolName)
+import Agent.ComputerUse (computerToolName)
 import Agent.CLI.Session.Runner.Types
     ( SessionRunnerContinuation(..) )
-import Agent.CLI.AgentViewport (AgentViewportEnv)
+import Agent.CLI.AgentViewport (AgentViewportEnv, agentSnapshot)
 import Agent.CLI.AgentViewport.Runtime
 import Agent.Tools.OutputArtifact
 import Agent.Tools.Background
     ( setBackgroundTaskHooks )
 import Agent.CLI.SessionTitle
-import Agent.CLI.ManagedTurn
-import Agent.CLI.GatewayBridge
+import Agent.Runtime.ManagedTurn
+import Agent.Runtime.GatewayBridge
 import Agent.CLI.Notification
     ( AttentionRequest(PermissionRequested)
     , notifyAttention
@@ -77,11 +77,11 @@ import Agent.CLI.Project
 import Agent.CLI.Prompt
 import Agent.CLI.SessionState
 import Agent.CLI.Render
-import Agent.CLI.Session
+import Agent.Runtime.Session
 import Agent.CLI.Session.History
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
-import qualified Agent.CLI.Session.Observation as Observation
-import Agent.CLI.Session.Inbox
+import qualified Agent.Runtime.Session.Observation as Observation
+import Agent.Runtime.Session.Inbox
     ( newSessionInbox
     , releaseInboxPending
     , takeInboxMessage
@@ -89,7 +89,7 @@ import Agent.CLI.Session.Inbox
     )
 import Agent.CLI.SessionEnv
 import Agent.Runtime.SessionState qualified as RuntimeState
-import Agent.CLI.SessionLock
+import Agent.Runtime.SessionLock
     ( acquireSessionActivityLock
     , releaseSessionLock
     )
@@ -101,12 +101,12 @@ import Agent.CLI.Startup.Auth
 import Agent.CLI.Subagents.Runtime
 import Agent.CLI.Style
 import Agent.CLI.Terminal
-import Agent.CLI.Request
+import Agent.Runtime.ProviderRequest
 import Agent.CLI.Tools
-import Agent.CLI.ModelConfig
+import Agent.Runtime.ModelConfig
     ( catalogSupportsAsyncToolCallsForTransport
     )
-import Agent.CLI.Error
+import Agent.Runtime.Error
 import Agent.CLI.Dialects
 import Agent.CLI.Dictation (dictationTargetForSession)
 import Agent.CLI.TUI.App
@@ -537,7 +537,7 @@ newSessionControlRuntime host SessionRequest{..} = do
         (loadAgentSnapshot agentViewportRuntime False)
     forM_ startup.startupNativeHooks \hooks ->
         hooks.nativeRegisterAgentSnapshot
-            (snd <$> loadAgentSnapshot agentViewportRuntime False)
+            (map agentSnapshot . snd <$> loadAgentSnapshot agentViewportRuntime False)
     writeIORef startup.startupAgentSelect
         (selectAgentViewport agentViewportRuntime)
     pure SessionControlRuntime

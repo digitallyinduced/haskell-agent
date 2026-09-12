@@ -26,9 +26,9 @@ import Agent.CLI
     )
 import Agent.CLI.Command (setModel, setReasoningEffort)
 import Agent.CLI.Input (terminalTextWidth)
-import Agent.CLI.Models (ModelOption(..), ModelTarget(..))
+import Agent.Runtime.Models (ModelOption(..), ModelTarget(..))
 import Agent.CLI.Status (formatContextUsage, formatTokenUsageOrZero)
-import Agent.CLI.ModelConfig
+import Agent.Runtime.ModelConfig
     ( ModelCatalog
     , decodeModelConfig
     , packagedModelCatalogPath

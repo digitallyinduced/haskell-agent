@@ -11,10 +11,10 @@ module Agent.CLI.TranscriptExport
     , visibleSessionTurns
     ) where
 
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( SessionTurn(..)
     )
-import Agent.CLI.Session.Types (TranscriptEffect(..))
+import Agent.Runtime.Session.Types (TranscriptEffect(..))
 import Agent.CLI.TUI.History (HistoryTurn(historyTurnBlocks))
 import Agent.CLI.TUI.SessionHistory (sessionHistoryTurn)
 import Agent.FileRetry (writeLazyFileAtomically)

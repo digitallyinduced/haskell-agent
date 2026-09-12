@@ -20,7 +20,7 @@ import Agent.CLI.AgentViewport
     )
 import Agent.TUI.Model (UiEvent(..), UiState(..))
 import Agent.Loop (LoopEvent(..), TurnOutput(..))
-import Agent.CLI.Session.PullRequest (conversationPullRequestURLs)
+import Agent.Runtime.Session.PullRequest (conversationPullRequestURLs)
 import Agent.ToolDispatch (ToolCallResult(..))
 import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson

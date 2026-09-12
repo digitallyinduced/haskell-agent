@@ -15,7 +15,7 @@ module Agent.CLI.McpAdd
     , suggestMcpTargetName
     ) where
 
-import Agent.CLI.Config (McpServerConfig(..))
+import Agent.Runtime.Config (McpServerConfig(..))
 import Agent.CLI.ExternalProgram (parseProgramWords)
 import Agent.MCP (McpProtocolPreference(..))
 import Control.Applicative ((<|>))

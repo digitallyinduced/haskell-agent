@@ -25,7 +25,7 @@ import Data.IORef
 import Data.Text (Text)
 import Control.Exception.Safe (bracket)
 import System.IO.Temp (withSystemTempDirectory)
-import Agent.CLI.GatewayClient (GatewayCredential(..))
+import Agent.Runtime.GatewayClient (GatewayCredential(..))
 import Agent.CLI.IntegrationGateway (gatewayIntegrationMcpConfig)
 import Agent.CLI.Options
     ( CliOptions(..)

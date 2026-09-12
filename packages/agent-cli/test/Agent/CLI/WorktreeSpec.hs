@@ -1,6 +1,6 @@
 module Agent.CLI.WorktreeSpec (spec) where
 
-import Agent.CLI.Config
+import Agent.Runtime.Config
 import Agent.CLI.Worktree
 import Agent.CLI.Worktree.Registry
 import qualified Agent.CLI.Worktree.Snapshot as Snapshot

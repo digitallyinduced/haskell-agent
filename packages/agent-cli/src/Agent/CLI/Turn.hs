@@ -10,7 +10,7 @@ module Agent.CLI.Turn
     , takeGrokFirstTurnContext
     ) where
 
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( withPersistentSessionRequest
     )
 import Agent.CLI.CancelWatch (withEscCancel)
@@ -22,7 +22,7 @@ import Agent.CLI.ProviderTransition
     ( PendingTurn(..)
     , TurnResult(..)
     )
-import Agent.CLI.Request (requestPromptParts)
+import Agent.Runtime.ProviderRequest (requestPromptParts)
 import Agent.CLI.TUI.App
     ( commitFullscreenHistoryTurn
     , emitUiEvent
@@ -51,7 +51,7 @@ import Agent.CLI.Render
     , stateLastTokensPerSecond
     , stateStartedAt
     )
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( SessionHandle(..)
     , SessionMeta(..)
     , SessionPromptSnapshot(..)
@@ -70,8 +70,8 @@ import Agent.CLI.Session
     , setGeneratedSessionTitle
     )
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
-import qualified Agent.CLI.Session.Observation as Observation
-import Agent.CLI.Session.TurnRecord (sessionTurnFromRecord)
+import qualified Agent.Runtime.Session.Observation as Observation
+import Agent.Runtime.Session.TurnRecord (sessionTurnFromRecord)
 import Agent.Runtime.TurnRecord qualified as Record
 import Agent.CLI.SessionEnv
     ( PreparedWorkspaceEnvironment(..)

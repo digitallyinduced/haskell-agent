@@ -28,7 +28,7 @@ module Agent.CLI.NativeRuntime
     , runNativeTurn
     ) where
 
-import qualified Agent.CLI.NativeProcess as NativeProcess
+import qualified Agent.Runtime.NativeProcess as NativeProcess
 import Agent.CLI.Session.Lifecycle (exitFailedTurn)
 import Agent.CLI.Session.Runner.Execution (applyNativeInteractionMode)
 import Agent.Integration.API
@@ -87,7 +87,7 @@ import Agent.CLI.Timestamp (MessageClock, parseMessageClock)
 import Agent.TUI.Motion (MotionMode(..))
 import Agent.Tools.Types (defaultToolEnv)
 import qualified Agent.MCP as MCP
-import Agent.CLI.McpConnectionRuntime (mcpConnectionCredentials, registerMcpConnectionRuntime, observeMcpConnectionInfo)
+import Agent.Runtime.McpConnectionRuntime (mcpConnectionCredentials, registerMcpConnectionRuntime, observeMcpConnectionInfo)
 import Control.Exception.Safe (finally, mask, onException)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -95,8 +95,8 @@ import System.IO (Handle)
 import System.OsPath (OsPath)
 
 -- | Native process resources, including the shared in-memory integrations
--- host. The core runtime remains in @agent-cli-runtime@; integration ownership
--- lives here to keep that lower layer independent of integration packages.
+-- host. Shared process resources live in @agent-runtime@; frontend lifecycle
+-- wiring remains here.
 data NativeProcessRuntime = NativeProcessRuntime
     { nativeProcessCore :: !NativeProcess.NativeProcessRuntime
     , nativeIntegrationSupervisor :: !IntegrationSupervisor

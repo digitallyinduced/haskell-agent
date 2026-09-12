@@ -62,8 +62,9 @@ library
                     , Agent.Server.Tenant
                     , Agent.Server.Types
     build-depends:    agent-cli >= 0.1 && < 0.2
-                    , agent-cli-runtime >= 0.1 && < 0.2
+                    , agent-runtime >= 0.1 && < 0.2
                     , agent-core >= 0.1 && < 0.2
+                    , agent-tools >= 0.1 && < 0.2
                     , agent-store >= 0.1 && < 0.2
                     , aeson >= 2.0
                     , async
@@ -112,7 +113,7 @@ test-suite agent-server-attachment-test
                     , Agent.Server.Runtime.Attachments
                     , Agent.Server.Types
     ghc-options:      -threaded
-    build-depends:    agent-cli-runtime
+    build-depends:    agent-runtime
                     , agent-core
                     , aeson
                     , async
@@ -144,7 +145,8 @@ test-suite agent-server-test
     ghc-options:      -threaded
     build-depends:    agent-server
                     , agent-core
-                    , agent-cli-runtime
+                    , agent-tools
+                    , agent-runtime
                     , aeson
                     , async
                     , base >= 4.17 && < 5
