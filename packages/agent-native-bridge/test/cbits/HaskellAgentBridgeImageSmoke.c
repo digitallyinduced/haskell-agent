@@ -922,6 +922,45 @@ int ha_session_continuity_abi_smoke(void) {
     return 11;
 }
 
+int ha_turn_context_stage_smoke(void) {
+    const uint8_t turn[] = "context-turn";
+    const uint8_t other[] = "other-turn";
+    const uint8_t app[] = "Fixture";
+    const uint8_t invalid[] = {0xff};
+    const ha_integration_attachment reference = {
+        app, sizeof(app) - 1, app, sizeof(app) - 1, app, sizeof(app) - 1
+    };
+    if (ha_runtime_init() != 0) return 20;
+    void *engine = ha_engine_create(image_stage_callback, NULL);
+    if (engine == NULL) { ha_runtime_exit(); return 21; }
+    int status = 0;
+    if (ha_engine_stage_turn_context(NULL, turn, sizeof(turn)-1, 0,
+            NULL, 0, NULL, 0, NULL, 0) != 1) status = 1;
+    if (ha_engine_stage_turn_context(engine, turn, sizeof(turn)-1, 0,
+            NULL, 0, NULL, 0, NULL, 0) != 5) status = 2;
+    if (ha_engine_stage_turn_options(engine, turn, sizeof(turn)-1,
+            HA_INTERACTION_MODE_ASK, HA_SHELL_MODE_BASH) != 0) status = 3;
+    if (ha_engine_stage_turn_context(engine, turn, sizeof(turn)-1, 42,
+            app, sizeof(app)-1, NULL, 0, &reference, 1) != 0) status = 4;
+    if (ha_engine_stage_turn_context(engine, other, sizeof(other)-1, 42,
+            app, sizeof(app)-1, NULL, 0, &reference, 1) != 5) status = 5;
+    if (ha_engine_stage_turn_context(engine, turn, sizeof(turn)-1, 42,
+            invalid, sizeof(invalid), NULL, 0, NULL, 0) != 4) status = 6;
+    if (ha_engine_stage_turn_context(engine, turn, sizeof(turn)-1, 42,
+            app, SIZE_MAX, NULL, 0, NULL, 0) != 4) status = 7;
+    if (ha_engine_stage_turn_context(engine, turn, sizeof(turn)-1, 0,
+            NULL, 0, NULL, 0, &reference, 33) != 4) status = 8;
+    if (ha_engine_stage_turn_context(engine, turn, sizeof(turn)-1, 0,
+            NULL, 0, NULL, 0, NULL, 0) != 0) status = 9;
+    if (ha_engine_discard_turn_staging(engine, turn, sizeof(turn)-1) != 0)
+        status = 10;
+    if (ha_engine_stage_turn_context(engine, turn, sizeof(turn)-1, 0,
+            NULL, 0, NULL, 0, NULL, 0) != 5) status = 11;
+    ha_engine_destroy(engine);
+    ha_runtime_exit();
+    return status;
+}
+
 int ha_turn_staging_discard_smoke(void) {
     const uint8_t options_only[] = "options-only";
     const uint8_t images_only[] = "images-only";
