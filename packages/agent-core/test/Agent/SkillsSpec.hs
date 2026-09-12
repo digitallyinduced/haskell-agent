@@ -252,6 +252,13 @@ spec = describe "Agent.Skills" do
         rendered `shouldSatisfy`
             maybe False (not . Text.isInfixOf "Always-active skill: always")
 
+    it "deduplicates dollar mentions in first-occurrence order" do
+        let deploy = fakeSkill "deploy" "deploy" UserSkill AgentSkills
+            review = fakeSkill "review" "review" UserSkill AgentSkills
+            invocations = buildSkillInvocations [] (SkillCatalog [deploy, review] [])
+        resolved <- expectRight (resolveSkillMentions invocations "$review $deploy $review $deploy")
+        map (.invocationName) resolved `shouldBe` ["review", "deploy"]
+
     it "resolves and deduplicates explicit dollar mentions" do
         let skill = fakeSkill "deploy" "deploy" UserSkill AgentSkills
         invocation <- expectSingleInvocation

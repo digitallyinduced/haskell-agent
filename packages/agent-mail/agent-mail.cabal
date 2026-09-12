@@ -59,6 +59,7 @@ library
         , network >= 3.2 && < 3.3
         , crypton-connection >= 0.4.5 && < 0.5
         , safe-exceptions >= 0.1.7 && < 0.2
+        , split >= 0.2 && < 0.3
         , tagsoup >= 0.14 && < 0.15
         , text >= 2.0 && < 2.2
         , time >= 1.12 && < 1.15

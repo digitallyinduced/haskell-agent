@@ -21,6 +21,7 @@ module Agent.Tools.Dangerous
 import Agent.JsonText (jsonTextField)
 import Agent.OsPath (fromText, toText, unsafeToFilePath)
 import Agent.Tools.FileSystem (pathTargetsSystemTemp)
+import Control.Monad.Extra (anyM)
 import Data.Char
     ( chr
     , digitToInt
@@ -576,13 +577,6 @@ percentDecodePath = Text.pack . decode . Text.unpack
             chr (digitToInt high * 16 + digitToInt low) : decode rest
     decode (char : rest) = char : decode rest
     decode [] = []
-
-anyM :: (a -> IO Bool) -> [a] -> IO Bool
-anyM _ [] = pure False
-anyM predicate (value : rest) =
-    predicate value >>= \case
-        True -> pure True
-        False -> anyM predicate rest
 
 hardcodedSystemTmpReason :: Text -> Text
 hardcodedSystemTmpReason command =
