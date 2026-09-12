@@ -186,6 +186,17 @@ elicitation, integration endpoint discovery, and stale-resource housekeeping.
 Protocol and transport implementations remain in `agent-mcp`; no new package is
 introduced for this session-integration layer.
 
+## Implemented: shared collaboration startup
+
+`Agent.Runtime.Collaboration` owns child-model policy, live gateway child-target
+resolution, concurrency-limit precedence, and scoped subagent registry ownership.
+Teardown interrupts active children before the host snapshots their state and
+closes the registry even if snapshotting fails. Gateway resolution reads the
+current host-supplied catalog and fails closed when that catalog is unavailable.
+The CLI retains credential loading, transcript persistence callbacks, worktree
+creation, and notification presentation. This session-integration layer remains
+in `agent-runtime`, without a new Cabal package or frontend dependencies.
+
 ## Remaining: move session composition and ownership out of the CLI
 
 ### Conversation-state ownership
