@@ -23,6 +23,7 @@ module Agent.CLI.Session.Observation
     ) where
 
 import Agent.Loop (LoopEvent(..), NativeAgentStatus(..))
+import qualified Agent.CLI.Session.Framing as Framing
 import Agent.ToolDispatch (ToolCall, ToolCallResult(..), ToolCallMode(..), toolCallMode, toolCallResultMode)
 import Agent.ToolOutcome (toolOutcomeSucceeded)
 import Control.Concurrent (threadDelay)
@@ -34,7 +35,6 @@ import Crypto.Hash (Digest, SHA256, hash)
 import Data.Aeson (FromJSON, ToJSON, eitherDecodeStrict', encode)
 import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Lazy as LBS
 import Data.Foldable (toList)
 import Data.Int (Int64)
@@ -447,10 +447,8 @@ frameSince previous current =
     in current.frame { reset, events = map (.event) selected }
 
 sendEnvelope :: Socket -> ObservationEnvelope -> IO ()
-sendEnvelope client envelope = do
-    let bytes = LBS.toStrict (encode envelope)
-        prefix = LBS.toStrict (Builder.toLazyByteString (Builder.word32BE (fromIntegral (BS.length bytes))))
-    Socket.sendAll client (prefix <> bytes)
+sendEnvelope client envelope =
+    Framing.sendFrame client (LBS.toStrict (encode envelope))
 
 -- | Keeps watching across CLI turns/restarts. Cancellation interrupts reads and
 -- reconnect waits and closes the socket before returning to the caller.
@@ -487,18 +485,6 @@ observeSessionAt directory sessionID callback = reconnect True
 
 receiveEnvelope :: Socket -> IO ObservationEnvelope
 receiveEnvelope client = do
-    prefix <- receiveExactly client 4
-    let count = BS.foldl' (\size byte -> size * 256 + fromIntegral byte) (0 :: Int) prefix
-    when (count <= 0 || count > 32 * 1024 * 1024) $
-        throwIO (userError "Invalid observation frame size.")
-    bytes <- receiveExactly client count
+    bytes <- Framing.receiveFrame "Invalid observation frame size." "Observation owner disconnected."
+        (Socket.recv client)
     either (throwIO . userError) pure (eitherDecodeStrict' bytes)
-
-receiveExactly :: Socket -> Int -> IO BS.ByteString
-receiveExactly client count = BS.concat . reverse <$> receive count []
-  where
-    receive 0 chunks = pure chunks
-    receive remaining chunks = do
-        bytes <- Socket.recv client (min remaining 65536)
-        when (BS.null bytes) (throwIO (userError "Observation owner disconnected."))
-        receive (remaining - BS.length bytes) (bytes : chunks)

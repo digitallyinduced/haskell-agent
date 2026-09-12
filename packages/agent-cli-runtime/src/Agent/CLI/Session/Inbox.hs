@@ -18,6 +18,7 @@ module Agent.CLI.Session.Inbox
     ) where
 
 import Agent.CLI.SessionLock (adjustSessionInboxPending)
+import qualified Agent.CLI.Session.Framing as Framing
 import Control.Concurrent.Async (mapConcurrently_, withAsync)
 import Control.Concurrent.STM
 import Control.Exception.Safe
@@ -27,7 +28,6 @@ import Crypto.Hash (Digest, SHA256, hash)
 import Data.Aeson (FromJSON, ToJSON, eitherDecodeStrict', encode)
 import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Maybe (fromMaybe)
@@ -267,12 +267,9 @@ removeOwnedSocket path = do
 sendEnvelope :: ToJSON a => Socket -> a -> IO ()
 sendEnvelope client value = do
     let bytes = LBS.toStrict (encode value)
-        prefix = LBS.toStrict
-            (Builder.toLazyByteString
-                (Builder.word32BE (fromIntegral (BS.length bytes))))
-    when (BS.length bytes > 32 * 1024 * 1024) $
+    when (BS.length bytes > Framing.maximumFrameBytes) $
         throwIO (userError "Inbox envelope exceeds the size limit.")
-    Socket.sendAll client (prefix <> bytes)
+    Framing.sendFrame client bytes
 
 receiveEnvelope :: Socket -> IO InboxEnvelope
 receiveEnvelope client =
@@ -285,18 +282,6 @@ receiveReply client =
         =<< receiveBounded client
 
 receiveBounded :: Socket -> IO BS.ByteString
-receiveBounded client = do
-    prefix <- receiveExactly client 4
-    let count = BS.foldl' (\size byte -> size * 256 + fromIntegral byte) (0 :: Int) prefix
-    when (count <= 0 || count > 32 * 1024 * 1024) $
-        throwIO (userError "Invalid inbox frame size.")
-    receiveExactly client count
-
-receiveExactly :: Socket -> Int -> IO BS.ByteString
-receiveExactly client count = BS.concat . reverse <$> receive count []
-  where
-    receive 0 chunks = pure chunks
-    receive remaining chunks = do
-        bytes <- Socket.recv client (min remaining 65536)
-        when (BS.null bytes) (throwIO (userError "Inbox owner disconnected."))
-        receive (remaining - BS.length bytes) (bytes : chunks)
+receiveBounded client =
+    Framing.receiveFrame "Invalid inbox frame size." "Inbox owner disconnected."
+        (Socket.recv client)
