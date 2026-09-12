@@ -58,6 +58,7 @@ library
                     , crypton
                     , direct-sqlite >= 2.3 && < 2.4
                     , directory
+                    , extra >= 1.7
                     , filepath
                     , network-uri
                     , process >= 1.6.26

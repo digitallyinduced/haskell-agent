@@ -569,6 +569,49 @@ spec = describe "Agent.CLI.ExternalSession" do
             discoverExternalSessions fixture.env ExternalClaude 0
                 `shouldReturn` []
 
+    it "keeps the first nonempty Codex user title and handles an empty title list" $
+        withFixture \fixture -> do
+            let rollout =
+                    fixture.env.externalCodexRoot </> "sessions" </> "rollout-title.jsonl"
+                sessionId = "55555555-5555-5555-5555-555555555555"
+            forM_
+                [ ([], "(untitled)")
+                , (["", "First user title", "Later user title"], "First user title")
+                ] \(titles, expected) -> do
+                    writeJsonl rollout $
+                        codexMetadata fixture.cwd sessionId
+                            : map (responseMessage "user") titles
+                    candidates <- discoverExternalSessions fixture.env ExternalCodex 0
+                    map (.candidateTitle) candidates `shouldBe` [expected]
+
+    it "skips invalid Cursor ID matches and keeps the first valid directory" $
+        withFixture \fixture -> do
+            let sessionId = "66666666-6666-6666-6666-666666666666"
+                chats = fixture.env.externalCursorRoot </> "chats"
+            forM_ ["project-one", "project-two", "project-three"] \name ->
+                createDirectoryIfMissing True (chats </> name)
+            -- Follow the provider's filesystem order instead of assuming that
+            -- listDirectory sorts names or preserves creation order.
+            digests <- listDirectory chats
+            case digests of
+                invalid : selected : later : [] -> do
+                    LBS.writeFile (chats </> invalid </> Text.unpack sessionId) ""
+                    forM_ [selected, later] \digest -> do
+                        let directory = chats </> digest </> Text.unpack sessionId
+                        createDirectory directory
+                        LBS.writeFile (directory </> "meta.json") $
+                            encode $ object
+                                [ "id" .= sessionId
+                                , "name" .= ("Preferred name" :: Text)
+                                , "title" .= ("Fallback title" :: Text)
+                                ]
+                    session <- showReference fixture.env ExternalCursor sessionId 100
+                    session.externalSessionCandidate.candidatePath
+                        `shouldBe` chats </> selected </> Text.unpack sessionId
+                    session.externalSessionCandidate.candidateTitle
+                        `shouldBe` "Preferred name"
+                _ -> expectationFailure "expected three Cursor fixture projects"
+
     it "reads Cursor's native SQLite store and ignores system metadata" $
         withFixture \fixture -> do
             let sessionId = "33333333-3333-3333-3333-333333333333"
