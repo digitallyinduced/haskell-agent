@@ -2,6 +2,7 @@ module Main (main) where
 
 import Agent.CLI (run)
 import Control.Monad (when)
+import HeapDiagnostics (withHeapDiagnostics)
 import System.Directory (canonicalizePath, doesFileExist)
 import System.Environment (getExecutablePath, lookupEnv, setEnv)
 import System.FilePath ((</>), searchPathSeparator, takeDirectory)
@@ -10,7 +11,7 @@ import System.IO.Error (catchIOError)
 main :: IO ()
 main = do
     configurePortableBundle
-    run
+    withHeapDiagnostics run
 
 -- | Configure resources shipped next to the standalone macOS executable.
 --

@@ -3,21 +3,27 @@ module Agent.CLI.Input.History
     ( replHistoryPath
     , readReplHistory
     , appendReplHistory
+    , readReplHistoryAt
+    , appendReplHistoryAt
     , ensureHistoryParent
     , trySetMode
     ) where
 
 import Agent.CLI.PrivateFileLock (withPrivateFileLock)
+import Control.DeepSeq (force)
 import Control.Exception.Safe (catchIO)
 import Data.Char (isSpace)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.Console.Haskeline.History
-    ( addHistory
-    , emptyHistory
-    , historyLines
-    , readHistory
-    , writeHistory
+import qualified Data.Text.IO as Text
+import System.IO
+    ( IOMode(ReadMode, WriteMode)
+    , hSetEncoding
+    , hSetNewlineMode
+    , mkTextEncoding
+    , noNewlineTranslation
+    , utf8
+    , withFile
     )
 import System.Directory (createDirectoryIfMissing, getHomeDirectory)
 import System.FilePath (takeDirectory, (</>))
@@ -31,26 +37,50 @@ replHistoryPath home = home </> ".haskell-agent" </> "history"
 readReplHistory :: IO [Text]
 readReplHistory = do
     home <- getHomeDirectory
-    let path = replHistoryPath home
+    readReplHistoryAt (replHistoryPath home)
+
+-- | Fully evaluated, newest-first entries. Haskeline's on-disk representation
+-- is UTF-8 lines without newline translation or escaping; embedded newlines
+-- therefore become separate entries on the next read.
+readReplHistoryAt :: FilePath -> IO [Text]
+readReplHistoryAt path = do
     ensureHistoryParent path
-    withHistoryLock path do
-        history <- readHistory path `catchIO` \_ -> pure emptyHistory
-        pure (map Text.pack (historyLines history))
+    withHistoryLock path (readHistoryEntries path)
+
+readHistoryEntries :: FilePath -> IO [Text]
+readHistoryEntries path =
+    (withFile path ReadMode \handle -> do
+        encoding <- mkTextEncoding "UTF-8//TRANSLIT"
+        hSetEncoding handle encoding
+        hSetNewlineMode handle noNewlineTranslation
+        contents <- Text.hGetContents handle
+        pure $! force (Text.lines contents))
+        `catchIO` \_ -> pure []
 
 appendReplHistory :: Text -> IO ()
 appendReplHistory text
     | Text.all isSpace text = pure ()
     | otherwise = do
         home <- getHomeDirectory
-        let path = replHistoryPath home
-        ensureHistoryParent path
-        withHistoryLock path do
-            history <- readHistory path `catchIO` \_ -> pure emptyHistory
-            writeHistory path (addHistory (Text.unpack text) history)
-                `catchIO` \_ -> pure ()
-            trySetMode path 0o600
+        appendReplHistoryAt (replHistoryPath home) text
 
--- Haskeline rewrites history in place. Fullscreen input publication and
+-- | Read the current file under the write lock, rather than saving an editor's
+-- stale snapshot and discarding entries submitted by another process.
+-- The caller controls which submissions belong in history; this helper does
+-- not filter whitespace (inline and fullscreen have different policies).
+appendReplHistoryAt :: FilePath -> Text -> IO ()
+appendReplHistoryAt path text = do
+    ensureHistoryParent path
+    withHistoryLock path do
+        entries <- readHistoryEntries path
+        (withFile path WriteMode \handle -> do
+            hSetEncoding handle utf8
+            hSetNewlineMode handle noNewlineTranslation
+            Text.hPutStr handle (Text.unlines (text : entries)))
+            `catchIO` \_ -> pure ()
+        trySetMode path 0o600
+
+-- History is rewritten in place. Fullscreen input publication and
 -- command handling run concurrently, so serialize reads with that rewrite to
 -- avoid observing the temporary truncated file. The lock also coordinates
 -- independent harness processes sharing the same history.
