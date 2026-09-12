@@ -37,11 +37,9 @@ replayableDisplayEvent = \case
     ToolRetracted _ -> True
     _ -> False
 
--- Admission remains a cheap chunk/event cons operation, except that adjacent
--- superseded tool snapshots are replaced to release cumulative streamed payloads.
--- Successful responses clear the journal without projecting it; other
--- normalization waits until failed output is retained. Entries and text chunks
--- are newest-first. Tails deliberately
+-- Admission remains a cheap chunk/event cons operation: successful responses
+-- clear the journal without projecting it. Normalize only when failed output
+-- is retained. Entries and text chunks are newest-first. Tails deliberately
 -- remain lazy, preserving prefix release and sharing during retractions.
 data DisplayJournal
     = EmptyDisplayJournal
@@ -60,32 +58,14 @@ recordDisplayEvent event journal = case event of
         DisplayJournalText chunks rest ->
             DisplayJournalText (delta : chunks) rest
         _ -> DisplayJournalText [delta] journal
-    ToolUpdated call -> recordUpdate call.callId
-    ToolArgumentsUpdated call -> recordUpdate call.callId
     ToolOutputUpdated callId output ->
-        recordOutput callId
-            (ToolOutputUpdated callId (boundLoopToolOutput output))
+        DisplayJournalEvent
+            (ToolOutputUpdated callId (boundLoopToolOutput output)) journal
     ToolFinished result ->
-        recordOutput result.callId
-            (ToolFinished result { output = boundLoopToolOutput result.output })
+        DisplayJournalEvent
+            (ToolFinished result { output = boundLoopToolOutput result.output }) journal
     ToolRetracted callId -> retractRawTool callId journal
     _ -> DisplayJournalEvent event journal
-  where
-    -- Inspect only the head: never cross text, restart, or other event boundaries.
-    -- Updates share one projection slot; a finish suppresses earlier output
-    -- snapshots, but never another finish.
-    {-# INLINE recordUpdate #-}
-    recordUpdate callId = case journal of
-        DisplayJournalEvent (ToolUpdated previous) rest
-            | previous.callId == callId -> DisplayJournalEvent event rest
-        DisplayJournalEvent (ToolArgumentsUpdated previous) rest
-            | previous.callId == callId -> DisplayJournalEvent event rest
-        _ -> DisplayJournalEvent event journal
-    {-# INLINE recordOutput #-}
-    recordOutput callId boundedEvent = case journal of
-        DisplayJournalEvent (ToolOutputUpdated previousId _) rest
-            | previousId == callId -> DisplayJournalEvent boundedEvent rest
-        _ -> DisplayJournalEvent boundedEvent journal
 
 -- Retractions keep the former lazy-filter behavior: forcing the new journal
 -- immediately releases a removed leading prefix, and the remaining tail is

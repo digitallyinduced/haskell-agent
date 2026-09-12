@@ -1,6 +1,7 @@
 module Main (main) where
 
 import Agent.Loop.Output
+import Agent.Loop.DisplayJournal
 import Agent.Loop.VisibleState
 import Agent.ToolDispatch
     ( functionToolCall, setToolCallArguments, ToolCallResult(..)
@@ -145,6 +146,59 @@ main = hspec $ describe "VisibleLoopState event sequences" do
         lateTool.providerAttemptActive `shouldBe` False
         visibleAssistantText next `shouldBe` Just "next"
         visibleDisplayEvents next `shouldBe` [TextDelta "next"]
+
+    it "discards snapshots without forcing superseded output" do
+        let old = error "discarded output was evaluated"
+            state = events
+                [ TurnStarted, ToolOutputUpdated "c1" "prior"
+                , ResponseRestarted "retry", ToolUpdated call
+                , ToolOutputUpdated "c1" old, ResponseAttemptDiscarded
+                ]
+        visibleDisplayEvents state `shouldBe`
+            [ToolOutputUpdated "c1" "prior", ResponseRestarted "retry"]
+
+    it "projects the latest output without evaluating its obsolete predecessor" do
+        let journal = recordDisplayEvent
+                (ToolOutputUpdated "c1" (error "superseded output was evaluated"))
+                emptyDisplayJournal
+        journal `seq` pure ()
+        displayEventsFromJournal
+            (recordDisplayEvent (ToolOutputUpdated "c1" "latest") journal)
+            `shouldBe` [ToolOutputUpdated "c1" "latest"]
+
+    it "projects a finish without evaluating the output snapshot it suppresses" do
+        let journal = recordDisplayEvent
+                (ToolOutputUpdated "c1" (error "suppressed output was evaluated"))
+                emptyDisplayJournal
+            finished = ToolCallResult
+                { callId = "c1", output = "finished", callKind = FunctionCallKind
+                , toolResultMode = BlockingToolCall, toolResultImages = []
+                , toolResultOutcome = Nothing
+                }
+        journal `seq` pure ()
+        displayEventsFromJournal (recordDisplayEvent (ToolFinished finished) journal)
+            `shouldBe` [ToolFinished finished]
+
+    it "keeps surviving output payloads lazy across repeated unrelated retractions" do
+        let journal = recordDisplayEvent
+                (ToolOutputUpdated "c1" (error "surviving output was evaluated"))
+                emptyDisplayJournal
+            retracted = recordDisplayEvent (ToolRetracted "other") journal
+            retractedAgain = recordDisplayEvent (ToolRetracted "another") retracted
+        journal `seq` pure ()
+        retracted `seq` pure ()
+        retractedAgain `seq` pure ()
+        displayEventsFromJournal
+            (recordDisplayEvent (ToolOutputUpdated "c1" "latest") retractedAgain)
+            `shouldBe` [ToolOutputUpdated "c1" "latest"]
+
+    it "releases an output head without evaluating the filtered tail" do
+        let journal = foldl' (flip recordDisplayEvent) emptyDisplayJournal
+                [ ToolOutputUpdated (error "tail ID was evaluated") "tail"
+                , TextDelta "boundary", ToolOutputUpdated "c1" "head"
+                ]
+            retracted = recordDisplayEvent (ToolRetracted "c1") journal
+        retracted `seq` (pure () :: IO ())
   where
     events = foldl' (flip recordVisibleLoopEvent) emptyVisibleLoopState
     call = functionToolCall "c1" "tool" "{}"

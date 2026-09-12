@@ -1,6 +1,13 @@
-# Connected memory: adjacent journal snapshots
+# Connected memory: historical adjacent journal snapshot results
 
-Baseline: `ed2a95290`; candidate: adjacent-only snapshot replacement in
+**Historical measurements of rejected candidate `80be75c3`.**
+The PR now contains profiling, benchmarks, and regression coverage only:
+the production journal optimization has been removed because of CPU and
+allocation guardrail regressions. There is no new production memory change
+and no new whole-process memory savings claim. The actual CLI measurements
+below are retained as historical evidence, not results for the current PR.
+
+Baseline: `ed2a95290`; candidate: `80be75c3`, adjacent-only snapshot replacement in
 `Agent.Loop.DisplayJournal`, with both local helpers inlined. Linux,
 GHC 9.10.3, Cabal optimization level 2, dynamically linked executables,
 `+RTS -N4 -T -s`. Executables and all local shared libraries were frozen
@@ -71,13 +78,19 @@ first tool, out of approximately 5.6 GB for the session. This identifies
 startup/idle allocation churn as a further profiling target, not a proven
 function-level attribution. A smaller journal cannot remove mapped libraries.
 
-## Component evidence and validation
+## Historical component evidence and validation
 
-[The journal benchmark](../../agent-core/benchmark/DisplayJournalRetention.md)
-shows about 99.3% less live memory for 1,000 consecutive cumulative snapshots
+The historical candidate showed about 99.3% less live memory for 1,000 consecutive cumulative snapshots
 of a single call. Interleaved calls and text are controls, not equivalent wins.
-The change retains only the latest adjacent superseding snapshot, preserving
+That candidate retained only the latest adjacent superseding snapshot, preserving
 text, restart, cross-call, retraction, and repeated-finish boundaries.
+
+Its roughly 42% small-turn component CPU regression was not an accepted shipping
+trade-off. Follow-up designs also failed guardrails, so no journal optimization
+is being shipped. See
+[DisplayJournalRetention.md](../../agent-core/benchmark/DisplayJournalRetention.md)
+for the component experiments and their limitations. Those measurements must
+not be substituted for a connected whole-CLI rerun.
 
 13 visible-state examples and 21 failed-display/event-delivery examples passed;
 the projection verifier passed 6,464 event prefixes. The optimized full CLI

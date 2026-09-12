@@ -1,5 +1,11 @@
 # Cumulative display-journal retention
 
+**Rejected optimization; benchmark retained.** Production `DisplayJournal.hs`
+has been restored exactly to `ed2a95290`. This PR now adds profiling tools and
+behavior/performance guardrails, not a production memory optimization. The
+historical candidate below is `80be75c3`, available in this branch's history.
+Its component memory savings are not present in the restored implementation.
+
 `DisplayJournalRetention.hs` measures the journal while a response attempt is
 still live, before failure projection or successful completion clears it.
 It complements `DisplayJournal.hs`, whose ordinary successful/failed-turn
@@ -7,8 +13,8 @@ workloads guard against admission overhead.
 
 ## Method
 
-Compare separately built executables from the current implementation before
-adjacent snapshot replacement and the candidate after it. **This baseline is
+Compare separately built executables from baseline `ed2a95290` and the rejected
+candidate `80be75c3` (or a future redesign). **This baseline is
 not `DisplayJournalBaseline.hs`**, the older implementation used by the existing
 benchmark's `old` mode.
 
@@ -44,10 +50,10 @@ Admission live bytes therefore include the live journal and runtime overhead.
 Projection is measured separately and fully checksummed. Payload construction
 is included in admission allocations and CPU for both variants.
 
-## Component results
+## Historical component results (rejected candidate)
 
 GHC 9.10.3, `-O2`, `+RTS -N4 -T`, medians of three samples. Decimal MB.
-These compare the frozen current-before baseline with the final candidate,
+These compare the frozen baseline with the rejected `80be75c3` candidate,
 including both helper `INLINE` pragmas.
 
 | Workload | Live MB before → after | Admission allocated MB before → after | Admission CPU ms before → after |
@@ -119,13 +125,64 @@ tool calls measured median CPU 0.001292 → 0.001834 ms (about 42%, but only
 duplicated argument-update pattern matches passed `--verify` but did not remove
 the cost: a matched three-way sweep measured baseline 0.001272 ms, direct
 0.001798 ms, and inlined helpers 0.001813 ms. Both alternatives allocated
-6,697 bytes versus 6,641 before. Keep the shorter inlined implementation;
-the extra head inspection and ID comparison are not free. This is a measured
-component trade-off, not a claim of zero CPU regression.
+6,697 bytes versus 6,641 before. The extra head inspection and ID comparison
+are not free. This regression is not an acceptable shipping trade-off.
+
+## CPU follow-up: restore the baseline
+
+Further optimized, separately compiled experiments tried flat output nodes,
+argument-update tags, a strict journal head, forced admission inlining, and
+output-only replacement. None cleared all ordinary-workload guardrails.
+Consequently **all production journal changes were removed**, rather than
+trading a small-turn regression for a streaming/retraction regression.
+
+For the output-only flat-node experiment, three alternating process pairs
+(31 samples for tools, 15 for text, default 20 repetitions per sample) gave:
+
+| Workload | Baseline CPU ms → experiment | Baseline bytes → experiment |
+|---|---:|---:|
+| Successful tools, 4 calls × 16 updates | 0.001300 → 0.001236 | 6,641 → 5,617 |
+| Successful tools, 100 calls × 16 updates | 0.036770 → 0.034032 | 162,545 → 136,945 |
+| Text success, 1,000 × 16 B | 0.008268 → 0.009585 | 48,145 → 48,145 |
+| Text after tool success, 10,000 × 16 B | 0.127150 → 0.149774 | 480,169 → 480,169 |
+| Retry/retract, 100 calls | 2.392683 → 2.278436 | 9,893,129 → 10,475,529 |
+
+Thus the initial ~15% tool allocation win was rejected: text CPU and repeated
+retraction allocation regressed. Reversing process order confirmed the small
+text regression. Removing forced inlining and converting surviving output
+nodes back to ordinary events during retraction each addressed only part of
+the problem, not all guardrails.
+
+The smallest alternative changed only the `ToolOutputUpdated` admission arm:
+replace an adjacent same-ID output inside an ordinary `DisplayJournalEvent`,
+with no new constructor or `INLINE` pragma. Three alternating pairs of 31
+samples still measured four-call CPU 0.001307 → 0.001390 ms and 1,000-chunk
+text CPU 0.008099 → 0.008466 ms; allocations were unchanged. It was also
+rejected. These are component experiments, not whole-CLI CPU measurements.
+
+Reproduce guardrails with separately compiled `DisplayJournal.hs` executables,
+the flags above, and identical forced fixtures:
+
+```sh
+# Run inside nix develop, alternating BEFORE/AFTER for three process pairs.
+"$TIMING_BEFORE" new tools-success 4 64 31 +RTS -N4 -T
+"$TIMING_AFTER" new tools-success 4 64 31 +RTS -N4 -T
+"$TIMING_AFTER" new tools-retract-once 4 64 31 +RTS -N4 -T
+"$TIMING_AFTER" new retry-retract 100 64 31 +RTS -N4 -T
+"$TIMING_AFTER" new text-success 1000 16 15 +RTS -N4 -T
+"$TIMING_AFTER" new text-after-tool-success 10000 16 15 +RTS -N4 -T
+```
+
+Also cover tool counts 1/4/16/100, success/failure/retry, and all four text
+controls at 1,000/10,000 chunks. `tools-retract-once` retains all existing calls
+and retracts an unrelated ID, catching survivor-node reconstruction costs.
+Optional final `REPETITIONS` defaults to 20; record any override with the
+results, since CSV does not encode it. Increasing it changes fixture residency
+and GC/cache behavior and must not replace the default workload guardrails.
 
 ## Limits
 
-- Only adjacent same-call snapshots of the same projection kind are replaced.
+- The rejected candidate only replaced adjacent same-call snapshots of the same projection kind.
   Interleaved call IDs and alternating arguments/output remain negative controls.
 - Text and restart boundaries are not crossed; prior finishes are never replaced.
 - These numbers are **post-GC live heap and allocated bytes, not process RSS**.

@@ -36,6 +36,7 @@ data Workload
     | TextAfterToolSuccess
     | ToolsFailure
     | ToolsSuccess
+    | ToolsRetractOnce
     | RetryRetract
 
 data Sample = Sample
@@ -111,11 +112,12 @@ retainedJournal mode tools snapshots size = case mode of
         pure (project <$> readIORef ref, writeIORef ref empty)
 
 runBenchmark :: [String] -> IO ()
+runBenchmark args | length args == 5 = runBenchmark (args <> ["20"])
 runBenchmark args = do
     enabled <- getRTSStatsEnabled
     unless enabled $ die "RTS stats disabled; use +RTS -T"
     case args of
-        [modeArg, workloadArg, countArg, sizeArg, samplesArg] -> do
+        [modeArg, workloadArg, countArg, sizeArg, samplesArg, repetitionsArg] -> do
             mode <- case modeArg of
                 "old" -> pure Old
                 "new" -> pure New
@@ -127,11 +129,13 @@ runBenchmark args = do
                 "text-after-tool-success" -> pure TextAfterToolSuccess
                 "tools-failure" -> pure ToolsFailure
                 "tools-success" -> pure ToolsSuccess
+                "tools-retract-once" -> pure ToolsRetractOnce
                 "retry-retract" -> pure RetryRetract
                 _ -> die "unknown workload"
             count <- positive countArg
             size <- positive sizeArg
             sampleCount <- positive samplesArg
+            repetitions <- positive repetitionsArg
             validatePrefixes
             -- Separate fixtures prevent validation from evaluating timed work.
             old <- runJournal Old workload (fixture workload count size 0)
@@ -149,7 +153,7 @@ runBenchmark args = do
                 (median (map (.wallMs) samples) / fromIntegral repetitions)
                 (median (map (.cpuMs) samples) / fromIntegral repetitions)
                 (median (map (.allocated) samples) `div` fromIntegral repetitions)
-        _ -> die "usage: display-journal-bench old|new WORKLOAD COUNT BODY_BYTES SAMPLES"
+        _ -> die "usage: display-journal-bench old|new WORKLOAD COUNT BODY_BYTES SAMPLES [REPETITIONS]"
 
 -- Exercise removals at every position, shared update slots, discarded attempts,
 -- reused call ids and text chunk boundaries, including observations before a
@@ -207,9 +211,6 @@ positive raw = case reads raw of
     [(n, "")] | n > 0 -> pure n
     _ -> die ("expected positive integer: " <> raw)
 
-repetitions :: Int
-repetitions = 20
-
 -- Exercise the same strict IORef admission/clear/discard operations as
 -- recordVisibleLoopEvent. A failed turn forces retained projection; success
 -- drops it, matching the loop's TurnFinished branch. This deliberately
@@ -256,6 +257,9 @@ fixture workload count size salt = case workload of
     TextAfterToolSuccess -> ToolStarted (makeCall 1) : texts
     ToolsFailure -> tools
     ToolsSuccess -> tools
+    -- Keep every existing call so this measures the cost of rebuilding
+    -- surviving journal nodes, including the first retraction conversion.
+    ToolsRetractOnce -> tools <> [ToolRetracted "unrelated-call"]
     RetryRetract ->
         tools
             <> [ResponseRestarted "retry"]
