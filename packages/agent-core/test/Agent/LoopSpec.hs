@@ -125,6 +125,46 @@ spec = describe "runLoop" do
                 maybe False (Text.isInfixOf "Unknown tool")
             lookup "available" outputs `shouldBe` Just "called"
 
+        it "uses the refreshed registry for streamed async admission and deduplication" do
+            invocations <- newIORef (0 :: Int)
+            handlerStarted <- newEmptyMVar
+            step <- newIORef (0 :: Int)
+            let call = asyncFunctionToolCall "refreshed" "deferred" "{}"
+                tool = asyncNoArgsTool "deferred" do
+                    modifyIORef' invocations (+ 1)
+                    putMVar handlerStarted ()
+                    pure (Right "called")
+                backend = backendWithCallbacks \state _ inputs callbacks -> do
+                    current <- atomicModifyIORef' step \value ->
+                        (value + 1, value + 1)
+                    if current == 1
+                        then do
+                            callbacks.onAsyncToolCall call
+                            started <- timeout concurrencyProbeMicros (readMVar handlerStarted)
+                            case started of
+                                Nothing -> Exception.throwIO $
+                                    userError "refreshed async handler did not start"
+                                Just () -> pure ()
+                            pure $ Right BackendResult
+                                { backendOutput = emptyTurnOutput "first" [call] Nothing
+                                , backendState = appendStateMarker state
+                                }
+                        else do
+                            [result.output | CompletedTool result <- inputs]
+                                `shouldBe` ["called"]
+                            pure $ Right BackendResult
+                                { backendOutput = emptyTurnOutput "done" [] (Just "done")
+                                , backendState = appendStateMarker state
+                                }
+            config <- testConfig backend
+            result <- runLoop config
+                { loopTools = registryFromTools []
+                , loopReadTools = Just (pure (registryFromTools [tool]))
+                }
+                Nothing "go"
+            fmap (.finalText) result `shouldBe` Right (Just "done")
+            readIORef invocations `shouldReturn` 1
+
         it "fails closed when refreshing request exposure fails" do
             submissions <- newIORef []
             backend <- scriptedBackend submissions
@@ -1380,6 +1420,59 @@ spec = describe "runLoop" do
                 , tokenUsage = emptyTokenUsage
                 })
         readIORef invocations `shouldReturn` ["first", "second", "third"]
+
+    it "deduplicates a blocking call replayed by a later response" do
+        invocations <- newIORef (0 :: Int)
+        approvals <- newIORef (0 :: Int)
+        submissions <- newIORef []
+        let call = functionToolCall "replayed" "once" "{}"
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1" [call] Nothing
+            , Right $ emptyTurnOutput "resp-2" [call] Nothing
+            , Right $ emptyTurnOutput "resp-3" [] (Just "done")
+            ]
+        config <- testConfig backend
+        result <- runLoop config
+            { loopTools = registryFromHandlers
+                [noArgsTool "once" do
+                    modifyIORef' invocations (+ 1)
+                    pure (Right "ran once")]
+            , loopApprove = \_ -> do
+                modifyIORef' approvals (+ 1)
+                pure ToolApprovalGranted
+            } Nothing "go"
+        result `shouldSatisfy` \case
+            Right output -> output.finalText == Just "done"
+            _ -> False
+        readIORef invocations `shouldReturn` 1
+        readIORef approvals `shouldReturn` 1
+        seen <- readIORef submissions
+        case seen of
+            [_, (_, [CompletedTool first]), (_, [CompletedTool replayed])] ->
+                replayed `shouldBe` first
+            other -> expectationFailure ("unexpected submissions: " <> show other)
+
+    it "rejects a conflicting blocking call without approving it" do
+        approvals <- newIORef ([] :: [Text])
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "duplicate" "first" "{}"
+                , functionToolCall "duplicate" "second" "{}"
+                ] Nothing
+            ]
+        config <- testConfig backend
+        result <- runLoop config
+            { loopApprove = \call -> do
+                modifyIORef' approvals (call.name :)
+                pure ToolApprovalGranted
+            } Nothing "go"
+        result `shouldSatisfy` \case
+            Left (LoopUnexpected message) ->
+                "Conflicting tool calls reused call_id duplicate"
+                    `Text.isInfixOf` message
+            _ -> False
+        readIORef approvals >>= (`shouldSatisfy` all (/= "second"))
 
     it "fails closed when an async call_id is reused for a different call" do
         firstInvocations <- newIORef (0 :: Int)
