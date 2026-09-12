@@ -676,37 +676,33 @@ receiveCallback listener readyVar issuerRequired issuer expectedState = do
                     Warp.defaultSettings
         application request respond
             | Wai.requestMethod request /= methodGet =
-                respond (plainResponse status405 "Method Not Allowed")
+                respond (callbackResponse status405 OAuth.OAuthCallbackMethodNotAllowed)
             | Wai.rawPathInfo request /= "/callback" =
-                respond (plainResponse status404 "Not Found")
+                respond (callbackResponse status404 OAuth.OAuthCallbackNotFound)
             | Left _ <- validateMcpOAuthCallback issuerRequired issuer expectedState
                 (Wai.queryString request) =
-                respond (plainResponse status400 "Invalid authorization response")
+                respond (callbackResponse status400 OAuth.OAuthCallbackRejected)
             | otherwise = do
                 let callback = callbackFromQuery (Wai.queryString request)
                     finish = do
                         void (tryPutMVar resultVar callback)
                         readMVar shutdownVar >>= id
                 respond
-                    (Wai.responseLBS
-                        status200
-                        [ (hContentType, "text/html; charset=utf-8")
-                        , (hCacheControl, "no-store")
-                        , (hConnection, "close")
-                        , ("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
-                        ]
-                        OAuth.oauthCallbackSuccessPage)
+                    (callbackResponse status200 OAuth.OAuthCallbackReceived)
                     `finally` finish
     Warp.runSettingsSocket settings listener application
     readMVar resultVar
   where
-    plainResponse status body =
+    callbackResponse status presentation =
         Wai.responseLBS
             status
-            [ (hContentType, "text/plain; charset=utf-8")
+            [ (hContentType, "text/html; charset=utf-8")
+            , (hCacheControl, "no-store")
             , (hConnection, "close")
+            , ("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+            , ("X-Content-Type-Options", "nosniff")
             ]
-            body
+            (OAuth.oauthCallbackPage presentation)
 
 -- | Validate untrusted callbacks before consuming the pending authorization.
 -- Duplicate security parameters are rejected rather than interpreted using

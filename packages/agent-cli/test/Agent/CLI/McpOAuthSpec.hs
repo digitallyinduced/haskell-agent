@@ -12,8 +12,8 @@ import Data.Either (isLeft)
 import Data.IORef (IORef, newIORef, readIORef, modifyIORef')
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Encoding
-import Network.HTTP.Client (defaultManagerSettings, httpLbs, newManager, parseRequest, responseStatus)
-import Network.HTTP.Types (status200, status400, status401, status404, mkStatus)
+import Network.HTTP.Client (defaultManagerSettings, httpLbs, newManager, parseRequest, responseStatus, responseHeaders, responseBody, method)
+import Network.HTTP.Types (ResponseHeaders, status200, status400, status401, status404, status405, mkStatus)
 import Network.HTTP.Types.URI (Query, parseQuery, renderQuery)
 import Network.URI (parseURI, uriQuery)
 import qualified Network.Wai as Wai
@@ -199,7 +199,7 @@ spec = describe "MCP OAuth host authorization" do
             completed `shouldBe` Just ()
             readIORef requests `shouldReturn` []
 
-    it "keeps authorization pending after an invalid callback and accepts the matching callback" do
+    it "renders rejected callback pages without consuming pending authorization" do
         requests <- newIORef []
         Warp.testWithApplication (pure (authorizationFixture requests)) \port -> do
             let endpoint = "http://127.0.0.1:" <> Text.pack (show port) <> "/mcp"
@@ -212,6 +212,18 @@ spec = describe "MCP OAuth host authorization" do
                     ]))
                 response <- httpLbs request manager
                 responseStatus response `shouldBe` status400
+                responseBody response `shouldBe` OAuth.oauthCallbackPage OAuth.OAuthCallbackRejected
+                assertCallbackHeaders (responseHeaders response)
+                LazyBytes.toStrict (responseBody response) `shouldSatisfy` (not . Bytes.isInfixOf "untrusted-account")
+                notFoundRequest <- parseRequest (Bytes.unpack (redirect <> "/missing"))
+                notFoundResponse <- httpLbs notFoundRequest manager
+                responseStatus notFoundResponse `shouldBe` status404
+                responseBody notFoundResponse `shouldBe` OAuth.oauthCallbackPage OAuth.OAuthCallbackNotFound
+                assertCallbackHeaders (responseHeaders notFoundResponse)
+                methodResponse <- httpLbs (request { method = "POST" }) manager
+                responseStatus methodResponse `shouldBe` status405
+                responseBody methodResponse `shouldBe` OAuth.oauthCallbackPage OAuth.OAuthCallbackMethodNotAllowed
+                assertCallbackHeaders (responseHeaders methodResponse)
             fmap ((.tokenAccessToken) . fst) result `shouldBe` Right "token-account-a"
             readIORef requests `shouldReturn` ["account-a"]
   where
@@ -253,11 +265,22 @@ authorizeFixtureWith endpoint account beforeCallback = do
                     ]
             manager <- newManager defaultManagerSettings
             request <- parseRequest (Bytes.unpack callback)
-            _ <- httpLbs request manager
+            response <- httpLbs request manager
+            responseStatus response `shouldBe` status200
+            responseBody response `shouldBe` OAuth.oauthCallbackSuccessPage
+            assertCallbackHeaders (responseHeaders response)
             pure ()
     result <- timeout (10 * 1000000) $
         concurrently (authorizeMcpWith host defaultLoginOptions Nothing endpoint) complete
     pure (maybe (Left "Fixture authorization timed out") fst result)
+
+assertCallbackHeaders :: ResponseHeaders -> Expectation
+assertCallbackHeaders headers = do
+    lookup "Content-Type" headers `shouldBe` Just "text/html; charset=utf-8"
+    lookup "Cache-Control" headers `shouldBe` Just "no-store"
+    lookup "Content-Security-Policy" headers
+        `shouldBe` Just "default-src 'none'; style-src 'unsafe-inline'"
+    lookup "X-Content-Type-Options" headers `shouldBe` Just "nosniff"
 
 authorizationCallbackParameters
     :: Text.Text
