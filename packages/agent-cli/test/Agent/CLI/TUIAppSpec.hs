@@ -3036,6 +3036,7 @@ spec = do
                 reopenedText = renderShell reopened
                 ghciText = renderShell ghciCompleted
                 execText = renderShell execCompleted
+                execExpandedText = renderShell (reduceUi UiToggleSelected execCompleted)
                 failedText = renderShell failed
             collapsedText `shouldSatisfy`
                 Text.isInfixOf "$ printf shell-command"
@@ -3048,8 +3049,14 @@ spec = do
             ghciText `shouldNotSatisfy`
                 Text.isInfixOf "ghci-output-marker"
             execText `shouldSatisfy`
-                Text.isInfixOf "$ exec · text(\"exec-invocation-marker\");"
+                Text.isInfixOf "JavaScript execution"
             execText `shouldNotSatisfy`
+                Text.isInfixOf "exec-invocation-marker"
+            execText `shouldNotSatisfy`
+                Text.isInfixOf "exec-output-marker"
+            execExpandedText `shouldSatisfy`
+                Text.isInfixOf "exec-invocation-marker"
+            execExpandedText `shouldSatisfy`
                 Text.isInfixOf "exec-output-marker"
             failedText `shouldSatisfy`
                 Text.isInfixOf "› ✗ $ false"

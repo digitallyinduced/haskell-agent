@@ -1096,7 +1096,7 @@ toolChrome name = case canonicalToolName name of
     "shell_command" -> ToolChromeShell
     "write_stdin" -> ToolChrome "Continued" ToolDetailMuted
     "run_ghci" -> ToolChromeShell
-    "exec" -> ToolChrome "$ exec" ToolDetailNone
+    "exec" -> ToolChrome "JavaScript execution" ToolDetailNone
     "get_task_output" -> ToolChrome "Read" ToolDetailMuted
     "wait_tasks" -> ToolChrome "Waited" ToolDetailMuted
     "kill_task" -> ToolChrome "Killed" ToolDetailMuted
@@ -1143,7 +1143,7 @@ formatToolBody color = formatToolBodyRelative color ""
 
 formatToolBodyRelative :: Bool -> Text -> ToolCall -> Text
 formatToolBodyRelative color workspace call = case canonicalToolName call.name of
-    "exec" -> roleToolCommand color call.arguments
+    "exec" -> ""
     _ ->
         Text.intercalate "\n" $
             map (paintDiffRelative color workspace) (toolCallDiffs call)
