@@ -10,6 +10,46 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    it "keeps the latest adjacent argument or metadata snapshot in its original order" do
+        let first = functionToolCall "c1" "read_file" "first"
+            final = functionToolCall "c1" "grep" "final"
+            events =
+                [ ToolStarted first
+                , ToolArgumentsUpdated first
+                , ToolUpdated final
+                , ToolArgumentsUpdated final
+                , TextDelta "after"
+                ]
+        let backend = Backend \_state _prev _inputs onEvent -> do
+                mapM_ onEvent events
+                pure (Left (ConnectionError "down"))
+        config <- testConfig backend
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionUncommittedDisplayEvents
+            `shouldBe` [ToolStarted first, ToolArgumentsUpdated final, TextDelta "after"]
+
+    it "does not collapse snapshot kinds or reused ids across restart boundaries" do
+        let call = functionToolCall "same" "read_file" "{}"
+            events =
+                [ ToolUpdated call
+                , ToolOutputUpdated "same" "old"
+                , ToolOutputUpdated "same" "latest"
+                , ResponseRestarted "retry"
+                , ToolArgumentsUpdated call
+                , ToolArgumentsUpdated (setToolCallArguments "new" call)
+                ]
+            backend = Backend \_state _prev _inputs onEvent -> do
+                mapM_ onEvent events
+                pure (Left (ConnectionError "down"))
+        config <- testConfig backend
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionUncommittedDisplayEvents `shouldBe`
+            [ ToolUpdated call
+            , ToolOutputUpdated "same" "latest"
+            , ResponseRestarted "retry"
+            , ToolArgumentsUpdated (setToolCallArguments "new" call)
+            ]
+
     it "marks a transport failure after streamed output as interrupted" do
         observed <- newIORef []
         let backend = Backend \_state _prev _inputs onEvent -> do

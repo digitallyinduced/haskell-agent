@@ -37,9 +37,10 @@ replayableDisplayEvent = \case
     ToolRetracted _ -> True
     _ -> False
 
--- Admission remains a cheap chunk/event cons operation: successful responses
--- clear the journal without projecting it. Normalize only when failed output
--- is retained. Entries and text chunks are newest-first. Tails deliberately
+-- Admission remains constant-time, replacing only superseded adjacent snapshots.
+-- Successful responses clear the journal without projecting it; other
+-- normalization waits until failed output is retained. Entries and text chunks
+-- are newest-first. Tails deliberately
 -- remain lazy, preserving prefix release and sharing during retractions.
 data DisplayJournal
     = EmptyDisplayJournal
@@ -59,13 +60,34 @@ recordDisplayEvent event journal = case event of
             DisplayJournalText (delta : chunks) rest
         _ -> DisplayJournalText [delta] journal
     ToolOutputUpdated callId output ->
-        DisplayJournalEvent
-            (ToolOutputUpdated callId (boundLoopToolOutput output)) journal
+        recordSnapshot (ToolOutputUpdated callId (boundLoopToolOutput output))
+            journal
     ToolFinished result ->
         DisplayJournalEvent
             (ToolFinished result { output = boundLoopToolOutput result.output }) journal
     ToolRetracted callId -> retractRawTool callId journal
-    _ -> DisplayJournalEvent event journal
+    _ -> recordSnapshot event journal
+
+-- Release superseded adjacent snapshots at admission, not just when a failed
+-- attempt is projected. Cumulative argument previews otherwise retain every
+-- earlier prefix until commit. Inspect only the head: scanning across text,
+-- other calls, or restart boundaries would make admission depend on history
+-- size. Nonadjacent snapshots retain the existing projection-time deduplication.
+recordSnapshot :: LoopEvent -> DisplayJournal -> DisplayJournal
+recordSnapshot event = \case
+    DisplayJournalEvent previous rest
+        | replaces previous -> DisplayJournalEvent event rest
+    journal -> DisplayJournalEvent event journal
+  where
+    replaces previous = case (event, previous) of
+        (ToolUpdated call, ToolUpdated old) -> call.callId == old.callId
+        (ToolUpdated call, ToolArgumentsUpdated old) -> call.callId == old.callId
+        (ToolArgumentsUpdated call, ToolUpdated old) -> call.callId == old.callId
+        (ToolArgumentsUpdated call, ToolArgumentsUpdated old) ->
+            call.callId == old.callId
+        (ToolOutputUpdated callId _, ToolOutputUpdated oldId _) ->
+            callId == oldId
+        _ -> False
 
 -- Retractions keep the former lazy-filter behavior: forcing the new journal
 -- immediately releases a removed leading prefix, and the remaining tail is
