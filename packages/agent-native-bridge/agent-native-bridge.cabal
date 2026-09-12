@@ -120,6 +120,7 @@ foreign-library haskell-agent-bridge
                     , Agent.CLI.MacOS.InstalledSkills
                     , Agent.CLI.MacOS.SessionTransferBridge
                     , Agent.CLI.MacOS.SessionObservationBridge
+                    , Agent.CLI.MacOS.SyntaxBridge
     c-sources:        cbits/HaskellAgentBridgeRuntime.c
                     , cbits/HaskellAgentMcpKeychain.c
     frameworks:      Security, CoreFoundation
@@ -139,6 +140,7 @@ foreign-library haskell-agent-bridge
                     , agent-responses-types >= 0.1 && < 0.2
                     , agent-store >= 0.1 && < 0.2
                     , agent-openai >= 0.1 && < 0.2
+                    , agent-syntax >= 0.1 && < 0.2
                     , agent-xai >= 0.1 && < 0.2
                     , agent-openrouter >= 0.1 && < 0.2
                     , aeson >= 2.0
@@ -185,6 +187,7 @@ test-suite agent-native-bridge-test
                     , agent-mcp
                     , agent-runtime-daemon
                     , agent-store
+                    , agent-syntax
                     , aeson
                     , async
                     , base >= 4.17 && < 5
@@ -208,6 +211,7 @@ test-suite agent-native-bridge-test
                     , test/cbits/HaskellAgentBridgeSessionObservationSmoke.c
                     , test/cbits/HaskellAgentBridgeMobileSmoke.c
                     , test/cbits/HaskellAgentBridgeMcpConnectionSmoke.c
+                    , test/cbits/HaskellAgentBridgeSyntaxSmoke.c
                     , cbits/HaskellAgentBridgeRuntime.c
                     , cbits/HaskellAgentMcpKeychain.c
         frameworks:   Security, CoreFoundation
@@ -218,6 +222,7 @@ test-suite agent-native-bridge-test
                      , Agent.CLI.MacOS.BundledIntegrations
                      , Agent.CLI.MacOS.SessionTransferBridge
                      , Agent.CLI.MacOS.SessionObservationBridge
+                     , Agent.CLI.MacOS.SyntaxBridge
                      , Agent.CLI.MacOS.SessionObservationBridgeSpec
                      , Agent.CLI.MacOS.MobileGatewaySpec
                      , Agent.CLI.MacOS.AgentSnapshot

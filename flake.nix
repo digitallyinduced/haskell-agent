@@ -854,6 +854,9 @@
                                                 then agentNativeBridgeCheckSource
                                                 else agentNativeBridgeProductionSource;
                                     }).overrideAttrs (old: {
+                                        preCheck = (old.preCheck or "") + ''
+                                            export AGENT_SYNTAX_DIR=${skylightingSyntaxDirectory}
+                                        '';
                                         # Keep revision volatility in this final
                                         # frontend instead of agent-core, where it
                                         # would invalidate every dependent package.
@@ -880,6 +883,7 @@
                                 [ final.agent-repository
                                   final.agent-runtime-daemon
                                   final.agent-integration-api
+                                  final.agent-syntax
                                 ]);
                         agent-telegram = localPackage (pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-telegram/package.nix { }) {

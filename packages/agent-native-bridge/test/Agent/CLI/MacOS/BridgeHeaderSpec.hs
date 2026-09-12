@@ -15,6 +15,9 @@ import Test.Hspec (Spec, describe, it, shouldReturn)
 foreign import ccall "ha_image_attachment_abi_smoke"
     imageAttachmentAbiSmoke :: IO CInt
 
+foreign import ccall "ha_syntax_abi_smoke"
+    syntaxAbiSmoke :: IO CInt
+
 foreign import ccall "ha_voice_abi_smoke"
     voiceAbiSmoke :: IO CInt
 
@@ -50,6 +53,9 @@ foreign import ccall "wrapper" makeSecretCallback
 
 spec :: Spec
 spec = do
+    describe "native syntax highlighting ABI" do
+        it "preserves UTF-8 ranges, classifies Haskell, and validates fallback inputs" do
+            syntaxAbiSmoke `shouldReturn` 0
     describe "native connection secure store" do
         it "fails closed when the native secure store is absent" do
             connectionSecretStore nullFunPtr nullPtr "scope"

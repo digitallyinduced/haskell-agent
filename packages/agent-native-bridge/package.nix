@@ -1,11 +1,11 @@
 { mkDerivation, aeson, agent-cli, agent-cli-runtime, agent-core
 , agent-integration-api, agent-json, agent-mcp, agent-openai
 , agent-openrouter, agent-repository, agent-responses-types
-, agent-runtime-daemon, agent-store, agent-xai, async, base
-, base64-bytestring, bytestring, containers, directory, filelock
-, filepath, hspec, http-client, http-client-tls, http-types
-, JuicyPixels, lib, network-uri, safe-exceptions, stm, text, time
-, transformers, unix, uuid, websockets, wuss
+, agent-runtime-daemon, agent-store, agent-syntax, agent-xai, async
+, base, base64-bytestring, bytestring, containers, directory
+, filelock, filepath, hspec, http-client, http-client-tls
+, http-types, JuicyPixels, lib, network-uri, safe-exceptions, stm
+, text, time, transformers, unix, uuid, websockets, wuss
 }:
 mkDerivation {
   pname = "agent-native-bridge";
@@ -20,10 +20,11 @@ mkDerivation {
   testHaskellDepends = [
     aeson agent-cli agent-cli-runtime agent-core agent-integration-api
     agent-json agent-mcp agent-openai agent-openrouter agent-repository
-    agent-responses-types agent-runtime-daemon agent-store agent-xai
-    async base base64-bytestring bytestring containers directory
-    filelock filepath hspec http-client http-client-tls http-types
-    JuicyPixels safe-exceptions stm text time unix websockets wuss
+    agent-responses-types agent-runtime-daemon agent-store agent-syntax
+    agent-xai async base base64-bytestring bytestring containers
+    directory filelock filepath hspec http-client http-client-tls
+    http-types JuicyPixels safe-exceptions stm text time unix
+    websockets wuss
   ];
   description = "Native host integration for the agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";

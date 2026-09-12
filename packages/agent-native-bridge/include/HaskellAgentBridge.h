@@ -8,6 +8,60 @@
 extern "C" {
 #endif
 
+enum {
+    HA_SYNTAX_NORMAL = 0,
+    HA_SYNTAX_KEYWORD = 1,
+    HA_SYNTAX_TYPE = 2,
+    HA_SYNTAX_FUNCTION = 3,
+    HA_SYNTAX_VARIABLE = 4,
+    HA_SYNTAX_STRING = 5,
+    HA_SYNTAX_NUMBER = 6,
+    HA_SYNTAX_COMMENT = 7,
+    HA_SYNTAX_OPERATOR = 8,
+    HA_SYNTAX_ANNOTATION = 9,
+    HA_SYNTAX_PREPROCESSOR = 10,
+    HA_SYNTAX_WARNING = 11,
+    HA_SYNTAX_ERROR = 12
+};
+
+typedef void (*ha_syntax_span_callback)(
+    void *context,
+    size_t byte_offset,
+    size_t byte_length,
+    int32_t syntax_class
+);
+
+/*
+ * Highlight one complete code block using the shared terminal tokenizer.
+ * Call after ha_runtime_init; no engine is required. Configure AGENT_SYNTAX_DIR
+ * before use. Definitions are loaded lazily and cached for the process lifetime.
+ * Concurrent calls are supported; callbacks run synchronously on the calling
+ * thread, in source order, before this function returns. The definition-cache
+ * lock is not held during callbacks. Callbacks must not throw across the ABI.
+ *
+ * language is a Markdown fence info string (for example "haskell" or "Main.hs").
+ * Both input buffers are borrowed, strict UTF-8, and need not be NUL terminated.
+ * NULL is permitted only with zero length. The callback is required; context
+ * is opaque, may be NULL, and is never retained. No output allocation transfers
+ * ownership. Callback values can be copied directly; no callback-scoped buffer
+ * is exposed. Spans are nonempty, nonoverlapping UTF-8 byte ranges in source,
+ * never split a Unicode scalar, and omit LF separators between lines.
+ *
+ * Returns 0 on success; 1 for plain-text fallback (unsupported language,
+ * unavailable definitions, tokenizer refusal, source exceeding 256 KiB or
+ * 5000 lines, or language exceeding 4096 bytes); 2 for invalid arguments or
+ * malformed UTF-8; 3 for internal failure. Discard any collected spans when
+ * status is nonzero. Input text is never modified.
+ */
+int32_t ha_syntax_highlight(
+    const uint8_t *language,
+    size_t language_length,
+    const uint8_t *source,
+    size_t source_length,
+    ha_syntax_span_callback callback,
+    void *context
+);
+
 typedef void (*ha_event_callback)(
     void *context,
     /*
