@@ -40,6 +40,7 @@ import qualified Agent.CLI.AuthSpec as AuthSpec
 import qualified Agent.CLI.BtwSpec as BtwSpec
 import qualified Agent.CLI.CancelWatchSpec as CancelWatchSpec
 import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
+import qualified Agent.CLI.ClipboardTextSpec as ClipboardTextSpec
 import qualified Agent.CLI.ClaudeGatewayProxySpec as ClaudeGatewayProxySpec
 import qualified Agent.CLI.ClaudeSpec as ClaudeSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
@@ -185,6 +186,7 @@ specs = do
     BtwSpec.spec
     CancelWatchSpec.spec
     ClipboardSpec.spec
+    ClipboardTextSpec.spec
     ClaudeGatewayProxySpec.spec
     ClaudeSpec.spec
     CommandSpec.spec

@@ -177,6 +177,7 @@ library
                     , Agent.CLI.Btw
                     , Agent.CLI.CancelWatch
                     , Agent.CLI.Clipboard
+                    , Agent.CLI.Clipboard.Process
                     , Agent.CLI.Claude
                     , Agent.CLI.ClaudeGatewayProxy
                     , Agent.CLI.CodeModeRuntime
@@ -570,6 +571,7 @@ test-suite agent-cli-test
                     , Agent.CLI.BtwSpec
                     , Agent.CLI.CancelWatchSpec
                     , Agent.CLI.ClipboardSpec
+                    , Agent.CLI.ClipboardTextSpec
                     , Agent.CLI.ClaudeGatewayProxySpec
                     , Agent.CLI.ClaudeSpec
                     , Agent.CLI.CommandSpec
