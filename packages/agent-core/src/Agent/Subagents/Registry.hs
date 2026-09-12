@@ -1,7 +1,7 @@
 -- | Nestable subagent registry.
 --
 -- Shared state (agent map, status, mailboxes, admission count) lives in STM.
--- IO is only used to allocate ids, start child supervisors, and wait with timeouts.
+-- IO allocates ids and leases, runs scoped turns, and waits with timeouts.
 module Agent.Subagents.Registry
     ( SubagentRegistry
     , SubagentLease

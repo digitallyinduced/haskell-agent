@@ -30,7 +30,7 @@ import Control.Concurrent.Async (race)
 import Control.Concurrent.MVar (withMVar)
 import Control.Concurrent.STM
 import Control.Exception.Safe (finally)
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -330,8 +330,8 @@ filterMSTM predicate = fmap reverse . go []
 
 -- | Re-admit a previously persisted agent that is not currently in the
 -- in-memory map (e.g. after close, or across a process restart within the
--- same session directory). Starts an idle supervisor; callers follow with
--- 'sendInput'. Does not consume a concurrency slot until the next turn.
+-- same session directory). Restores idle state; callers follow with
+-- 'sendInput'. Does not occupy an execution worker until the next turn.
 restoreSubagent
     :: SubagentRegistry
     -> SubagentId
@@ -472,6 +472,10 @@ restoreSubagentResolvedWithCwd
             Pending -> pure (Left "cannot restore a pending subagent")
             NotFound -> pure (Left "cannot restore a missing subagent record")
             _ -> do
+                -- An interrupted close can leave service-owned cleanup running.
+                -- Keep the record closed until that cleanup has been joined.
+                when (status == Closed) $
+                    releaseRecordResources registry record
                 resetCancel record.recordCancel
                 atomically do
                     releaseSlotSTM registry record
@@ -484,7 +488,7 @@ restoreSubagentResolvedWithCwd
                         atomically $
                             writeTVar record.recordPhase
                                 (AgentIdle normalizedStatus Nothing)
-                        startRecordSupervisor registry record mempty
+                        acquireRecordResources registry record mempty
                     else pure (Right ())
                 case restarted of
                     Left err -> do
@@ -496,7 +500,9 @@ restoreSubagentResolvedWithCwd
         cancelFlag <- newCancelFlag
         mailbox <- newTQueueIO
         phaseVar <- newTVarIO normalizedPhase
-        asyncVar <- newTVarIO Nothing
+        executionVar <- newTVarIO False
+        leaseVar <- newTVarIO Nothing
+        cleanupVar <- newTVarIO Nothing
         previousVar <- newTVarIO previous
         lastUpdateVar <- newTVarIO Nothing
         restored <- atomically do
@@ -524,7 +530,9 @@ restoreSubagentResolvedWithCwd
                                             , recordPhase = phaseVar
                                             , recordCancel = cancelFlag
                                             , recordMailbox = mailbox
-                                            , recordAsync = asyncVar
+                                            , recordExecution = executionVar
+                                            , recordLease = leaseVar
+                                            , recordCleanup = cleanupVar
                                             , recordPreviousResponseId = previousVar
                                             , recordLastUpdate = lastUpdateVar
                                             , recordTaskPath = resolvedPath
@@ -544,9 +552,9 @@ restoreSubagentResolvedWithCwd
                         writeTVar record.recordPhase
                             (AgentIdle normalizedStatus Nothing)
                     _ -> pure ()
-                startRecordSupervisor registry record mempty >>= \case
+                acquireRecordResources registry record mempty >>= \case
                     Left err -> do
-                        rollbackAdmission registry record
+                        rollbackAdmissionLocked registry record
                         pure (Left err)
                     Right () -> pure (Right agentId)
 

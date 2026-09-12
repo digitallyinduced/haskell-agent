@@ -16,7 +16,7 @@ import qualified Control.Concurrent.Async as Async
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Exception.Safe (finally)
-import Control.Monad (unless)
+import Control.Monad (unless, void)
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import qualified Data.Map.Strict as Map
@@ -25,6 +25,98 @@ import qualified Data.Text as Text
 import qualified Data.Text.Read as TextRead
 import System.Timeout (timeout)
 import Test.Hspec
+
+-- The release gate makes the interruption occur during owned resource cleanup,
+-- rather than relying on worker scheduling or normal completion.
+interruptedResourceCleanup :: Bool -> IO ()
+interruptedResourceCleanup resetAfterInterruption = do
+    cleanupStarted <- newEmptyMVar
+    cleanupRelease <- newEmptyMVar
+    cleanupFinished <- newEmptyMVar
+    workerStarted <- newEmptyMVar
+    retryStarted <- newEmptyMVar
+    releases <- newIORef (0 :: Int)
+    registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath ".")
+        (\_ _ _ _ -> putMVar workerStarted () >> atomically retry)
+        (\_ _ -> pure ())
+    let releaseGate = void (tryPutMVar cleanupRelease ())
+        cleanup = do
+            atomicModifyIORef' releases \n -> (n + 1, ())
+            putMVar cleanupStarted ()
+            readMVar cleanupRelease
+            putMVar cleanupFinished ()
+    (do
+        Right agentId <- spawnSubagentWithCwdPrepared registry (fromFilePath ".")
+            (\_ -> pure (subagentLease cleanup))
+            Nothing 0 "owned" Nothing
+        timeout 5000000 (readMVar workerStarted) `shouldReturn` Just ()
+        Async.withAsync (closeSubagent registry agentId) \closer ->
+            (do
+                timeout 5000000 (readMVar cleanupStarted) `shouldReturn` Just ()
+                timeout 5000000 (Async.cancel closer) `shouldReturn` Just ()
+                let retryShutdown =
+                        if resetAfterInterruption
+                            then resetSubagentRegistry registry
+                            else void (closeSubagent registry agentId)
+                Async.withAsync (putMVar retryStarted () >> retryShutdown) \retryCloser ->
+                    (do
+                        timeout 5000000 (readMVar retryStarted) `shouldReturn` Just ()
+                        -- Waiting times out without cancelling the closer.
+                        timeout 100000 (Async.wait retryCloser) `shouldReturn` Nothing
+                        readIORef releases `shouldReturn` 1
+                        releaseGate
+                        timeout 5000000 (Async.wait retryCloser) `shouldReturn` Just ()
+                        timeout 5000000 (readMVar cleanupFinished) `shouldReturn` Just ()
+                        getStatus registry agentId `shouldReturn`
+                            (if resetAfterInterruption then NotFound else Closed)
+                    ) `finally` releaseGate
+            ) `finally` releaseGate
+        ) `finally` (releaseGate >> closeSubagentRegistry registry)
+
+interruptedRestoreCleanup :: Bool -> IO ()
+interruptedRestoreCleanup interruptRestore = do
+    cleanupStarted <- newEmptyMVar
+    cleanupRelease <- newEmptyMVar
+    workerStarted <- newEmptyMVar
+    restoreStarted <- newEmptyMVar
+    releases <- newIORef (0 :: Int)
+    registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath ".")
+        (\_ _ _ _ -> putMVar workerStarted () >> atomically retry)
+        (\_ _ -> pure ())
+    let releaseGate = void (tryPutMVar cleanupRelease ())
+        cleanup = do
+            atomicModifyIORef' releases \n -> (n + 1, ())
+            putMVar cleanupStarted ()
+            readMVar cleanupRelease
+    (do
+        Right agentId <- spawnSubagentWithCwdPrepared registry (fromFilePath ".")
+            (\_ -> pure (subagentLease cleanup))
+            Nothing 0 "owned" Nothing
+        timeout 5000000 (readMVar workerStarted) `shouldReturn` Just ()
+        Async.withAsync (closeSubagent registry agentId) \closer ->
+            (do
+                timeout 5000000 (readMVar cleanupStarted) `shouldReturn` Just ()
+                timeout 5000000 (Async.cancel closer) `shouldReturn` Just ()
+                let restore = restoreSubagent registry agentId Nothing 1 Nothing Nothing
+                Async.withAsync (putMVar restoreStarted () >> restore) \restorer ->
+                    (do
+                        timeout 5000000 (readMVar restoreStarted) `shouldReturn` Just ()
+                        timeout 100000 (Async.wait restorer) `shouldReturn` Nothing
+                        getStatus registry agentId `shouldReturn` Closed
+                        if interruptRestore
+                            then do
+                                timeout 5000000 (Async.cancel restorer) `shouldReturn` Just ()
+                                getStatus registry agentId `shouldReturn` Closed
+                                releaseGate
+                                timeout 5000000 restore `shouldReturn` Just (Right agentId)
+                            else do
+                                releaseGate
+                                timeout 5000000 (Async.wait restorer) `shouldReturn` Just (Right agentId)
+                        getStatus registry agentId `shouldReturn` Completed Nothing
+                        readIORef releases `shouldReturn` 1
+                    ) `finally` releaseGate
+            ) `finally` releaseGate
+        ) `finally` (releaseGate >> closeSubagentRegistry registry)
 
 messagePayload :: InterAgentMessage -> Text
 messagePayload message = case message.messageContent of
@@ -105,7 +197,7 @@ spec = describe "Agent.Subagents" do
         timedOut `shouldBe` False
         Map.lookup agentId statuses `shouldBe` Just (Completed (Just "done:hello"))
 
-    it "does not launch a prepared supervisor after registry shutdown" do
+    it "does not launch a prepared turn after registry shutdown" do
         entered <- newEmptyMVar
         release <- newEmptyMVar
         ran <- newIORef False
@@ -118,10 +210,10 @@ spec = describe "Agent.Subagents" do
         closeSubagentRegistry registry
         putMVar release ()
         Async.wait spawning `shouldReturn`
-            Left "Subagent closed before its supervisor started."
+            Left "Subagent closed before resource acquisition."
         readIORef ran `shouldReturn` False
 
-    it "releases a prepared lease when the supervisor cannot start" do
+    it "releases a prepared lease when resource acquisition is rejected" do
         entered <- newEmptyMVar
         release <- newEmptyMVar
         releases <- newIORef (0 :: Int)
@@ -139,7 +231,7 @@ spec = describe "Agent.Subagents" do
         closeSubagentRegistry registry
         putMVar release ()
         Async.wait spawning `shouldReturn`
-            Left "Subagent closed before its supervisor started."
+            Left "Subagent closed before resource acquisition."
         readIORef releases `shouldReturn` 1
         readIORef ran `shouldReturn` False
 
@@ -176,7 +268,7 @@ spec = describe "Agent.Subagents" do
         closeSubagent registry agentId `shouldReturn` Right Pending
         putMVar release ()
         Async.wait spawning `shouldReturn`
-            Left "Subagent closed before its supervisor started."
+            Left "Subagent closed before resource acquisition."
 
         Right _ <- spawnSubagent registry Nothing 0 "replacement" Nothing
         extra <- spawnSubagent registry Nothing 0 "extra" Nothing
@@ -208,7 +300,7 @@ spec = describe "Agent.Subagents" do
         getStatus registry agentId `shouldReturn` Interrupted
         putMVar release ()
         Async.wait spawning `shouldReturn`
-            Left "Subagent closed before its supervisor started."
+            Left "Subagent closed before resource acquisition."
         readIORef leaseReleases `shouldReturn` 1
         getStatus registry agentId `shouldReturn` NotFound
         closeSubagentRegistry registry
@@ -813,6 +905,124 @@ spec = describe "Agent.Subagents" do
             Nothing 0 "first" Nothing
         closeSubagentRegistry registry
         readIORef released `shouldReturn` True
+
+    it "retains resource cleanup ownership after an interrupted close" do
+        interruptedResourceCleanup False
+
+    it "joins retained cleanup before restoring an interrupted close" do
+        interruptedRestoreCleanup False
+
+    it "keeps a restore interrupted during retained cleanup closed and retryable" do
+        interruptedRestoreCleanup True
+
+    it "waits for retained resource cleanup before resetting the registry" do
+        interruptedResourceCleanup True
+
+    it "rejects reset after terminal registry closure" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath ".")
+            (\_ _ _ _ -> pure (completedResult "done"))
+            (\_ _ -> pure ())
+        closeSubagentRegistry registry
+        resetSubagentRegistry registry `shouldThrow` anyIOException
+        result <- spawnSubagent registry Nothing 0 "task" Nothing
+        result `shouldSatisfy` either (const True) (const False)
+        closeSubagentRegistry registry
+
+    it "starts sibling resource finalizers concurrently during registry close" do
+        started <- newTVarIO (0 :: Int)
+        release <- newEmptyMVar
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath ".")
+            (\_ _ _ _ -> pure (completedResult "done"))
+            (\_ _ -> pure ())
+        let unblock = void $ tryPutMVar release ()
+            prepare _ = pure $ subagentLease do
+                atomically $ modifyTVar' started (+ 1)
+                readMVar release
+        (do
+            Right _ <- spawnSubagentWithCwdPrepared registry (fromFilePath ".")
+                prepare Nothing 0 "first" Nothing
+            Right _ <- spawnSubagentWithCwdPrepared registry (fromFilePath ".")
+                prepare Nothing 0 "second" Nothing
+            Async.withAsync (closeSubagentRegistry registry) \closer -> do
+                (timeout 5000000 (atomically $ readTVar started >>= check . (== 2))
+                    `shouldReturn` Just ())
+                    `finally` unblock
+                Async.wait closer)
+            `finally` (unblock >> closeSubagentRegistry registry)
+
+    it "starts additional turns after increasing the concurrency limit" do
+        started <- newTQueueIO
+        registry <- newSubagentRegistry
+            (defaultSubagentConfig { maxConcurrent = 1 })
+            (fromFilePath ".")
+            (\_ _ prompt _ -> do
+                atomically $ writeTQueue started (messagePayload prompt)
+                atomically retry)
+            (\_ _ -> pure ())
+        (do
+            Right _ <- spawnSubagent registry Nothing 0 "first" Nothing
+            timeout 5000000 (atomically $ readTQueue started)
+                `shouldReturn` Just "first"
+            setMaxConcurrent registry 2
+            Right _ <- spawnSubagent registry Nothing 0 "second" Nothing
+            timeout 5000000 (atomically $ readTQueue started)
+                `shouldReturn` Just "second"
+            ) `finally` closeSubagentRegistry registry
+
+    it "joins turn cleanup before releasing the agent lease" do
+        started <- newEmptyMVar
+        turnCleanupStarted <- newEmptyMVar
+        turnCleanupRelease <- newEmptyMVar
+        leaseReleased <- newEmptyMVar
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath ".")
+            (\_ _ _ _ ->
+                (putMVar started () >> atomically retry)
+                    `finally` do
+                        putMVar turnCleanupStarted ()
+                        readMVar turnCleanupRelease)
+            (\_ _ -> pure ())
+        let releaseGate = void $ tryPutMVar turnCleanupRelease ()
+        (do
+            Right agentId <- spawnSubagentWithCwdPrepared registry (fromFilePath ".")
+                (\_ -> pure $ subagentLease (putMVar leaseReleased ()))
+                Nothing 0 "blocked" Nothing
+            timeout 5000000 (readMVar started) `shouldReturn` Just ()
+            Async.withAsync (closeSubagent registry agentId) \closer ->
+                (do
+                    timeout 5000000 (readMVar turnCleanupStarted)
+                        `shouldReturn` Just ()
+                    tryReadMVar leaseReleased `shouldReturn` Nothing
+                    timeout 5000000 (Async.cancel closer) `shouldReturn` Just ()
+                    tryReadMVar leaseReleased `shouldReturn` Nothing
+                    releaseGate
+                    _ <- closeSubagent registry agentId
+                    timeout 5000000 (readMVar leaseReleased) `shouldReturn` Just ()
+                    ) `finally` releaseGate
+            ) `finally` (releaseGate >> closeSubagentRegistry registry)
+
+    it "releases an idle agent while every turn worker is occupied" do
+        started <- newEmptyMVar
+        released <- newEmptyMVar
+        registry <- newSubagentRegistry
+            (defaultSubagentConfig { maxConcurrent = 1 })
+            (fromFilePath ".")
+            (\_ _ prompt _ ->
+                if messagePayload prompt == "blocked"
+                    then putMVar started () >> atomically retry
+                    else pure (completedResult (messagePayload prompt)))
+            (\_ _ -> pure ())
+        (do
+            Right idleAgent <- spawnSubagentWithCwdPrepared registry (fromFilePath ".")
+                (\_ -> pure $ subagentLease (putMVar released ()))
+                Nothing 0 "completed" Nothing
+            (_, timedOut) <- waitSubagents registry [idleAgent] 5000
+            timedOut `shouldBe` False
+            Right _ <- spawnSubagent registry Nothing 0 "blocked" Nothing
+            timeout 5000000 (readMVar started) `shouldReturn` Just ()
+            result <- timeout 5000000 (closeSubagent registry idleAgent)
+            result `shouldSatisfy` maybe False (const True)
+            timeout 5000000 (readMVar released) `shouldReturn` Just ()
+            ) `finally` closeSubagentRegistry registry
 
     it "releases composed subagent leases in reverse acquisition order" do
         released <- newIORef ([] :: [Int])
