@@ -1695,7 +1695,7 @@ spec = describe "runLoop" do
                     count <- atomicModifyIORef' steeringReads \n -> (n + 1, n)
                     if count == 0
                         then pure [UserMessage "also verify tests"]
-                        else Safe.throwIO (userError "steering unavailable")
+                        else Exception.throwIO (userError "steering unavailable")
                 , loopCommitSteering = \count ->
                     modifyIORef' acknowledgements (<> [count])
                 }
