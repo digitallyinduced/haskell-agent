@@ -8,8 +8,8 @@ import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.Runtime.Session
 import Agent.Runtime.SessionLock
 import Agent.CLI.SteeringInputs
-    ( awaitBackgroundCompletion, clearSteeringInputs, commitSteeringInputs
-    , hasBackgroundCompletionWake, newSteeringInputs
+    ( awaitSteeringInput, clearSteeringInputs, commitSteeringInputs
+    , hasSteeringInputWake, newSteeringInputs
     , prepareBackgroundCompletion, readSteeringInputs )
 import Agent.Dialect (DialectId(..))
 import Agent.Loop (TurnInput(..), defaultLoopDispatch)
@@ -605,11 +605,11 @@ spec = describe "Agent.CLI.AgentSessions" do
                 (\status -> void $ enqueue "child:turn-1" $
                     UserMessage (formatSessionCompletionNotice "child" status))
                 (pure (Right ()))
-            timeout 1000000 (atomically (awaitBackgroundCompletion steering))
+            timeout 1000000 (atomically (awaitSteeringInput steering))
                 `shouldReturn` Just ()
             -- Consuming the idle-wake edge must not consume the model input.
             readSteeringInputs steering `shouldReturn` [notice]
-            hasBackgroundCompletionWake steering `shouldReturn` False
+            hasSteeringInputWake steering `shouldReturn` False
             readSteeringInputs steering `shouldReturn` [notice]
             commitSteeringInputs steering 1
             readSteeringInputs steering `shouldReturn` []
@@ -627,13 +627,13 @@ spec = describe "Agent.CLI.AgentSessions" do
             putMVar gate ()
             waitForThreadStatus manager "child" "completed"
             readSteeringInputs steering `shouldReturn` []
-            hasBackgroundCompletionWake steering `shouldReturn` False
+            hasSteeringInputWake steering `shouldReturn` False
             -- New work belongs to the new conversation and can wake it.
             current <- prepareBackgroundCompletion steering
             current "child:turn-2" (UserMessage "new completion")
                 `shouldReturn` Right True
             readSteeringInputs steering `shouldReturn` [UserMessage "new completion"]
-            hasBackgroundCompletionWake steering `shouldReturn` True
+            hasSteeringInputWake steering `shouldReturn` True
 
     it "serializes and reports in-process session turns" $
         withTempSessionThreadManager ["blocked", "failed"] \_ manager -> do

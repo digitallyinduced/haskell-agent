@@ -418,6 +418,47 @@ spec = describe "fullscreen UI reducer" do
         map (.blockBody) (Foldable.toList state.uiBlocks)
             `shouldBe` ["failed partial", "complete retry"]
 
+    it "ignores unknown tool completions without reviving an idle turn" do
+        let result = ToolCallResult
+                { toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , callId = "late-nested-call"
+                , output = "done"
+                , callKind = FunctionCallKind
+                }
+            finished = apply
+                [ UiLoop TurnStarted
+                , UiLoop (TurnFinished (emptyTurnOutput "r1" [] (Just "done")))
+                ]
+            idle = reduceUi (UiSetAwaitingInput True) finished
+            writing = apply [UiLoop TurnStarted, UiLoop (TextDelta "next answer")]
+        mapM_ (\state -> reduceUi (UiLoop (ToolFinished result)) state
+            `shouldBe` state) [finished, idle, writing]
+
+    it "updates a late tracked tool result without reviving an idle turn" do
+        let call = functionToolCall "c1" "read_file" "{}"
+            result = ToolCallResult
+                { toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , callId = "c1"
+                , output = "contents"
+                , callKind = FunctionCallKind
+                }
+            idle = apply
+                [ UiLoop TurnStarted
+                , UiLoop (ToolStarted call)
+                , UiSetAwaitingInput True
+                ]
+            completed = reduceUi (UiLoop (ToolFinished result)) idle
+        completed.uiRunning `shouldBe` False
+        completed.uiAwaitingInput `shouldBe` True
+        completed.uiActivity `shouldBe` idle.uiActivity
+        completed.uiToolCalls `shouldBe` mempty
+        map (.blockState) (Foldable.toList completed.uiBlocks)
+            `shouldBe` [BlockComplete]
+
     it "matches tool completion by call id" do
         let call = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"git status\"}"
             result = ToolCallResult
@@ -723,6 +764,17 @@ spec = describe "fullscreen UI reducer" do
         polled.uiToolCalls `shouldBe` mempty
         polled.uiShellProcesses `shouldBe` mempty
         polled.uiShellPolls `shouldBe` mempty
+
+        let idle = reduceUi (UiSetAwaitingInput True) waiting
+            late = reduceUi
+                (UiLoop (ToolFinished (finished { callId = "poll-1" }))) idle
+        late.uiRunning `shouldBe` False
+        late.uiAwaitingInput `shouldBe` True
+        late.uiActivity `shouldBe` idle.uiActivity
+        late.uiShellPolls `shouldBe` mempty
+        late.uiShellProcesses `shouldBe` mempty
+        map (.blockState) (Foldable.toList late.uiBlocks)
+            `shouldBe` [BlockComplete]
 
     it "keeps the command tracked when an empty poll itself is cancelled" do
         let command =
@@ -2190,7 +2242,7 @@ spec = describe "fullscreen UI reducer" do
         map (.blockBody) (Foldable.toList state.uiBlocks)
             `shouldBe` ["keep the schema"]
         (.noticeText) <$> state.uiNotice
-            `shouldBe` Just "Steering the current turn…"
+            `shouldBe` Just "Guidance queued…"
 
     it "promotes a send-now draft ahead of existing queued inputs" do
         let state =

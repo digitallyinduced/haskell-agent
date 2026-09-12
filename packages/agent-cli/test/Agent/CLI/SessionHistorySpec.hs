@@ -6,6 +6,10 @@ import Agent.Runtime.Session
     )
 import Agent.CLI.Session.ConversationStore (newConversationStore)
 import Agent.CLI.Session.History (hydrateUiHistory)
+import qualified Agent.CLI.SteeringInputs as Steering
+import Agent.CLI.TUI.SessionHistory (sessionHistoryTurn)
+import Agent.CLI.TUI.History (HistoryTurn(..))
+import Control.Concurrent.STM (atomically)
 import Agent.Runtime.Session.History
     ( foldSessionItems
     , readLiveAttachments
@@ -66,6 +70,24 @@ spec = do
         readLiveAttachments conversationRef `shouldReturn` []
 
     describe "hydrateUiHistory" do
+      it "retains idle wake guidance in both text and detailed history" do
+        steering <- Steering.newSteeringInputs
+        Steering.enqueueSteeringInputs steering [UserMessage "late guidance"]
+            `shouldReturn` Right ()
+        atomically (Steering.awaitSteeringInput steering)
+        (promptText, inputs) <- Steering.readSteeringTurn steering
+        let turn = (sessionTurn promptText (Just "done") TranscriptAppend)
+                { turnItems = turnInputsToItems inputs }
+            textBlocks = Foldable.toList (hydrateUiHistory [turn]).uiBlocks
+            detailedBlocks = Foldable.toList
+                (sessionHistoryTurn (0 :: Int) turn).historyTurnBlocks
+            userBodies blocks =
+                [ block.blockBody | block <- blocks, block.blockKind == BlockUser ]
+        promptText `shouldBe` "late guidance"
+        userBodies textBlocks `shouldBe` ["late guidance"]
+        userBodies detailedBlocks `shouldBe` ["late guidance"]
+        Steering.readSteeringInputs steering `shouldReturn` inputs
+
       it "keeps pre-compaction blocks scrollable while appending the summary" do
         let before = sessionTurn "question" (Just "answer") TranscriptAppend
             compacted =
