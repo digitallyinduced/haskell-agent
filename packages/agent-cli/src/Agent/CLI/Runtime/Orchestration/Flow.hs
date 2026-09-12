@@ -38,7 +38,7 @@ import Agent.CLI.Options
       isOneShot,
       CliOptions(optMotionMode, optManagedTurnFile, optScreenMode,
                  optProvider, optModel, optWorktree, optEffort, optPrompt,
-                 optPromptFile, optResume, optCwd, optCodeMode, optYolo),
+                 optPromptFile, optResume, optCwd, optCodeMode, optYolo), Override(..),
       CodeModeOption(CodeModeEnabled),
       ScreenMode(ScreenMinimal) )
 import Agent.CLI.Provider.Switch
@@ -1097,7 +1097,7 @@ prepareAgentIterationAction request resources interface resumeLock
     , isNothing request.iterationTransition = do
         let options = request.iterationOptions
             prepareAccountUsage =
-                options.optYolo
+                options.optYolo == Explicit True
                     || isNothing interface.iterationFullscreen
                     || isJust options.optProvider
                     || isJust options.optModel

@@ -15,7 +15,7 @@ import Agent.Runtime.Models
     ( ModelOption(..), ModelTarget(..), defaultModelFor, rawModelOption
     , resolveConfiguredModel, resolvePersistedDialect )
 import Agent.CLI.Options
-    ( ApprovalPolicy(..), CliOptions(..), defaultEffortFor
+    ( ApprovalPolicy(..), CliOptions(..), Override(..), defaultEffortFor
     , normalizeReasoningEffortForDialect, resolveApprovalPolicy )
 import Agent.CLI.Project (ProjectModel(..), ProjectSettings(..))
 import Agent.CLI.Runtime.Orchestration.Tools.Request
@@ -289,6 +289,6 @@ resolveToolModel AgentToolsRequest
                     Just _ -> False
                     Nothing -> hooks.nativeInteractionMode == NativeYolo
             Nothing ->
-                not options.optNoYolo
-                    && (options.optYolo
+                options.optYolo /= Explicit False
+                    && (options.optYolo == Explicit True
                         || projectSettings.settingsAutoApprove)

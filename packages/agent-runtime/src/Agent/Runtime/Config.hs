@@ -45,7 +45,7 @@ import Agent.PrivateFileLock (withPrivateFileLock)
 import Control.Exception.Safe (displayException, tryIO)
 import Control.Monad (forM_, unless, when)
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Trans.Except (ExceptT(..), runExceptT, withExceptT)
+import Control.Monad.Trans.Except (ExceptT(..), except, runExceptT, withExceptT)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Bits ((.|.), rotateL, shiftL, xor)
@@ -626,46 +626,32 @@ withHarnessConfigSnapshot home action =
 
 loadHarnessConfigUnlocked
     :: OsPath -> IO (Either Text (Word64, HarnessConfig))
-loadHarnessConfigUnlocked home = do
+loadHarnessConfigUnlocked home = runExceptT do
     let path = harnessConfigPath home
-    exists <- doesFileExist path
-    bytesResult <-
+    exists <- liftIO (doesFileExist path)
+    bytes <- withExceptT (\exception ->
+        "Failed to read "
+            <> Text.pack (unsafeToFilePath path)
+            <> ": "
+            <> Text.pack (displayException exception)) $ ExceptT $
         if exists
             then tryIO
                 (retryOnFileBusy (LBS.readFile (unsafeToFilePath path)))
             else pure (Right (Aeson.encode defaultHarnessConfig))
-    case bytesResult of
-        Left exception ->
-            pure . Left $
-                "Failed to read "
-                    <> Text.pack (unsafeToFilePath path)
-                    <> ": "
-                    <> Text.pack (displayException exception)
-        Right bytes ->
-            case
-                if isBlankJson bytes
-                    then Right defaultHarnessConfig
-                    else decodeLazy harnessConfigDecoder bytes
-            of
-                Left err ->
-                    pure . Left $
-                        "Invalid "
-                            <> Text.pack (unsafeToFilePath path)
-                            <> ": "
-                            <> err
-                Right config ->
-                    case validateHarnessConfig config of
-                        Left err -> pure (Left err)
-                        Right valid -> do
-                            identified <- assignMcpConnectionIds valid
-                            if identified /= valid
-                                then fmap (fmap (, identified))
-                                    (writeHarnessConfigUnlocked home identified)
-                                else loadHarnessRevisionKeyUnlocked home >>= \case
-                                    Left err -> pure (Left err)
-                                    Right key ->
-                                        pure (Right
-                                            (keyedConfigRevision key bytes, valid))
+    config <- withExceptT (\err ->
+        "Invalid " <> Text.pack (unsafeToFilePath path) <> ": " <> err) $ except $
+        if isBlankJson bytes
+            then Right defaultHarnessConfig
+            else decodeLazy harnessConfigDecoder bytes
+    valid <- except (validateHarnessConfig config)
+    identified <- liftIO (assignMcpConnectionIds valid)
+    if identified /= valid
+        then do
+            revision <- ExceptT (writeHarnessConfigUnlocked home identified)
+            pure (revision, identified)
+        else do
+            key <- ExceptT (loadHarnessRevisionKeyUnlocked home)
+            pure (keyedConfigRevision key bytes, valid)
 
 -- | Atomically read, transform, validate, and replace the config while holding
 -- the process-shared config lock. The returned revision is for the exact bytes

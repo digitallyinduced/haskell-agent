@@ -221,6 +221,7 @@ library
                     , Agent.CLI.Options
                     , Agent.CLI.Permission
                     , Agent.CLI.PendingInputs
+                    , Agent.CLI.PendingInputs.Model
                     , Agent.CLI.InputBudget
                     , Agent.CLI.Picker
                     , Agent.CLI.Plan
@@ -329,7 +330,7 @@ library
                     , aeson >= 2.0
                     , ansi-terminal >= 1.0
                     , async
-                    , base >= 4.17 && < 5
+                    , base >= 4.19 && < 5
                     , base64-bytestring
                     , brick >= 2.9 && < 3
                     , bytestring
@@ -337,6 +338,7 @@ library
                     , containers
                     , crypton-connection
                     , crypton
+                    , deepseq
                     , directory
                     , entropy
                     , filelock
@@ -378,13 +380,18 @@ executable agent-cli
     import:           common-options
     hs-source-dirs:   app
     main-is:          Main.hs
+    other-modules:    HeapDiagnostics
     -- Keep enough capabilities for concurrent agent work without multiplying
     -- the RTS allocation area by every host core.
     ghc-options:      -threaded -rtsopts "-with-rtsopts=-N4 -M8G"
     build-depends:    agent-cli
+                    , async
                     , base >= 4.17 && < 5
                     , directory
                     , filepath
+                    , safe-exceptions
+                    , time
+                    , unix
 
 executable eval-ghci-vs-bash
     import:           common-options
@@ -485,6 +492,24 @@ benchmark history-retention-bench
                     , base >= 4.17 && < 5
                     , text
 
+benchmark command-history-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark, src
+    main-is:          CommandHistory.hs
+    other-modules:    Agent.CLI.Input.History
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T -N4"
+    build-depends:    agent-runtime
+                    , base >= 4.17 && < 5
+                    , deepseq
+                    , directory
+                    , filepath
+                    , haskeline
+                    , safe-exceptions
+                    , temporary
+                    , text
+                    , unix
+
 benchmark history-eviction-bench
     import:           common-options
     type:             exitcode-stdio-1.0
@@ -561,6 +586,7 @@ test-suite agent-cli-test
                     , Agent.CLI.ImagePreviewSpec
                     , Agent.CLI.ChartImageSpec
                     , Agent.CLI.InputSpec
+                    , Agent.CLI.InputHistorySpec
                     , Agent.CLI.InterruptSpec
                     , Agent.CLI.VoiceAudioSpec
                     , Agent.CLI.LoginSpec

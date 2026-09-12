@@ -31,17 +31,17 @@ mkDerivation {
     agent-responses-types agent-runtime agent-store agent-syntax
     agent-tools agent-tui agent-webrtc agent-xai ansi-terminal async
     base base64-bytestring brick bytestring colour containers crypton
-    crypton-connection directory entropy filelock filepath haskeline
-    hasql-pool http-client http-client-tls http-types JuicyPixels
-    memory mtl network network-uri optparse-applicative process
-    resourcet retry safe-exceptions scientific stm tagsoup terminfo
-    text time tls transformers unix vector vty vty-crossplatform
-    vty-unix wai warp
+    crypton-connection deepseq directory entropy filelock filepath
+    haskeline hasql-pool http-client http-client-tls http-types
+    JuicyPixels memory mtl network network-uri optparse-applicative
+    process resourcet retry safe-exceptions scientific stm tagsoup
+    terminfo text time tls transformers unix vector vty
+    vty-crossplatform vty-unix wai warp
   ];
   executableHaskellDepends = [
     aeson agent-responses agent-responses-types agent-runtime
-    agent-store base bytestring containers directory filepath process
-    safe-exceptions text time unix
+    agent-store async base bytestring containers directory filepath
+    process safe-exceptions text time unix
   ];
   testHaskellDepends = [
     aeson agent-accounts agent-claude agent-codex-dialect
@@ -59,8 +59,8 @@ mkDerivation {
     aeson agent-core agent-json agent-mcp agent-openai agent-responses
     agent-responses-types agent-runtime agent-store agent-tui
     ansi-terminal async base brick bytestring colour containers deepseq
-    directory filepath JuicyPixels process safe-exceptions stm text
-    time unix vty
+    directory filepath haskeline JuicyPixels process safe-exceptions
+    stm temporary text time unix vty
   ];
   description = "Command-line interface for the universal agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";

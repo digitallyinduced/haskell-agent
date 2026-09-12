@@ -1,7 +1,7 @@
 { mkDerivation, aeson, agent-json, agent-responses-types, async
 , base, base64-bytestring, bytestring, containers
-, crypton-connection, directory, entropy, filelock, filepath, hspec
-, JuicyPixels, lib, process, QuickCheck, resourcet, retry
+, crypton-connection, directory, entropy, extra, filelock, filepath
+, hspec, JuicyPixels, lib, process, QuickCheck, resourcet, retry
 , safe-exceptions, scientific, stm, text, text-builder, time, tls
 , transformers, unix, vector, websockets, yaml, zlib
 }:
@@ -12,10 +12,10 @@ mkDerivation {
   enableSeparateDataOutput = true;
   libraryHaskellDepends = [
     aeson agent-json agent-responses-types async base base64-bytestring
-    bytestring containers crypton-connection directory entropy filelock
-    filepath JuicyPixels process resourcet retry safe-exceptions
-    scientific stm text time tls transformers unix vector websockets
-    yaml zlib
+    bytestring containers crypton-connection directory entropy extra
+    filelock filepath JuicyPixels process resourcet retry
+    safe-exceptions scientific stm text time tls transformers unix
+    vector websockets yaml zlib
   ];
   testHaskellDepends = [
     aeson agent-json agent-responses-types async base base64-bytestring

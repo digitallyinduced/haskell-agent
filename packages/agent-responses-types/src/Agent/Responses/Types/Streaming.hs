@@ -20,6 +20,8 @@ import Agent.Responses.Types.Items
     , responseItemDecoder
     )
 import Agent.Responses.Types.Response (Response, responseDecoder)
+import Control.Applicative ((<|>))
+import Control.Monad (join)
 import Data.Aeson hiding (TaggedObject)
 import qualified Data.Hermes as Hermes
 import Data.Text (Text)
@@ -719,16 +721,8 @@ turnStateFieldsDecoder = do
     nestedHeaders <- optionalAtKey "headers" $ Hermes.object do
         nestedHeader <- optionalAtKey "x-codex-turn-state" Hermes.text
         nestedAlias <- optionalAtKey "turn_state" Hermes.text
-        pure (firstJust nestedHeader nestedAlias)
-    pure
-        ( firstJust directHeader
-            (firstJust directAlias (maybe Nothing id nestedHeaders))
-        )
-
-firstJust :: Maybe value -> Maybe value -> Maybe value
-firstJust first second = case first of
-    Just value -> Just value
-    Nothing -> second
+        pure (nestedHeader <|> nestedAlias)
+    pure (directHeader <|> directAlias <|> join nestedHeaders)
 
 codexRateLimitsDecoder :: Hermes.Decoder CodexRateLimits
 codexRateLimitsDecoder = Hermes.object $

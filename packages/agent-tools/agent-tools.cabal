@@ -74,6 +74,7 @@ library
     autogen-modules:  Paths_agent_tools
     hs-source-dirs:   src
     build-depends:    base >= 4.14 && < 5
+                    , extra
                     , agent-core >= 0.1 && < 0.2
                     , agent-json >= 0.1 && < 0.2
                     , agent-process >= 0.1 && < 0.2

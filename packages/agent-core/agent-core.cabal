@@ -107,6 +107,7 @@ library
                     , crypton-connection
                     , directory
                     , entropy
+                    , extra
                     , filepath
                     , JuicyPixels
                     , filelock

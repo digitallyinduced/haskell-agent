@@ -90,6 +90,7 @@
                     include = [
                         "app"
                         "benchmark"
+                        "internal"
                         "src"
                         "test"
                         "agent-openai.cabal"
@@ -308,6 +309,7 @@
                     root = ./packages/agent-mail;
                     include = [
                         "src"
+                        "internal"
                         "test"
                         "agent-mail.cabal"
                         "package.nix"

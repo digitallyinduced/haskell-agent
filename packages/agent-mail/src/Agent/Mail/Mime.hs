@@ -32,6 +32,7 @@ import qualified Data.Text.Encoding.Error as TextEncodingError
 import Text.HTML.TagSoup (innerText, parseTags)
 import Text.Read (readMaybe)
 import Agent.Mail.Types (MailDraftContent(..))
+import Agent.Mail.Utf8 (truncateUtf8, utf8Length)
 
 data ParsedMailMime = ParsedMailMime
     { parsedMailParts :: ![MimePart]
@@ -711,17 +712,3 @@ maximumMimeParameterSegments = 32
 
 maximumTextDecodeBytes :: Int
 maximumTextDecodeBytes = 512 * 1024
-
-truncateUtf8 :: Int -> Text -> Text
-truncateUtf8 maximum =
-    decodePrefix . BS.take maximum . TextEncoding.encodeUtf8
-  where
-    decodePrefix bytes =
-        case TextEncoding.decodeUtf8' bytes of
-            Right value -> value
-            Left _
-                | BS.null bytes -> ""
-                | otherwise -> decodePrefix (BS.init bytes)
-
-utf8Length :: Text -> Int
-utf8Length = BS.length . TextEncoding.encodeUtf8

@@ -27,7 +27,6 @@ module Agent.Runtime.ConversationStore
 
 import Agent.Loop
     ( BackendContinuation(..)
-    , BackendRevision(..)
     , BackendSnapshot(..)
     , ImageAttachment
     )
@@ -41,10 +40,12 @@ import Control.Concurrent.MVar
     )
 import Control.Exception.Safe (bracket)
 import Data.Text (Text)
-import Data.Word (Word64)
-
-newtype TranscriptGeneration = TranscriptGeneration Word64
-    deriving (Eq, Ord, Show)
+import Agent.Runtime.ConversationStore.Lifecycle
+    ( ConversationState(..), TranscriptState(..), ResidentSource(..)
+    , TranscriptGeneration(..), ConversationResidency(..)
+    , openAiContinuation, snapshotFromState
+    )
+import qualified Agent.Runtime.ConversationStore.Lifecycle as Lifecycle
 
 -- | A durable location from which an exact transcript can be reconstructed.
 --
@@ -55,27 +56,7 @@ data TranscriptCheckpoint = TranscriptCheckpoint
     , checkpointLoad :: !(IO [ResponseItem])
     }
 
-data ConversationResidency
-    = ConversationResident
-    | ConversationCold
-    deriving (Eq, Show)
-
-data TranscriptState
-    = ResidentTranscript ![ResponseItem] !ResidentSource
-    | ColdTranscript !TranscriptCheckpoint
-
-data ResidentSource
-    = CommittedResident
-    | HydratedResident !TranscriptCheckpoint !Int
-
-data ConversationState = ConversationState
-    { stateGeneration :: !TranscriptGeneration
-    , stateTranscript :: !TranscriptState
-    , stateContinuation :: !(Maybe BackendContinuation)
-    , stateAttachments :: ![ImageAttachment]
-    }
-
-newtype ConversationStore = ConversationStore (MVar ConversationState)
+newtype ConversationStore = ConversationStore (MVar (ConversationState TranscriptCheckpoint))
 
 newConversationStore
     :: Maybe Text
@@ -136,47 +117,27 @@ withConversationBackendState
     -> (BackendSnapshot -> IO a)
     -> IO a
 withConversationBackendState
-        store@(ConversationStore stateVar)
+        (ConversationStore stateVar)
         action =
     bracket acquire release \(_, _, snapshot) ->
         action snapshot
   where
     acquire =
         modifyMVar stateVar \state ->
-            case state.stateTranscript of
-                ResidentTranscript items CommittedResident ->
+            case Lifecycle.acquireTranscript state of
+                Lifecycle.Acquired resident releaseHydration items ->
                     pure
-                        ( state
+                        ( resident
                         , ( state.stateGeneration
-                          , False
+                          , releaseHydration
                           , snapshotFromState state items
                           )
                         )
-                ResidentTranscript items
-                        (HydratedResident checkpoint readers) ->
-                    pure
-                        ( state
-                            { stateTranscript =
-                                ResidentTranscript
-                                    items
-                                    (HydratedResident
-                                        checkpoint
-                                        (readers + 1))
-                            }
-                        , ( state.stateGeneration
-                          , True
-                          , snapshotFromState state items
-                          )
-                        )
-                ColdTranscript cold -> do
+                Lifecycle.LoadCheckpoint cold -> do
+                    -- Keep hydration under modifyMVar: a failed/cancelled load
+                    -- restores the cold state, and writers cannot interleave.
                     items <- cold.checkpointLoad
-                    let resident =
-                            state
-                                { stateTranscript =
-                                    ResidentTranscript
-                                        items
-                                        (HydratedResident cold 1)
-                                }
+                    let resident = Lifecycle.hydratedTranscript cold items state
                     pure
                         ( resident
                         , ( state.stateGeneration
@@ -186,7 +147,9 @@ withConversationBackendState
                         )
     release (generation, releaseHydration, _) =
         if releaseHydration
-            then releaseHydratedTranscript store generation
+            then modifyMVar_ stateVar \state ->
+                case Lifecycle.releaseHydratedTranscript generation state of
+                    (next, ()) -> pure next
             else pure ()
 
 -- | Publish a newer exact transcript and return its generation token.
@@ -195,17 +158,7 @@ commitConversationTranscript
     -> [ResponseItem]
     -> IO TranscriptGeneration
 commitConversationTranscript (ConversationStore stateVar) transcript =
-    modifyMVar stateVar \state -> do
-        let generation = nextGeneration state.stateGeneration
-        pure
-            ( state
-                { stateGeneration = generation
-                , stateTranscript =
-                    ResidentTranscript transcript CommittedResident
-                , stateContinuation = Nothing
-                }
-            , generation
-            )
+    modifyMVar stateVar (pure . Lifecycle.commitTranscript transcript)
 
 -- | Replace transcript state outside a backend commit without disturbing
 -- queued images. The legacy response-id argument is ignored: replacement
@@ -219,17 +172,7 @@ replaceConversationTranscript
         (ConversationStore stateVar)
         _previousResponseId
         transcript =
-    modifyMVar stateVar \state -> do
-        let generation = nextGeneration state.stateGeneration
-        pure
-            ( state
-                { stateGeneration = generation
-                , stateTranscript =
-                    ResidentTranscript transcript CommittedResident
-                , stateContinuation = Nothing
-                }
-            , generation
-            )
+    modifyMVar stateVar (pure . Lifecycle.commitTranscript transcript)
 
 -- | Release a resident transcript only when it is still the expected version.
 --
@@ -245,30 +188,11 @@ evictConversationTranscript
         expectedGeneration
         checkpoint =
     modifyMVar stateVar \state ->
-        case state.stateTranscript of
-            ResidentTranscript _ CommittedResident
-                | state.stateGeneration == expectedGeneration ->
-                    pure
-                        ( state
-                            { stateTranscript =
-                                ColdTranscript checkpoint
-                            }
-                        , True
-                        )
-            ResidentTranscript items (HydratedResident _ readers)
-                | state.stateGeneration == expectedGeneration ->
-                    -- Readers keep their immutable value, while their final
-                    -- release installs the newest durable checkpoint.
-                    pure
-                        ( state
-                            { stateTranscript =
-                                ResidentTranscript
-                                    items
-                                    (HydratedResident checkpoint readers)
-                            }
-                        , False
-                        )
-            _ -> pure (state, False)
+        -- Decide inside the callback, without forcing the new state. In
+        -- particular an exceptional generation comparison must restore the
+        -- old MVar, not publish a deferred exception as its next value.
+        case Lifecycle.evictTranscript expectedGeneration checkpoint state of
+            (next, evicted) -> pure (next, evicted)
 
 -- | Point an unchanged cold or currently hydrated transcript at an equivalent
 -- durable snapshot under a different identity (for example, after /fork).
@@ -280,19 +204,7 @@ retargetConversationCheckpoint
 retargetConversationCheckpoint
         (ConversationStore stateVar)
         checkpoint =
-    modifyMVar_ stateVar \state ->
-        pure state
-            { stateTranscript =
-                case state.stateTranscript of
-                    ColdTranscript _ ->
-                        ColdTranscript checkpoint
-                    ResidentTranscript items
-                            (HydratedResident _ readers) ->
-                        ResidentTranscript
-                            items
-                            (HydratedResident checkpoint readers)
-                    resident@ResidentTranscript{} -> resident
-            }
+    modifyMVar_ stateVar (pure . Lifecycle.retargetCheckpoint checkpoint)
 
 readConversationPreviousResponseId
     :: ConversationStore
@@ -315,21 +227,7 @@ commitConversationBackendState
     -> BackendSnapshot
     -> IO BackendSnapshot
 commitConversationBackendState (ConversationStore stateVar) candidate =
-    modifyMVar stateVar \state -> do
-        let generation = nextGeneration state.stateGeneration
-            committed = candidate
-                { backendRevision = generationRevision generation }
-        pure
-            ( state
-                { stateGeneration = generation
-                , stateTranscript =
-                    ResidentTranscript
-                        committed.backendItems
-                        CommittedResident
-                , stateContinuation = committed.backendContinuation
-                }
-            , committed
-            )
+    modifyMVar stateVar (pure . Lifecycle.commitBackendState candidate)
 
 readConversationAttachments
     :: ConversationStore
@@ -348,61 +246,8 @@ modifyConversationAttachments (ConversationStore stateVar) update =
 
 resetConversationStore :: ConversationStore -> IO ()
 resetConversationStore (ConversationStore stateVar) =
-    modifyMVar_ stateVar \state ->
-        pure state
-            { stateGeneration = nextGeneration state.stateGeneration
-            , stateTranscript =
-                ResidentTranscript [] CommittedResident
-            , stateContinuation = Nothing
-            , stateAttachments = []
-            }
-
-nextGeneration :: TranscriptGeneration -> TranscriptGeneration
-nextGeneration (TranscriptGeneration generation) =
-    TranscriptGeneration (generation + 1)
-
-generationRevision :: TranscriptGeneration -> BackendRevision
-generationRevision (TranscriptGeneration generation) =
-    BackendRevision generation
-
-openAiContinuation :: Maybe Text -> Maybe BackendContinuation
-openAiContinuation =
-    fmap (BackendContinuation "openai.responses")
+    modifyMVar_ stateVar (pure . Lifecycle.resetState)
 
 continuationResponseId :: Maybe BackendContinuation -> Maybe Text
 continuationResponseId =
     fmap (.continuationToken)
-
-snapshotFromState :: ConversationState -> [ResponseItem] -> BackendSnapshot
-snapshotFromState state items = BackendSnapshot
-    { backendItems = items
-    , backendRevision = generationRevision state.stateGeneration
-    , backendContinuation = state.stateContinuation
-    }
-
-releaseHydratedTranscript
-    :: ConversationStore
-    -> TranscriptGeneration
-    -> IO ()
-releaseHydratedTranscript
-        (ConversationStore stateVar)
-        expectedGeneration =
-    modifyMVar_ stateVar \state ->
-        if state.stateGeneration /= expectedGeneration
-            then pure state
-            else case state.stateTranscript of
-                ResidentTranscript _
-                        (HydratedResident checkpoint 1) ->
-                    pure state
-                        { stateTranscript = ColdTranscript checkpoint }
-                ResidentTranscript items
-                        (HydratedResident checkpoint readers) ->
-                    pure state
-                        { stateTranscript =
-                            ResidentTranscript
-                                items
-                                (HydratedResident
-                                    checkpoint
-                                    (readers - 1))
-                        }
-                _ -> pure state

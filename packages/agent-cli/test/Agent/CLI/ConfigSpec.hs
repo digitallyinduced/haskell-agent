@@ -113,6 +113,25 @@ spec = describe "Agent.Runtime.Config" do
             writeConfig home " \n\t"
             loadHarnessConfig home `shouldReturn` Right defaultHarnessConfig
 
+    it "persists migrated identities and returns the revision of the migrated bytes" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home "{\"mcpServers\":{\"remote\":{\"url\":\"https://example.test/mcp\"}}}"
+            Right (revision, config) <- loadHarnessConfigSnapshot home
+            let server = config.configMcpServers Map.! "remote"
+            server.mcpConnectionId `shouldSatisfy` isJust
+            bytes <- LBS.readFile (filePath (harnessConfigPath home))
+            LBS.length bytes `shouldSatisfy` (> 0)
+            loadHarnessConfigSnapshot home `shouldReturn` Right (revision, config)
+            LBS.readFile (filePath (harnessConfigPath home)) `shouldReturn` bytes
+
+    it "does not rewrite valid configuration bytes when no migration is needed" $
+        withTempDir "agent-config-" \home -> do
+            let bytes = "{ \"maxConcurrentAgents\" : 3 }\n"
+            writeConfig home bytes
+            Right snapshot <- loadHarnessConfigSnapshot home
+            loadHarnessConfigSnapshot home `shouldReturn` Right snapshot
+            LBS.readFile (filePath (harnessConfigPath home)) `shouldReturn` bytes
+
     it "updates typed configuration without discarding unrelated fields" $
         withTempDir "agent-config-" \home -> do
             let original =

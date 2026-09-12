@@ -28,7 +28,7 @@ import Control.Concurrent.Async (race)
 import Control.Exception.Safe (bracket, throwIO, tryIO)
 import Control.Monad (when)
 import Data.Char (isDigit)
-import Data.List (elemIndex, findIndex)
+import Data.List (elemIndex, findIndex, stripPrefix, unsnoc)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -409,12 +409,6 @@ selectableRows frame = do
             ' ' : ' ' : c : _ -> c /= ' '
             _ -> False
 
-stripPrefix :: String -> String -> Maybe String
-stripPrefix prefix value
-    | Text.pack prefix `Text.isPrefixOf` Text.pack value =
-        Just (drop (length prefix) value)
-    | otherwise = Nothing
-
 splitOnce :: Char -> String -> Maybe (String, String)
 splitOnce delimiter value =
     case break (== delimiter) value of
@@ -433,10 +427,6 @@ listAt index values
     | otherwise = case drop index values of
         value : _ -> Just value
         [] -> Nothing
-
-unsnoc :: [a] -> Maybe ([a], a)
-unsnoc [] = Nothing
-unsnoc xs = Just (init xs, last xs)
 
 readDecimal :: String -> Maybe Int
 readDecimal chars
