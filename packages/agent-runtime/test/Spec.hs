@@ -34,6 +34,8 @@ import qualified Agent.Runtime.ModelConfigSpec as ModelConfigSpec
 import qualified Agent.Runtime.ModelsSpec as ModelsSpec
 import qualified Agent.Runtime.NativeProcessSpec as NativeProcessSpec
 import qualified Agent.Runtime.SessionSpec as SessionSpec
+import qualified Agent.Runtime.Session.ResourcesSpec as SessionResources
+import qualified Agent.Runtime.Session.PreparationSpec as SessionPreparation
 import qualified Agent.Runtime.TurnStateSpec as TurnStateSpec
 import Test.Hspec
 
@@ -114,4 +116,6 @@ main = hspec do
     ModelsSpec.spec
     NativeProcessSpec.spec
     SessionSpec.spec
+    SessionResources.spec
+    SessionPreparation.spec
     TurnStateSpec.spec

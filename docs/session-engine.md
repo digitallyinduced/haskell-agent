@@ -159,9 +159,22 @@ unwind. Shutdown order remains activities, code mode, session lock, computer
 use, LSP, web fetch, MCP, coding tools, scratch storage.
 
 This is a bounded extraction, not the complete session entry point. Concrete
-MCP/scratch setup, host-specific tool groups, terminal hooks, and session launch
+MCP setup, host-specific tool groups, terminal hooks, and session launch
 still live in CLI orchestration. Server still depends on `agent-cli` until
 those remaining composition boundaries move. No new Cabal package is needed.
+
+## Implemented: shared session resource preparation
+
+`Agent.Runtime.Session.Preparation` owns deferred persistence creation and
+resumed-session retargeting through a typed `PersistenceRequest`.
+`Agent.Runtime.Session.Resources` restores task plans and image history,
+allocates scratch storage, and owns temporary-directory leases and cleanup.
+Partial acquisition failures and cancellation unwind the same resource scope.
+
+CLI supplies resume notices, fullscreen history wiring, external-session tool
+construction, and a repository worktree lease hook. CLI options are translated
+at the adapter boundary; the runtime request contains no terminal or CLI types.
+Stale-resource housekeeping remains in the host composition layer.
 
 ## Remaining: move session composition and ownership out of the CLI
 
