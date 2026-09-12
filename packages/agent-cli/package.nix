@@ -46,10 +46,10 @@ mkDerivation {
     agent-integration-api agent-json agent-mcp agent-openai
     agent-openrouter agent-responses agent-responses-types agent-store
     agent-tui agent-xai ansi-terminal async base base64-bytestring
-    brick bytestring colour containers dbus directory filelock filepath
-    haskeline hspec http-client http-types JuicyPixels network
-    network-uri process QuickCheck resourcet safe-exceptions stm
-    temporary text time transformers unix vty vty-unix wai warp
+    brick bytestring colour containers crypton dbus directory filelock
+    filepath haskeline hspec http-client http-types JuicyPixels memory
+    network network-uri process QuickCheck resourcet safe-exceptions
+    stm temporary text time transformers unix vty vty-unix wai warp
   ];
   benchmarkHaskellDepends = [
     aeson agent-cli-runtime agent-core agent-json agent-mcp
