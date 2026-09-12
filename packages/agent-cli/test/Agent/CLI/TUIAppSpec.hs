@@ -3313,6 +3313,24 @@ spec = do
                 state.appUi.uiDraft `shouldBe` "before"
                 state.appUi.uiFocus `shouldBe` FocusComposer
 
+        it "restores prompt focus and inserts a paste, including after returning to a terminal tab" do
+            forM_ [[], [UiLoop TurnStarted]] $ \setup ->
+                forM_ [[], [V.EvLostFocus], [V.EvLostFocus, V.EvGainedFocus]] $ \focusEvents -> do
+                    state <- runTranscriptFocusInput setup
+                        (focusEvents <> [V.EvPaste (encoded "first\nsecond λ")])
+                    state.appUi.uiDraft `shouldBe` "befirst\nsecond λfore"
+                    state.appUi.uiCursor `shouldBe` 16
+                    state.appUi.uiFocus `shouldBe` FocusComposer
+                    state.appHistorySelectedBlock `shouldBe` Nothing
+
+        it "does not redirect paste out of an approval overlay" do
+            state <- runTranscriptFocusInput
+                [UiPermissionShown "Approve a test operation"]
+                [V.EvPaste (encoded "paste text")]
+            state.appUi.uiDraft `shouldBe` "before"
+            state.appUi.uiFocus `shouldBe` FocusPermission
+            state.appUi.uiPermission `shouldSatisfy` isJust
+
         it "does not insert navigation keys or modified character shortcuts" do
             forM_
                 [ V.EvKey V.KUp []
