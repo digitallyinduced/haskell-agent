@@ -114,7 +114,12 @@ library
                     , Agent.Runtime.TurnEngine
                     , Agent.Runtime.TurnExecution
                     , Agent.Runtime.TurnState
+                    , Agent.Runtime.Tools.Dialects
+                    , Agent.Runtime.Tools.Resources
+                    , Agent.Runtime.Tools.Startup
     build-depends:    agent-accounts >= 0.1 && < 0.2
+                    , agent-codex-dialect >= 0.1 && < 0.2
+                    , agent-grok-build-dialect >= 0.1 && < 0.2
                     , agent-claude >= 0.1 && < 0.2
                     , agent-connectivity >= 0.1 && < 0.2
                     , agent-core >= 0.1 && < 0.2
@@ -150,6 +155,7 @@ library
                     , network
                     , network-uri
                     , process >= 1.6.26
+                    , resourcet
                     , safe-exceptions
                     , scientific
                     , stm
@@ -218,6 +224,9 @@ test-suite agent-runtime-test
     main-is:          Spec.hs
     ghc-options:      -threaded
     other-modules:    Agent.Runtime.RequestSpec
+                    , Agent.Runtime.Tools.DialectsSpec
+                    , Agent.Runtime.Tools.ResourcesSpec
+                    , Agent.Runtime.Tools.StartupSpec
                     , Agent.Runtime.ProviderRuntimeSpec
                     , Agent.Runtime.CompactionSpec
                     , Agent.Runtime.CompactionSpec.Fixtures
@@ -274,6 +283,7 @@ test-suite agent-runtime-test
                     , http-client
                     , http-types
                     , QuickCheck
+                    , resourcet
                     , safe-exceptions
                     , stm
                     , text

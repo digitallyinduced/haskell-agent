@@ -48,7 +48,7 @@ import Agent.Runtime.Compaction.Provider
     , OccupancySnapshot
     )
 import Agent.Runtime.Database.Store (DatabaseScopes)
-import Agent.CLI.Dialects (CodingTools(..))
+import Agent.Runtime.Tools.Dialects (CodingTools(..))
 import Agent.Runtime.Error (formatApiErrorAt)
 import Agent.Runtime.GatewayClient
     ( GatewayCredential(gatewayBaseUrl)

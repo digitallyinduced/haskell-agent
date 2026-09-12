@@ -70,7 +70,7 @@ import Agent.Runtime.ModelConfig
     (connectionSupportsDialect, organizationGatewayConnectionId)
 import Agent.CLI.Tools
     (hostedSearchToolNames, requireToolRegistry, schemasFromAppTools)
-import Agent.CLI.Dialects
+import Agent.Runtime.Tools.Dialects
     ( CodingTools(..)
     , codingToolsFor
     , filterBashTools

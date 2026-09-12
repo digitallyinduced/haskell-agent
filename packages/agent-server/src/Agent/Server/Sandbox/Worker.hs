@@ -9,7 +9,7 @@ module Agent.Server.Sandbox.Worker
     , sandboxWorkerMain
     ) where
 
-import Agent.CLI.Dialects
+import Agent.Runtime.Tools.Dialects
     ( CodingTools(..)
     , codingToolsFor
     )
