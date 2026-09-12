@@ -270,6 +270,7 @@
                         "data"
                         "src"
                         "test"
+                        "test-visible-state"
                         "agent-core.cabal"
                         "LICENSE"
                         "README.md"
