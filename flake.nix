@@ -802,7 +802,7 @@
                                             then agentRuntimeCheckSource
                                             else agentRuntimeProductionSource;
                                 })
-                            [ pkgs.postgresql_18 ]);
+                            [ pkgs.postgresql_18 pkgs.bash pkgs.coreutils ]);
                         agent-external-session = localPackage
                             (pkgs.haskell.lib.addTestToolDepends
                                 (pkgs.haskell.lib.overrideSrc

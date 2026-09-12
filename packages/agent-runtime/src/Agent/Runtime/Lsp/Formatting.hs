@@ -1,8 +1,8 @@
-module Agent.CLI.Lsp.Formatting
+module Agent.Runtime.Lsp.Formatting
     ( formatLspResult
     ) where
 
-import Agent.CLI.FileUri (fileUriPath)
+import Agent.Runtime.FileUri (fileUriPath)
 import Agent.GrokBuild.Dialect.Lsp (LspOperation(..))
 import Agent.Json
     ( RawJson
