@@ -84,12 +84,12 @@ import Agent.CLI.Progress
     , wrapOscForTmux
     )
 import Agent.CLI.Terminal (fileUri)
-import Agent.CLI.Error
+import Agent.Runtime.Error
     ( formatApiError
     , formatApiErrorAt
     , formatApiErrorPersistedAt
     )
-import Agent.CLI.ComputerUse (summarizeComputerToolCall)
+import Agent.ComputerUse (summarizeComputerToolCall)
 import Agent.CLI.Style
     ( agentBackground
     , glyphCancel

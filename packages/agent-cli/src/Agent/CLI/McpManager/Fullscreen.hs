@@ -13,7 +13,7 @@ module Agent.CLI.McpManager.Fullscreen
     , runFullscreenMcpManager
     ) where
 
-import Agent.CLI.Config
+import Agent.Runtime.Config
     ( HarnessConfig(..)
     , McpServerConfig(..)
     , loadHarnessConfigSnapshot
@@ -34,8 +34,8 @@ import Agent.CLI.McpManager
     , mcpEntryTransport
     , pendingHttpAuthorizationUrl
     )
-import Agent.CLI.Login.Internal.Browser (openBrowser)
-import Agent.CLI.McpOAuth
+import Agent.Runtime.Browser (openBrowser)
+import Agent.Runtime.McpOAuth
     ( McpLoginHost(..)
     , defaultLoginOptions
     , loginMcpWithHost

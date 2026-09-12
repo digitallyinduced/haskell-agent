@@ -2,11 +2,11 @@ module Agent.CLI.Runtime.Orchestration.Providers.XAI
     ( withXaiProvider
     ) where
 
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( readSessionRequestParams
     )
-import Agent.CLI.Auth (gatewayTokenProviderForProvider)
-import Agent.CLI.GatewayClient (GatewayCredential(..))
+import Agent.Accounts.Auth (gatewayTokenProviderForProvider)
+import Agent.Runtime.GatewayClient (GatewayCredential(..))
 import Agent.CLI.Compaction
     ( autoCompactBackendWith
     , boundCompletedToolContinuations

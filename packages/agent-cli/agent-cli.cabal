@@ -66,7 +66,6 @@ library
                     , Agent.CLI.McpStatus
                     , Agent.CLI.Input.Approval
                     , Agent.CLI.Login.Internal.Accounts
-                    , Agent.CLI.Login.Internal.Browser
                     , Agent.CLI.Login.Internal.Dashboard
                     , Agent.CLI.Login.Internal.Device
                     , Agent.CLI.Login.Internal.Formatting
@@ -111,7 +110,6 @@ library
                     , Agent.CLI.Runtime.Repl.Attachments
                     , Agent.CLI.Runtime.Repl.Commands
                     , Agent.CLI.Runtime.Repl.Context
-                    , Agent.CLI.Runtime.Repl.MetaConsole
                     , Agent.CLI.Runtime.Repl.Selection
                     , Agent.CLI.Runtime.Repl.Session
                     , Agent.CLI.Runtime.Repl.Transcript
@@ -157,6 +155,7 @@ library
                     , Agent.CLI.TUI.Render.Workspace
                     , Paths_agent_cli
     exposed-modules:  Agent.CLI
+                    , Agent.CLI.Runtime.Repl.MetaConsole
                     , Agent.CLI.Session.Choices
                     , Agent.CLI.TUI.Keyboard
                     , Agent.CLI.IntegrationGateway
@@ -179,24 +178,9 @@ library
                     , Agent.CLI.Compaction
                     , Agent.CLI.Context
                     , Agent.CLI.Command
-                    , Agent.CLI.ComputerUse
-                    , Agent.CLI.ComputerUse.Backend
-                    , Agent.CLI.ComputerUse.Input
-                    , Agent.CLI.ComputerUse.Linux
-                    , Agent.CLI.ComputerUse.Linux.Logind
-                    , Agent.CLI.ComputerUse.Linux.Portal
-                    , Agent.CLI.ComputerUse.Linux.X11
-                    , Agent.CLI.ComputerUse.Accessibility
-                    , Agent.CLI.Config
                     , Agent.CLI.McpAdd
                     , Agent.CLI.McpCatalog
-                    , Agent.CLI.McpOAuthStore
-                    , Agent.CLI.McpConnectionCredentials
                     , Agent.CLI.McpConnectionLifecycle
-                    , Agent.CLI.McpConnectionRuntime
-                    , Agent.CLI.McpOAuth
-                    , Agent.CLI.Database
-                    , Agent.CLI.Database.Store
                     , Agent.CLI.Database.Storage
                     , Agent.CLI.Desktop
                     , Agent.CLI.Dictation
@@ -302,27 +286,30 @@ library
                     , Agent.CLI.Worktree.Clean
                     , Agent.CLI.Worktree.Ignored
                     , Agent.CLI.Worktree.Incorporation
+                    , Agent.CLI.Auth
+                    , Agent.CLI.CredentialStore
+                    , Agent.CLI.Duration
+                    , Agent.CLI.Environment
+                    , Agent.CLI.Error
+                    , Agent.CLI.GatewayBoundary
+                    , Agent.CLI.GatewayBridge
+                    , Agent.CLI.GatewayClient
+                    , Agent.CLI.ManagedTurn
+                    , Agent.CLI.ModelConfig
+                    , Agent.CLI.Models
+                    , Agent.CLI.Request
+                    , Agent.CLI.Session
+                    , Agent.CLI.Session.StoreCodec
+                    , Agent.CLI.SessionLock
     reexported-modules:
                       agent-external-session:Agent.CLI.ExternalSession as Agent.CLI.ExternalSession
-                    , agent-cli-runtime:Agent.CLI.Auth as Agent.CLI.Auth
-                    , agent-cli-runtime:Agent.CLI.CredentialStore as Agent.CLI.CredentialStore
-                    , agent-cli-runtime:Agent.CLI.Duration as Agent.CLI.Duration
-                    , agent-cli-runtime:Agent.CLI.Environment as Agent.CLI.Environment
-                    , agent-cli-runtime:Agent.CLI.Error as Agent.CLI.Error
-                    , agent-cli-runtime:Agent.CLI.GatewayBoundary as Agent.CLI.GatewayBoundary
-                    , agent-cli-runtime:Agent.CLI.GatewayBridge as Agent.CLI.GatewayBridge
-                    , agent-cli-runtime:Agent.CLI.GatewayClient as Agent.CLI.GatewayClient
-                    , agent-cli-runtime:Agent.CLI.ManagedTurn as Agent.CLI.ManagedTurn
-                    , agent-cli-runtime:Agent.CLI.ModelConfig as Agent.CLI.ModelConfig
-                    , agent-cli-runtime:Agent.CLI.Models as Agent.CLI.Models
-                    , agent-cli-runtime:Agent.CLI.Request as Agent.CLI.Request
-                    , agent-cli-runtime:Agent.CLI.Session as Agent.CLI.Session
-                    , agent-cli-runtime:Agent.CLI.Session.StoreCodec as Agent.CLI.Session.StoreCodec
-                    , agent-cli-runtime:Agent.CLI.SessionLock as Agent.CLI.SessionLock
-    build-depends:    agent-cli-runtime >= 0.1 && < 0.2
+    build-depends:    agent-runtime >= 0.1 && < 0.2
+                    , agent-tools >= 0.1 && < 0.2
+                    , agent-accounts >= 0.1 && < 0.2
                     , agent-external-session >= 0.1 && < 0.2
                     , agent-integration-api >= 0.1 && < 0.2
                     , agent-connectivity >= 0.1 && < 0.2
+                    , agent-computer-use >= 0.1 && < 0.2
                     , agent-core >= 0.1 && < 0.2
                     , agent-mcp >= 0.1 && < 0.2
                     , agent-json >= 0.1 && < 0.2
@@ -353,7 +340,6 @@ library
                     , crypton
                     , deepseq
                     , directory
-                    , dbus >= 1.4 && < 1.5
                     , entropy
                     , filelock
                     , filepath
@@ -413,7 +399,7 @@ executable eval-ghci-vs-bash
     main-is:          GhciVsBash.hs
     ghc-options:      -threaded -rtsopts
     build-depends:    agent-cli
-                    , agent-cli-runtime
+                    , agent-runtime
                     , agent-responses
                     , agent-responses-types
                     , agent-store
@@ -513,7 +499,7 @@ benchmark command-history-bench
     main-is:          CommandHistory.hs
     other-modules:    Agent.CLI.Input.History
     ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T -N4"
-    build-depends:    agent-cli-runtime
+    build-depends:    agent-runtime
                     , base >= 4.17 && < 5
                     , deepseq
                     , directory
@@ -540,18 +526,6 @@ benchmark history-eviction-bench
                     , containers
                     , text
 
-benchmark accessibility-delta-bench
-    import:           common-options
-    type:             exitcode-stdio-1.0
-    hs-source-dirs:   benchmark
-    main-is:          AccessibilityDelta.hs
-    ghc-options:      -O2 -rtsopts "-with-rtsopts=-T"
-    build-depends:    agent-cli
-                    , aeson
-                    , base >= 4.17 && < 5
-                    , bytestring
-                    , text
-
 benchmark concurrency-bench
     import:           common-options
     type:             exitcode-stdio-1.0
@@ -570,22 +544,6 @@ benchmark concurrency-bench
                     , safe-exceptions
                     , text
                     , time
-
-benchmark portal-capture-bench
-    import:           common-options
-    type:             exitcode-stdio-1.0
-    hs-source-dirs:   benchmark
-    main-is:          PortalCapture.hs
-    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
-    build-depends:    agent-cli
-                    , async
-                    , base >= 4.17 && < 5
-                    , bytestring
-                    , process >= 1.6.26
-                    , safe-exceptions
-                    , stm
-                    , text
-                    , unix
 
 test-suite agent-cli-test
     import:           common-options
@@ -699,8 +657,11 @@ test-suite agent-cli-test
                     , Agent.CLI.Worktree.SnapshotSpec
                     , Agent.CLI.Worktree.ProvenanceSpec
     build-depends:    agent-cli
-                    , agent-cli-runtime
+                    , agent-runtime
                     , agent-connectivity
+                    , agent-tools
+                    , agent-accounts
+                    , agent-computer-use
                     , agent-core
                     , agent-integration-api
                     , agent-mcp
@@ -727,7 +688,6 @@ test-suite agent-cli-test
                     , containers
                     , crypton
                     , directory
-                    , dbus >= 1.4 && < 1.5
                     , filepath
                     , haskeline >= 0.8 && < 0.9
                     , hspec >= 2.11 && < 2.12
@@ -826,7 +786,7 @@ benchmark model-picker-latency-bench
     main-is:          ModelPickerLatency.hs
     ghc-options:      -O2 -threaded -rtsopts
     build-depends:    agent-cli
-                    , agent-cli-runtime
+                    , agent-runtime
                     , agent-core
                     , agent-openai
                     , agent-tui

@@ -12,8 +12,8 @@ module Agent.CLI.ProviderFallback
     , selectAutomaticProviderCandidateWith
     ) where
 
-import Agent.CLI.ModelConfig (ModelCatalog)
-import Agent.CLI.Models (ModelOption(..), ModelTarget(..), modelCatalog)
+import Agent.Runtime.ModelConfig (ModelCatalog)
+import Agent.Runtime.Models (ModelOption(..), ModelTarget(..), modelCatalog)
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Provider (BillingMode(..), Provider(..))
 import Data.Containers.ListUtils (nubOrdOn)

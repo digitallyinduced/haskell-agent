@@ -1,9 +1,9 @@
 module Agent.CLI.ProviderRuntimeSpec (spec) where
 
-import Agent.CLI.Session.Request (newSessionRequestState, readSessionRequestParams, setSessionRequestModel)
-import Agent.CLI.Session (Persistence(..))
-import Agent.CLI.Auth (LoadedAuth(..), gatewayLoadedAuthForProvider)
-import Agent.CLI.GatewayClient (GatewayCredential(..))
+import Agent.Runtime.Session.Request (newSessionRequestState, readSessionRequestParams, setSessionRequestModel)
+import Agent.Runtime.Session (Persistence(..))
+import Agent.Accounts.Auth (LoadedAuth(..), gatewayLoadedAuthForProvider)
+import Agent.Runtime.GatewayClient (GatewayCredential(..))
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.ByteString.Lazy as LBS

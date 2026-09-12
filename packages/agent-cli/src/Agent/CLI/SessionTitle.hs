@@ -15,8 +15,8 @@ module Agent.CLI.SessionTitle
     ) where
 
 import Agent.CLI.Btw (BtwBackendFactory)
-import Agent.CLI.Error (formatApiErrorInline)
-import Agent.CLI.Session.TitlePolicy (titleRefreshIndex)
+import Agent.Runtime.Error (formatApiErrorInline)
+import Agent.Runtime.Session.TitlePolicy (titleRefreshIndex)
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)

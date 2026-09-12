@@ -8,7 +8,7 @@ import Agent.CLI.PendingInputs
     , newPendingInputs
     , withPendingInputs
     )
-import Agent.CLI.ModelConfig (loadModelCatalogAt)
+import Agent.Runtime.ModelConfig (loadModelCatalogAt)
 import Agent.CLI.Project (loadProjectSettings, loadUserSettings)
 import Agent.CLI.Session.History (detectGitBranch)
 import Agent.CLI.Skills (loadSkillsCatalogQuiet)

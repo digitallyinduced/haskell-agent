@@ -6,12 +6,12 @@ module Agent.CLI.Runtime.Orchestration.Tools.Model
     , resolveToolModel
     ) where
 
-import Agent.CLI.Auth (LoadedAuth(..), isGatewayLoadedAuth)
-import Agent.CLI.Config (HarnessConfig)
-import Agent.CLI.GatewayClient (cachedGatewayModels, gatewayCredentialIdentity)
+import Agent.Accounts.Auth (LoadedAuth(..), isGatewayLoadedAuth)
+import Agent.Runtime.Config (HarnessConfig)
+import Agent.Runtime.GatewayClient (cachedGatewayModels, gatewayCredentialIdentity)
 import Agent.CLI.GatewayModels (modelOptionsForGatewayModels, selectGatewayModelOption)
-import Agent.CLI.ModelConfig (ResponsesConnection(..), builtinConnectionId)
-import Agent.CLI.Models
+import Agent.Runtime.ModelConfig (ResponsesConnection(..), builtinConnectionId)
+import Agent.Runtime.Models
     ( ModelOption(..), ModelTarget(..), defaultModelFor, rawModelOption
     , resolveConfiguredModel, resolvePersistedDialect )
 import Agent.CLI.Options
@@ -22,7 +22,7 @@ import Agent.CLI.Runtime.Orchestration.Tools.Request
 import Agent.CLI.Runtime.Orchestration.Types
     ( NativeRunCapabilities, NativeRunHooks(..), NativeInteractionMode(..)
     , fullNativeRunCapabilities )
-import Agent.CLI.Session (LegacySubagentTarget, SessionMeta(..), sessionLegacySubagentTarget)
+import Agent.Runtime.Session (LegacySubagentTarget, SessionMeta(..), sessionLegacySubagentTarget)
 import Agent.CLI.Session.Runtime.Types (StartupRuntime(..))
 import Agent.CLI.Startup.Auth (markStartupStage, startupDie)
 import Agent.Dialect (Dialect, DialectId, dialectForId)

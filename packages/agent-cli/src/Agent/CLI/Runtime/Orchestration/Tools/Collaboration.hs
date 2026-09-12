@@ -6,11 +6,11 @@ module Agent.CLI.Runtime.Orchestration.Tools.Collaboration
     , installCollaborationCallbacks
     ) where
 
-import Agent.CLI.Auth (LoadedAuth(..), hasOpenAiAuth, loadAuth)
-import Agent.CLI.Config (HarnessConfig(..))
-import Agent.CLI.GatewayClient (cachedGatewayModels)
+import Agent.Accounts.Auth (LoadedAuth(..), hasOpenAiAuth, loadAuth)
+import Agent.Runtime.Config (HarnessConfig(..))
+import Agent.Runtime.GatewayClient (cachedGatewayModels)
 import Agent.CLI.GatewayModels (modelOptionsForGatewayModels)
-import Agent.CLI.Models (ModelOption(..), ModelTarget(..), resolveModelOptionById)
+import Agent.Runtime.Models (ModelOption(..), ModelTarget(..), resolveModelOptionById)
 import Agent.CLI.Options (CliOptions(..))
 import Agent.CLI.PendingInputs
     ( PendingInputs, PendingNoticeKind(..), enqueuePendingInput
@@ -21,8 +21,8 @@ import Agent.CLI.Runtime.Orchestration.Startup (reportStartupWarning)
 import Agent.CLI.Runtime.Orchestration.Tools.Model
 import Agent.CLI.Runtime.Orchestration.Tools.Request
 import Agent.CLI.Runtime.Orchestration.Types (NativeRunCapabilities(..))
-import Agent.CLI.Session (Persistence(..))
-import Agent.CLI.SessionLock (SessionLock)
+import Agent.Runtime.Session (Persistence(..))
+import Agent.Runtime.SessionLock (SessionLock)
 import Agent.CLI.Subagents.Runtime
     ( flushAllSubagentSnapshots, persistAndEvictSubagentSessionWithStatus
     , prepareCollaborationSpawn, restoreAgentFromDisk )

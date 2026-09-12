@@ -4,7 +4,7 @@ module Agent.CLI.Clipboard.Linux
     , readLinuxClipboardText
     ) where
 
-import Agent.CLI.Error (formatException)
+import Agent.Runtime.Error (formatException)
 import Agent.Loop (ImageAttachment(..))
 import Control.Exception.Safe (bracket, finally, tryAny)
 import Control.Monad (void)

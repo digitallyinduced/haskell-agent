@@ -49,7 +49,10 @@ Load every library you may edit so `:r` recompiles across package boundaries (`a
 nix develop
 cabal repl \
   agent-cli:lib:agent-cli \
-  agent-cli-runtime:lib:agent-cli-runtime \
+  agent-runtime:lib:agent-runtime \
+  agent-accounts:lib:agent-accounts \
+  agent-computer-use:lib:agent-computer-use \
+  agent-tools:lib:agent-tools \
   agent-external-session:lib:agent-external-session \
   agent-repository:lib:agent-repository \
   agent-native-bridge:lib:agent-native-bridge \

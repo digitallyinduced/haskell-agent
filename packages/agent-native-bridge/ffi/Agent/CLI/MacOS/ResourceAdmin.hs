@@ -4,7 +4,7 @@
 
 module Agent.CLI.MacOS.ResourceAdmin () where
 
-import Agent.CLI.Database.Store
+import Agent.Runtime.Database.Store
     ( DatabaseScopes
     , deriveDatabaseScopes
     )
@@ -27,7 +27,7 @@ import Agent.CLI.ResourceAdmin
     , validateResourceSummary
     , validateResourceSkillDraft
     )
-import Agent.CLI.Session (sessionsRoot)
+import Agent.Runtime.Session (sessionsRoot)
 import Agent.CLI.SessionAdmin (managedPostgresConfigForHome)
 import Agent.Store.Postgres
     ( Store

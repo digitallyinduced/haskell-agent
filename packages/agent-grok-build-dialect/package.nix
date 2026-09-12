@@ -1,5 +1,5 @@
-{ mkDerivation, aeson, agent-core, agent-json, async, base
-, containers, directory, filepath, hspec, lib, process
+{ mkDerivation, aeson, agent-core, agent-json, agent-tools, async
+, base, containers, directory, filepath, hspec, lib, process
 , safe-exceptions, temporary, text, time, transformers, unix
 }:
 mkDerivation {
@@ -7,17 +7,17 @@ mkDerivation {
   version = "0.1.0.0";
   src = ./.;
   libraryHaskellDepends = [
-    aeson agent-core agent-json async base containers directory
-    filepath process safe-exceptions temporary text time transformers
-    unix
+    aeson agent-core agent-json agent-tools async base containers
+    directory filepath process safe-exceptions temporary text time
+    transformers unix
   ];
   testHaskellDepends = [
-    agent-core async base containers directory filepath hspec process
-    safe-exceptions temporary text time unix
+    agent-core agent-tools async base containers directory filepath
+    hspec process safe-exceptions temporary text time unix
   ];
   benchmarkHaskellDepends = [
-    aeson agent-core async base containers filepath safe-exceptions
-    text time unix
+    aeson agent-core agent-tools async base containers filepath
+    safe-exceptions text time unix
   ];
   description = "Grok Build model-facing dialect for the universal agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";

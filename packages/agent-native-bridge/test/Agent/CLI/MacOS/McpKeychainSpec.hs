@@ -2,7 +2,7 @@ module Agent.CLI.MacOS.McpKeychainSpec (spec) where
 
 import Agent.CLI.MacOS.McpKeychain
 import Agent.CLI.MacOS.McpCredentialStore (nativeMcpCredentialRuntime)
-import Agent.CLI.McpConnectionCredentials (loadMcpConnectionRecord, deleteMcpConnectionRecord)
+import Agent.Runtime.McpConnectionCredentials (loadMcpConnectionRecord, deleteMcpConnectionRecord)
 import Control.Concurrent.Async (concurrently)
 import qualified Data.ByteString as BS
 import Data.Either (isLeft)

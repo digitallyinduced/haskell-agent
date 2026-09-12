@@ -25,7 +25,7 @@ module Agent.CLI.Session.History
     , writeLiveTranscript
     ) where
 
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( SessionTurn(..)
     , TranscriptEffect(..)
     , loadActiveSession

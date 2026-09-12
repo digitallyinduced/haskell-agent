@@ -1,6 +1,6 @@
 module Agent.CLI.WebLspSpec (spec) where
 
-import Agent.CLI.Config
+import Agent.Runtime.Config
 import Agent.CLI.Lsp
 import Agent.CLI.WebFetch
 import Agent.Json (rawJsonFromEncoding)

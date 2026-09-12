@@ -1,6 +1,6 @@
 module Agent.CLI.TUIComposerSpec (spec) where
 
-import Agent.CLI.Auth (LoadedAuth(..), staticCredentialProvider)
+import Agent.Accounts.Auth (LoadedAuth(..), staticCredentialProvider)
 import Agent.CLI.Dictation
     ( DictationAuthError(..)
     , DictationBackend(..)
@@ -11,7 +11,7 @@ import Agent.CLI.Dictation
     , insertDictation
     , selectDictationBackend
     )
-import Agent.CLI.GatewayClient (newGatewayModelAccessWith)
+import Agent.Runtime.GatewayClient (newGatewayModelAccessWith)
 import Agent.CLI.Command (CopyRequest(..), ReplAction(..))
 import Agent.Provider
     ( BillingMode(..)

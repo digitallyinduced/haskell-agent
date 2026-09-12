@@ -9,7 +9,7 @@ import Agent.CLI.Compaction
     , projectRequestTokens
     )
 import Agent.CLI.Context (contextUsageTokens, formatContextReport)
-import Agent.CLI.Request (requestParams)
+import Agent.Runtime.ProviderRequest (requestParams)
 import Agent.CLI.Session.ConversationStore
     ( commitConversationBackendState
     , newConversationStore

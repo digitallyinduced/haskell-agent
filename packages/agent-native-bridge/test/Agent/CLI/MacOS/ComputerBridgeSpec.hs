@@ -2,7 +2,7 @@
 
 module Agent.CLI.MacOS.ComputerBridgeSpec (spec) where
 
-import Agent.CLI.ComputerUse.Accessibility
+import Agent.ComputerUse.Accessibility
     ( AccessibilityObservation(..)
     )
 import Agent.CLI.MacOS.ComputerBridge

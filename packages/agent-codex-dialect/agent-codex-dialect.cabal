@@ -42,6 +42,7 @@ library
                     , Agent.Codex.Dialect.Tools
     hs-source-dirs:   src
     build-depends:    agent-core >= 0.1 && < 0.2
+                    , agent-tools >= 0.1 && < 0.2
                     , agent-json >= 0.1 && < 0.2
                     , async
                     , base >= 4.14 && < 5
@@ -62,6 +63,7 @@ test-suite agent-codex-dialect-test
     other-modules:    Agent.Codex.DialectSpec
     build-depends:    agent-codex-dialect
                     , agent-core
+                    , agent-tools
                     , base >= 4.14 && < 5
                     , directory
                     , filepath

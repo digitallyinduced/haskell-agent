@@ -13,7 +13,7 @@ import Agent.CLI.Dialects
     ( CodingTools(..)
     , codingToolsFor
     )
-import Agent.CLI.Session (isValidSessionId)
+import Agent.Runtime.Session (isValidSessionId)
 import Agent.Dialect
     ( DialectId
     , dialectForId

@@ -9,7 +9,7 @@ module Agent.CLI.Input.History
     , trySetMode
     ) where
 
-import Agent.CLI.PrivateFileLock (withPrivateFileLock)
+import Agent.PrivateFileLock (withPrivateFileLock)
 import Control.DeepSeq (force)
 import Control.Exception.Safe (catchIO)
 import Data.Char (isSpace)

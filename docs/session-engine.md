@@ -4,8 +4,8 @@
 
 `Agent.Runtime.TurnRecord` carries the engine's opaque `ModelItems` and
 `DisplayItems` projections through successful and interrupted turn persistence.
-Only `Agent.CLI.Session.TurnRecord.sessionTurnFromRecord`, a compatibility
-adapter owned by `agent-cli-runtime`, unwraps them into the existing `SessionTurn`
+Only `Agent.Runtime.Session.TurnRecord.sessionTurnFromRecord`, a compatibility
+adapter owned by `agent-runtime`, unwraps them into the existing `SessionTurn`
 storage format. Display-only activity cannot be passed as canonical history.
 The persisted schema is unchanged.
 
@@ -16,7 +16,7 @@ ownership remains a separate session-owner/composition step.
 
 ## Implemented: frontend-neutral turn lifecycle
 
-`agent-cli-runtime` owns the lifecycle policy in `Agent.Runtime.*`:
+`agent-runtime` owns the lifecycle policy in `Agent.Runtime.*`:
 
 - `Request`: typed native turn requests and validation, independent of
   `CliOptions`. Existing CLI exports remain compatibility reexports.
@@ -85,9 +85,8 @@ Background session workers now use a frontend-independent typed owner; see
 [session worker ownership](session-worker-ownership.md) for admission,
 cancellation, notification ordering, and the remaining composition boundary.
 
-`agent-cli-runtime` also owns `Agent.CLI.NativeProcess` and
-`Agent.CLI.Session.Threads`. These retain the legacy shared-module namespace,
-but belong to the runtime package, not `agent-cli`. They own process allocation,
+`agent-runtime` also owns `Agent.Runtime.NativeProcess` and
+`Agent.Runtime.Session.Threads`. These frontend-neutral modules own process allocation,
 the tracked cleanup worker, session-thread registration, MCP and network
 recovery resources, and their close/restart operations. The server imports
 process-resource operations directly from this package; CLI exports remain
@@ -139,7 +138,7 @@ conversation slot. Pending-state references are not otherwise exposed.
 
 These extractions provide turn execution, process resources, and conversation
 state, not a complete headless session owner. The dependency graph still includes
-`agent-server -> agent-cli -> agent-cli-runtime`. The server still calls
+`agent-server -> agent-cli -> agent-runtime`. The server still calls
 `Agent.CLI.NativeRuntime.runNativeTurn`, which lowers native requests into
 `CliOptions` internally. The public native hook uses `nativeStartupPolicy`
 rather than exposing those options.
@@ -203,9 +202,9 @@ replaying the model projection in memory with the finalized previous-response
 patch applied (including chain invalidation), not a persisted frontend round trip;
 compaction uses an installed checkpoint, not a live summarization provider.
 
-`Agent.CLI.NativeProcessSpec` covers cleanup-worker ownership and session-worker
+`Agent.Runtime.NativeProcessSpec` covers cleanup-worker ownership and session-worker
 joining through the shared process handle: all three examples pass through
-`cabal repl --offline agent-cli-runtime:test:agent-cli-runtime-test`.
+`cabal repl --offline agent-runtime:test:agent-runtime-test`.
 These tests do not establish full CLI/server parity.
 
 The server's `SupervisorSpec` and `ApplicationSpec` pass through its Cabal test
@@ -239,12 +238,12 @@ Reproduce the package-aware load from the repository root in the Nix toolchain:
 
 ```sh
 printf ':show modules\n:quit\n' | cabal repl --offline \
-  agent-cli-runtime:lib:agent-cli-runtime \
+  agent-runtime:lib:agent-runtime \
   agent-cli:lib:agent-cli agent-server:lib:agent-server
 ```
 
 For the database-backed rerun, first provide a permitted short `TMPDIR`, then
-open `cabal repl --offline agent-cli-runtime:test:agent-cli-runtime-test`
+open `cabal repl --offline agent-runtime:test:agent-runtime-test`
 and run `:main`. For CLI session integration, open
 `cabal repl --offline agent-cli:test:agent-cli-test`, import
 `Test.Hspec` and `Agent.CLI.AgentSessionsSpec` qualified, and run

@@ -14,7 +14,7 @@ module Agent.CLI.Approval.Decision
     , resolveApprovalPromptWith
     ) where
 
-import Agent.CLI.ComputerUse
+import Agent.ComputerUse
     ( computerToolCallBlocked
     , computerToolCallHasPendingSafetyChecks
     )

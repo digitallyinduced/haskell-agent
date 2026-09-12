@@ -1,8 +1,8 @@
 module Agent.CLI.ModelPickerSpec (spec) where
 
 import Agent.CLI.ModelPicker
-import Agent.CLI.Models
-import Agent.CLI.ModelConfig
+import Agent.Runtime.Models
+import Agent.Runtime.ModelConfig
     ( ModelCatalog
     , decodeModelConfig
     , organizationGatewayConnectionId

@@ -12,7 +12,7 @@ import Agent.CLI.Compaction
     , OccupancySnapshot(..)
     )
 import Agent.CLI.Compaction.Types (occupancyMatchesHistory)
-import Agent.CLI.Request
+import Agent.Runtime.ProviderRequest
     ( setRequestInstructions
     , setRequestInstructionsAndTools
     )

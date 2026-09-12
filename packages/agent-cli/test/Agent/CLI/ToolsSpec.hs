@@ -2,7 +2,7 @@ module Agent.CLI.ToolsSpec (spec) where
 
 import Agent.CLI.Tools
 import Agent.CLI.ChartImage (terminalChartTool)
-import Agent.CLI.ComputerUse (computerUseTool)
+import Agent.ComputerUse (computerUseTool)
 import Agent.CLI.CodeModeRuntime
     ( CodeModeProjectionStrategy(..)
     , CodeModeRuntimePlan(..)

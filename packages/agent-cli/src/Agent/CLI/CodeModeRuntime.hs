@@ -27,7 +27,7 @@ module Agent.CLI.CodeModeRuntime
     , filterStartupUnavailableTools
     ) where
 
-import Agent.CLI.Models (modelsCacheFilePath)
+import Agent.Runtime.Models (modelsCacheFilePath)
 import Agent.Dialect
     ( Dialect
     , PromptStyle(..)

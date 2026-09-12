@@ -14,7 +14,7 @@ module Agent.CLI.Runtime.MetaConsole
     , runMetaPlanner
     ) where
 
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( readSessionRequestParams
     )
 import Agent.Cancel (CancelFlag)
@@ -24,7 +24,7 @@ import Agent.CLI.Command
     , currentEffort
     , currentModel
     )
-import Agent.CLI.Config
+import Agent.Runtime.Config
     ( HarnessConfig(..)
     , LspConfig(..)
     , LspServerConfig(..)
@@ -33,7 +33,7 @@ import Agent.CLI.Config
     , WebFetchConfig(..)
     , mcpUsesConnectionCredentials
     )
-import Agent.CLI.GatewayClient (cachedGatewayModels, gatewayModelIds)
+import Agent.Runtime.GatewayClient (cachedGatewayModels, gatewayModelIds)
 import Agent.CLI.Interrupt (withTurnCancel)
 import Agent.CLI.MetaConsole
     ( MetaAction(..)
@@ -45,7 +45,7 @@ import Agent.CLI.MetaConsole
     , redactMetaContext
     , runMetaConsoleWithCancel
     )
-import Agent.CLI.ModelConfig
+import Agent.Runtime.ModelConfig
     ( organizationGatewayConnectionId
     , CatalogModel(..)
     , catalogModels

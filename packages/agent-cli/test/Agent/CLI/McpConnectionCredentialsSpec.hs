@@ -1,6 +1,6 @@
 module Agent.CLI.McpConnectionCredentialsSpec (spec) where
 
-import Agent.CLI.McpConnectionCredentials
+import Agent.Runtime.McpConnectionCredentials
 import Agent.MCP (McpCredentialProvider(..))
 import Agent.MCP.OAuth
 import Control.Concurrent.Async (withAsync, wait)

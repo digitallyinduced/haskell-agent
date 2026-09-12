@@ -1,12 +1,12 @@
 module Agent.CLI.AgentSessionsSpec (spec) where
 
 import Agent.CLI.AgentSessions
-import Agent.CLI.Models (ModelOption(..), ModelTarget(..))
-import Agent.CLI.ModelConfig (organizationGatewayConnectionId)
-import Agent.CLI.ManagedTurn (managedTurnRequestFromText)
+import Agent.Runtime.Models (ModelOption(..), ModelTarget(..))
+import Agent.Runtime.ModelConfig (organizationGatewayConnectionId)
+import Agent.Runtime.ManagedTurn (managedTurnRequestFromText)
 import Agent.CLI.Options (ApprovalPolicy(..))
-import Agent.CLI.Session
-import Agent.CLI.SessionLock
+import Agent.Runtime.Session
+import Agent.Runtime.SessionLock
 import Agent.CLI.SteeringInputs
     ( awaitBackgroundCompletion, clearSteeringInputs, commitSteeringInputs
     , hasBackgroundCompletionWake, newSteeringInputs

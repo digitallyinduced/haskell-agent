@@ -42,9 +42,9 @@ mkdir -p "$benchmark_parent"
 build_root="$(mktemp -d "$benchmark_parent/run.XXXXXX")"
 shared_source_cache="$benchmark_parent/source-cache"
 marker_file="$root/packages/agent-cli/src/Agent/CLI/TUI/LambdaArt.hs"
-runtime_marker_file="$root/packages/agent-cli/src/Agent/CLI/ManagedTurn.hs"
+runtime_marker_file="$root/packages/agent-cli/src/Agent/Runtime/ManagedTurn.hs"
 if [[ "$stage" == "refactored" ]]; then
-  runtime_marker_file="$root/packages/agent-cli-runtime/src/Agent/CLI/ManagedTurn.hs"
+  runtime_marker_file="$root/packages/agent-runtime/src/Agent/Runtime/ManagedTurn.hs"
 fi
 marker_backup="$build_root/LambdaArt.hs"
 runtime_marker_backup="$build_root/ManagedTurn.hs"
@@ -59,14 +59,14 @@ if [[ ! -f "$runtime_marker_file" ]]; then
 fi
 case "$stage" in
   baseline)
-    if grep -q 'agent-cli-runtime' \
+    if grep -q 'agent-runtime' \
         "$root/packages/agent-telegram/agent-telegram.cabal"; then
       echo "baseline stage requested for a refactored package graph" >&2
       exit 2
     fi
     ;;
   refactored)
-    if ! grep -q 'agent-cli-runtime' \
+    if ! grep -q 'agent-runtime' \
         "$root/packages/agent-telegram/agent-telegram.cabal"; then
       echo "refactored stage requested for a baseline package graph" >&2
       exit 2
@@ -154,7 +154,7 @@ if [[ "$mode" != "incremental" ]]; then
         <<<"$(run_build "$dir" "$target" "$log")"
       compiled="$(grep -Ec 'Compiling|Linking|Building' "$log" || true)"
       cli_built="$(component_built agent-cli "$log")"
-      runtime_built="$(component_built agent-cli-runtime "$log")"
+      runtime_built="$(component_built agent-runtime "$log")"
       telegram_built="$(component_built agent-telegram "$log")"
       printf 'cold-%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$name" "$i" "$real" "$user" "$sys" "$compiled" \
@@ -190,7 +190,7 @@ if [[ "$mode" != "cold" ]]; then
         <<<"$(run_build "$warm" "$target" "$log")"
       compiled="$(grep -Ec 'Compiling|Linking|Building' "$log" || true)"
       cli_built="$(component_built agent-cli "$log")"
-      runtime_built="$(component_built agent-cli-runtime "$log")"
+      runtime_built="$(component_built agent-runtime "$log")"
       telegram_built="$(component_built agent-telegram "$log")"
       if [[ "$stage" == refactored && "$scenario" == telegram \
           && "$cli_built" != false ]]; then
@@ -228,7 +228,7 @@ if [[ "$mode" != "cold" ]]; then
         <<<"$(run_build "$warm" "$target" "$log")"
       compiled="$(grep -Ec 'Compiling|Linking|Building' "$log" || true)"
       cli_built="$(component_built agent-cli "$log")"
-      runtime_built="$(component_built agent-cli-runtime "$log")"
+      runtime_built="$(component_built agent-runtime "$log")"
       telegram_built="$(component_built agent-telegram "$log")"
       printf 'warm-runtime-edit-to-%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$scenario" "$i" "$real" "$user" "$sys" "$compiled" \

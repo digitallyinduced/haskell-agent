@@ -21,14 +21,14 @@ module Agent.CLI.MetaConsole
     , formatMetaError
     ) where
 
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( SessionRequestState
     , readSessionRequestParams
     )
 import Agent.Cancel (CancelFlag, newCancelFlag, waitCancel)
 import Agent.CLI.Btw (BtwBackendFactory)
-import Agent.CLI.Config (McpInitStrategy(..))
-import Agent.CLI.Error (formatApiErrorInline)
+import Agent.Runtime.Config (McpInitStrategy(..))
+import Agent.Runtime.Error (formatApiErrorInline)
 import Agent.Error (ApiError)
 import Agent.Loop
     ( Backend(..)

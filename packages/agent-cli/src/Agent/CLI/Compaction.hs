@@ -45,11 +45,11 @@ module Agent.CLI.Compaction
     , projectRequestTokens
     ) where
 
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( SessionRequestState
     , readSessionRequestParams
     )
-import Agent.CLI.Error (formatApiError)
+import Agent.Runtime.Error (formatApiError)
 import Agent.CLI.Compaction.Continuation
     ( boundCompletedToolContinuations
     )

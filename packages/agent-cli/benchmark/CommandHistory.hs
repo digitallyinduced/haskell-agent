@@ -1,7 +1,7 @@
 module Main (main) where
 
 import Agent.CLI.Input.History (appendReplHistoryAt, readReplHistoryAt)
-import Agent.CLI.PrivateFileLock (withPrivateFileLock)
+import Agent.PrivateFileLock (withPrivateFileLock)
 import Control.Exception (evaluate)
 import Control.Monad (replicateM, unless)
 import Data.IORef (newIORef, readIORef)

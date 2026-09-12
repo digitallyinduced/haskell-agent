@@ -12,7 +12,7 @@ module Agent.CLI.WebFetch
     , isNonPublicIPv6
     ) where
 
-import Agent.CLI.Config (WebFetchConfig(..))
+import Agent.Runtime.Config (WebFetchConfig(..))
 import Agent.GrokBuild.Dialect.WebFetch
     ( WebFetchRequest(..)
     , webFetchTool

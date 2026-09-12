@@ -8,7 +8,7 @@ import Agent.CLI.Options
     , applyBackgroundApproval )
 import Agent.CLI.Runtime.Orchestration.Types ( AgentRunMode, backgroundRunMode )
 import Agent.CLI.Runtime.Types ( DevResult(..) )
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( SessionHandle(..), SessionMeta(..) )
 import Agent.OsPath ( unsafeToFilePath )
 import Data.Text ( Text )

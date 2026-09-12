@@ -9,15 +9,15 @@ module Agent.CLI.TUI.SessionHistory
     , sessionTurnPullRequestURL
     ) where
 
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( SessionTurn(..)
     , SessionTurnPage(..)
     )
 import Agent.Tools.RenderChart (chartResultDocument, renderChartToolName)
 import qualified Data.Map.Strict as Map
-import Agent.CLI.Session.Types (TranscriptEffect(..))
+import Agent.Runtime.Session.Types (TranscriptEffect(..))
 import Agent.CLI.Render (renderToolOutputValue)
-import Agent.CLI.Session.PullRequest (sessionTurnPullRequestURL)
+import Agent.Runtime.Session.PullRequest (sessionTurnPullRequestURL)
 import Agent.CLI.Plan
     ( ProposedPlanSegment(..)
     , feedProposedPlanStream

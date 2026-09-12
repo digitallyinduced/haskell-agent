@@ -574,13 +574,15 @@ are discussed in [`IDEAS.md`](IDEAS.md).
 ```text
              agent-cli / agent-telegram / future clients
                               |
-                    agent-cli-runtime
-        sessions | model catalog | auth | gateway processes
+                       agent-runtime
+       sessions | model catalog | turn execution | gateways
+                 /            |
+        agent-accounts   agent-tools
                               |
                    provider-neutral events
                               |
      +------------------- agent-core -------------------+
-     | agent loop | tools | approvals | agents | state |
+     | loop | tool contracts | approvals | agents | state |
      +-------------------------+------------------------+
                                |
                     canonical Responses model
@@ -602,19 +604,45 @@ retry policy. On macOS it also uses `NWPathMonitor` to wake an interrupted
 submission as soon as the network path recovers; other platforms retain the
 portable polling fallback.
 
-`agent-cli-runtime` is the headless frontend library shared by the terminal
-CLI and gateways. Interactive parsing, rendering, and TTY state remain in
+`agent-runtime` replaces `agent-cli-runtime` as the headless support
+library shared by the terminal CLI, server, and gateways. Its
+`Agent.Runtime.*` modules own session persistence and lifecycle primitives,
+model configuration, provider-neutral request construction and turn execution,
+database and MCP support, shared process resources, gateway support, and
+neutral host contracts. Product-level provider
+assembly, tool registration, and session orchestration still live in
+`Agent.CLI.Runtime.Orchestration.*`; extracting this support library does not
+make it a complete frontend-independent composition root.
+Interactive parsing, rendering, and TTY state also remain in
 `agent-cli`, so Cabal builds of gateway libraries do not depend on or rebuild
 the terminal frontend. The packaged Telegram service still carries the
 `agent-cli` executable as a runtime dependency because managed child sessions
 launch that executable.
 
+`agent-core` owns the provider-neutral loop, tool contracts, scheduling,
+approvals, and shared state, but not concrete tool implementations.
+`agent-tools` implements filesystem, shell, GHCi/code-mode, image, and
+multi-agent tools against those contracts; core never depends on it.
+`agent-accounts` owns credential storage, account selection, authentication,
+and gateway credentials. `agent-computer-use` owns desktop input,
+accessibility, and platform backends used by the CLI and native integration;
+the runtime does not depend on it. These packages and the runtime have
+no CLI/TUI dependency or frontend module imports.
+
 Repository review/delivery and process-hardening code lives in the independent
 `agent-repository` package. Native administration helpers and the Darwin
-foreign-library bridge live in `agent-native-bridge`, which depends on the CLI
-rather than making the production CLI depend on native-only integration code.
+foreign-library bridge live in `agent-native-bridge`. Its ordinary Haskell
+library uses the headless runtime and does not depend on the CLI. The Darwin
+foreign library still uses the CLI turn runner and legacy composition entry points;
+migrating that FFI boundary is deliberately deferred. The production CLI
+does not depend on native-only integration code.
 The resulting production rebuild change is recorded in the
 [`package-split benchmark`](docs/package-split-benchmark.md).
+
+`scripts/check-package-boundaries.sh` checks source ownership and invokes
+the Python 3 package-graph guard. The graph conservatively includes all
+components and conditional dependencies, including the deferred Darwin FFI
+edge, and rejects missing local packages and cycles.
 
 Discovery and bounded import of Codex, Claude, Cursor, and Grok histories lives
 in `agent-external-session`. The CLI re-exports its public facade while keeping

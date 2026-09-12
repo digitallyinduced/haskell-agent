@@ -26,12 +26,12 @@ import Agent.CLI
     )
 import Agent.CLI.Command (setModel, setReasoningEffort)
 import Agent.CLI.Input (terminalTextWidth)
-import Agent.CLI.Models (ModelOption(..), ModelTarget(..))
+import Agent.Runtime.Models (ModelOption(..), ModelTarget(..))
 import Agent.CLI.Status (formatContextUsage, formatTokenUsageOrZero, formatBackgroundTaskStatus)
 import Agent.Tools.Background (BackgroundTaskStatus(..))
 import Data.Time.Clock (UTCTime(..), addUTCTime)
 import Data.Time.Calendar (fromGregorian)
-import Agent.CLI.ModelConfig
+import Agent.Runtime.ModelConfig
     ( ModelCatalog
     , decodeModelConfig
     , packagedModelCatalogPath

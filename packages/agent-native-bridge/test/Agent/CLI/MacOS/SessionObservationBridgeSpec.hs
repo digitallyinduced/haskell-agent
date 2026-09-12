@@ -5,7 +5,7 @@ module Agent.CLI.MacOS.SessionObservationBridgeSpec (spec) where
 import Agent.CLI.MacOS.Marshalling (decodeInput)
 import Agent.CLI.MacOS.SessionObservationBridge
     ( SessionObservationCallback, deliverUpdate )
-import Agent.CLI.Session.Observation
+import Agent.Runtime.Session.Observation
 import Control.Exception.Safe (bracket)
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Foreign (FunPtr, freeHaskellFunPtr, nullPtr)

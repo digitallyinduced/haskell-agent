@@ -48,6 +48,7 @@ library
                     , Agent.CLI.ExternalSession.SQLite
                     , Agent.CLI.ExternalSession.Types
     build-depends:    agent-core >= 0.1 && < 0.2
+                    , agent-tools >= 0.1 && < 0.2
                     , agent-json >= 0.1 && < 0.2
                     , aeson >= 2.0
                     , async
