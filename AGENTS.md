@@ -215,6 +215,10 @@ separately and reverted because flattening the complete body for every Markdown
 render made it slower and allocated more than the strict-`Text` baseline.
 
 # haskell
+- Prefer strict `Text` for application text and retained textual state, and
+  `ByteString` for encoded or binary data. Keep `String` conversions at APIs
+  that require them; do not replace `FilePath` with `Text` mechanically.
+  Audit `Text.unpack` and `[Char]` as well as explicit `String` signatures.
 - Prefer Control.Exception.Safe over Control.Exception
 - Never use bare `Control.Concurrent.Async.async`. Prefer structured
   concurrency (`withAsync`, `race`, `concurrently`, etc.) so child lifetimes

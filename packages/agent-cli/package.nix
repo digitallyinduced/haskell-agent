@@ -29,7 +29,7 @@ mkDerivation {
     agent-responses-types agent-store agent-syntax agent-tui
     agent-webrtc agent-xai ansi-terminal async base base64-bytestring
     brick bytestring colour containers crypton crypton-connection dbus
-    directory entropy filelock filepath haskeline hasql-pool
+    deepseq directory entropy filelock filepath haskeline hasql-pool
     http-client http-client-tls http-types JuicyPixels memory mtl
     network network-uri optparse-applicative process resourcet retry
     safe-exceptions scientific stm tagsoup terminfo text time tls
@@ -37,8 +37,8 @@ mkDerivation {
   ];
   executableHaskellDepends = [
     aeson agent-cli-runtime agent-responses agent-responses-types
-    agent-store base bytestring containers directory filepath process
-    safe-exceptions text time unix
+    agent-store async base bytestring containers directory filepath
+    process safe-exceptions text time unix
   ];
   testHaskellDepends = [
     aeson agent-claude agent-cli-runtime agent-codex-dialect
@@ -55,8 +55,8 @@ mkDerivation {
     aeson agent-cli-runtime agent-core agent-json agent-mcp
     agent-openai agent-responses agent-responses-types agent-store
     agent-tui ansi-terminal async base brick bytestring colour
-    containers deepseq directory filepath JuicyPixels process
-    safe-exceptions stm text time unix vty
+    containers deepseq directory filepath haskeline JuicyPixels process
+    safe-exceptions stm temporary text time unix vty
   ];
   description = "Command-line interface for the universal agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";
