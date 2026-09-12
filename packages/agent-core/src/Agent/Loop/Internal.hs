@@ -26,6 +26,7 @@ import Agent.Loop.Input
 import Agent.Loop.InputItems (turnInputsToItems)
 import Agent.Loop.Output
 import Agent.Loop.TokenUsage
+import Agent.Loop.VisibleState
 import Agent.Responses.Types
 import Agent.Telemetry (TurnTelemetry)
 import Agent.ToolDispatch
@@ -92,7 +93,7 @@ import Control.Exception.Safe
 import Control.Monad (when)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
-import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', atomicWriteIORef, modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.IntMap.Strict as IntMap
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntSet as IntSet
@@ -312,10 +313,7 @@ data LoopRuntime = LoopRuntime
     , loopRuntimeProgressRef :: IORef (BackendSnapshot, LoopProgress)
     , loopRuntimePendingRef :: IORef [TurnInput]
     , loopRuntimePendingSteeringRef :: IORef Int
-    , loopRuntimeUncommittedTextRef :: IORef ([[Text]], [Text])
-    , loopRuntimeUncommittedDisplayEventsRef
-        :: IORef DisplayJournal
-    , loopRuntimeProviderAttemptActiveRef :: IORef Bool
+    , loopRuntimeVisibleStateRef :: IORef VisibleLoopState
     , loopRuntimeProviderTelemetryRef :: IORef [TurnTelemetry]
     , loopRuntimeInitialSteering :: [TurnInput]
     }
@@ -345,9 +343,7 @@ initializeLoopRuntime config0 initialState firstInputs = do
     manager <- newAsyncToolManager
     eventAdmissionLock <- newMVar ()
     progressRef <- newIORef (initialState, NoResponseCommitted)
-    uncommittedTextRef <- newIORef ([], [])
-    uncommittedDisplayEventsRef <- newIORef emptyDisplayJournal
-    providerAttemptActiveRef <- newIORef False
+    visibleStateRef <- newIORef emptyVisibleLoopState
     providerTelemetryRef <- newIORef []
     initialSteering <- config0.loopReadSteering
     pendingRef <- newIORef (firstInputs <> initialSteering)
@@ -356,13 +352,11 @@ initializeLoopRuntime config0 initialState firstInputs = do
             { loopOnEvent = \event ->
                 -- Provider streaming and async host tools can publish at the
                 -- same time. Keep journal mutation and event-pump admission
-                -- in one total order instead of racing the IORefs below.
+                -- in one total order. An atomic state update alone would not
+                -- preserve admission order when the event pump backpressures.
                 withMVar eventAdmissionLock \_ -> do
-                    recordVisibleLoopEvent
-                        uncommittedTextRef
-                        uncommittedDisplayEventsRef
-                        providerAttemptActiveRef
-                        event
+                    atomicModifyIORef' visibleStateRef \state ->
+                        (recordVisibleLoopEvent event state, ())
                     emitLoopEvent eventPump event
             }
     pure LoopRuntime
@@ -372,65 +366,10 @@ initializeLoopRuntime config0 initialState firstInputs = do
         , loopRuntimeProgressRef = progressRef
         , loopRuntimePendingRef = pendingRef
         , loopRuntimePendingSteeringRef = pendingSteeringRef
-        , loopRuntimeUncommittedTextRef = uncommittedTextRef
-        , loopRuntimeUncommittedDisplayEventsRef =
-            uncommittedDisplayEventsRef
-        , loopRuntimeProviderAttemptActiveRef = providerAttemptActiveRef
+        , loopRuntimeVisibleStateRef = visibleStateRef
         , loopRuntimeProviderTelemetryRef = providerTelemetryRef
         , loopRuntimeInitialSteering = initialSteering
         }
-
-recordVisibleLoopEvent
-    :: IORef ([[Text]], [Text])
-    -> IORef DisplayJournal
-    -> IORef Bool
-    -> LoopEvent
-    -> IO ()
-recordVisibleLoopEvent
-    uncommittedTextRef
-    uncommittedDisplayEventsRef
-    providerAttemptActiveRef
-    event = do
-        modifyIORef' uncommittedTextRef \(finished, current) ->
-            case event of
-                TextDelta delta -> (finished, delta : current)
-                -- A restarted attempt stays visible, marked failed,
-                -- until a later response commits or the turn ends.
-                ResponseRestarted _ ->
-                    finishCurrentTextAttempt finished current
-                ResponseAttemptDiscarded -> (finished, [])
-                _ -> (finished, current)
-        case event of
-            TurnStarted -> do
-                writeIORef providerAttemptActiveRef True
-                writeIORef uncommittedDisplayEventsRef emptyDisplayJournal
-            TurnFinished _ -> do
-                writeIORef providerAttemptActiveRef False
-                writeIORef uncommittedDisplayEventsRef emptyDisplayJournal
-            ResponseRestarted _ ->
-                modifyIORef'
-                    uncommittedDisplayEventsRef
-                    (recordDisplayEvent event)
-            ResponseAttemptDiscarded ->
-                modifyIORef'
-                    uncommittedDisplayEventsRef
-                    discardCurrentDisplayAttempt
-            _
-                | replayableDisplayEvent event -> do
-                    active <- readIORef providerAttemptActiveRef
-                    when active $
-                        modifyIORef'
-                            uncommittedDisplayEventsRef
-                            (recordDisplayEvent event)
-                | otherwise -> pure ()
-
-finishCurrentTextAttempt
-    :: [[Text]]
-    -> [Text]
-    -> ([[Text]], [Text])
-finishCurrentTextAttempt finished current
-    | null current = (finished, [])
-    | otherwise = (current : finished, [])
 
 finishLoopExecution
     :: LoopRuntime
@@ -441,26 +380,16 @@ finishLoopExecution
 finishLoopExecution runtime state progress result = do
     writeIORef runtime.loopRuntimeProgressRef (state, progress)
     pending <- readIORef runtime.loopRuntimePendingRef
-    (finishedChunks, currentChunks) <-
-        readIORef runtime.loopRuntimeUncommittedTextRef
-    displayEvents <-
-        displayEventsFromJournal
-            <$> readIORef runtime.loopRuntimeUncommittedDisplayEventsRef
+    visibleState <- readIORef runtime.loopRuntimeVisibleStateRef
     providerTelemetry <-
         reverse <$> readIORef runtime.loopRuntimeProviderTelemetryRef
-    let uncommittedText = Text.intercalate "\n\n" $
-            filter (not . Text.null) $
-                map (Text.concat . reverse)
-                    (reverse finishedChunks <> [currentChunks])
     pure LoopExecution
         { executionState = state.backendItems
         , executionPendingInputs = pending
         , executionProgress = progress
         , executionUncommittedAssistantText =
-            if Text.null uncommittedText
-                then Nothing
-                else Just uncommittedText
-        , executionUncommittedDisplayEvents = displayEvents
+            visibleAssistantText visibleState
+        , executionUncommittedDisplayEvents = visibleDisplayEvents visibleState
         , executionProviderTelemetry = providerTelemetry
         , executionResult = result
         }
@@ -734,9 +663,9 @@ continueCommittedLoop runtime cursor turn = do
     -- The committed response absorbed every input submitted with it, and its
     -- assistant text now lives in the committed state.
     writeIORef runtime.loopRuntimePendingRef []
-    writeIORef runtime.loopRuntimeUncommittedTextRef ([], [])
-    writeIORef runtime.loopRuntimeUncommittedDisplayEventsRef emptyDisplayJournal
-    writeIORef runtime.loopRuntimeProviderAttemptActiveRef False
+    -- Async tool publishers may still be active. Reset the whole snapshot
+    -- atomically without introducing a blocking checkpoint during commit.
+    atomicWriteIORef runtime.loopRuntimeVisibleStateRef emptyVisibleLoopState
     -- Result metadata belongs to the response commit even when a cancellation
     -- lands before the completion event is painted.
     case turn.providerTelemetry of

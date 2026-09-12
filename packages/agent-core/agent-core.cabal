@@ -112,6 +112,7 @@ library
                     , Agent.Loop.EventPump
                     , Agent.Loop.Input
                     , Agent.Loop.Internal
+                    , Agent.Loop.VisibleState
                     , Agent.Loop.Output
                     , Agent.Loop.TokenUsage
                     , Agent.Subagents.Registry.Internal.Core
@@ -310,6 +311,36 @@ benchmark artifact-retrieval-bench
                     , bytestring
                     , directory
                     , text
+
+-- Compile the internal transition directly, without exposing it as public API.
+test-suite visible-loop-state-test
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test-visible-state, src
+    main-is:          Spec.hs
+    other-modules:    Agent.Dialect
+                    , Agent.Error
+                    , Agent.Loop.DisplayJournal
+                    , Agent.Loop.EventPump
+                    , Agent.Loop.Output
+                    , Agent.Loop.TokenUsage
+                    , Agent.Loop.VisibleState
+                    , Agent.Provider
+                    , Agent.Telemetry
+                    , Agent.TextBuffer
+                    , Agent.ToolDispatch
+    build-depends:    agent-json
+                    , agent-responses-types
+                    , aeson
+                    , async
+                    , base >= 4.14 && < 5
+                    , bytestring
+                    , containers
+                    , hspec
+                    , safe-exceptions
+                    , stm
+                    , text
+                    , time
 
 test-suite agent-core-test
     import:           common-opts
