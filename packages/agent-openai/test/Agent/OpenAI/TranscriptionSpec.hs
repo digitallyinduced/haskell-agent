@@ -14,12 +14,15 @@ import Agent.Provider
     , tokenProvider
     )
 import Control.Concurrent
-    ( newEmptyMVar
+    ( myThreadId
+    , newEmptyMVar
     , putMVar
+    , readMVar
     , takeMVar
     , threadDelay
+    , throwTo
     )
-import Control.Concurrent.Async (wait, withAsync)
+import Control.Concurrent.Async (AsyncCancelled(..), cancel, wait, withAsync)
 import Control.Exception.Safe (bracket, finally, throwString)
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
@@ -33,6 +36,7 @@ import Data.IORef
     , readIORef
     )
 import Data.Text (Text)
+import GHC.Clock (getMonotonicTimeNSec)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Network.HTTP.Types as HTTP
@@ -40,6 +44,7 @@ import qualified Network.Socket as Socket
 import qualified Network.Wai as Wai
 import qualified Network.WebSockets as WS
 import qualified System.Timeout as Timeout
+import System.IO.Error (ioeGetErrorString)
 import Test.Hspec
 
 spec :: Spec
@@ -68,6 +73,103 @@ spec = describe "OpenAI transcription" do
                         throwString "callback failed")
                 `shouldReturn` Just "final text"
         readIORef callbacks `shouldReturn` ["hello ", "hello world", " final text "]
+
+    it "propagates a Realtime receiver socket exception without waiting for timeout" do
+        let server = realtimeServer \connection -> do
+                expectCommit connection
+                WS.sendClose connection ("receiver failed" :: Text)
+        withWebSocketServer server \port ->
+            Timeout.timeout (5 * 1_000_000)
+                (WS.runClient "127.0.0.1" port "/" \connection ->
+                    transcribeOnConnection connection (const (pure ())) (const (pure ())))
+                `shouldThrow` \case
+                    WS.CloseRequest 1000 "receiver failed" -> True
+                    _ -> False
+
+    it "propagates a Realtime error event and closes the session" do
+        let server = realtimeServer \connection -> do
+                expectCommit connection
+                sendEvent connection $ Aeson.object
+                    [ "type" .= ("error" :: Text)
+                    , "message" .= ("bad audio" :: Text)
+                    ]
+                expectRealtimeClose connection
+        withWebSocketServer server \port ->
+            Timeout.timeout (5 * 1_000_000)
+                (WS.runClient "127.0.0.1" port "/" \connection ->
+                    transcribeOnConnection connection (const (pure ())) (const (pure ())))
+                `shouldThrow` ((== "bad audio") . ioeGetErrorString)
+
+    mapM_ (\receiverCancelled ->
+      it (if receiverCancelled
+          then "retains the Realtime timeout policy when a callback exits asynchronously"
+          else "times out Realtime only after committing, without returning partial text") do
+        let server = realtimeServer \connection -> do
+                expectCommit connection
+                sendEvent connection $ Aeson.object
+                    [ "type" .= ("conversation.item.input_audio_transcription.delta" :: Text)
+                    , "delta" .= ("partial text" :: Text)
+                    ]
+                expectRealtimeClose connection
+        withWebSocketServer server \port -> do
+            started <- getMonotonicTimeNSec
+            Timeout.timeout (40 * 1_000_000)
+                (WS.runClient "127.0.0.1" port "/" \connection ->
+                    transcribeOnConnection connection
+                        (const (threadDelay 1_000_000))
+                        (\_ -> if receiverCancelled
+                            then myThreadId >>= \tid -> throwTo tid AsyncCancelled
+                            else pure ()))
+                `shouldThrow` ((== "timed out waiting for OpenAI Realtime transcription")
+                    . ioeGetErrorString)
+            ended <- getMonotonicTimeNSec
+            (ended - started) `shouldSatisfy` (>= 31_000_000_000)
+      ) [False, True]
+
+    mapM_ (\cancelParent ->
+        it (if cancelParent
+            then "cancels Realtime and joins its blocked receiver after sending close"
+            else "preserves capture failure and joins its blocked Realtime receiver") do
+            callbackStarted <- newEmptyMVar
+            callbackStopped <- newEmptyMVar
+            closeSeen <- newEmptyMVar
+            blocked <- newEmptyMVar
+            let server = realtimeServer \connection -> do
+                    sendEvent connection $ Aeson.object
+                        [ "type" .= ("conversation.item.input_audio_transcription.delta" :: Text)
+                        , "delta" .= ("partial" :: Text)
+                        ]
+                    expectRealtimeClose connection
+                    putMVar closeSeen ()
+                callback _ =
+                    (putMVar callbackStarted () >> takeMVar blocked)
+                        `finally` do
+                            -- Cancellation must not precede the close frame:
+                            -- the receiver's cleanup waits for the peer to see it.
+                            closed <- Timeout.timeout 2_000_000 (readMVar closeSeen)
+                            putMVar callbackStopped closed
+                produce _ = do
+                    readMVar callbackStarted
+                    if cancelParent
+                        then takeMVar blocked
+                        else ioError (userError "capture failed")
+            withWebSocketServer server \port ->
+                Timeout.timeout (5 * 1_000_000) (do
+                    withAsync
+                        (WS.runClient "127.0.0.1" port "/" \connection ->
+                            transcribeOnConnection connection produce callback)
+                        \client -> do
+                            if cancelParent
+                                then do
+                                    readMVar callbackStarted
+                                    cancel client
+                                    wait client `shouldThrow` (const True :: AsyncCancelled -> Bool)
+                                else
+                                    wait client `shouldThrow` ((== "capture failed") . ioeGetErrorString)
+                            -- Already joined, not merely cancellation-requested.
+                            readMVar callbackStopped `shouldReturn` Just ())
+                    `shouldReturn` Just ())
+        [False, True]
 
     it "retains ChatGPT state on a normal WebSocket close after callback failure" do
         callbacks <- newIORef []
@@ -559,6 +661,25 @@ spec = describe "OpenAI transcription" do
                 Left
                     (ChatGPTDictationStreamUnavailable
                         "Dictation WebSocket URL must use WS, WSS, HTTP, or HTTPS")
+realtimeServer :: (WS.Connection -> IO ()) -> WS.ServerApp
+realtimeServer action pending = do
+    connection <- WS.acceptRequest pending
+    _ <- WS.receiveData connection :: IO Text
+    sendEvent connection $ Aeson.object ["type" .= ("session.updated" :: Text)]
+    action connection
+
+expectCommit :: WS.Connection -> IO ()
+expectCommit connection = do
+    message <- WS.receiveData connection
+    decodeValue message `shouldBe` Aeson.object
+        ["type" .= ("input_audio_buffer.commit" :: Text)]
+
+expectRealtimeClose :: WS.Connection -> IO ()
+expectRealtimeClose connection =
+    (WS.receiveData connection :: IO Text) `shouldThrow` \case
+        WS.CloseRequest 1000 "done" -> True
+        _ -> False
+
 withWebSocketServer
     :: WS.ServerApp
     -> (Int -> IO value)
