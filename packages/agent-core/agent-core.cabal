@@ -45,6 +45,7 @@ library
                     , Agent.ClientIdentity
                     , Agent.Cancel
                     , Agent.Concurrent
+                    , Agent.Transcription.Receive
                     , Agent.ComputerUse.Protocol
                     , Agent.Dialect
                     , Agent.Error
@@ -373,6 +374,7 @@ test-suite agent-core-test
                     , Agent.SubagentsSpec
                     , Agent.Subagents.TaskPathSpec
                     , Agent.TextBufferSpec
+                    , Agent.Transcription.ReceiveSpec
                     , Agent.TelemetrySpec
                     , Agent.ToolArgsSpec
                     , Agent.ToolDispatchSpec

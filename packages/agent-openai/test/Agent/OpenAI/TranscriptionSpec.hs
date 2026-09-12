@@ -54,7 +54,12 @@ spec = describe "OpenAI transcription" do
         let server pending = do
                 connection <- WS.acceptRequest pending
                 _ <- WS.receiveData connection :: IO Text
-                WS.sendTextData connection ("{\"type\":\"session.updated\"}" :: Text)
+                mapM_ (WS.sendTextData connection)
+                    [ "invalid JSON"
+                    , "{\"type\":\"future.event\"}"
+                    , "{\"type\":\"session.updated\"}"
+                    :: Text
+                    ]
                 _ <- WS.receiveData connection :: IO Text
                 mapM_ (WS.sendTextData connection)
                     [ "{\"type\":\"conversation.item.input_audio_transcription.delta\",\"delta\":\"hello \"}"
@@ -89,6 +94,10 @@ spec = describe "OpenAI transcription" do
     it "propagates a Realtime error event and closes the session" do
         let server = realtimeServer \connection -> do
                 expectCommit connection
+                sendEvent connection $ Aeson.object
+                    [ "type" .= ("conversation.item.input_audio_transcription.delta" :: Text)
+                    , "delta" .= ("interim" :: Text)
+                    ]
                 sendEvent connection $ Aeson.object
                     [ "type" .= ("error" :: Text)
                     , "message" .= ("bad audio" :: Text)
@@ -170,6 +179,23 @@ spec = describe "OpenAI transcription" do
                             readMVar callbackStopped `shouldReturn` Just ())
                     `shouldReturn` Just ())
         [False, True]
+
+    it "rejects readiness errors before producing audio" do
+        produced <- newIORef False
+        let server pending = do
+                connection <- WS.acceptRequest pending
+                _ <- WS.receiveData connection :: IO Text
+                WS.sendTextData connection
+                    ("{\"type\":\"error\",\"error\":{\"message\":\"not ready\"}}" :: Text)
+        Timeout.timeout (5 * 1_000_000)
+            (withWebSocketServer server \port ->
+                WS.runClient "127.0.0.1" port "/" \connection ->
+                    transcribeOnConnection connection
+                        (const (modifyIORef' produced (const True)))
+                        (const (pure ()))
+                        `shouldThrow` (\err -> ioeGetErrorString err == "not ready"))
+            `shouldReturn` Just ()
+        readIORef produced `shouldReturn` False
 
     it "retains ChatGPT state on a normal WebSocket close after callback failure" do
         callbacks <- newIORef []
@@ -661,6 +687,7 @@ spec = describe "OpenAI transcription" do
                 Left
                     (ChatGPTDictationStreamUnavailable
                         "Dictation WebSocket URL must use WS, WSS, HTTP, or HTTPS")
+
 realtimeServer :: (WS.Connection -> IO ()) -> WS.ServerApp
 realtimeServer action pending = do
     connection <- WS.acceptRequest pending
