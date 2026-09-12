@@ -55,7 +55,7 @@ import Agent.TUI.Markdown
       diffWidgetWithSyntaxHighlighting,
       markdownWidgetWithLinks,
       markdownWidgetWithStreamingCache,
-      markdownWidgetWithParsedStreamingCache,
+      markdownWidgetWithMarkdownStreamingCache,
       markdownWidgetWithSyntaxHighlightingAndLinks )
 import Agent.TUI.Model
     ( blockCodeLanguage,
@@ -214,7 +214,7 @@ drawBlock state target ui block =
             | block.blockState == BlockStreaming
             , Just (ident, parsed) <- ui.uiStreamingMarkdown
             , ident == block.blockId =
-                markdownWidgetWithParsedStreamingCache
+                markdownWidgetWithMarkdownStreamingCache
                     state.appSyntaxHighlighter
                     MarkdownLink
                     cacheProse

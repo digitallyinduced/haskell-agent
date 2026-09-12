@@ -1,7 +1,7 @@
 module Agent.TUI.ModelSpec (spec) where
 
 import Agent.TUI.Model
-import Agent.TUI.FencedCode (emptyFenceStreamState, feedFenceStream, fenceStreamSections)
+import Agent.TUI.Markdown.Stream (emptyMarkdownStreamState, feedMarkdownStream, markdownStreamSnapshot)
 import Agent.TUI.Presentation
     ( TodoDisplayLine(..)
     , TodoDisplayStatus(..)
@@ -32,9 +32,9 @@ spec = describe "fullscreen UI reducer" do
     it "retains incremental assistant parsing across deltas and releases it at completion" do
         let fragments = ["First paragraph.\n", "\n```haskell\n", "value = 1\n", "```\n"]
             streaming = foldl' (flip (reduceUi . UiLoop . TextDelta)) initialUiState fragments
-            expected = feedFenceStream emptyFenceStreamState (Text.concat fragments)
-        fmap (fenceStreamSections . snd) streaming.uiStreamingMarkdown
-            `shouldBe` Just (fenceStreamSections expected)
+            expected = feedMarkdownStream emptyMarkdownStreamState (Text.concat fragments)
+        fmap (markdownStreamSnapshot . snd) streaming.uiStreamingMarkdown
+            `shouldBe` Just (markdownStreamSnapshot expected)
         fmap fst streaming.uiStreamingMarkdown `shouldBe` streaming.uiSelectedBlock
         let completed = reduceUi (UiLoop (TurnFinished (emptyTurnOutput "r1" [] Nothing))) streaming
         completed.uiStreamingMarkdown `shouldBe` Nothing
@@ -52,9 +52,26 @@ spec = describe "fullscreen UI reducer" do
     it "reconstructs missing assistant parser state before extending an existing block" do
         let first = reduceUi (UiLoop (TextDelta "paragraph\n\n```\n")) initialUiState
             recovered = reduceUi (UiLoop (TextDelta "body\n```")) first{uiStreamingMarkdown = Nothing}
-            expected = feedFenceStream emptyFenceStreamState "paragraph\n\n```\nbody\n```"
-        fmap (fenceStreamSections . snd) recovered.uiStreamingMarkdown
-            `shouldBe` Just (fenceStreamSections expected)
+            expected = feedMarkdownStream emptyMarkdownStreamState "paragraph\n\n```\nbody\n```"
+        fmap (markdownStreamSnapshot . snd) recovered.uiStreamingMarkdown
+            `shouldBe` Just (markdownStreamSnapshot expected)
+
+    it "retains the same syntax at every reducer prefix, including empty deltas" do
+        let fragments = ["A **", "bold", "** [label](https://example.com", ")\n", "", "| A | B |\n", "| -", "-- | --- |\n", "| λ | `x|y` |"]
+            states = tail (scanl (flip (reduceUi . UiLoop . TextDelta)) initialUiState fragments)
+            sources = tail (scanl (<>) "" fragments)
+        map (fmap (markdownStreamSnapshot . snd) . (.uiStreamingMarkdown)) states
+            `shouldBe` map (Just . markdownStreamSnapshot . feedMarkdownStream emptyMarkdownStreamState) sources
+
+    it "does not reuse parser state belonging to another assistant block" do
+        let old = reduceUi (UiLoop (TextDelta "Unrelated **syntax")) initialUiState
+            submitted = reduceUi (UiUserSubmitted "next") old
+            current = reduceUi (UiLoop (TextDelta "Current `code")) submitted
+            stale = current{uiStreamingMarkdown = old.uiStreamingMarkdown}
+            recovered = reduceUi (UiLoop (TextDelta "` text")) stale
+            expected = feedMarkdownStream emptyMarkdownStreamState "Current `code` text"
+        fmap (markdownStreamSnapshot . snd) recovered.uiStreamingMarkdown
+            `shouldBe` Just (markdownStreamSnapshot expected)
 
     it "updates background work without changing the draft or adding transcript blocks" do
         let draft = reduceUi (UiSetDraft "follow-up message" 4) initialUiState

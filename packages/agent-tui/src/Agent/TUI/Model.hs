@@ -63,7 +63,7 @@ import Agent.TUI.Model.ToolResult
 import Agent.TUI.Model.State
 import Agent.TUI.Model.Timing
 import Agent.TUI.Model.Types
-import Agent.TUI.FencedCode (emptyFenceStreamState, feedFenceStream)
+import Agent.TUI.Markdown.Stream (emptyMarkdownStreamState, feedMarkdownStream)
 import Agent.TUI.Motion
     ( completionStatusDurationMillis )
 import Agent.Loop
@@ -561,8 +561,8 @@ appendOrExtend kind title delta streamState state =
                                 let previous = case state.uiStreamingMarkdown of
                                         Just (ident, parsed)
                                             | ident == block.blockId -> parsed
-                                        _ -> feedFenceStream emptyFenceStreamState block.blockBody
-                                    parsed = feedFenceStream previous delta
+                                        _ -> feedMarkdownStream emptyMarkdownStreamState block.blockBody
+                                    parsed = feedMarkdownStream previous delta
                                 in parsed `seq` Just (block.blockId, parsed)
                             else Nothing
                     }

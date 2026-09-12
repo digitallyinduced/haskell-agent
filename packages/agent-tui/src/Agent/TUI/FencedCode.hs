@@ -15,6 +15,10 @@ module Agent.TUI.FencedCode
     , emptyFenceStreamState
     , feedFenceStream
     , fenceStreamSections
+    , FenceSectionLayout(..)
+    , feedFenceStreamWithProse
+    , fenceStreamPendingProse
+    , fenceStreamLayout
     ) where
 
 import Control.Applicative ((<|>))
@@ -171,6 +175,64 @@ feedFenceStream state input =
                 let line = SourceLine (state.streamPendingLine <> fragment) "\n"
                     next = consumeStreamLine state{streamPendingLine = ""} line
                 in feedFenceStream next (Text.drop 1 suffix)
+
+-- | Structural events for a downstream prose parser. Only newline-complete
+-- prose lines are committed; the final line remains a reversible preview.
+feedFenceStreamWithProse
+    :: FenceStreamState -> Text -> (FenceStreamState, [(Int, Int, Text)])
+feedFenceStreamWithProse state input =
+    case Text.breakOn "\n" input of
+        (fragment, suffix)
+            | Text.null suffix ->
+                (state{streamPendingLine = state.streamPendingLine <> fragment}, [])
+            | otherwise ->
+                let source = state.streamPendingLine <> fragment
+                    line = SourceLine source "\n"
+                    -- A prose line leaves the parser outside a fence. Reuse
+                    -- the transition's decision instead of running contextual
+                    -- opener recognition twice for every completed line.
+                    events = case (state.streamOpener, next.streamOpener) of
+                        (Nothing, Nothing) ->
+                            [(state.streamChunkIndex, state.streamSectionIndex, source)]
+                        _ -> []
+                    next = consumeStreamLine state{streamPendingLine = ""} line
+                    (final, remaining) = feedFenceStreamWithProse next (Text.drop 1 suffix)
+                in (final, events <> remaining)
+
+fenceStreamPendingProse :: FenceStreamState -> Maybe (Int, Int, Text)
+fenceStreamPendingProse state
+    | Nothing <- state.streamOpener
+    , not (Text.null state.streamPendingLine)
+    , Nothing <- fenceOpenerInContext state.streamPrevious state.streamPendingLine =
+        Just (state.streamChunkIndex, state.streamSectionIndex, state.streamPendingLine)
+    | otherwise = Nothing
+
+-- | A view that does not flatten the growing prose section. Source-bearing
+-- snapshots remain available for callers that actually require source text.
+data FenceSectionLayout
+    = FenceProseLayout !Int !Int !Bool
+    | FenceCodeLayout !Int !FencedBlock
+    deriving (Eq, Show)
+
+fenceStreamLayout :: FenceStreamState -> [FenceSectionLayout]
+fenceStreamLayout state =
+    let preview
+            | Text.null state.streamPendingLine = state
+            | otherwise = consumeStreamLine state{streamPendingLine = ""}
+                (SourceLine state.streamPendingLine "")
+        completed = map sectionLayout (toList preview.streamSections)
+        active = case preview.streamOpener of
+            Just opener ->
+                [FenceCodeLayout preview.streamChunkIndex (streamBlock preview opener False)]
+            Nothing
+                | not (null preview.streamLines) ->
+                    [FenceProseLayout preview.streamChunkIndex preview.streamSectionIndex False]
+                | otherwise -> []
+    in completed <> active
+  where
+    sectionLayout (FenceProseSection chunk section stable _) =
+        FenceProseLayout chunk section stable
+    sectionLayout (FenceCodeSection chunk block) = FenceCodeLayout chunk block
 
 consumeStreamLine :: FenceStreamState -> SourceLine -> FenceStreamState
 consumeStreamLine state line =

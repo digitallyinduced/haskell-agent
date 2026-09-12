@@ -18,6 +18,7 @@ module Agent.TUI.Markdown
     , markdownWidgetWithSyntaxHighlightingAndLinks
     , markdownWidgetWithStreamingCache
     , markdownWidgetWithParsedStreamingCache
+    , markdownWidgetWithMarkdownStreamingCache
     , markdownStreamingCacheSections
     , parseInline
     ) where
@@ -36,6 +37,7 @@ import Agent.TUI.Markdown.Inline
     , parseInline
     )
 import qualified Agent.TUI.Markdown.Block as Block
+import qualified Agent.TUI.Markdown.Stream as Stream
 import Agent.Syntax
     ( HighlightedLine
     , SyntaxHighlighter
@@ -62,6 +64,7 @@ import qualified Brick.Types as B
 import Control.Applicative ((<|>))
 import Data.Bits ((.|.))
 import Data.Char (isDigit, isSpace)
+import Data.Foldable (toList)
 import qualified Data.List as List
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
@@ -244,6 +247,48 @@ markdownWidgetWithParsedStreamingCache highlighter linkName cacheProse cacheCode
                         vBox (renderLines (Just linkName) (Text.lines prose))
             ]
         | otherwise = renderLines (Just linkName) (Text.lines prose)
+
+-- | Render retained syntax, including inline trees and table-cell measurements.
+-- Only immutable prose sections enter Brick's cache; the active suffix remains
+-- uncached and can be reinterpreted as additional Markdown arrives.
+markdownWidgetWithMarkdownStreamingCache
+    :: Ord n
+    => Maybe SyntaxHighlighter
+    -> (Text -> n)
+    -> (Int -> Int -> Widget n -> Widget n)
+    -> (Int -> Widget n -> Widget n)
+    -> (Int -> Text -> Widget n)
+    -> Stream.MarkdownStreamState
+    -> Widget n
+markdownWidgetWithMarkdownStreamingCache highlighter linkName cacheProse cacheCode codeHeader =
+    vBox . concatMap renderSection . Stream.markdownStreamSnapshot
+  where
+    renderSection (Stream.MarkdownCodeSection _ block) =
+        renderChunk highlighter (Just linkName) cacheCode codeHeader (FenceBlock block)
+    renderSection (Stream.MarkdownProseSection chunk index stable whitespace blocks)
+        | stable =
+            [cacheProse chunk index $
+                B.Widget (if whitespace then B.Fixed else B.Greedy) B.Fixed $
+                    B.render (vBox (map renderBlock (toList blocks)))]
+        | otherwise = map renderBlock (toList blocks)
+    renderBlock (Stream.MarkdownTable alignments rows) =
+        let cells = toList rows
+        in tableInlineRowsWidget (Just linkName) alignments
+            (map (map (.cellInlines)) cells)
+            (map (map (\cell -> (cell.cellNaturalWidth, cell.cellMinimumWidth))) cells)
+    renderBlock (Stream.MarkdownLine kind inlines) =
+        let inline = inlineWidgetWithAttr (Just linkName)
+        in case kind of
+            Stream.ProseLine -> inline Theme.assistantAttr inlines
+            Stream.HeadingLine -> padTop (Pad 1) (inline Theme.headingAttr inlines)
+            Stream.BulletLine indent -> hBox
+                [txt indent, withAttr Theme.headingAttr (txt "• "), inline Theme.assistantAttr inlines]
+            Stream.OrderedLine indent number -> hBox
+                [txt indent, withAttr Theme.headingAttr (txt (number <> ". ")), inline Theme.assistantAttr inlines]
+            Stream.QuoteLine -> hBox
+                [withAttr Theme.mutedAttr (txt "│ "), inline Theme.mutedAttr inlines]
+            Stream.BlankLine -> txt " "
+            Stream.ThematicLine -> withAttr Theme.mutedAttr (vLimit 1 (fill '─'))
 
 -- | Render a standalone code body with the same width bounding and optional
 -- syntax highlighting used by fenced Markdown blocks.
@@ -1295,7 +1340,20 @@ tableRowsWidget
     -> [[Text]]
     -> [Text]
     -> Widget n
-tableRowsWidget linkName table rows headerCells =
+tableRowsWidget linkName table rows _ =
+    tableInlineRowsWidget linkName table.tableAlignments
+        (map (map parseInline) rows)
+        (map (map (\cell -> (cellDisplayWidth cell, cellMinimumWidth cell))) rows)
+
+tableInlineRowsWidget
+    :: Ord n
+    => Maybe (Text -> n)
+    -> [Block.TableAlignment]
+    -> [[[Inline]]]
+    -> [[(Int, Int)]]
+    -> Widget n
+tableInlineRowsWidget _ _ [] _ = emptyWidget
+tableInlineRowsWidget linkName alignments rows@(headerCells : _) measurements =
     B.Widget B.Greedy B.Fixed do
         context <- B.getContext
         borderAttr <- B.lookupAttrName Theme.borderAttr
@@ -1308,8 +1366,7 @@ tableRowsWidget linkName table rows headerCells =
                         (resolveInline
                             (if rowIndex == 0
                                 then Theme.strongAttr
-                                else Theme.assistantAttr)
-                            . parseInline)
+                                else Theme.assistantAttr))
                         cells)
                 (zip [0 :: Int ..] normalizedRows)
         let availableWidth = max 1 context.availWidth
@@ -1346,13 +1403,13 @@ tableRowsWidget linkName table rows headerCells =
                                 renderTableRow
                                     linkName
                                     borderAttr headerAttr horizontalPadding
-                                    table.tableAlignments widths header
+                                    alignments widths header
                                     : map
                                         (renderTableRow
                                             linkName
                                             borderAttr bodyAttr
                                             horizontalPadding
-                                            table.tableAlignments widths)
+                                            alignments widths)
                                         body
                         in top
                             : (List.intersperse divider logicalRows
@@ -1366,14 +1423,14 @@ tableRowsWidget linkName table rows headerCells =
   where
     columnCount = length headerCells
     normalizedRows =
-        [ take columnCount (cells <> repeat "")
+        [ take columnCount (cells <> repeat [])
         | cells <- rows
         ]
     naturalWidths =
         [ maximum
             (1
-                : [ cellDisplayWidth cell
-                  | row <- normalizedRows
+                : [ fst cell
+                  | row <- measurements
                   , cell <- take 1 (drop columnIndex row)
                   ])
         | columnIndex <- [0 .. columnCount - 1]
@@ -1381,8 +1438,8 @@ tableRowsWidget linkName table rows headerCells =
     minimumWidths =
         [ maximum
             (1
-                : [ cellMinimumWidth cell
-                  | row <- normalizedRows
+                : [ snd cell
+                  | row <- measurements
                   , cell <- take 1 (drop columnIndex row)
                   ])
         | columnIndex <- [0 .. columnCount - 1]

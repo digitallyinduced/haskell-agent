@@ -42,6 +42,7 @@ library
                     , Agent.TUI.Markdown
                     , Agent.TUI.Markdown.Block
                     , Agent.TUI.Markdown.Inline
+                    , Agent.TUI.Markdown.Stream
                     , Agent.TUI.Motion
                     , Agent.TUI.Model
                     , Agent.TUI.Presentation
@@ -78,6 +79,7 @@ test-suite agent-tui-test
                     , Agent.TUI.FencedCodeSpec
                     , Agent.TUI.Markdown.BlockSpec
                     , Agent.TUI.Markdown.InlineSpec
+                    , Agent.TUI.Markdown.InlineStreamSpec
                     , Agent.TUI.MarkdownSpec
                     , Agent.TUI.MotionSpec
                     , Agent.TUI.ModelSpec
@@ -121,6 +123,7 @@ benchmark fullscreen-markdown-bench
                     , Agent.TUI.Markdown
                     , Agent.TUI.Markdown.Block
                     , Agent.TUI.Markdown.Inline
+                    , Agent.TUI.Markdown.Stream
                     , Agent.TUI.Motion
                     , Agent.TUI.Presentation
                     , Agent.TUI.TextWidth

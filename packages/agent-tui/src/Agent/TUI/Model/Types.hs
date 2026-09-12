@@ -20,7 +20,7 @@ module Agent.TUI.Model.Types
 import Agent.Loop (LoopEvent, TokenUsage)
 import Agent.ToolDispatch (ToolCall)
 import Agent.TUI.Presentation (TodoDisplayLine)
-import Agent.TUI.FencedCode (FenceStreamState)
+import Agent.TUI.Markdown.Stream (MarkdownStreamState)
 import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq)
 import Data.Text (Text)
@@ -142,7 +142,7 @@ data UiState = UiState
     { uiBlocks :: !(Seq UiBlock)
     -- | Parser state for the most recently extended assistant block. Other
     -- blocks use the ordinary renderer; no parser state is retained in history.
-    , uiStreamingMarkdown :: !(Maybe (BlockId, FenceStreamState))
+    , uiStreamingMarkdown :: !(Maybe (BlockId, MarkdownStreamState))
     , uiNextBlockId :: !Int
     , uiDraft :: !Text
     , uiCursor :: !Int
