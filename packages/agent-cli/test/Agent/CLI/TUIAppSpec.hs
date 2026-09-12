@@ -176,6 +176,7 @@ import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Concurrent.Async (cancel, waitCatch, withAsync)
 import Control.Exception.Safe (bracket, bracket_)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
+import qualified System.Directory as Directory
 import Control.Exception (AsyncException(UserInterrupt))
 import qualified Control.Exception as Exception
 import Control.Concurrent.STM
@@ -3331,6 +3332,28 @@ spec = do
             state.appUi.uiFocus `shouldBe` FocusPermission
             state.appUi.uiPermission `shouldSatisfy` isJust
 
+        it "restores prompt focus for legacy and modified clipboard shortcuts" do
+            withClipboardTextFixture do
+                forM_
+                    [ V.EvKey (V.KChar '\SYN') []
+                    , V.EvKey (V.KChar 'v') [V.MCtrl]
+                    , V.EvKey (V.KChar 'v') [V.MMeta]
+                    ] $ \pasteEvent ->
+                    forM_ [[], [V.EvLostFocus], [V.EvLostFocus, V.EvGainedFocus]] $ \focusEvents -> do
+                        state <- runTranscriptFocusInput [] (focusEvents <> [pasteEvent])
+                        state.appUi.uiDraft `shouldBe` "beclipboard textfore"
+                        state.appUi.uiCursor `shouldBe` 16
+                        state.appUi.uiFocus `shouldBe` FocusComposer
+                        state.appHistorySelectedBlock `shouldBe` Nothing
+
+        it "does not redirect legacy clipboard input out of an approval overlay" do
+            state <- runTranscriptFocusInput
+                [UiPermissionShown "Approve a test operation"]
+                [V.EvKey (V.KChar '\SYN') []]
+            state.appUi.uiDraft `shouldBe` "before"
+            state.appUi.uiFocus `shouldBe` FocusPermission
+            state.appUi.uiPermission `shouldSatisfy` isJust
+
         it "does not insert navigation keys or modified character shortcuts" do
             forM_
                 [ V.EvKey V.KUp []
@@ -3972,6 +3995,24 @@ unfocusedStreamingRefreshesOnMotionTick = do
             ]
     rendered <- runFullscreenScript initialState script
     pure $ encoded marker `ByteString.isInfixOf` rendered
+
+-- Exercise the platform clipboard reader without accessing the user's clipboard.
+withClipboardTextFixture :: IO a -> IO a
+withClipboardTextFixture action =
+    withSystemTempDirectory "agent-tui-clipboard-text" \directory -> do
+        shell <- Directory.findExecutable "sh" >>= maybe
+            (fail "clipboard fixture requires a shell") pure
+        forM_ ["pbpaste", "wl-paste", "xclip"] $ \command -> do
+            let path = directory </> command
+            writeFile path ("#!" <> shell <> "\nprintf '%s' 'clipboard text'\n")
+            permissions <- Directory.getPermissions path
+            Directory.setPermissions path (Directory.setOwnerExecutable True permissions)
+        bracket
+            (lookupEnv "PATH")
+            (\previous -> maybe (unsetEnv "PATH") (setEnv "PATH") previous)
+            \_ -> do
+                setEnv "PATH" directory
+                action
 
 withPastedImageFixtures :: (FilePath -> FilePath -> IO a) -> IO a
 withPastedImageFixtures action =

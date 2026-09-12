@@ -380,6 +380,9 @@ mouseScrollLines = 3
 handleScrollbackKey :: V.Event -> EventM Name AppState ()
 handleScrollbackKey = \case
     event@V.EvPaste{} -> editComposer event
+    -- Legacy terminals encode Ctrl-V as the C0 SYN character.
+    V.EvKey (V.KChar '\SYN') [] ->
+        editComposer (V.EvKey (V.KChar 'v') [V.MCtrl])
     event@(V.EvKey (V.KChar 'v') modifiers)
         | V.MCtrl `elem` modifiers || V.MMeta `elem` modifiers ->
             editComposer event
