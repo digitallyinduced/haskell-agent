@@ -124,9 +124,56 @@ Peak RSS is a separate metric. Three fresh process runs with macOS
 `/usr/bin/time -l` around that retained command (including parity checks) gave
 median RSS of 62,390,272 → 49,790,976 bytes for `history-prose 1000`, but
 134,922,240 → 148,553,728 bytes for `history-mixed 500` (about 10% higher).
-Thus copying fixes source-buffer retention, but these results do **not** establish
-a general peak-memory improvement. The mixed-history peak remains a limitation;
-allocation reductions must not be presented as reductions in process memory.
+These initial figures include the correctness checker and are superseded for
+rendering attribution by the isolated investigation below. Allocation reductions
+must not be presented as reductions in process memory.
+
+### Isolated peak-memory investigation
+
+The parity checker renders both implementations and expands their pictures into
+per-character comparisons. Its memory contributes to process-wide peak RSS even
+though it is outside the timing interval. The benchmark now supports separate
+processes for verification and measurement (default behavior is unchanged):
+
+```sh
+MARKDOWN_BENCH_PHASE=verify "$BENCH" retained history-mixed 500 64 3 +RTS -T
+# Only measure after verification succeeds, for each comparison binary.
+MARKDOWN_BENCH_PHASE=measure /usr/bin/time -l \
+  "$BENCH" retained history-mixed 500 64 3 +RTS -T -s
+```
+
+Both binaries use the same updated harness; baseline disables only the ASCII
+guard. Three fresh measurement processes gave median peak RSS of **85,442,560 →
+87,572,480 bytes (+2.5%)**, rather than the earlier combined-process 10%.
+RTS maximum live heap was slightly lower, **26,888,152 → 26,780,304 bytes**,
+while runtime memory in use rose from **65 to 67 MiB**. Final live heap remained
+identical. This points to allocation/GC scheduling and heap reservation rather
+than extra retained source buffers; it does not prove every source of RSS.
+
+Additional isolated runs (three retained samples per process):
+
+| Mixed-history count | Baseline peak RSS bytes | Copy peak RSS bytes | Final live bytes, both |
+| ---: | ---: | ---: | ---: |
+| 100 | 37,191,680 | 35,127,296 | 1,035,376 |
+| 250 | 57,114,624 | 58,163,200 | 2,494,120 |
+| 500 | 85,426,176 | 87,539,712 | 4,925,392 |
+| 1000 | 152,551,424 | 154,697,728 | 9,787,888 |
+
+Single-sample controls also showed about 2 MiB more RSS at counts 500/1000.
+Here count means repeated workload sections in **one completed body**, not
+separate chat messages. The phase harness adds a small fixed live-heap overhead
+relative to the earlier table, identically for both binaries.
+
+A new combined-process control gave 146,276,352 → 148,422,656 bytes. Even
+harness changes can move GC thresholds, so the historical 10% cannot be treated
+as a stable production effect or attributed solely to the parity checker.
+
+An attempted single-pass table-width measurement reduced allocation in the
+isolated 500-count run from 1,660,190,376 to 1,513,814,376 bytes, but increased
+peak RSS to 89,636,864 bytes (69 MiB runtime memory). It was rejected and reverted.
+No GC tuning or unsafe identity-return shortcut is included. The remaining
+roughly 2 MiB peak overhead is **not eliminated**; the production implementation
+is unchanged by this investigation.
 
 ## Performance boundary
 

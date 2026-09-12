@@ -12,7 +12,7 @@ import qualified Agent.TUI.Theme as Theme
 import Brick
 -- This standalone benchmark uses base's bracket solely for stable-pointer cleanup.
 import Control.Exception (bracket, evaluate)
-import Control.Monad (forM, unless)
+import Control.Monad (forM, unless, when)
 import Data.Char (ord)
 import Data.Foldable (toList)
 import Data.IORef (newIORef, readIORef)
@@ -28,8 +28,8 @@ import GHC.Clock (getMonotonicTimeNSec)
 import Foreign.StablePtr (newStablePtr, freeStablePtr)
 import GHC.Stats (RTSStats(..), GCDetails(..), getRTSStats, getRTSStatsEnabled)
 import System.CPUTime (getCPUTime)
-import System.Environment (getArgs)
-import System.Exit (die)
+import System.Environment (getArgs, lookupEnv)
+import System.Exit (die, exitSuccess)
 import System.Mem (performGC)
 import Text.Printf (printf)
 
@@ -90,6 +90,10 @@ prepareFrame renderer parser@(ParserState fences markdown) streaming body delta
 
 main :: IO ()
 main = do
+    -- Separate processes are required when attributing process-wide peak RSS.
+    phase <- lookupEnv "MARKDOWN_BENCH_PHASE"
+    unless (phase `elem` [Nothing, Just "verify", Just "measure"])
+        (die "MARKDOWN_BENCH_PHASE must be verify or measure")
     enabled <- getRTSStatsEnabled
     unless enabled (die "run with +RTS -T")
     getArgs >>= \case
@@ -113,7 +117,8 @@ main = do
             chunkSize <- positive chunkArg
             samples <- positive samplesArg
             let input = frameInput scenario count chunkSize 0
-            if renderer `elem` [BaselineInlineParser, StreamingInlineParser]
+            if phase == Just "measure" then pure ()
+            else if renderer `elem` [BaselineInlineParser, StreamingInlineParser]
                 then verifyInlineFrames input
                 else case [(index, old, new) |
                     (index, (old, new)) <- zip [0 :: Int ..]
@@ -124,6 +129,7 @@ main = do
                     (index, old, new) : _ ->
                         die ("old/new per-frame display or click targets differ at "
                             <> show index <> "\nOLD: " <> show old <> "\nNEW: " <> show new)
+            when (phase == Just "verify") exitSuccess
             if renderer == RetainedRenderer
                 then do
                     results <- forM [1 .. samples] \sample ->
