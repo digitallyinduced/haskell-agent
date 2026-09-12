@@ -413,6 +413,12 @@ commandPaletteActionAt index catalog
 data FullscreenRuntime = FullscreenRuntime
     { runtimeEvents :: !(BChan AppEvent)
     , runtimeMailbox :: !AppEventMailbox
+    -- | Forced shutdown bypasses display backpressure. The event pump gives
+    -- this one-shot control lane priority over queued rendering work.
+    , runtimeStopRequested :: !(TMVar ())
+    -- | Final diagnostics belong to the terminal owner, not the display
+    -- mailbox: they must survive its closure and run after Vty is restored.
+    , runtimeFinalOutput :: !(TQueue (IO ()))
     , runtimeInput :: !FullscreenInputBuffer
     , runtimeCancel :: !(IO ())
     , runtimeSteer :: !(Bool -> Text -> IO (Either Text ()))

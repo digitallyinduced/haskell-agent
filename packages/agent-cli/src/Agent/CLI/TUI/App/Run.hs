@@ -155,7 +155,6 @@ import Agent.CLI.Recap ( autoRecapAwayThreshold , autoRecapIdleThreshold , autoR
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
 import Control.Exception.Safe (finally, onException, throwIO, tryAny)
-import Control.Exception (AsyncException(UserInterrupt))
 import Data.Char (isControl, isSpace)
 import Data.Foldable (toList)
 import Data.IORef ( atomicModifyIORef' , modifyIORef' , newIORef , readIORef , writeIORef )
@@ -194,13 +193,11 @@ import Agent.CLI.TUI.App.Event
 -- The grace interval bounds cooperative shutdown only. If it expires, scope
 -- exit cancels and joins the worker; we never abandon it or kill the host
 -- process. Resource finalizers must themselves provide interruptible cleanup.
-withFullscreenWorker :: (Async a -> IO ()) -> IO a -> (Async a -> IO ()) -> IO a
+withFullscreenWorker :: (Async a -> IO ()) -> IO a -> (Async a -> IO ()) -> IO (Maybe a)
 withFullscreenWorker closeChannels workerAction runUi =
     withAsyncWithUnmask (\unmask -> unmask workerAction) \worker -> do
         runUi worker `finally` closeChannels worker
-        timeout 2_000_000 (wait worker) >>= \case
-            Just result -> pure result
-            Nothing -> throwIO UserInterrupt
+        timeout 2_000_000 (wait worker)
 
 closeFullscreenChannels :: FullscreenRuntime -> Async a -> IO ()
 closeFullscreenChannels runtime worker = do
@@ -213,8 +210,17 @@ closeFullscreenChannels runtime worker = do
             Nothing -> Composer.closeFullscreenInputBuffer runtime.runtimeInput
             Just _ -> pure ()
 
-runFullscreen :: FullscreenRuntime -> IO a -> IO a
-runFullscreen runtime workerAction = do
+-- | The outermost terminal scope owns final diagnostics. Remove them before
+-- attempting output so cleanup cannot print them twice. A failed diagnostic
+-- must neither hide the session's original failure nor suppress later hints.
+withFullscreenFinalOutput :: FullscreenRuntime -> IO a -> IO a
+withFullscreenFinalOutput runtime action =
+    action `finally` do
+        pending <- atomically (flushTQueue runtime.runtimeFinalOutput)
+        mapM_ (void . tryAny) pending
+
+runFullscreen :: FullscreenRuntime -> IO a -> IO (Maybe a)
+runFullscreen runtime workerAction = withFullscreenFinalOutput runtime do
     history <- readReplHistory
     (initialAgent, initialAgents) <- runtime.runtimeAgentSnapshot
     initialClock <- getMonotonicTimeNSec
