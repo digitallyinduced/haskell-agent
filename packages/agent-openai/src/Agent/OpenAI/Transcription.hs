@@ -21,6 +21,7 @@ import Agent.Error
     , isInlineRetryableProviderError
     )
 import qualified Agent.Json.Decode as Json
+import qualified Agent.Transcription.Receive as Receive
 import Agent.Provider
     ( BillingMode(..)
     , Credential(..)
@@ -1233,24 +1234,15 @@ encodeText :: Aeson.Value -> Text
 encodeText = Text.decodeUtf8 . LBS.toStrict . Aeson.encode
 
 awaitSessionUpdated :: Json.DecoderSession -> WS.Connection -> IO ()
-awaitSessionUpdated decoderSession connection = do
-    updated <- Timeout.timeout (10 * 1_000_000) loop
-    case updated of
-        Nothing ->
-            fail "timed out waiting for OpenAI Realtime session.updated"
-        Just () ->
-            pure ()
-  where
-    loop = do
-        bytes <- WS.receiveData connection
-        Json.decodeIO
-            decoderSession
-            transcriptEventDecoder
-            (LBS.toStrict bytes) >>= \case
-            Right SessionUpdated -> pure ()
-            Right TranscriptError{transcriptMessage} ->
-                fail (Text.unpack transcriptMessage)
-            _ -> loop
+awaitSessionUpdated decoderSession connection =
+    Receive.awaitReady
+        (10 * 1_000_000)
+        "timed out waiting for OpenAI Realtime session.updated"
+        (Receive.receiveEvent decoderSession transcriptEventDecoder connection)
+        \case
+            SessionUpdated -> Just (Right ())
+            TranscriptError{transcriptMessage} -> Just (Left transcriptMessage)
+            _ -> Nothing
 
 receiveTranscripts
     :: Json.DecoderSession
@@ -1258,32 +1250,17 @@ receiveTranscripts
     -> (Text -> IO ())
     -> IO TranscriptState
 receiveTranscripts decoderSession connection onTranscript =
-    loop emptyTranscriptState
+    Receive.receiveLoop
+        (Receive.receiveEvent decoderSession transcriptEventDecoder connection)
+        step emptyTranscriptState onTranscript
   where
-    -- The receiver owns accumulation; only the final state crosses threads.
-    loop :: TranscriptState -> IO TranscriptState
-    loop previous = do
-        bytes <- WS.receiveData connection
-        Json.decodeIO
-            decoderSession
-            transcriptEventDecoder
-            (LBS.toStrict bytes) >>= \case
-            Left _ -> loop previous
-            Right event -> do
-                let current = applyTranscriptEvent event previous
-                case event of
-                    TranscriptDelta{} ->
-                        notify current
-                    TranscriptCompleted{} ->
-                        notify current
-                    _ ->
-                        pure ()
-                case event of
-                    TranscriptCompleted{} -> pure current
-                    TranscriptError{} -> pure current
-                    _ -> loop current
-    notify current =
-        void (tryAny (onTranscript (renderTranscript current)))
+    step event previous =
+        let current = applyTranscriptEvent event previous
+        in case event of
+            TranscriptDelta{} -> Receive.Continue current (Just (renderTranscript current))
+            TranscriptCompleted{} -> Receive.Complete current (Just (renderTranscript current))
+            TranscriptError{} -> Receive.Complete current Nothing
+            _ -> Receive.Continue current Nothing
 
 applyTranscriptEvent :: TranscriptEvent -> TranscriptState -> TranscriptState
 applyTranscriptEvent event state =
@@ -1306,7 +1283,8 @@ waitForTranscript
     :: Async TranscriptState
     -> IO Text
 waitForTranscript receiver = do
-    completedInTime <- Timeout.timeout (30 * 1_000_000) do
+    current <- Receive.waitForResult
+        (30 * 1_000_000) "timed out waiting for OpenAI Realtime transcription" do
         result <- waitCatch receiver
         case result of
             -- The former tryAny completion channel was never filled when the
@@ -1314,20 +1292,14 @@ waitForTranscript receiver = do
             -- cancellation of the parent still interrupts this wait.
             Left err | not (isSyncException err) -> STM.atomically STM.retry
             _ -> pure result
-    case completedInTime of
+    case current.failure of
+        Just message ->
+            fail (Text.unpack message)
         Nothing ->
-            fail "timed out waiting for OpenAI Realtime transcription"
-        Just (Left err) ->
-            throwIO err
-        Just (Right current) -> do
-            case current.failure of
-                Just message ->
-                    fail (Text.unpack message)
-                Nothing ->
-                    let transcript = Text.strip (renderTranscript current)
-                    in if Text.null transcript
-                        then fail "OpenAI transcription produced no text"
-                        else pure transcript
+            let transcript = Text.strip (renderTranscript current)
+            in if Text.null transcript
+                then fail "OpenAI transcription produced no text"
+                else pure transcript
 
 renderTranscript :: TranscriptState -> Text
 renderTranscript state =
