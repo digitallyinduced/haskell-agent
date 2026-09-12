@@ -43,13 +43,19 @@ jsonTextFieldPartial key arguments =
             Json.decodeText Json.text ("\"" <> encodedBody <> "\"")
 
 takeStringBody :: Text -> Text
-takeStringBody = Text.pack . go False . Text.unpack
+takeStringBody input = scan 0 input
   where
-    go _ [] = []
-    go escaped (char : rest)
-        | char == '"' && not escaped = []
-        | char == '\\' && not escaped = char : go True rest
-        | otherwise = char : go False rest
+    -- Only quotes can terminate the body. An odd preceding backslash run
+    -- escapes a quote; skip that quote without constructing character lists.
+    scan offset remaining =
+        let (prefix, suffix) = Text.breakOn "\"" remaining
+            nextOffset = offset + Text.length prefix
+        in if Text.null suffix
+            then input
+            else if odd (Text.length (Text.takeWhileEnd (== '\\') prefix))
+                then let afterQuote = nextOffset + 1
+                     in afterQuote `seq` scan afterQuote (Text.drop 1 suffix)
+                else Text.take nextOffset input
 
 completeEscapePrefix :: Text -> Text
 completeEscapePrefix body

@@ -28,7 +28,7 @@ import Data.Aeson.Types (Pair)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
-import Data.IORef (atomicModifyIORef', newIORef)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.List (sort)
 import Data.Maybe (maybeToList)
 import Data.Text (Text)
@@ -73,17 +73,43 @@ main = do
             samples <- forM [1 .. sampleCount] \_ ->
                 measure (runRequests iterations)
             report "request" iterations 0 samples
+        [mode, bodyArg, repeatArg, sampleArg]
+            | mode `elem` ["partial-field", "partial-field-escaped", "partial-field-unicode"] -> do
+            bodyChars <- positive "argument body characters" bodyArg
+            repetitions <- positive "repetition count" repeatArg
+            sampleCount <- positive "sample count" sampleArg
+            let patternText = case mode of
+                    "partial-field-escaped" -> "\"\\\t"
+                    "partial-field-unicode" -> "café世界🙂"
+                    _ -> "x"
+                body = Text.take bodyChars (Text.replicate bodyChars patternText)
+                arguments = "{\"command\":"
+                    <> Text.dropEnd 1
+                        (Text.Encoding.decodeUtf8 (LBS.toStrict (Aeson.encode body)))
+            _ <- evaluate (Text.length arguments)
+            if jsonTextFieldPartial "command" arguments == Just body
+                then pure ()
+                else die "partial-field fixture did not decode to its expected body"
+            samples <- forM [1 .. sampleCount] \_ ->
+                measure (runPartialField repetitions arguments)
+            report (mode <> "-x" <> show repetitions) bodyChars 0 samples
         [mode, bodyArg, deltaArg, repeatArg, sampleArg]
             | mode `elem`
-                ["tool-shell-baseline", "tool-shell", "tool-json"] -> do
+                ["tool-shell-baseline", "tool-shell", "tool-shell-escaped",
+                 "tool-shell-unicode", "tool-json"] -> do
             bodyChars <- positive "argument body characters" bodyArg
             deltaChars <- positive "delta characters" deltaArg
             repetitions <- positive "repetition count" repeatArg
             sampleCount <- positive "sample count" sampleArg
             let events =
-                    toolArgumentEvents
+                    toolArgumentEventsWithBody
                         (mode /= "tool-json")
-                        bodyChars
+                        (case mode of
+                            "tool-shell-escaped" ->
+                                Text.take bodyChars (Text.replicate bodyChars "\"\\\t")
+                            "tool-shell-unicode" ->
+                                Text.take bodyChars (Text.replicate bodyChars "café世界🙂")
+                            _ -> Text.replicate bodyChars "x")
                         deltaChars
             _ <- evaluate (sum (map argumentEventSize events))
             samples <- forM [1 .. sampleCount] \_ ->
@@ -102,6 +128,9 @@ main = do
                 <> "   or: responses-json-bench request ITERATIONS SAMPLES\n"
                 <> "   or: responses-json-bench tool-shell-baseline BODY_CHARS DELTA_CHARS REPETITIONS SAMPLES\n"
                 <> "   or: responses-json-bench tool-shell BODY_CHARS DELTA_CHARS REPETITIONS SAMPLES\n"
+                <> "   or: responses-json-bench tool-shell-escaped BODY_CHARS DELTA_CHARS REPETITIONS SAMPLES\n"
+                <> "   or: responses-json-bench tool-shell-unicode BODY_CHARS DELTA_CHARS REPETITIONS SAMPLES\n"
+                <> "   or: responses-json-bench partial-field[-escaped|-unicode] BODY_CHARS REPETITIONS SAMPLES\n"
                 <> "   or: responses-json-bench tool-json BODY_CHARS DELTA_CHARS REPETITIONS SAMPLES"
 positive :: String -> String -> IO Int
 positive label raw = case reads raw of
@@ -177,6 +206,20 @@ runToolArgumentProjection repetitions events = go repetitions checksumSeed
     projectOne project !current event = do
         projected <- project event
         pure $! foldl' loopEventChecksum current projected
+
+-- The public helper is also used outside the bounded shell stream projector.
+-- Read through an IORef each repetition to prevent sharing a pure result.
+runPartialField :: Int -> Text -> IO Int
+runPartialField repetitions arguments = do
+    inputRef <- newIORef arguments
+    let go 0 !result = pure result
+        go remaining !result = do
+            input <- readIORef inputRef
+            let !next = maybe result
+                    (Text.foldl' (\value character -> value * 33 + fromEnum character) result)
+                    (jsonTextFieldPartial "command" input)
+            go (remaining - 1) next
+    go repetitions checksumSeed
 
 -- Conservative compatibility baseline for the shell-preview hot path replaced
 -- by batching. Keep this local to the benchmark: each delta extends the
@@ -310,16 +353,16 @@ withLegacyToolArguments ToolCall
         , argumentsEncrypted
         }
 
-toolArgumentEvents :: Bool -> Int -> Int -> [ResponseStreamEvent]
-toolArgumentEvents shell bodyChars deltaChars =
+toolArgumentEventsWithBody :: Bool -> Text -> Int -> [ResponseStreamEvent]
+toolArgumentEventsWithBody shell body deltaChars =
     added : zipWith deltaEvent [1 ..] chunks <> [done]
   where
     name = if shell then "shell_command" else "grep"
     field = if shell then "command" else "pattern"
     arguments =
-        "{\"" <> field <> "\":\""
-            <> Text.replicate bodyChars "x"
-            <> "\"}"
+        "{\"" <> field <> "\":"
+            <> Text.Encoding.decodeUtf8 (LBS.toStrict (Aeson.encode body))
+            <> "}"
     chunks = Text.chunksOf deltaChars arguments
     call = FunctionCall
         { itemId = Just "benchmark-tool-item"
