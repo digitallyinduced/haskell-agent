@@ -23,6 +23,7 @@ import Agent.CLI.TUI.App
     , setFullscreenSessionActions
     )
 import Agent.CLI.TUI.Bridge
+import Agent.CLI.TUIAppSpec.AgentFixtures (childEntry)
 import Agent.CLI.TUI.ImagePreview (TuiImagePreview(..))
 import Agent.CLI.TUI.Types
     ( AppEvent(..)
@@ -36,6 +37,11 @@ import Agent.CLI.TUI.Types
     , SyntaxHighlighterState(..)
     )
 import Agent.TUI.Model
+import Agent.TUI.Markdown.Stream
+    ( emptyMarkdownStreamState
+    , feedMarkdownStream
+    , markdownStreamRetainedBytes
+    )
 import Agent.TUI.Presentation
     ( TodoDisplayLine(..)
     , TodoDisplayStatus(..)
@@ -380,6 +386,69 @@ spec = describe "fullscreen TUI bridge" do
                 }
         appEventLogicalBytes (AppAgentSnapshot AgentRoot [entry])
             `shouldSatisfy` (>= 4 * 1024 * 1024)
+
+    describe "retained Markdown snapshot accounting" do
+        let content = Text.replicate 4096 "界"
+            snapshot conversation =
+                AppAgentSnapshot AgentRoot
+                    [(childEntry 1){agentConversation = conversation}]
+        mapM_ (\(label, source) ->
+            it ("charges parser storage for " <> label) do
+                let conversation = reduceUi (UiLoop (TextDelta source)) initialUiState
+                    withoutParser = conversation{uiStreamingMarkdown = Nothing}
+                    additional = appEventLogicalBytes (snapshot conversation)
+                        - appEventLogicalBytes (snapshot withoutParser)
+                additional `shouldSatisfy` (>= 4 * Text.length content)
+                case conversation.uiStreamingMarkdown of
+                    Nothing -> expectationFailure "expected retained streaming parser"
+                    Just (_, parser) ->
+                        toInteger additional `shouldBe` markdownStreamRetainedBytes parser)
+            [ ("pending prose", content)
+            , ("completed prose", content <> "\n\n")
+            , ("pending inline markup", "**" <> content)
+            , ("completed inline markup", "**" <> content <> "**\n\n")
+            , ("table header candidates", "| " <> content <> " |\n")
+            , ("active tables", "| heading |\n| --- |\n| " <> content <> " |\n")
+            , ("completed tables", "| heading |\n| --- |\n| " <> content <> " |\n\n")
+            , ("open code fences", "```haskell\n" <> content <> "\n")
+            , ("closed code fences", "```haskell\n" <> content <> "\n```\n")
+            ]
+
+        it "charges retained parser storage even when its block is absent" do
+            let parser = feedMarkdownStream emptyMarkdownStreamState content
+                conversation = initialUiState{uiStreamingMarkdown = Just (BlockId 999, parser)}
+            appEventLogicalBytes (snapshot conversation)
+                - appEventLogicalBytes (snapshot initialUiState)
+                `shouldBe` fromInteger (markdownStreamRetainedBytes parser)
+
+        it "releases the parser charge when the conversation is cleared" do
+            let conversation = reduceUi (UiLoop (TextDelta content)) initialUiState
+                cleared = reduceUi UiConversationCleared conversation
+            cleared.uiStreamingMarkdown `shouldBe` Nothing
+            appEventLogicalBytes (snapshot cleared)
+                `shouldBe` appEventLogicalBytes (snapshot cleared{uiStreamingMarkdown = Nothing})
+
+        it "backpressures snapshots whose parser storage exceeds the remaining budget" do
+            runtime <- newBridgeTestRuntime
+            -- The old block-only accounting would admit both events (< 16 MiB).
+            -- The pending line and inline scanner make the second exceed it.
+            let body = Text.replicate (1024 * 1024) "x"
+                conversation = reduceUi (UiLoop (TextDelta body)) initialUiState
+                event = snapshot conversation
+                preceding = AppSetWindowTitle body
+                budget = 16 * 1024 * 1024
+            appEventLogicalBytes preceding
+                + appEventLogicalBytes (snapshot conversation{uiStreamingMarkdown = Nothing})
+                `shouldSatisfy` (< budget)
+            appEventLogicalBytes preceding + appEventLogicalBytes event
+                `shouldSatisfy` (> budget)
+            enqueueAppEvent runtime preceding
+            withAsync (enqueueAppEvent runtime event) \publishing -> do
+                timeout 100000 (wait publishing) `shouldReturn` Nothing
+                let AppEventMailbox stateRef = runtime.runtimeMailbox
+                state <- readTVarIO stateRef
+                state.mailboxPendingCount `shouldBe` 1
+                state.mailboxPendingBytes `shouldBe` appEventLogicalBytes preceding
 
     it "accounts provider-controlled snapshot target identifiers" do
         let target = AgentNative (Text.replicate (1024 * 1024) "x")

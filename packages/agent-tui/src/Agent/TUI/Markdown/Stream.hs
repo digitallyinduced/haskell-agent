@@ -7,6 +7,7 @@ module Agent.TUI.Markdown.Stream
     , feedMarkdownStream
     , markdownStreamSnapshot
     , finishMarkdownStream
+    , markdownStreamRetainedBytes
     , MarkdownSection(..)
     , MarkdownBlock(..)
     , MarkdownLineKind(..)
@@ -78,6 +79,43 @@ data MarkdownStreamState = MarkdownStreamState
 
 emptyMarkdownStreamState :: MarkdownStreamState
 emptyMarkdownStreamState = MarkdownStreamState emptyFenceStreamState Map.empty Nothing
+
+-- | Logical retained storage for mailbox admission. Include both source and
+-- syntax, even if some Text storage is shared. Inspect retained fields rather
+-- than snapshots: rendering can allocate or reparse provisional syntax.
+-- This remains valid when the associated UI block is missing or stale.
+-- The charge is a logical estimate, not an exact measurement of heap residency
+-- or the backing arrays shared by Text slices.
+markdownStreamRetainedBytes :: MarkdownStreamState -> Integer
+markdownStreamRetainedBytes state =
+    128
+        + fenceStreamRetainedBytes state.fenceParser
+        + Map.foldl' (\size prose -> size + proseBytes prose) 0 state.proseParsers
+        + maybe 0 pendingBytes state.pendingInline
+  where
+    textBytes text = 64 + 4 * toInteger (Text.length text)
+    kindBytes (BulletLine marker) = textBytes marker
+    kindBytes (OrderedLine marker spacing) = textBytes marker + textBytes spacing
+    kindBytes _ = 0
+    blockBytes (MarkdownLine kind inlines) =
+        128 + kindBytes kind + inlinesBytes inlines
+    blockBytes (MarkdownTable alignments rows) = 128 + tableBytes alignments rows
+    tableBytes alignments rows =
+        64 * toInteger (length alignments)
+            + foldl' (\size cells ->
+                size + 64 + foldl' (\rowSize cell -> rowSize + cellBytes cell) 0 cells) 0 rows
+    inlinesBytes = foldl' (\size node -> size + inlineRetainedBytes node) 0
+    cellBytes :: MarkdownCell -> Integer
+    cellBytes cell = 128 + inlinesBytes cell.cellInlines
+    proseBytes :: ProseState -> Integer
+    proseBytes prose =
+        192 + foldl' (\size block -> size + blockBytes block) 0 prose.completedBlocks
+            + maybe 0 (\(source, node) -> textBytes source + blockBytes node) prose.candidateHeader
+            + maybe 0 (uncurry tableBytes) prose.activeTable
+    pendingBytes :: PendingInline -> Integer
+    pendingBytes pending =
+        128 + kindBytes pending.pendingKind + textBytes pending.pendingBody
+            + maybe 0 inlineStreamRetainedBytes pending.pendingParser
 
 emptyProseState :: ProseState
 emptyProseState = ProseState Seq.empty Nothing Nothing True

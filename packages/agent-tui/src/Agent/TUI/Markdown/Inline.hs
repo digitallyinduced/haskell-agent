@@ -8,6 +8,8 @@ module Agent.TUI.Markdown.Inline
     , feedInlineStream
     , inlineStreamSnapshot
     , finishInlineStream
+    , inlineRetainedBytes
+    , inlineStreamRetainedBytes
     ) where
 
 import Control.Applicative ((<|>))
@@ -75,6 +77,28 @@ data PendingScan
 
 emptyInlineStreamState :: InlineStreamState
 emptyInlineStreamState = InlineStreamState Seq.empty Nothing emptyPendingInline
+
+-- | Conservative logical storage charge for syntax, including nested labels.
+-- Text slices are charged separately even when their storage may be shared;
+-- this is a logical estimate rather than exact heap residency.
+inlineRetainedBytes :: Inline -> Integer
+inlineRetainedBytes node = 64 + case node of
+    InlineText text -> textBytes text
+    InlineCode text -> textBytes text
+    InlineStrong children -> childrenBytes children
+    InlineEmphasis children -> childrenBytes children
+    InlineLink destination children ->
+        textBytes destination + childrenBytes children
+  where
+    textBytes text = 64 + 4 * toInteger (Text.length text)
+    childrenBytes = foldl' (\size child -> size + inlineRetainedBytes child) 0
+
+-- | Count the retained scanner state directly, without parsing its suffix.
+inlineStreamRetainedBytes :: InlineStreamState -> Integer
+inlineStreamRetainedBytes (InlineStreamState committed _ (PendingInline chunks _)) =
+    192
+        + foldl' (\size node -> size + inlineRetainedBytes node) 0 committed
+        + foldl' (\size text -> size + 64 + 4 * toInteger (Text.length text)) 0 chunks
 
 emptyPendingInline :: PendingInline
 emptyPendingInline = PendingInline Seq.empty ScanGeneral

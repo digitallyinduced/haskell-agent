@@ -19,6 +19,7 @@ module Agent.TUI.FencedCode
     , feedFenceStreamWithProse
     , fenceStreamPendingProse
     , fenceStreamLayout
+    , fenceStreamRetainedBytes
     ) where
 
 import Control.Applicative ((<|>))
@@ -144,6 +145,26 @@ data FenceSection
     = FenceProseSection !Int !Int !Bool !Text
     | FenceCodeSection !Int !FencedBlock
     deriving (Eq, Show)
+
+-- | Logical retained size, including source context and unfinished sections.
+-- Count shared text conservatively and never construct a rendering snapshot.
+-- Integer arithmetic lets callers saturate at their own accounting limit.
+-- This is a logical estimate, not exact heap residency: Text slices may share
+-- backing arrays, and their complete allocation sizes are not inspected.
+fenceStreamRetainedBytes :: FenceStreamState -> Integer
+fenceStreamRetainedBytes state =
+    256
+        + foldl' (\size section -> size + sectionBytes section) 0 state.streamSections
+        + foldl' (\size line -> size + 128 + textBytes line.lineText + textBytes line.lineEnding)
+            0 state.streamPrevious
+        + textBytes state.streamPendingLine
+        + maybe 0 (\opener -> 128 + textBytes opener.openInfo) state.streamOpener
+        + foldl' (\size text -> size + textBytes text) 0 state.streamLines
+  where
+    textBytes text = 64 + 4 * toInteger (Text.length text)
+    sectionBytes (FenceProseSection _ _ _ text) = 128 + textBytes text
+    sectionBytes (FenceCodeSection _ block) =
+        128 + textBytes block.fencedInfo + textBytes block.fencedBody
 
 -- | Append-only parser state. A partial final line is never committed: even a
 -- seemingly complete closing fence can become ordinary code when more arrives.
