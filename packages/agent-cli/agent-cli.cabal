@@ -699,6 +699,7 @@ test-suite agent-cli-test
                     , bytestring
                     , colour
                     , containers
+                    , crypton
                     , directory
                     , dbus >= 1.4 && < 1.5
                     , filepath
@@ -709,6 +710,7 @@ test-suite agent-cli-test
                     , http-client
                     , http-types
                     , JuicyPixels
+                    , memory
                     , network
                     , network-uri
                     , process

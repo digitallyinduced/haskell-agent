@@ -159,20 +159,57 @@ authorizeMcp
     -> Maybe McpOAuthConfig
     -> Text
     -> IO (OAuth.OAuthTokenFile, OAuth.OAuthTokenFileExtra)
-authorizeMcp host options oauthConfig serverUrl = do
-    either (const (failText "MCP authorization requires an HTTPS endpoint without embedded credentials or a fragment."))
+authorizeMcp host = runMcpOAuth OAuthWorkflowHost
+    { workflowSay = const (pure ())
+    , workflowError = const
+    , workflowLoadPrevious = host.oauthLoadPrevious >>= \case
+        Left _ -> failText "MCP credentials could not be read from protected storage."
+        Right record -> pure record
+    , workflowAuthorize = \url awaitCallback -> do
+        host.oauthOpenBrowser url
+            >>= either (const (failText "The authorization browser could not be opened.")) pure
+        awaitCallback
+    }
+
+-- | Only presentation, error disclosure and credential loading vary by owner.
+-- The protocol engine returns credentials; it cannot persist them or configure
+-- a server. In particular the runtime owner must still check its generation
+-- before committing the returned record.
+data OAuthWorkflowHost = OAuthWorkflowHost
+    { workflowSay :: Text -> IO ()
+    , workflowError :: Text -> Text -> Text
+    -- ^ Safe public summary, detailed CLI diagnostic.
+    , workflowLoadPrevious :: IO (Maybe (OAuth.OAuthTokenFile, OAuth.OAuthTokenFileExtra))
+    , workflowAuthorize :: Text -> IO Callback -> IO Callback
+    }
+
+runMcpOAuth
+    :: OAuthWorkflowHost
+    -> LoginOptions
+    -> Maybe McpOAuthConfig
+    -> Text
+    -> IO (OAuth.OAuthTokenFile, OAuth.OAuthTokenFileExtra)
+runMcpOAuth host options oauthConfig serverUrl = do
+    let reject :: Text -> Text -> IO a
+        reject summary = failText . host.workflowError summary
+    either (reject "MCP authorization requires an HTTPS endpoint without embedded credentials or a fragment.")
         pure (OAuth.validateOAuthEndpoint serverUrl)
     let resourceUri = OAuth.canonicalResourceUri serverUrl
     manager <- newTlsManager
     challenge <- OAuth.probeAuthorizationChallenge manager serverUrl >>= \case
-        Left _ -> pure Nothing
-        Right probe -> pure probe.probeChallenge
+        Left err -> do
+            host.workflowSay ("Warning: " <> err <> "; falling back to well-known discovery.")
+            pure Nothing
+        Right probe -> do
+            when (probe.probeStatus /= 401 && probe.probeStatus /= 403) $
+                host.workflowSay
+                    ("Note: the MCP server answered the unauthenticated probe with HTTP "
+                        <> Text.pack (show probe.probeStatus) <> "; continuing with discovery.")
+            pure probe.probeChallenge
     resource <- OAuth.discoverProtectedResourceMetadata manager serverUrl
         (challenge >>= (.challengeResourceMetadata))
-            >>= either (const (failText "MCP authorization metadata could not be discovered or validated.")) pure
-    stored <- host.oauthLoadPrevious >>= \case
-        Left _ -> failText "MCP credentials could not be read from protected storage."
-        Right record -> pure record
+            >>= either (reject "MCP authorization metadata could not be discovered or validated.") pure
+    stored <- host.workflowLoadPrevious
     let storedIssuer = stored >>= (.extraIssuer) . snd
     issuer <- case resource.authorizationServers of
         [] -> failText "MCP protected resource metadata did not advertise an authorization server"
@@ -180,15 +217,24 @@ authorizeMcp host options oauthConfig serverUrl = do
             Just previous | previous `elem` resource.authorizationServers -> previous
             _ -> first
     metadata <- OAuth.discoverAuthorizationServerMetadata manager issuer
-        >>= either (const (failText "OAuth authorization server metadata could not be discovered or validated.")) pure
+        >>= either (reject "OAuth authorization server metadata could not be discovered or validated.") pure
     forM_ [metadata.authorizationEndpoint, metadata.tokenEndpoint] \endpoint ->
-        either (const (failText "OAuth metadata contains an unsafe authorization or token endpoint."))
+        either (reject "OAuth metadata contains an unsafe authorization or token endpoint.")
             pure (OAuth.validateOAuthEndpoint endpoint)
-    either (const (failText "The authorization server must support S256 PKCE.")) pure (OAuth.checkPkceSupport metadata)
+    either (reject "The authorization server must support S256 PKCE.") pure (OAuth.checkPkceSupport metadata)
     let recordedIssuer = fromMaybe issuer metadata.issuer
         sameIssuer = storedIssuer == Just recordedIssuer
-            && maybe True ((== Just resourceUri) . (.extraResource) . snd) stored
-        previous = if sameIssuer then stored else Nothing
+        -- A missing legacy resource is not evidence that this record belongs
+        -- to the current resource. Do not carry its client secret or scopes.
+        sameResource = (stored >>= (.extraResource) . snd) == Just resourceUri
+        previous = if sameIssuer && sameResource then stored else Nothing
+    when (isJust stored && not sameIssuer) $
+        host.workflowSay
+            ("Note: the authorization server changed to " <> recordedIssuer
+                <> "; the previous client registration and granted scopes will not be reused.")
+    when (isJust stored && sameIssuer && not sameResource) $
+        host.workflowSay
+            "Note: the stored OAuth resource does not match; the previous client registration and granted scopes will not be reused."
     let preferredPort = previous >>= (.extraRedirectUri) . snd >>= OAuth.loopbackRedirectPort
     bracket (openCallbackSocket preferredPort) close $ \listener -> do
         port <- callbackPort listener
@@ -217,24 +263,30 @@ authorizeMcp host options oauthConfig serverUrl = do
                 , registrationRedirectUri = redirect
                 }
         plan <- either
-            (const (failText "The authorization server requires a registered OAuth client. Configure a client ID or client metadata URL."))
+            (reject "The authorization server requires a registered OAuth client. Configure a client ID or client metadata URL.")
             pure (OAuth.selectClientRegistration registrationOptions metadata)
         client <- case plan of
-            OAuth.UsePreRegisteredClient pre ->
+            OAuth.UsePreRegisteredClient pre -> do
+                host.workflowSay
+                    "Using the pre-registered OAuth client from ~/.haskell-agent/config.json."
                 pure ResolvedClient
                     { resolvedClientId = pre.preRegisteredClientId
                     , resolvedClientSecret = pre.preRegisteredClientSecret
                     , resolvedSource = OAuth.ClientIdPreRegistered
                     , resolvedMetadataUrl = Nothing
                     }
-            OAuth.UseClientIdMetadataDocument url ->
+            OAuth.UseClientIdMetadataDocument url -> do
+                host.workflowSay
+                    ("Using the Client ID Metadata Document " <> url <> " as client_id.")
                 pure ResolvedClient
                     { resolvedClientId = url
                     , resolvedClientSecret = Nothing
                     , resolvedSource = OAuth.ClientIdMetadataDocument
                     , resolvedMetadataUrl = Just url
                     }
-            OAuth.ReuseDynamicRegistration clientId ->
+            OAuth.ReuseDynamicRegistration clientId -> do
+                host.workflowSay
+                    "Reusing the dynamic client registration from the previous login."
                 pure ResolvedClient
                     { resolvedClientId = clientId
                     , resolvedClientSecret = previous >>= (.extraClientSecret) . snd
@@ -246,7 +298,7 @@ authorizeMcp host options oauthConfig serverUrl = do
                     { registrationClientName = "Haskell Agent"
                     , registrationRedirectUris = [redirect]
                     , registrationScopes = scopes
-                    } >>= either (const (failText "OAuth client registration failed.")) pure
+                    } >>= either (reject "OAuth client registration failed.") pure
                 pure ResolvedClient
                     { resolvedClientId = registration.clientId
                     , resolvedClientSecret = registration.clientSecret
@@ -268,15 +320,15 @@ authorizeMcp host options oauthConfig serverUrl = do
         callback <-
             withListeningCallback listener
                 metadata.authorizationResponseIssParameterSupported recordedIssuer state
-                \awaitCallback -> do
-                    host.oauthOpenBrowser authUrl
-                        >>= either (const (failText "The authorization browser could not be opened.")) pure
-                    awaitCallback
-        either (const (failText "MCP OAuth callback issuer mismatch.")) pure $ OAuth.validateAuthorizationResponseIssuer
+                (host.workflowAuthorize authUrl)
+        -- Validate issuer before interpreting even an error response.
+        either (reject "MCP OAuth callback issuer mismatch.") pure $ OAuth.validateAuthorizationResponseIssuer
             metadata.authorizationResponseIssParameterSupported recordedIssuer callback.callbackIss
         when (callback.callbackState /= Just state) (failText "MCP OAuth callback state mismatch")
-        forM_ callback.callbackError \_ ->
-            failText "MCP authorization was not granted."
+        forM_ callback.callbackError \err ->
+            reject "MCP authorization was not granted."
+                ("MCP authorization was not granted: " <> err
+                    <> maybe "" (\description -> " (" <> description <> ")") callback.callbackErrorDescription)
         code <- maybe (failText "MCP OAuth callback did not contain an authorization code") pure callback.callbackCode
         OAuth.exchangeAuthorizationCodeWith manager OAuth.TokenExchange
             { exchangeEndpoint = metadata.tokenEndpoint
@@ -287,7 +339,7 @@ authorizeMcp host options oauthConfig serverUrl = do
             , exchangeCodeVerifier = verifier
             , exchangeResource = Just resourceUri
             } >>= \case
-                OAuth.OAuthTokenFailure _ -> failText "OAuth token exchange failed."
+                OAuth.OAuthTokenFailure err -> reject "OAuth token exchange failed." err
                 OAuth.OAuthTokenSuccess tokens -> do
                     now :: Int <- round <$> getPOSIXTime
                     let tokenFile = OAuth.OAuthTokenFile
@@ -346,190 +398,45 @@ loginMcpWithHostThrow host options serverUrl = do
     home <- Dir.getHomeDirectory
     harness <- loadHarnessConfig home >>= either failText pure
     let oauthConfig = lookupServerOAuthConfig serverUrl harness
-        resourceUri = OAuth.canonicalResourceUri serverUrl
-    manager <- newTlsManager
-    challenge <- OAuth.probeAuthorizationChallenge manager serverUrl >>= \case
-        Left err -> do
-            host.mcpLoginSay
-                ("Warning: " <> err <> "; falling back to well-known discovery.")
-            pure Nothing
-        Right probe -> do
-            when (probe.probeStatus /= 401 && probe.probeStatus /= 403) $
-                host.mcpLoginSay
-                    ("Note: the MCP server answered the unauthenticated probe with HTTP "
-                        <> Text.pack (show probe.probeStatus)
-                        <> "; continuing with discovery.")
-            pure probe.probeChallenge
-    resource <- OAuth.discoverProtectedResourceMetadata manager serverUrl
-        (challenge >>= (.challengeResourceMetadata)) >>= either failText pure
-    stored <- loadMcpOAuthRecord serverUrl >>= \case
-        Left err -> do
-            host.mcpLoginSay
-                ("Warning: ignoring unreadable MCP OAuth record: " <> err)
-            pure Nothing
-        Right record -> pure record
-    let storedIssuer = stored >>= (.extraIssuer) . snd
-    issuer <- case resource.authorizationServers of
-        [] -> failText "MCP protected resource metadata did not advertise an authorization server"
-        first : _ -> pure case storedIssuer of
-            Just previous | previous `elem` resource.authorizationServers -> previous
-            _ -> first
-    metadata <- OAuth.discoverAuthorizationServerMetadata manager issuer >>= either failText pure
-    either failText pure (OAuth.checkPkceSupport metadata)
-    let recordedIssuer = fromMaybe issuer metadata.issuer
-        sameIssuer = storedIssuer == Just recordedIssuer
-        previous = if sameIssuer then stored else Nothing
-    when (isJust stored && not sameIssuer) $
+        workflow = OAuthWorkflowHost
+            { workflowSay = host.mcpLoginSay
+            , workflowError = \_ detail -> detail
+            , workflowLoadPrevious = loadMcpOAuthRecord serverUrl >>= \case
+                Left err -> do
+                    host.mcpLoginSay
+                        ("Warning: ignoring unreadable MCP OAuth record: " <> err)
+                    pure Nothing
+                Right record -> pure record
+            , workflowAuthorize = \url awaitCallback -> do
+                host.mcpLoginSay ("Opening browser for MCP authorization: " <> url)
+                host.mcpLoginAuthorize url awaitCallback >>= \case
+                    Left err -> failText err
+                    Right Nothing -> failText "Timed out waiting for MCP OAuth callback"
+                    Right (Just received) -> pure received
+            }
+    (tokenFile, extra) <- runMcpOAuth workflow options oauthConfig serverUrl
+    when (Text.null tokenFile.tokenRefreshToken) $
         host.mcpLoginSay
-            ("Note: the authorization server changed to " <> recordedIssuer
-                <> "; the previous client registration and granted scopes will not be reused.")
-    let preferredPort = previous >>= (.extraRedirectUri) . snd >>= OAuth.loopbackRedirectPort
-    bracket (openCallbackSocket preferredPort) close $ \listener -> do
-        port <- callbackPort listener
-        let redirect = "http://127.0.0.1:" <> Text.pack (show port) <> "/callback"
-            scopes = OAuth.planScopes OAuth.ScopePlan
-                { scopeSources = OAuth.ScopeSources
-                    { scopeChallenge = maybe [] OAuth.challengeScopes challenge
-                    , scopeResourceMetadata = resource.scopesSupported
-                    , scopeConfigured = maybe [] (.mcpOAuthScopes) oauthConfig
-                    }
-                , scopePreviouslyGranted = maybe [] Text.words (previous >>= (.extraScope) . snd)
-                , scopeAdditional = options.loginAdditionalScopes
-                , scopeAuthorizationServerSupported = metadata.scopesSupportedByServer
-                }
-            registrationOptions = OAuth.RegistrationOptions
-                { registrationPreRegistered = oauthConfig >>= \config ->
-                    (\clientId -> OAuth.PreRegisteredClient clientId config.mcpOAuthClientSecret)
-                        <$> config.mcpOAuthClientId
-                , registrationClientIdMetadataUrl = oauthConfig >>= (.mcpOAuthClientIdMetadataUrl)
-                , registrationStored = previous >>= \(file, extra) ->
-                    OAuth.StoredClient
-                        <$> extra.extraIssuer
-                        <*> pure file.tokenClientId
-                        <*> extra.extraClientIdSource
-                        <*> pure extra.extraRedirectUri
-                , registrationRedirectUri = redirect
-                }
-        plan <- either failText pure (OAuth.selectClientRegistration registrationOptions metadata)
-        client <- case plan of
-            OAuth.UsePreRegisteredClient pre -> do
-                host.mcpLoginSay
-                    "Using the pre-registered OAuth client from ~/.haskell-agent/config.json."
-                pure ResolvedClient
-                    { resolvedClientId = pre.preRegisteredClientId
-                    , resolvedClientSecret = pre.preRegisteredClientSecret
-                    , resolvedSource = OAuth.ClientIdPreRegistered
-                    , resolvedMetadataUrl = Nothing
-                    }
-            OAuth.UseClientIdMetadataDocument url -> do
-                host.mcpLoginSay
-                    ("Using the Client ID Metadata Document " <> url <> " as client_id.")
-                pure ResolvedClient
-                    { resolvedClientId = url
-                    , resolvedClientSecret = Nothing
-                    , resolvedSource = OAuth.ClientIdMetadataDocument
-                    , resolvedMetadataUrl = Just url
-                    }
-            OAuth.ReuseDynamicRegistration clientId -> do
-                host.mcpLoginSay
-                    "Reusing the dynamic client registration from the previous login."
-                pure ResolvedClient
-                    { resolvedClientId = clientId
-                    , resolvedClientSecret = Nothing
-                    , resolvedSource = OAuth.ClientIdDynamicRegistration
-                    , resolvedMetadataUrl = Nothing
-                    }
-            OAuth.UseDynamicRegistration endpoint -> do
-                registration <- OAuth.registerClientWith manager endpoint OAuth.ClientRegistrationRequest
-                    { registrationClientName = "Haskell Agent"
-                    , registrationRedirectUris = [redirect]
-                    , registrationScopes = scopes
-                    } >>= either failText pure
-                pure ResolvedClient
-                    { resolvedClientId = registration.clientId
-                    , resolvedClientSecret = registration.clientSecret
-                    , resolvedSource = OAuth.ClientIdDynamicRegistration
-                    , resolvedMetadataUrl = Nothing
-                    }
-        verifier <- randomUrlBytes 32
-        state <- randomUrlBytes 24
-        let codeChallenge = Base64.encodeUnpadded (BA.convert (hash (Encoding.encodeUtf8 verifier) :: Digest SHA256))
-            scopeText = Text.unwords scopes
-            separator = if "?" `Text.isInfixOf` metadata.authorizationEndpoint then "&" else "?"
-            authUrl = metadata.authorizationEndpoint <> separator
-                <> "response_type=code&client_id=" <> encode client.resolvedClientId
-                <> "&redirect_uri=" <> encode redirect
-                <> "&code_challenge=" <> Encoding.decodeUtf8 codeChallenge
-                <> "&code_challenge_method=S256&state=" <> encode state
-                <> (if Text.null scopeText then "" else "&scope=" <> encode scopeText)
-                <> "&resource=" <> encode resourceUri
-        host.mcpLoginSay ("Opening browser for MCP authorization: " <> authUrl)
-        callback <-
-            withListeningCallback listener
-                metadata.authorizationResponseIssParameterSupported recordedIssuer state
-                \awaitCallback ->
-                    host.mcpLoginAuthorize authUrl awaitCallback >>= \case
-                        Left err -> failText err
-                        Right Nothing ->
-                            failText "Timed out waiting for MCP OAuth callback"
-                        Right (Just received) -> pure received
-        -- RFC 9207: validate the issuer before acting on any other parameter,
-        -- including error responses.
-        either failText pure $ OAuth.validateAuthorizationResponseIssuer
-            metadata.authorizationResponseIssParameterSupported recordedIssuer callback.callbackIss
-        when (callback.callbackState /= Just state) (failText "MCP OAuth callback state mismatch")
-        forM_ callback.callbackError \err ->
-            failText ("MCP authorization was not granted: " <> err
-                <> maybe "" (\description -> " (" <> description <> ")") callback.callbackErrorDescription)
-        code <- maybe (failText "MCP OAuth callback did not contain an authorization code") pure callback.callbackCode
-        OAuth.exchangeAuthorizationCodeWith manager OAuth.TokenExchange
-            { exchangeEndpoint = metadata.tokenEndpoint
-            , exchangeClientId = client.resolvedClientId
-            , exchangeClientSecret = client.resolvedClientSecret
-            , exchangeCode = code
-            , exchangeRedirectUri = redirect
-            , exchangeCodeVerifier = verifier
-            , exchangeResource = Just resourceUri
-            } >>= \case
-                OAuth.OAuthTokenFailure err -> failText err
-                OAuth.OAuthTokenSuccess tokens -> do
-                    now :: Int <- round <$> getPOSIXTime
-                    let tokenFile = OAuth.OAuthTokenFile
-                            client.resolvedClientId metadata.tokenEndpoint tokens.accessToken
-                            (fromMaybe "" tokens.refreshToken)
-                            (fmap (now +) tokens.expiresIn)
-                        granted = fromMaybe scopeText tokens.scope
-                        extra = OAuth.OAuthTokenFileExtra
-                            { extraIssuer = Just recordedIssuer
-                            , extraScope = if Text.null (Text.strip granted) then Nothing else Just granted
-                            , extraResource = Just resourceUri
-                            , extraClientIdSource = Just client.resolvedSource
-                            , extraClientIdMetadataUrl = client.resolvedMetadataUrl
-                            , extraClientSecret = client.resolvedClientSecret
-                            , extraRedirectUri = Just redirect
-                            }
-                    when (Text.null tokenFile.tokenRefreshToken) $
-                        host.mcpLoginSay
-                            "Warning: MCP provider returned no refresh token; reauthorization may be required."
-                    saveMcpOAuthRecord serverUrl tokenFile extra
-                        >>= either failText pure
-                    registerAuthorizedMcpServer home serverUrl >>= \case
-                        Left err -> failText
-                            ("MCP authorization was saved, but server registration failed: " <> err)
-                        Right (name, enabled) -> do
-                            let followUp =
-                                    if enabled
-                                        then "Start a new session to connect this server."
-                                        else
-                                            "This server remains disabled. Enable it with: agent-cli mcp enable "
-                                                <> shellQuote name
-                                message =
-                                    "MCP authorization saved. MCP server configured: "
-                                        <> name
-                                        <> ". "
-                                        <> followUp
-                            host.mcpLoginSay message
-                            pure message
+            "Warning: MCP provider returned no refresh token; reauthorization may be required."
+    saveMcpOAuthRecord serverUrl tokenFile extra
+        >>= either failText pure
+    registerAuthorizedMcpServer home serverUrl >>= \case
+        Left err -> failText
+            ("MCP authorization was saved, but server registration failed: " <> err)
+        Right (name, enabled) -> do
+            let followUp =
+                    if enabled
+                        then "Start a new session to connect this server."
+                        else
+                            "This server remains disabled. Enable it with: agent-cli mcp enable "
+                                <> shellQuote name
+                message =
+                    "MCP authorization saved. MCP server configured: "
+                        <> name
+                        <> ". "
+                        <> followUp
+            host.mcpLoginSay message
+            pure message
 
 -- | Register only after the token record has been persisted successfully.
 -- Re-read under the configuration lock so browser-time edits are preserved.
