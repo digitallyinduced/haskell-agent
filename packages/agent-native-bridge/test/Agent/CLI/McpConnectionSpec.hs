@@ -4,6 +4,7 @@ import Agent.CLI.Config (HarnessConfig(..), McpServerConfig(..), loadHarnessConf
 import Control.Concurrent.Async (concurrently)
 import Agent.CLI.McpAdmin
 import Agent.CLI.McpConnection
+import Agent.CLI.McpConnectionCredentials (newCredentialRuntime)
 import Control.Exception.Safe (bracket)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
@@ -16,6 +17,19 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.CLI.McpConnection" do
+    it "uses the supplied unavailable runtime and keeps removal retryable" $
+        withTempDir \home -> do
+            credentials <- newCredentialRuntime Nothing
+            Right initial <- listMcpConnections home
+            Right added <- createMcpConnection home initial.mcpAdminRevision
+                "Account" "https://example.test/mcp"
+            removeMcpConnection credentials home added.mcpAdminRevision
+                added.mcpAdminValue.connectionId
+                `shouldReturn` Left (McpAdminInvalid "Protected MCP credential storage is unavailable")
+            Right listed <- listMcpConnections home
+            listed.mcpAdminRevision `shouldBe` added.mcpAdminRevision
+            listed.mcpAdminValue `shouldBe` [added.mcpAdminValue]
+
     it "migrates legacy CLI connections once and manages them by identity without renaming keys" $
         withTempDir \home -> do
             path <- decodeUtf (harnessConfigPath home)

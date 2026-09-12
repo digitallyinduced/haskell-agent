@@ -6,11 +6,15 @@
 -- so the pending input contains either the reminder or the explicit result.
 module Agent.Tools.Background
     ( CompletionGate
+    , BackgroundTaskStatus(..)
     , consumeCompletion
     , dismissBackgroundTaskNotice
     , newCompletionGate
     , publishBackgroundTaskNotice
     , publishCompletion
+    , readBackgroundTasks
+    , registerBackgroundTask
+    , removeBackgroundTask
     , setBackgroundTaskHooks
     , suppressCompletion
     , systemReminder
@@ -19,14 +23,39 @@ module Agent.Tools.Background
 import Agent.Tools.Types
     ( BackgroundTaskHooks(..)
     , BackgroundTaskNotice
+    , BackgroundTaskStatus(..)
     , ToolEnv(..)
     )
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Control.Exception.Safe (tryAny)
 import Control.Monad (void)
-import Data.IORef (readIORef, writeIORef)
+import Data.IORef (atomicModifyIORef', readIORef, writeIORef)
+import qualified Data.Map.Strict as Map
+import Data.List (sortOn)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Time.Clock (getCurrentTime)
+
+-- | Snapshot only: never consumes task output or completion notifications.
+readBackgroundTasks :: ToolEnv -> IO [BackgroundTaskStatus]
+readBackgroundTasks env =
+    sortOn (\task -> (task.taskStartedAt, task.taskKey)) . Map.elems
+        <$> readIORef env.toolBackgroundTasks
+
+-- | Register before starting the worker, so an immediate completion cannot
+-- remove its entry before insertion. Repeated registration preserves its age.
+registerBackgroundTask :: ToolEnv -> Text -> Text -> Bool -> IO ()
+registerBackgroundTask env key label autoResume = do
+    startedAt <- getCurrentTime
+    let status = BackgroundTaskStatus key label startedAt autoResume
+    atomicModifyIORef' env.toolBackgroundTasks \tasks ->
+        (Map.insertWith (\_ existing -> existing) key status tasks, ())
+
+-- | Idempotent removal on completion, failed start, cancellation, or shutdown.
+removeBackgroundTask :: ToolEnv -> Text -> IO ()
+removeBackgroundTask env key =
+    atomicModifyIORef' env.toolBackgroundTasks \tasks ->
+        (Map.delete key tasks, ())
 
 setBackgroundTaskHooks :: ToolEnv -> BackgroundTaskHooks -> IO ()
 setBackgroundTaskHooks env = writeIORef env.toolBackgroundTaskHooks

@@ -176,6 +176,8 @@ reduceUi event state = case event of
         state { uiBranch = branch, uiCwd = cwd, uiWorkspaceRoot = workspace }
     UiSetNotice notice ->
         state { uiNotice = notice, uiNoticeElapsedMillis = 0 }
+    UiSetBackgroundTaskStatus rows ->
+        state { uiBackgroundTaskStatus = rows }
     UiMoveSelection delta ->
         moveSelection delta state
     UiSelectBlock ident ->
@@ -299,6 +301,7 @@ clearConversation state =
         , uiShellPolls = Map.empty
         , uiRetryCountdown = Nothing
         , uiTodos = []
+        , uiBackgroundTaskStatus = []
         , uiGenerating = False
         , uiGenerationChars = 0
         , uiGenerationMillis = 0
