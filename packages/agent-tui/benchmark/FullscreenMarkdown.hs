@@ -10,8 +10,9 @@ import Agent.TUI.Markdown.Stream (MarkdownStreamState, emptyMarkdownStreamState,
 import qualified Agent.TUI.Markdown.Inline as Inline
 import qualified Agent.TUI.Theme as Theme
 import Brick
-import Control.Exception (evaluate) -- safe-exceptions does not export evaluate.
-import Control.Monad (forM, unless)
+-- This standalone benchmark uses base's bracket solely for stable-pointer cleanup.
+import Control.Exception (bracket, evaluate)
+import Control.Monad (forM, unless, when)
 import Data.Char (ord)
 import Data.Foldable (toList)
 import Data.IORef (newIORef, readIORef)
@@ -19,14 +20,16 @@ import Data.List (sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Lazy as LazyText
+import Data.Word (Word64)
 import qualified Graphics.Vty as V
 import Graphics.Vty.PictureToSpans (displayOpsForPic)
 import Graphics.Vty.Span (SpanOp(..))
 import GHC.Clock (getMonotonicTimeNSec)
-import GHC.Stats (RTSStats(..), getRTSStats, getRTSStatsEnabled)
+import Foreign.StablePtr (newStablePtr, freeStablePtr)
+import GHC.Stats (RTSStats(..), GCDetails(..), getRTSStats, getRTSStatsEnabled)
 import System.CPUTime (getCPUTime)
-import System.Environment (getArgs)
-import System.Exit (die)
+import System.Environment (getArgs, lookupEnv)
+import System.Exit (die, exitSuccess)
 import System.Mem (performGC)
 import Text.Printf (printf)
 
@@ -38,7 +41,7 @@ data Sample = Sample !Double !Double !Double
 -- The historical modes remain available so earlier benchmark reports can be
 -- reproduced. "incremental" is the PR #1278 fence-only parser baseline.
 data Renderer = LegacyRenderer | SectionCacheRenderer | IncrementalRenderer | StreamingRenderer
-    | BaselineInlineParser | StreamingInlineParser
+    | BaselineInlineParser | StreamingInlineParser | RetainedRenderer
     deriving (Eq)
 
 data ParserState = ParserState !FenceStreamState !MarkdownStreamState
@@ -87,6 +90,10 @@ prepareFrame renderer parser@(ParserState fences markdown) streaming body delta
 
 main :: IO ()
 main = do
+    -- Separate processes are required when attributing process-wide peak RSS.
+    phase <- lookupEnv "MARKDOWN_BENCH_PHASE"
+    unless (phase `elem` [Nothing, Just "verify", Just "measure"])
+        (die "MARKDOWN_BENCH_PHASE must be verify or measure")
     enabled <- getRTSStatsEnabled
     unless enabled (die "run with +RTS -T")
     getArgs >>= \case
@@ -97,19 +104,21 @@ main = do
                 "current" -> pure SectionCacheRenderer
                 "incremental" -> pure IncrementalRenderer
                 "streaming" -> pure StreamingRenderer
+                "retained" -> pure RetainedRenderer
                 "baseline-inline" -> pure BaselineInlineParser
                 "streaming-inline" -> pure StreamingInlineParser
                 _ -> die "unknown renderer or parser mode"
             unless (scenario `elem`
                 ["prose", "prose-lines", "fence", "open-fence", "table", "open-table", "mixed", "resize",
                  "history-prose", "history-mixed", "long-line", "incomplete",
-                 "unmatched-code", "unmatched-link"])
+                 "unmatched-code", "unmatched-link", "unicode-prose", "unicode-tail"])
                 (die "unknown scenario")
             count <- positive countArg
             chunkSize <- positive chunkArg
             samples <- positive samplesArg
             let input = frameInput scenario count chunkSize 0
-            if renderer `elem` [BaselineInlineParser, StreamingInlineParser]
+            if phase == Just "measure" then pure ()
+            else if renderer `elem` [BaselineInlineParser, StreamingInlineParser]
                 then verifyInlineFrames input
                 else case [(index, old, new) |
                     (index, (old, new)) <- zip [0 :: Int ..]
@@ -120,15 +129,24 @@ main = do
                     (index, old, new) : _ ->
                         die ("old/new per-frame display or click targets differ at "
                             <> show index <> "\nOLD: " <> show old <> "\nNEW: " <> show new)
-            results <- forM [1 .. samples] \sample ->
-                measure renderer (scenario == "resize")
-                    (frameInput scenario count chunkSize sample)
-            printf "%s,%s,%d,%d,%d,%.6f,%.6f,%.0f\n"
-                mode scenario count chunkSize samples
-                (median [wall | Sample wall _ _ <- results])
-                (median [cpu | Sample _ cpu _ <- results])
-                (median [bytes | Sample _ _ bytes <- results])
-        _ -> die "usage: fullscreen-markdown-bench old|new|current|incremental|streaming|baseline-inline|streaming-inline SCENARIO COUNT CHUNK_CHARS SAMPLES"
+            when (phase == Just "verify") exitSuccess
+            if renderer == RetainedRenderer
+                then do
+                    results <- forM [1 .. samples] \sample ->
+                        measureRetained (scenario == "resize")
+                            (frameInput scenario count chunkSize sample)
+                    printf "%s,%s,%d,%d,%d,%d\n"
+                        mode scenario count chunkSize samples (median results)
+                else do
+                    results <- forM [1 .. samples] \sample ->
+                        measure renderer (scenario == "resize")
+                            (frameInput scenario count chunkSize sample)
+                    printf "%s,%s,%d,%d,%d,%.6f,%.6f,%.0f\n"
+                        mode scenario count chunkSize samples
+                        (median [wall | Sample wall _ _ <- results])
+                        (median [cpu | Sample _ cpu _ <- results])
+                        (median [bytes | Sample _ _ bytes <- results])
+        _ -> die "usage: fullscreen-markdown-bench old|new|current|incremental|streaming|retained|baseline-inline|streaming-inline SCENARIO COUNT CHUNK_CHARS SAMPLES"
   where
     positive raw = case reads raw of
         [(n, "")] | n > 0 -> pure n
@@ -159,10 +177,29 @@ measure renderer resize input = do
 run :: Renderer -> Bool -> [(Bool, Text)] -> Int
 run BaselineInlineParser _ = runInline False
 run StreamingInlineParser _ = runInline True
-run renderer resize = go "" emptyParserState emptyRenderState 0 (0 :: Int)
+run renderer resize = \input ->
+    case runRendered renderer resize input of
+        (checksum, _, _, _) -> checksum
+
+-- The normal timing runner discards its output. This diagnostic instead pins
+-- the final body, Brick image cache, and picture across a major GC, without
+-- retaining the input frame list. Its final CSV field is total live heap bytes,
+-- not allocated bytes or peak RSS. Compare separately built helper variants.
+measureRetained :: Bool -> [(Bool, Text)] -> IO Word64
+measureRetained resize input = do
+    result <- evaluate (runRendered StreamingRenderer resize input)
+    bracket (newStablePtr result) freeStablePtr \_ -> do
+        performGC
+        stats <- getRTSStats
+        pure stats.gc.gcdetails_live_bytes
+
+{-# NOINLINE runRendered #-}
+runRendered :: Renderer -> Bool -> [(Bool, Text)] -> (Int, Text, RenderState Name, V.Picture)
+runRendered renderer resize =
+    go "" emptyParserState emptyRenderState (V.picForImage V.emptyImage) 0 (0 :: Int)
   where
-    go !_ !_ !_ !total !_ [] = total
-    go !body !parser !state !total !frame ((streaming, delta) : rest) =
+    go !body !_ !state !picture !total !_ [] = (total, body, state, picture)
+    go !body !parser !state !_ !total !frame ((streaming, delta) : rest) =
         let !nextBody = body <> delta
             (!nextParser, markdown) = prepareFrame renderer parser streaming nextBody delta
             width = if resize && (frame `div` 50) `mod` 2 == 1 then 40 else 80
@@ -177,7 +214,7 @@ run renderer resize = go "" emptyParserState emptyRenderState 0 (0 :: Int)
             !checksum = foldl' (foldl' spanChecksum) 0
                 (displayOpsForPic picture region)
                 + foldl' (\n extent -> n + length (show extent)) 0 extents
-        in go nextBody nextParser nextState (total + checksum) (frame + 1) rest
+        in go nextBody nextParser nextState picture (total + checksum) (frame + 1) rest
 
 -- Diagnostics force the complete syntax tree, not just its rendered text.
 -- They are not a substitute for the full-render acceptance measurements.
@@ -280,6 +317,8 @@ workload scenario count nonce =
     "# Response " <> Text.pack (show nonce) <> "\n\n" <> case scenario of
         "prose" -> Text.replicate count (prose <> "\n")
         "prose-lines" -> Text.replicate count prose
+        "unicode-prose" -> Text.replicate count unicodeProse
+        "unicode-tail" -> Text.replicate count unicodeTail
         "long-line" -> Text.replicate count (Text.stripEnd prose <> " ")
         "incomplete" -> "**unfinished [label (with nesting) " <> Text.replicate count "plain text and `code` "
         "unmatched-code" -> "`" <> Text.replicate count "unfinished code "
@@ -291,6 +330,14 @@ workload scenario count nonce =
         _ -> Text.replicate count (prose <> "\n" <> fence 3 <> table 3 <> "\n")
   where
     prose = "A **bold** explanation with `inline code` and [docs](https://example.com).\n"
+    -- No blank separators: completed lines remain in the active prose section.
+    unicodeProse =
+        "説明 **重要** cafe\x0301 with `変数` and [資料](https://example.com) "
+            <> "\x1f469\x200d\x1f4bb \x1f1e9\x1f1ea.\n"
+    -- The final non-ASCII character rejects a whole-span ASCII fast path only
+    -- after scanning a long prefix. Keep the prefix free of inline delimiters.
+    unicodeTail =
+        Text.replicate 16 "A representative line of ordinary source text. " <> "界\n"
     code = "value = map (+ 1) [1, 2, 3]\n"
     row = "| item | **some value** |\n"
     fence n = "```haskell\n" <> Text.replicate n code <> "```\n"
