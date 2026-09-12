@@ -5,6 +5,7 @@ import qualified Agent.Runtime.Tools.ResourcesSpec as ToolResources
 import qualified Agent.Runtime.Tools.DialectsSpec as ToolDialects
 import qualified Agent.Runtime.Tools.StartupSpec as ToolStartup
 import qualified Agent.Runtime.Mcp.StartupSpec as McpStartup
+import qualified Agent.Runtime.CollaborationSpec as Collaboration
 import qualified Agent.Runtime.ProviderRuntimeSpec as ProviderRuntime
 import qualified Agent.Runtime.CompactionSpec as Compaction
 import qualified Agent.Runtime.StartupPolicySpec as StartupPolicy
@@ -46,6 +47,7 @@ main = hspec do
     ToolResources.spec
     ToolStartup.spec
     McpStartup.spec
+    Collaboration.spec
     Request.spec
     ProviderRuntime.spec
     Compaction.spec

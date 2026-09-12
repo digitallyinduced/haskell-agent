@@ -27,6 +27,10 @@ if [[ -e "$cli/src/Agent/CLI/Dialects.hs" \
 fi
 
 python3 "$root/scripts/check-package-graph.py" "$root"
+if rg --line-number '\b(newSubagentRegistry|closeSubagentRegistry|interruptActiveSubagents|grokRootChildModels|resolveModelOptionById)\b' \
+    "$cli/src/Agent/CLI/Runtime/Orchestration/Tools/Collaboration.hs"; then
+  fail "collaboration startup policy and registry ownership must remain in agent-runtime"
+fi
 if rg --line-number 'MCP\.(acquireMcpFleet|releaseMcpFleetLease)' \
     "$cli/src/Agent/CLI/Runtime/Orchestration/Tools/Mcp.hs"; then
   fail "MCP startup lease ownership must remain in agent-runtime"
@@ -167,6 +171,8 @@ done
 
 required_files=(
   packages/agent-runtime/src/Agent/Runtime/Mcp/Startup.hs
+  packages/agent-runtime/src/Agent/Runtime/Collaboration.hs
+  packages/agent-runtime/test/Agent/Runtime/CollaborationSpec.hs
   packages/agent-runtime/test/Agent/Runtime/Mcp/StartupSpec.hs
   packages/agent-runtime/src/Agent/Runtime/Session/Preparation.hs
   packages/agent-runtime/src/Agent/Runtime/Session/Resources.hs

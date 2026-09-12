@@ -61,6 +61,7 @@ library
                     , Agent.Runtime.AgentSnapshot
                     , Agent.Runtime.Browser
                     , Agent.Runtime.Config
+                    , Agent.Runtime.Collaboration
                     , Agent.Runtime.Compaction
                     , Agent.Runtime.Compaction.Provider
                     , Agent.Runtime.Compaction.Projection
@@ -230,6 +231,7 @@ test-suite agent-runtime-test
     main-is:          Spec.hs
     ghc-options:      -threaded
     other-modules:    Agent.Runtime.RequestSpec
+                    , Agent.Runtime.CollaborationSpec
                     , Agent.Runtime.Mcp.StartupSpec
                     , Agent.Runtime.Tools.DialectsSpec
                     , Agent.Runtime.Tools.ResourcesSpec
