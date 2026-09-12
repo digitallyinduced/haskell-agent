@@ -535,12 +535,16 @@ updateBufferedLiveCall
                 Map.insert key nextPreview state.rawPreviewsByCallId
             }
         updatedCall = withToolArguments call rawArguments
+    -- Once the bounded prefix is full, keep its existing state. Activity and
+    -- runaway counters still advance in updateToolArguments for every delta.
     in if shouldPublish
         then
             ( trackUpdatedToolCall updatedCall withPreview
             , Just updatedCall
             )
-        else (withPreview, Nothing)
+        else if room <= 0
+            then (state, Nothing)
+            else (withPreview, Nothing)
 
 finishBufferedLiveCall
     :: Int

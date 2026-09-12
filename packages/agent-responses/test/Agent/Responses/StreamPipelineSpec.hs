@@ -41,6 +41,31 @@ spec = describe "Responses Conduit pipeline" do
                 .| decodeSseC .| collect
         result `shouldBe` parseSseEventsBytes completeStream
 
+    it "delivers a fragmented event before reading the next event" do
+        remaining <- newIORef (map BS.singleton (BS.unpack created) <> [completeStream])
+        reads <- newIORef (0 :: Int)
+        let readChunk = do
+                n <- atomicModifyIORef' reads (\n -> (n + 1, n))
+                if n >= BS.length created
+                    then throwIO (userError "read ahead of callback")
+                    else atomicModifyIORef' remaining \case
+                        [] -> ([], "")
+                        chunk : rest -> (rest, chunk)
+            emit _ = do
+                readIORef reads `shouldReturn` BS.length created
+                throwIO (userError "callback stopped")
+        consumeResponsesSse config Nothing readChunk emit
+            `shouldThrow` (\err -> show (err :: IOError) == "user error (callback stopped)")
+
+    it "validates UTF-8 even in ignored comment and unknown-field lines" do
+        mapM_ (\bad -> do
+            (result, seen) <- runChunks [created <> bad <> "\n\n"]
+            result `shouldSatisfy` isDecodeError
+            seen `shouldBe` [])
+            [prefix <> BS.pack invalid
+            | prefix <- [": comment ", "ignored: "]
+            , invalid <- [[255], [192,175], [237,160,128], [244,144,128,128], [226,130]]]
+
     it "assembles streamed tool arguments without reading ahead of callbacks" do
         let chunks =
                 [ created

@@ -1978,6 +1978,27 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
             (customInputDelta "ct-1" "call-9" "still not retained")
         second `shouldBe` []
 
+    it "counts saturated preview deltas and still accepts canonical completion" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent
+            (customToolCallAdded "ct-1" "call-9" "apply_patch")
+        _ <- projectEvent
+            (customInputDelta "ct-1" "call-9" (Text.replicate 65536 "p"))
+        quiet <- projectEvent
+            (customInputDelta "ct-1" "call-9" (Text.replicate 34463 "x"))
+        quiet `shouldBe` []
+        warning <- projectEvent (customInputDelta "ct-1" "call-9" "x")
+        warning `shouldBe`
+            [ WarningRaised
+                ("The model has streamed 100k chars of apply_patch "
+                    <> "arguments in one response; it may be stuck in a "
+                    <> "repetition loop.")
+            ]
+        completed <- projectEvent
+            (customToolCallDone "ct-1" "call-9" "apply_patch" "canonical")
+        completed `shouldBe`
+            [ToolUpdated (customToolCall "call-9" "apply_patch" "canonical")]
+
     it "flushes accumulated custom input when input done omits it" do
         projectEvent <- newStreamEventToLoopEvents False
         _ <- projectEvent
