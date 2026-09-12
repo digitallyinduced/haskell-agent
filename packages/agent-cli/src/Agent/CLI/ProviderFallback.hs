@@ -9,6 +9,7 @@ module Agent.CLI.ProviderFallback
     , ProviderRecoveryPreference(..)
     , providerRecoveryPreference
     , rankedModels
+    , selectAutomaticProviderCandidateWith
     ) where
 
 import Agent.CLI.ModelConfig (ModelCatalog)
@@ -22,6 +23,41 @@ import Data.List (sortOn)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime)
+
+-- | Select a validated fallback and its account without committing a transition.
+-- Callers supply dialect resolution, target/account validation, and reporting;
+-- startup and per-turn messaging and pending-turn policy remain outside the loop.
+selectAutomaticProviderCandidateWith
+    :: (ModelOption -> IO ModelOption)
+    -> (ModelOption -> IO (Either Text account))
+    -> (Provider -> Text -> IO ())
+    -> Provider
+    -> Set Provider
+    -> [ModelOption]
+    -> IO (Maybe (ModelOption, account, Set Provider))
+selectAutomaticProviderCandidateWith resolve validate reportSkipped current =
+    tryCandidates
+  where
+    tryCandidates unavailable = \case
+        [] -> pure Nothing
+        rawChoice : rest -> do
+            choice <- resolve rawChoice
+            validate choice >>= \case
+                Left err -> do
+                    let failedProvider = choice.modelTarget.targetProvider
+                        unavailable' = Set.insert failedProvider unavailable
+                        remaining =
+                            filter
+                                ((/= failedProvider) . (.modelTarget.targetProvider))
+                                rest
+                    reportSkipped failedProvider err
+                    tryCandidates unavailable' remaining
+                Right selected -> do
+                    let unavailable' =
+                            if choice.modelTarget.targetProvider == current
+                                then unavailable
+                                else Set.insert current unavailable
+                    pure (Just (choice, selected, unavailable'))
 
 -- | Keep brief provider cooldowns invisible to the user. Longer waits are
 -- eligible for cross-provider fallback instead of making the CLI appear hung.
