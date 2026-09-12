@@ -151,7 +151,6 @@ library
                     , Agent.CLI.TUI.App.Run
                     , Agent.CLI.TUI.App.Runtime
                     , Agent.CLI.TUI.Composer.Logic
-                    , Agent.CLI.TUI.Composer.Undo
                     , Agent.CLI.TUI.Composer.Render
                     , Agent.CLI.TUI.LambdaArt
                     , Agent.CLI.TUI.Motion
@@ -286,6 +285,7 @@ library
                     , Agent.CLI.TUI.App
                     , Agent.CLI.TUI.Bridge
                     , Agent.CLI.TUI.Composer
+                    , Agent.CLI.TUI.Composer.Undo
                     , Agent.CLI.TUI.History
                     , Agent.CLI.TUI.SessionHistory
                     , Agent.CLI.TUI.ImagePreview
