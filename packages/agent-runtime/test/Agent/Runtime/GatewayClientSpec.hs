@@ -485,7 +485,8 @@ spec = describe "gateway device authorization" do
             `shouldReturn`
                 Left "Gateway browser authorization was cancelled."
 
-    it "serves and shuts down a successful loopback callback" do
+    forM_ [False, True] \authorizationDenied ->
+      it ("serves a styled loopback callback and shuts down: " <> if authorizationDenied then "denied" else "received") do
         baseUrlVar <- newEmptyMVar
         expectedUserAgent <- gatewayUserAgent
         let gatewayApplication request respond = do
@@ -547,17 +548,34 @@ spec = describe "gateway device authorization" do
                                 HTTP.parseRequest $
                                     Text.unpack
                                         (redirectUri
-                                            <> "?code=hac_loopback_test&state="
+                                            <> (if authorizationDenied
+                                                then "?error=access_denied&error_description=private_callback_detail&state="
+                                                else "?code=hac_loopback_test&state=")
                                             <> state)
                             callbackResponse <-
                                 HTTP.httpLbs callbackRequest manager
                             HTTP.responseStatus callbackResponse
                                 `shouldBe` status200
-                            LBS.toStrict (HTTP.responseBody callbackResponse)
-                                `shouldSatisfy`
-                                    BS.isInfixOf "Authorization received"
-                            timeout 5_000_000 (wait connection)
-                                `shouldReturn` Just (Right ())
+                            let body = LBS.toStrict (HTTP.responseBody callbackResponse)
+                                headers = HTTP.responseHeaders callbackResponse
+                            body `shouldSatisfy` BS.isInfixOf
+                                (if authorizationDenied then "Haskell Agent could not connect"
+                                    else "Your authorization response was received.")
+                            forM_ ["class=\"card\"", "@media(prefers-color-scheme:dark)", "width=device-width"] \fragment ->
+                                body `shouldSatisfy` BS.isInfixOf fragment
+                            forM_ ["hac_loopback_test", "private_callback_detail", TextEncoding.encodeUtf8 state, "<script", "src=", "href="] \fragment ->
+                                body `shouldSatisfy` (not . BS.isInfixOf fragment)
+                            lookup hContentType headers `shouldBe` Just "text/html; charset=utf-8"
+                            lookup "Cache-Control" headers `shouldBe` Just "no-store"
+                            lookup "X-Content-Type-Options" headers `shouldBe` Just "nosniff"
+                            lookup "Content-Security-Policy" headers `shouldBe`
+                                Just "default-src 'none'; style-src 'unsafe-inline'"
+                            lookup "Content-Length" headers `shouldBe`
+                                Just (TextEncoding.encodeUtf8 (Text.pack (show (BS.length body))))
+                            result <- timeout 5_000_000 (wait connection)
+                            if authorizationDenied
+                                then result `shouldBe` Just (Left "Gateway authorization was not granted: access_denied.")
+                                else result `shouldBe` Just (Right ())
                     let expected =
                             GatewayCredential
                                 baseUrl
@@ -565,7 +583,7 @@ spec = describe "gateway device authorization" do
                                     <> "/v1/responses")
                                 "loopback-secret"
                     loadGatewayCredentialAt home
-                        `shouldReturn` Right (Just expected)
+                        `shouldReturn` Right (if authorizationDenied then Nothing else Just expected)
 
     it "accepts only the exact IPv4 loopback redirect contract" do
         let authorize redirect =

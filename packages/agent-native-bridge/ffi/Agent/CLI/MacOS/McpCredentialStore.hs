@@ -1,25 +1,20 @@
--- | Install the platform credential implementation before the native runtime
--- can start MCP connections. Registration itself performs no Keychain access.
-module Agent.CLI.MacOS.McpCredentialStore (ensureNativeMcpCredentialStore) where
+-- | Application-scoped credential ownership at the handle-free C ABI boundary.
+-- All engines and catalog operations borrow the same fully initialized runtime.
+-- Construction performs no Keychain access.
+module Agent.CLI.MacOS.McpCredentialStore (nativeMcpCredentialRuntime) where
 
 import Agent.CLI.MacOS.McpKeychain
 import Agent.Runtime.McpConnectionCredentials
-    ( McpCredentialStore(..), installMcpCredentialStore )
-import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar)
-import Control.Monad (unless)
+    ( CredentialRuntime, McpCredentialStore(..), newCredentialRuntime )
 import System.IO.Unsafe (unsafePerformIO)
 
-credentialStoreInstalled :: MVar Bool
-credentialStoreInstalled = unsafePerformIO (newMVar False)
-{-# NOINLINE credentialStoreInstalled #-}
-
-ensureNativeMcpCredentialStore :: IO ()
-ensureNativeMcpCredentialStore =
-    modifyMVar_ credentialStoreInstalled \installed -> do
-        unless installed $
-            installMcpCredentialStore McpCredentialStore
-                { credentialStoreLoad = readMcpKeychain
-                , credentialStoreSave = writeMcpKeychain
-                , credentialStoreDelete = deleteMcpKeychain
-                }
-        pure True
+-- The existing C ABI has no application handle. Keep the sole singleton here,
+-- not in the credential implementation: there is no separate install step or
+-- mutable store that an engine can observe before initialization completes.
+nativeMcpCredentialRuntime :: CredentialRuntime
+nativeMcpCredentialRuntime = unsafePerformIO $ newCredentialRuntime $ Just McpCredentialStore
+    { credentialStoreLoad = readMcpKeychain
+    , credentialStoreSave = writeMcpKeychain
+    , credentialStoreDelete = deleteMcpKeychain
+    }
+{-# NOINLINE nativeMcpCredentialRuntime #-}

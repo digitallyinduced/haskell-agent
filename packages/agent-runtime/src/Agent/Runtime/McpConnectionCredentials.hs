@@ -3,7 +3,8 @@
 -- by the native host; no URL-indexed or plaintext-file fallback is permitted.
 module Agent.Runtime.McpConnectionCredentials
     ( McpCredentialStore(..)
-    , installMcpCredentialStore
+    , CredentialRuntime
+    , newCredentialRuntime
     , loadMcpConnectionRecord
     , saveMcpConnectionRecord
     , deleteMcpConnectionRecord
@@ -21,13 +22,11 @@ import Control.Concurrent.MVar
 import Control.Exception.Safe (tryAny)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
-import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Network.HTTP.Client.TLS (getGlobalManager)
-import System.IO.Unsafe (unsafePerformIO)
 import System.OsPath (OsPath)
 
 -- | A nonsecret stable lock file serializes refresh across application
@@ -51,21 +50,19 @@ data McpCredentialStore = McpCredentialStore
     , credentialStoreDelete :: Text -> IO (Either Text ())
     }
 
-credentialStore :: IORef (Maybe McpCredentialStore)
-credentialStore = unsafePerformIO (newIORef Nothing)
-{-# NOINLINE credentialStore #-}
+-- | Application-owned credentials and coordination. Share one runtime across
+-- all sessions using the same store. The store is fixed at construction, so a
+-- consumer can never observe partially installed platform credentials.
+data CredentialRuntime = CredentialRuntime
+    { credentialStore :: !(Maybe McpCredentialStore)
+    , connectionLocks :: !(MVar (Map.Map Text (MVar ())))
+    , refreshLocks :: !(MVar (Map.Map Text (MVar ())))
+    }
 
--- | Install once during native process initialization, before operations start.
-installMcpCredentialStore :: McpCredentialStore -> IO ()
-installMcpCredentialStore store = writeIORef credentialStore (Just store)
-
-connectionLocks :: MVar (Map.Map Text (MVar ()))
-connectionLocks = unsafePerformIO (newMVar Map.empty)
-{-# NOINLINE connectionLocks #-}
-
-refreshLocks :: MVar (Map.Map Text (MVar ()))
-refreshLocks = unsafePerformIO (newMVar Map.empty)
-{-# NOINLINE refreshLocks #-}
+-- | 'Nothing' explicitly selects unavailable protected storage (no fallback).
+newCredentialRuntime :: Maybe McpCredentialStore -> IO CredentialRuntime
+newCredentialRuntime store =
+    CredentialRuntime store <$> newMVar Map.empty <*> newMVar Map.empty
 
 withIdentifierLock :: MVar (Map.Map Text (MVar ())) -> Text -> IO a -> IO a
 withIdentifierLock registry identifier action = do
@@ -78,10 +75,10 @@ withIdentifierLock registry identifier action = do
     withMVar lock (const action)
 
 withConnectionStore
-    :: Text -> (McpCredentialStore -> IO (Either Text a)) -> IO (Either Text a)
-withConnectionStore identifier action =
-    withIdentifierLock connectionLocks identifier $
-        readIORef credentialStore >>= \case
+    :: CredentialRuntime -> Text -> (McpCredentialStore -> IO (Either Text a)) -> IO (Either Text a)
+withConnectionStore runtime identifier action =
+    withIdentifierLock runtime.connectionLocks identifier $
+        case runtime.credentialStore of
             Nothing -> pure (Left "Protected MCP credential storage is unavailable")
             Just store -> tryAny (action store) >>= \case
                 Left _ -> pure (Left "Protected MCP credential operation failed")
@@ -98,51 +95,51 @@ loadRecord store identifier =
                 Left _ -> Left "Protected MCP credential record is invalid"
                 Right record -> Right (Just record)
 
-loadMcpConnectionRecord :: Text
+loadMcpConnectionRecord :: CredentialRuntime -> Text
     -> IO (Either Text (Maybe (OAuthTokenFile, OAuthTokenFileExtra)))
-loadMcpConnectionRecord identifier =
-    withConnectionStore identifier \store -> loadRecord store identifier
+loadMcpConnectionRecord runtime identifier =
+    withConnectionStore runtime identifier \store -> loadRecord store identifier
 
-saveMcpConnectionRecord :: Text -> OAuthTokenFile -> OAuthTokenFileExtra
+saveMcpConnectionRecord :: CredentialRuntime -> Text -> OAuthTokenFile -> OAuthTokenFileExtra
     -> IO (Either Text ())
-saveMcpConnectionRecord identifier record extra =
-    withConnectionStore identifier \store ->
+saveMcpConnectionRecord runtime identifier record extra =
+    withConnectionStore runtime identifier \store ->
         store.credentialStoreSave identifier
             (LBS.toStrict (encodeOAuthTokenRecord record extra))
 
-deleteMcpConnectionRecord :: Text -> IO (Either Text ())
-deleteMcpConnectionRecord identifier =
-    withConnectionStore identifier \store -> store.credentialStoreDelete identifier
+deleteMcpConnectionRecord :: CredentialRuntime -> Text -> IO (Either Text ())
+deleteMcpConnectionRecord runtime identifier =
+    withConnectionStore runtime identifier \store -> store.credentialStoreDelete identifier
 
-mcpConnectionCredentialProvider :: Text -> McpCredentialProvider
-mcpConnectionCredentialProvider identifier =
-    mcpConnectionCredentialProviderWith identifier id
+mcpConnectionCredentialProvider :: CredentialRuntime -> Text -> McpCredentialProvider
+mcpConnectionCredentialProvider runtime identifier =
+    mcpConnectionCredentialProviderWith runtime identifier id
 
 -- | The host gate validates the captured generation under the catalog lock.
 -- It wraps only protected storage, never a network request. Lock ordering is
 -- consistently catalog -> store; refresh serialization is independent.
 mcpConnectionCredentialProviderWith
-    :: Text
+    :: CredentialRuntime -> Text
     -> (forall a. IO (Either Text a) -> IO (Either Text a))
     -> McpCredentialProvider
-mcpConnectionCredentialProviderWith identifier gate =
-    mcpConnectionCredentialProviderWithRefresh identifier gate \request -> do
+mcpConnectionCredentialProviderWith runtime identifier gate =
+    mcpConnectionCredentialProviderWithRefresh runtime identifier gate \request -> do
         manager <- getGlobalManager
         refreshAccessTokenWith manager request
 
 mcpConnectionCredentialProviderWithRefresh
-    :: Text
+    :: CredentialRuntime -> Text
     -> (forall a. IO (Either Text a) -> IO (Either Text a))
     -> (RefreshRequest -> IO OAuthTokenResponse)
     -> McpCredentialProvider
-mcpConnectionCredentialProviderWithRefresh identifier gate refresh = McpCredentialProvider
+mcpConnectionCredentialProviderWithRefresh runtime identifier gate refresh = McpCredentialProvider
     { mcpCredentialAccessToken = accessToken False
     , mcpCredentialRefreshAccessToken =
         accessToken True >>= pure . (>>= maybe (Left "MCP authorization is required") Right)
     }
   where
-    accessToken forceRefresh = withIdentifierLock refreshLocks identifier $
-        gate (loadMcpConnectionRecord identifier) >>= \case
+    accessToken forceRefresh = withIdentifierLock runtime.refreshLocks identifier $
+        gate (loadMcpConnectionRecord runtime identifier) >>= \case
             Left err -> pure (Left err)
             Right Nothing -> pure (Right Nothing)
             Right (Just (current, extra)) -> do
@@ -166,7 +163,7 @@ mcpConnectionCredentialProviderWithRefresh identifier gate refresh = McpCredenti
                                         , tokenExpiresAt = fmap (completed +) tokens.expiresIn
                                         }
                                     updatedExtra = extra { extraScope = tokens.scope <|> extra.extraScope }
-                                gate (withConnectionStore identifier \store ->
+                                gate (withConnectionStore runtime identifier \store ->
                                     loadRecord store identifier >>= \case
                                         Right (Just (latest, latestExtra))
                                             | encodeOAuthTokenRecord latest latestExtra

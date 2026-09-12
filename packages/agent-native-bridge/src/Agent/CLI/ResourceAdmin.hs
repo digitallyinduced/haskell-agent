@@ -29,7 +29,7 @@ import Agent.Runtime.Database.Store
     , applicableDatabaseScopes
     , scopeForDatabase
     )
-import Agent.Runtime.Database (DatabaseScope(..))
+import Agent.Runtime.Database (CustomDatabaseScope(..))
 import Agent.Store.Postgres (Store, trustedPool)
 import Agent.Store.Postgres.Scope
     ( Scope(..)

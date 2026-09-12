@@ -1,7 +1,7 @@
 module Agent.CLI.LearnedSkillsSpec (spec) where
 
 import Agent.CLI (learnAboutUserOnboardingPrompt)
-import Agent.Runtime.Database (DatabaseScope(..))
+import Agent.Runtime.Database (CustomDatabaseScope(..))
 import Agent.CLI.LearnedSkills
 import Agent.CLI.LearnedSkills.Store
     ( loadLearnedSkillsWithPreload
@@ -135,6 +135,31 @@ spec = do
             readIORef learnedSeen `shouldReturn`
                 Just (DatabaseRepositoryScope, "postgres-session", Just 2)
             learnedResult.output `shouldContainText` "Learned body"
+
+        it "rejects harness scope before reading or mutating learned skills" do
+            called <- newIORef False
+            invocationsRef <- newIORef []
+            let env = testEnv
+                    { learnedSkillRead = \_ _ _ -> do
+                        writeIORef called True
+                        pure (Right testLearnedSkillView)
+                    , learnedSkillArchive = \_ -> do
+                        writeIORef called True
+                        pure (Right testMutationResponse)
+                    }
+                handlers =
+                    appToolHandlers (learnedSkillTools invocationsRef Nothing env)
+            viewResult <- dispatchToolCall dispatchConfig handlers
+                (functionToolCall "harness-view" "view_skill"
+                    "{\"scope\":\"harness\",\"name\":\"test\"}")
+            archiveResult <- dispatchToolCall dispatchConfig handlers
+                (functionToolCall "harness-archive" "skill_archive"
+                    "{\"scope\":\"harness\",\"slug\":\"test\",\"expected_revision\":1,\"change_summary\":\"test\",\"evidence\":\"test\"}")
+            readIORef called `shouldReturn` False
+            viewResult.output `shouldContainText`
+                "the harness catalog is not available in this session"
+            archiveResult.output `shouldContainText`
+                "the harness catalog is not available in this session"
 
         it "rejects invalid mutations before calling storage" do
             called <- newIORef False

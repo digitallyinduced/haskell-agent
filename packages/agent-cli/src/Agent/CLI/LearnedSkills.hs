@@ -20,7 +20,7 @@ module Agent.CLI.LearnedSkills
     , queueLearnedSkillContextWithOmissions
     ) where
 
-import Agent.Runtime.Database (DatabaseScope(..), databaseScopeDecoder)
+import Agent.Runtime.Database (CustomDatabaseScope(..), customDatabaseScopeDecoder)
 import Agent.CLI.Skills (resolveSkillContent)
 import Agent.MCP.Types (McpFleet)
 import Agent.Skills
@@ -62,7 +62,7 @@ import qualified Data.Text as Text
 import Data.Time.Clock (UTCTime)
 
 data LearnedSkillCreateRequest = LearnedSkillCreateRequest
-    { createRequestScope :: !DatabaseScope
+    { createRequestScope :: !CustomDatabaseScope
     , createRequestSlug :: !Text
     , createRequestTitle :: !Text
     , createRequestDescription :: !Text
@@ -76,7 +76,7 @@ data LearnedSkillCreateRequest = LearnedSkillCreateRequest
     deriving (Eq, Show)
 
 data LearnedSkillUpdateRequest = LearnedSkillUpdateRequest
-    { updateRequestScope :: !DatabaseScope
+    { updateRequestScope :: !CustomDatabaseScope
     , updateRequestSlug :: !Text
     , updateRequestExpectedRevision :: !Integer
     , updateRequestTitle :: !(Maybe Text)
@@ -91,7 +91,7 @@ data LearnedSkillUpdateRequest = LearnedSkillUpdateRequest
     deriving (Eq, Show)
 
 data LearnedSkillArchiveRequest = LearnedSkillArchiveRequest
-    { archiveRequestScope :: !DatabaseScope
+    { archiveRequestScope :: !CustomDatabaseScope
     , archiveRequestSlug :: !Text
     , archiveRequestExpectedRevision :: !Integer
     , archiveRequestChangeSummary :: !Text
@@ -100,7 +100,7 @@ data LearnedSkillArchiveRequest = LearnedSkillArchiveRequest
     deriving (Eq, Show)
 
 data LearnedSkillRollbackRequest = LearnedSkillRollbackRequest
-    { rollbackRequestScope :: !DatabaseScope
+    { rollbackRequestScope :: !CustomDatabaseScope
     , rollbackRequestSlug :: !Text
     , rollbackRequestExpectedRevision :: !Integer
     , rollbackRequestTargetRevision :: !Integer
@@ -348,7 +348,7 @@ data LearnedSkillToolsEnv = LearnedSkillToolsEnv
     { learnedSkillSearch
         :: !(Text -> Int -> IO (Either Text LearnedSkillSearchResponse))
     , learnedSkillRead
-        :: !(DatabaseScope -> Text -> Maybe Integer -> IO (Either Text LearnedSkillView))
+        :: !(CustomDatabaseScope -> Text -> Maybe Integer -> IO (Either Text LearnedSkillView))
     , learnedSkillCreate
         :: !(LearnedSkillCreateRequest -> IO (Either Text LearnedSkillMutationResponse))
     , learnedSkillUpdate
@@ -367,20 +367,20 @@ searchArgsDecoder = Hermes.object $
             <$> Hermes.atKey "query" Hermes.text
             <*> defaultKey 10 "limit" Hermes.int
 
-data ViewArgs = ViewArgs !Text !(Maybe DatabaseScope) !(Maybe Integer)
+data ViewArgs = ViewArgs !Text !(Maybe CustomDatabaseScope) !(Maybe Integer)
 
 viewArgsDecoder :: Hermes.Decoder ViewArgs
 viewArgsDecoder = Hermes.object $
         ViewArgs
             <$> Hermes.atKey "name" Hermes.text
-            <*> optionalKey "scope" databaseScopeDecoder
+            <*> optionalKey "scope" customDatabaseScopeDecoder
             <*> optionalKey "revision" integer
 
 learnedSkillCreateRequestDecoder :: Hermes.Decoder LearnedSkillCreateRequest
 learnedSkillCreateRequestDecoder = Hermes.object do
         activation <- optionalKey "activation" learnedSkillActivationDecoder
         LearnedSkillCreateRequest
-            <$> Hermes.atKey "scope" databaseScopeDecoder
+            <$> Hermes.atKey "scope" customDatabaseScopeDecoder
             <*> Hermes.atKey "slug" Hermes.text
             <*> Hermes.atKey "title" Hermes.text
             <*> Hermes.atKey "description" Hermes.text
@@ -394,7 +394,7 @@ learnedSkillCreateRequestDecoder = Hermes.object do
 learnedSkillUpdateRequestDecoder :: Hermes.Decoder LearnedSkillUpdateRequest
 learnedSkillUpdateRequestDecoder = Hermes.object $
         LearnedSkillUpdateRequest
-            <$> Hermes.atKey "scope" databaseScopeDecoder
+            <$> Hermes.atKey "scope" customDatabaseScopeDecoder
             <*> Hermes.atKey "slug" Hermes.text
             <*> Hermes.atKey "expected_revision" integer
             <*> optionalKey "title" Hermes.text
@@ -409,7 +409,7 @@ learnedSkillUpdateRequestDecoder = Hermes.object $
 learnedSkillArchiveRequestDecoder :: Hermes.Decoder LearnedSkillArchiveRequest
 learnedSkillArchiveRequestDecoder = Hermes.object $
         LearnedSkillArchiveRequest
-            <$> Hermes.atKey "scope" databaseScopeDecoder
+            <$> Hermes.atKey "scope" customDatabaseScopeDecoder
             <*> Hermes.atKey "slug" Hermes.text
             <*> Hermes.atKey "expected_revision" integer
             <*> Hermes.atKey "change_summary" Hermes.text
@@ -418,7 +418,7 @@ learnedSkillArchiveRequestDecoder = Hermes.object $
 learnedSkillRollbackRequestDecoder :: Hermes.Decoder LearnedSkillRollbackRequest
 learnedSkillRollbackRequestDecoder = Hermes.object $
         LearnedSkillRollbackRequest
-            <$> Hermes.atKey "scope" databaseScopeDecoder
+            <$> Hermes.atKey "scope" customDatabaseScopeDecoder
             <*> Hermes.atKey "slug" Hermes.text
             <*> Hermes.atKey "expected_revision" integer
             <*> Hermes.atKey "target_revision" integer

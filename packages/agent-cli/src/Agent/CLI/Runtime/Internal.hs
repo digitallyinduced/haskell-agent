@@ -101,6 +101,7 @@ import System.IO ( stderr )
 
 import qualified Agent.MCP as MCP
 import Agent.Runtime.McpConnectionRuntime (mcpConnectionCredentials)
+import Agent.Runtime.McpConnectionCredentials (newCredentialRuntime)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import qualified Data.Text as Text
 
@@ -226,6 +227,9 @@ runAgentWithRestarts options =
                 rootsRef <- newIORef Nothing
                 samplingRef <- newIORef Nothing
                 toolResourceArbiter <- newToolResourceArbiter 1024
+                -- Shared by the application supervisor, including background
+                -- sessions and restarts; CLI has no protected native store.
+                credentials <- newCredentialRuntime Nothing
                 cleanupStarted <- newIORef False
                 cleanupRequest <- newEmptyMVar
                 -- Cleanup is intentionally process-scoped rather than
@@ -241,7 +245,7 @@ runAgentWithRestarts options =
                                 { MCP.mcpHostElicit = readIORef elicitationRef
                                 , MCP.mcpHostRoots = readIORef rootsRef
                                 , MCP.mcpHostSample = readIORef samplingRef
-                                , MCP.mcpHostCredentials = mcpConnectionCredentials
+                                , MCP.mcpHostCredentials = mcpConnectionCredentials credentials
                                 }
                             `onException`
                                 closeIntegrationSupervisor integrationSupervisor

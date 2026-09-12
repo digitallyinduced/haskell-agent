@@ -34,12 +34,14 @@ import Agent.Provider
 import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
-    ( cancel
+    ( Async
+    , cancel
     , waitCatch
     , waitEitherCatch
     , withAsync
     )
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
+import qualified Control.Concurrent.STM as STM
 import Control.Concurrent.MVar
     ( MVar
     , newEmptyMVar
@@ -1181,15 +1183,14 @@ transcribeOnConnection connection produceAudio onTranscript =
     Json.withDecoderSession \decoderSession -> do
         WS.sendTextData connection sessionUpdateMessage
         awaitSessionUpdated decoderSession connection
-        finished <- newEmptyMVar
         withAsync
-            (receiveTranscripts decoderSession connection finished onTranscript)
+            (receiveTranscripts decoderSession connection onTranscript)
             \receiver ->
                 (do
                     produceAudio \bytes ->
                         WS.sendTextData connection (audioAppendMessage bytes)
                     WS.sendTextData connection audioCommitMessage
-                    waitForTranscript finished)
+                    waitForTranscript receiver)
                     `finally` do
                         void (tryAny (WS.sendClose connection ("done" :: Text)))
                         cancel receiver
@@ -1254,11 +1255,10 @@ awaitSessionUpdated decoderSession connection = do
 receiveTranscripts
     :: Json.DecoderSession
     -> WS.Connection
-    -> MVar (Either SomeException TranscriptState)
     -> (Text -> IO ())
-    -> IO ()
-receiveTranscripts decoderSession connection finished onTranscript =
-    tryAny (loop emptyTranscriptState) >>= void . tryPutMVar finished
+    -> IO TranscriptState
+receiveTranscripts decoderSession connection onTranscript =
+    loop emptyTranscriptState
   where
     -- The receiver owns accumulation; only the final state crosses threads.
     loop :: TranscriptState -> IO TranscriptState
@@ -1303,10 +1303,17 @@ applyTranscriptEvent event state =
             state
 
 waitForTranscript
-    :: MVar (Either SomeException TranscriptState)
+    :: Async TranscriptState
     -> IO Text
-waitForTranscript finished = do
-    completedInTime <- Timeout.timeout (30 * 1_000_000) (takeMVar finished)
+waitForTranscript receiver = do
+    completedInTime <- Timeout.timeout (30 * 1_000_000) do
+        result <- waitCatch receiver
+        case result of
+            -- The former tryAny completion channel was never filled when the
+            -- receiver exited asynchronously. Preserve its timeout policy;
+            -- cancellation of the parent still interrupts this wait.
+            Left err | not (isSyncException err) -> STM.atomically STM.retry
+            _ -> pure result
     case completedInTime of
         Nothing ->
             fail "timed out waiting for OpenAI Realtime transcription"

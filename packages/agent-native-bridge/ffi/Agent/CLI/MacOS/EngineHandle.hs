@@ -11,7 +11,7 @@ import Agent.CLI.MacOS.EngineLifecycle (workerLifecycle)
 import Agent.CLI.MacOS.EngineMailbox (newEngineMailboxIO, closeEngineMailbox)
 import Agent.CLI.MacOS.EngineState (Engine(..), EngineCommand(..))
 import Agent.CLI.MacOS.InteractionState (InteractionRuntime(..))
-import Agent.CLI.MacOS.McpCredentialStore (ensureNativeMcpCredentialStore)
+import Agent.CLI.MacOS.McpCredentialStore (nativeMcpCredentialRuntime)
 import Agent.Runtime.Session (sessionsRoot)
 import Agent.CLI.SessionAdmin (managedPostgresConfigForHome)
 import Control.Concurrent.Async (asyncWithUnmask, cancel, waitCatch)
@@ -36,7 +36,6 @@ ha_engine_create callback context
     | callback == nullFunPtr = pure nullPtr
     | otherwise = do
         created <- tryAny do
-            ensureNativeMcpCredentialStore
             home <- getHomeDirectory
             config <- managedPostgresConfigForHome home
             commands <- newEngineMailboxIO
@@ -61,6 +60,7 @@ ha_engine_create callback context
                 worker <- asyncWithUnmask \unmask ->
                     unmask
                         (workerLifecycle
+                            nativeMcpCredentialRuntime
                             callback
                             context
                             config
