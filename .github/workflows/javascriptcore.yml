@@ -65,7 +65,8 @@ jobs:
             "$helper_out/bin/agent-code-mode-worker" --check
           test -s "$helper_out/share/licenses/agent-code-mode-worker/acorn-LICENSE"
           test ! -e "$helper_out/bin/bun"
-          otool -L "$helper_out/bin/agent-code-mode-worker" |
+          nix develop --no-write-lock-file --command otool -L \
+            "$helper_out/bin/agent-code-mode-worker" |
             grep -F '/System/Library/Frameworks/JavaScriptCore.framework/'
 
       - name: Run lowering and native-versus-Bun protocol checks
