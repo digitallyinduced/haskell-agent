@@ -1597,14 +1597,19 @@ resolveInline plainAttr = fmap concat . traverse (go emptyContext)
             suffix <-
                 if Text.null url || inlinePlainText children == url
                     then pure []
-                    else one Theme.linkAttr linkContext (" (" <> url <> ")")
+                    else oneWithAttr Theme.dimAttr linkContext (" (" <> url <> ")")
             pure (label <> suffix)
 
-    one baseName context text = do
-        base <- B.lookupAttrName $
-            case context.inlineUrl of
+    one baseName context text =
+        oneWithAttr
+            (case context.inlineUrl of
                 Just _ -> Theme.linkAttr
-                Nothing -> baseName
+                Nothing -> baseName)
+            context
+            text
+
+    oneWithAttr attributeName context text = do
+        base <- B.lookupAttrName attributeName
         let addedStyle =
                 (if context.inlineStrong then V.bold else 0)
                     .|. (if context.inlineEmphasis then V.italic else 0)
