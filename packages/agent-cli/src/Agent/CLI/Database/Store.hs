@@ -14,6 +14,7 @@ module Agent.CLI.Database.Store
 import Agent.CLI.Database
     ( ConversationSearchMatch(..)
     , DatabaseScope(..)
+    , CustomDatabaseScope(..)
     , DatabaseToolsEnv(..)
     )
 import Agent.CLI.ModelConfig (organizationGatewayConnectionId)
@@ -171,8 +172,8 @@ databaseToolsEnvForStore
             DatabaseHarnessScope ->
                 fmap formatCatalog
                     <$> inspectSchema (storePool (trustedPool store)) "harness"
-            _ ->
-                withScopeDatabase store (scopeForDatabase scopes selected)
+            DatabaseCustomScope custom ->
+                withScopeDatabase store (scopeForDatabase scopes custom)
                     \database pool ->
                         fmap formatCatalog <$> inspectCustomSchema pool database
     , databaseRunQuery = \selected sql ->
@@ -185,33 +186,28 @@ databaseToolsEnvForStore
                     sql >>= \case
                     Left err -> pure (Left err)
                     Right result -> pure (Right (formatQueryResult result))
-            _ ->
-                withScopeDatabase store (scopeForDatabase scopes selected)
+            DatabaseCustomScope custom ->
+                withScopeDatabase store (scopeForDatabase scopes custom)
                     \database pool ->
                         queryCustom pool database defaultQueryLimits sql >>= \case
                             Left err -> pure (Left err)
                             Right result ->
                                 pure (Right (formatQueryResult result))
     , databaseRunExecute = \selected purpose sql ->
-        case selected of
-            DatabaseHarnessScope ->
-                pure $ Left
-                    "the harness catalog is read-only; use user, repository, or checkout to change agent-created tables"
-            _ ->
-                withScopeDatabase store (scopeForDatabase scopes selected)
-                    \database pool -> do
-                        sessionId <- currentSessionId
-                        fmap formatExecutionResult <$> executeCustom
-                            (storePool (trustedPool store))
-                            pool
-                            database
-                            CustomAuditContext
-                                { customAuditSessionId = sessionId
-                                , customAuditAgentId = Nothing
-                                }
-                            defaultQueryLimits
-                            purpose
-                            sql
+        withScopeDatabase store (scopeForDatabase scopes selected)
+            \database pool -> do
+                sessionId <- currentSessionId
+                fmap formatExecutionResult <$> executeCustom
+                    (storePool (trustedPool store))
+                    pool
+                    database
+                    CustomAuditContext
+                        { customAuditSessionId = sessionId
+                        , customAuditAgentId = Nothing
+                        }
+                    defaultQueryLimits
+                    purpose
+                    sql
     , databaseSearchConversations = \query limit ->
         searchConversationTurnsForBoundary
             (trustedPool store)
@@ -231,7 +227,7 @@ databaseToolsEnvForStore
 listDatabaseObjects
     :: Store
     -> DatabaseScopes
-    -> DatabaseScope
+    -> CustomDatabaseScope
     -> IO (Either Text [CatalogObject])
 listDatabaseObjects store scopes selected =
     withExistingScopeDatabase
@@ -247,7 +243,7 @@ listDatabaseObjects store scopes selected =
 loadDatabaseRows
     :: Store
     -> DatabaseScopes
-    -> DatabaseScope
+    -> CustomDatabaseScope
     -> Text
     -> Int64
     -> Int
@@ -449,13 +445,11 @@ withExistingScopeDatabase store scope missing action =
 
 type HasqlPool = Hasql.Pool.Pool
 
-scopeForDatabase :: DatabaseScopes -> DatabaseScope -> Scope
+scopeForDatabase :: DatabaseScopes -> CustomDatabaseScope -> Scope
 scopeForDatabase scopes = \case
     DatabaseUserScope -> scopes.userScope
     DatabaseRepositoryScope -> scopes.repositoryScope
     DatabaseCheckoutScope -> scopes.checkoutScope
-    DatabaseHarnessScope ->
-        error "scopeForDatabase: harness is the runtime catalog, not a custom scope"
 
 applicableDatabaseScopes :: DatabaseScopes -> [Scope]
 applicableDatabaseScopes scopes =
