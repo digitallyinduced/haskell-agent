@@ -12,6 +12,7 @@ import Agent.CLI.MacOS.ComputerBridge
     , NativeComputerResult(..)
     , closeComputerSession
     , computerToolSessionWhenEnabled
+    , computerToolSessionForAttachment
     , invokeComputerSessionRequest
     , newComputerHost
     , newComputerSession
@@ -57,7 +58,7 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
-import Data.Either (isRight)
+import Data.Either (isRight, isLeft)
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
@@ -221,6 +222,47 @@ spec = describe "native AX-first computer bridge" do
                         )
                         False
                     ]
+
+    it "opens an attached window with the host token and closes its scoped session" do
+        operations <- newIORef []
+        requests <- newIORef []
+        closes <- newIORef 0
+        let callback context abi operation token request requestLength
+                result resultCapacity resultLength ax axCapacity axLength
+                image imageCapacity imageLength err errCapacity errLength
+                outputToken outputFormat = do
+                    modifyIORef' operations (<> [(operation, token)])
+                    recordingCallback "attached" requests closes context abi
+                        (if operation == 6 then 1 else operation) token request requestLength
+                        result resultCapacity resultLength ax axCapacity axLength
+                        image imageCapacity imageLength err errCapacity errLength
+                        outputToken outputFormat
+        withHost callback \host -> do
+            Right (Just (_, _, close)) <- computerToolSessionForAttachment host 987654
+            close
+        readIORef operations `shouldReturn` [(6, 987654), (5, 73)]
+        readIORef closes `shouldReturn` 1
+
+    it "fails attached window admission when no computer host is registered" do
+        host <- newComputerHost
+        outcome <- computerToolSessionForAttachment host 123
+        isLeft outcome `shouldBe` True
+
+    it "does not retry an expired attachment as an unrestricted open" do
+        operations <- newIORef []
+        let callback _context _abi operation _token _request _requestLength
+                _result _resultCapacity resultLength _ax _axCapacity axLength
+                _image _imageCapacity imageLength _err _errCapacity errLength
+                outputToken outputFormat = do
+                    modifyIORef' operations (<> [operation])
+                    zeroLengths resultLength axLength imageLength errLength
+                    poke outputToken 0
+                    poke outputFormat 0
+                    pure 1
+        withHost callback \host -> do
+            outcome <- computerToolSessionForAttachment host 123
+            isLeft outcome `shouldBe` True
+        readIORef operations `shouldReturn` [6]
 
     it "returns an image only when explicitly requested" do
         requests <- newIORef []
