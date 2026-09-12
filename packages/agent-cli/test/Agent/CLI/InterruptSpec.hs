@@ -1,7 +1,9 @@
 module Agent.CLI.InterruptSpec (spec) where
 
 import Agent.CLI.Interrupt
-import Agent.Cancel (newCancelFlag, isCancelled, requestCancel)
+import Agent.Cancel (newCancelFlag, isCancelled, requestCancel, waitCancel)
+import Control.Concurrent.Async (concurrently)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import qualified Control.Exception as Base
 import Control.Exception (AsyncException(ThreadKilled, UserInterrupt))
 import Control.Exception.Safe (bracket, finally, throwIO, toSyncException)
@@ -9,6 +11,7 @@ import Control.Monad (forM_, void)
 import Data.IORef
 import System.Posix.Signals (Handler(..), Signal, installHandler, sigHUP, sigINT, sigTERM)
 import Test.Hspec
+import System.Timeout (timeout)
 
 spec :: Spec
 spec = do
@@ -63,30 +66,136 @@ spec = do
             noteFullscreenCtrlC state `shouldReturn` ForceExit
             noteFullscreenCtrlC state `shouldReturn` ForceExit
 
-    describe "withCtrlCHandler" do
-        it "keeps repeated confirmed interrupts within the session boundary" do
+        it "serializes simultaneous Ctrl-C requests against the active turn" do
             state <- newInterruptState (const (pure ()))
-            withCtrlCHandler state do
-                noteIdleCtrlC state `shouldReturn` ContinuePrompt
-                noteIdleCtrlC state `shouldReturn` QuitProcess
-                forM_ [1 :: Int, 2] \_ ->
-                    catchUserInterrupt
-                        (invokeInstalledHandler sigINT >> pure False)
-                        (pure True)
-                        `shouldReturn` True
+            flag <- newCancelFlag
+            decisions <- withTurnCancel state flag $
+                concurrently (noteFullscreenCtrlC state) (noteFullscreenCtrlC state)
+            decisions `shouldSatisfy`
+                (`elem` [(SoftCancel, ForceExit), (ForceExit, SoftCancel)])
+            isCancelled flag `shouldReturn` True
+
+    describe "withSessionInterrupts" do
+        it "preserves a normally completed action without requesting UI stop" do
+            state <- newInterruptState (const (pure ()))
+            withSessionInterrupts state
+                (expectationFailure "Unexpected UI stop")
+                (pure (42 :: Int))
+                `shouldReturn` Just 42
+
+        it "joins a keyboard-cancelled action after notifying its UI owner" do
+            state <- newInterruptState (const (pure ()))
+            blocked <- newEmptyMVar
+            events <- newIORef ([] :: [String])
+            let record event = atomicModifyIORef' events \old -> (old <> [event], ())
+            timeout 1_000_000
+                (withSessionInterrupts state (record "stop") $
+                    (do
+                        noteIdleCtrlC state `shouldReturn` ContinuePrompt
+                        void (noteIdleCtrlC state)
+                        takeMVar blocked)
+                    `finally` record "joined")
+                `shouldReturn` Just (Nothing :: Maybe ())
+            readIORef events `shouldReturn` ["stop", "joined"]
 
         it "treats hangup and termination as confirmed session quit" do
             forM_ [sigHUP, sigTERM] \signal -> do
                 state <- newInterruptState (const (pure ()))
-                catchUserInterrupt
-                    (withCtrlCHandler state
-                        (invokeInstalledHandler signal >> pure False))
-                    (pure True)
-                    `shouldReturn` True
+                blocked <- newEmptyMVar
+                joined <- newIORef False
+                timeout 1_000_000
+                    (withSessionInterrupts state (pure ()) $
+                        (invokeInstalledHandler signal >> takeMVar blocked)
+                            `finally` writeIORef joined True)
+                    `shouldReturn` Just (Nothing :: Maybe ())
+                readIORef joined `shouldReturn` True
                 noteIdleCtrlC state `shouldReturn` QuitProcess
 
-        it "restores previous signal handlers after an exceptional session exit" do
-            forM_ [sigINT, sigHUP, sigTERM] \signal -> do
+        it "soft-cancels the first SIGINT and quits on the next" do
+            messages <- newEmptyMVar
+            state <- newInterruptState (putMVar messages)
+            flag <- newCancelFlag
+            blocked <- newEmptyMVar
+            joined <- newIORef False
+            timeout 1_000_000
+                (withSessionInterrupts state (pure ()) $
+                    withTurnCancel state flag $
+                        (do
+                            invokeInstalledHandler sigINT
+                            waitCancel flag
+                            takeMVar messages
+                                `shouldReturn` "Interrupted; press Ctrl-C again to exit"
+                            invokeInstalledHandler sigINT
+                            takeMVar blocked)
+                        `finally` writeIORef joined True)
+                `shouldReturn` Just (Nothing :: Maybe ())
+            readIORef joined `shouldReturn` True
+
+        it "keeps repeated exit requests from interrupting a worker finalizer" do
+            state <- newInterruptState (const (pure ()))
+            blocked <- newEmptyMVar
+            joined <- newIORef False
+            timeout 1_000_000
+                (withSessionInterrupts state (pure ()) $
+                    (requestSessionExit state >> takeMVar blocked)
+                        `finally` do
+                            forM_ [sigINT, sigHUP, sigTERM] invokeInstalledHandler
+                            requestSessionExit state
+                            writeIORef joined True)
+                `shouldReturn` Just (Nothing :: Maybe ())
+            readIORef joined `shouldReturn` True
+
+        it "quits on the second SIGINT while the first notice is blocked" do
+            noticeStarted <- newEmptyMVar
+            noticeBlocked <- newEmptyMVar
+            noticeJoined <- newIORef False
+            state <- newInterruptState \_ ->
+                (putMVar noticeStarted () >> takeMVar noticeBlocked)
+                    `finally` writeIORef noticeJoined True
+            workerBlocked <- newEmptyMVar
+            workerJoined <- newIORef False
+            timeout 1_000_000
+                (withSessionInterrupts state (pure ()) $
+                    (do
+                        invokeInstalledHandler sigINT
+                        takeMVar noticeStarted
+                        invokeInstalledHandler sigINT
+                        takeMVar workerBlocked)
+                    `finally` writeIORef workerJoined True)
+                `shouldReturn` Just (Nothing :: Maybe ())
+            readIORef workerJoined `shouldReturn` True
+            readIORef noticeJoined `shouldReturn` True
+
+        it "prioritizes queued Ctrl-C requests over a completed provider transition" do
+            state <- newInterruptState (const (pure ()))
+            timeout 1_000_000
+                (withSessionInterrupts state (pure ()) do
+                    invokeInstalledHandler sigINT
+                    invokeInstalledHandler sigINT
+                    pure ("provider transition" :: String))
+                `shouldReturn` Just Nothing
+
+        it "propagates worker failures instead of reporting a requested quit" do
+            state <- newInterruptState (const (pure ()))
+            withSessionInterrupts state
+                (expectationFailure "Unexpected UI stop")
+                (ioError (userError "provider failed") :: IO ())
+                `shouldThrow` anyIOException
+
+        it "propagates failed worker cleanup during a requested quit" do
+            state <- newInterruptState (const (pure ()))
+            blocked <- newEmptyMVar
+            timeout 1_000_000
+                (withSessionInterrupts state (pure ()) $
+                    (requestSessionExit state >> takeMVar blocked :: IO ())
+                        -- Model a dependency finalizer that propagates its
+                        -- cleanup failure. Safe.finally instead preserves the
+                        -- original async cancellation over synchronous errors.
+                        `Base.finally` ioError (userError "cleanup failed"))
+                `shouldThrow` anyIOException
+
+        it "restores previous handlers after normal and exceptional exits" do
+            forM_ [(signal, fails) | signal <- [sigINT, sigHUP, sigTERM], fails <- [False, True]] \(signal, fails) -> do
                 restored <- newIORef False
                 bracket
                     (installHandler signal
@@ -94,11 +203,39 @@ spec = do
                     (\previous -> void (installHandler signal previous Nothing))
                     \_ -> do
                         state <- newInterruptState (const (pure ()))
-                        catchUserInterrupt
-                            (withCtrlCHandler state (Base.throwIO UserInterrupt))
-                            (pure ())
+                        let session = withSessionInterrupts state (pure ()) $
+                                if fails then ioError (userError "session failed") else pure ()
+                        if fails
+                            then session `shouldThrow` anyIOException
+                            else session `shouldReturn` Just ()
                         invokeInstalledHandler signal
                         readIORef restored `shouldReturn` True
+
+    describe "withSessionInterruptScope" do
+        it "retains latched signal handlers through post-join reporting" do
+            forM_ [sigINT, sigHUP, sigTERM] \signal -> do
+                previousCalled <- newIORef False
+                joined <- newIORef False
+                blocked <- newEmptyMVar
+                state <- newInterruptState (const (pure ()))
+                bracket
+                    (installHandler signal
+                        (Catch (writeIORef previousCalled True)) Nothing)
+                    (\previous -> void (installHandler signal previous Nothing))
+                    \_ -> do
+                        let report supervise = do
+                                supervise `shouldReturn` (Nothing :: Maybe ())
+                                readIORef joined `shouldReturn` True
+                                forM_ [sigINT, sigHUP, sigTERM] invokeInstalledHandler
+                                noteFullscreenCtrlC state `shouldReturn` ForceExit
+                                readIORef previousCalled `shouldReturn` False
+                        timeout 1_000_000
+                            (withSessionInterruptScope state (pure ()) report $
+                                (requestSessionExit state >> takeMVar blocked)
+                                    `finally` writeIORef joined True)
+                            `shouldReturn` Just ()
+                        invokeInstalledHandler signal
+                        readIORef previousCalled `shouldReturn` True
 
     describe "isWrappedUserInterrupt" do
         it "recognizes a synchronously wrapped UserInterrupt" do
@@ -157,13 +294,14 @@ spec = do
             readIORef attempts `shouldReturn` 2
 
 -- Invoke the installed callback directly rather than deliver a process-wide
--- signal to the test runner or GHCi. The callback still targets the session's
--- owning thread, exercising the same exception path as the signal dispatcher.
+-- signal to the test runner or GHCi. Restore the callback before invoking it,
+-- since publishing exit can let the supervisor restore its outer handler.
 invokeInstalledHandler :: Signal -> IO ()
-invokeInstalledHandler signal =
-    bracket
+invokeInstalledHandler signal = do
+    installed <- bracket
         (installHandler signal Ignore Nothing)
         (\previous -> void (installHandler signal previous Nothing))
-        \case
-            Catch handler -> handler
-            _ -> expectationFailure "Expected a session signal handler"
+        pure
+    case installed of
+        Catch handler -> handler
+        _ -> expectationFailure "Expected a session signal handler"

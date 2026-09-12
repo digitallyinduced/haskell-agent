@@ -59,7 +59,7 @@ import Agent.CLI.Interrupt
     ( InterruptState
     , catchUserInterrupt
     , retryUserInterruptOnce
-    , withCtrlCHandler
+    , withSessionInterruptScope
     )
 import Agent.CLI.ManagedTurn ( ManagedTurnRequest(..) )
 import Agent.CLI.ModelConfig
@@ -195,7 +195,7 @@ import Agent.CLI.Subagents.Runtime
 import Agent.CLI.Subagents.Runtime.Types
     (SubagentSession, SubagentStoreRoot)
 import Agent.CLI.TUI.App
-    ( FullscreenRuntime, withFullscreenSuspended, emitUiEvent )
+    ( FullscreenRuntime, deferFullscreenOutput, requestFullscreenStop, emitUiEvent )
 import Agent.CLI.Terminal ( resolveColor )
 import Agent.CLI.Tools
     ( schemasFromAppToolsCodeModeWithHostedSearchAndAsyncCapability
@@ -1122,8 +1122,10 @@ runSessionWithInterruptHandling AgentSessionRequest
     } progName action
         | startup.startupBackground = action
         | otherwise =
-            withCtrlCHandler interrupt $
-                withResumeHintOnQuit fullscreen progName persist action
+            withSessionInterruptScope interrupt
+                (mapM_ requestFullscreenStop fullscreen)
+                (withResumeHintOnQuit fullscreen progName persist . fmap (fromMaybe RunQuit))
+                action
 
 launchPreparedSession
     :: AgentSessionRequest windowTitleResult
@@ -1445,14 +1447,16 @@ withResumeHintOnQuit fullscreen progName persist action = do
         RunQuit -> do
             case fullscreen of
                 Nothing -> printResumeHint progName persist
-                Just runtime ->
-                    withFullscreenSuspended runtime
-                        (printResumeHint progName persist)
+                Just runtime -> do
+                    -- Resolve persistence while the session still owns its
+                    -- resources. Only terminal output outlives this scope.
+                    sessionId <- retryUserInterruptOnce (ensurePersistenceSessionId persist)
+                    forM_ sessionId \identifier ->
+                        deferFullscreenOutput runtime
+                            (printResumeHintForId progName identifier)
         _ -> pure ()
-    -- An interrupt is the requested, graceful end of the CLI session.
-    -- Returning lets the surrounding brackets restore the SIGINT handler
-    -- and close tools without GHC's top-level exception handler printing
-    -- "user interrupt" and a backtrace.
+    -- Quit is a normal session result, including compatibility handling for
+    -- an external UserInterrupt. Surrounding resource scopes unwind normally.
     pure result
 
 -- | Report only a session that is already durable. In particular, do not try
@@ -1471,7 +1475,7 @@ printCrashResumeHint fullscreen progName persist =
             case fullscreen of
                 Nothing -> printResumeHintForId progName identifier
                 Just runtime ->
-                    withFullscreenSuspended runtime
+                    deferFullscreenOutput runtime
                         (printResumeHintForId progName identifier)
     ) `Safe.catchAny` \_ -> pure ()
 

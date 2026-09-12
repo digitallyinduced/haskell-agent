@@ -565,7 +565,7 @@ runAgent
                         , restartChooseModel = chooseRecoveryModel
                         }
                 in
-                runFullscreen runtime $
+                fmap (fromMaybe RunQuit) $ runFullscreen runtime $
                     runFullscreenRestartLoop
                         callbacks
                         runtime

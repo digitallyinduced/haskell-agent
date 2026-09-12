@@ -8,7 +8,9 @@ module Agent.CLI.Interrupt
     , exitConfirmWindow
     , decideCtrlC
     , newInterruptState
-    , withCtrlCHandler
+    , withSessionInterrupts
+    , withSessionInterruptScope
+    , requestSessionExit
     , withTurnCancel
     , resetIdleTurnCancel
     , noteIdleCtrlC
@@ -19,7 +21,14 @@ module Agent.CLI.Interrupt
     ) where
 
 import Agent.Cancel (CancelFlag, isCancelled, requestCancel, resetCancel)
-import Control.Concurrent (ThreadId, myThreadId, throwTo)
+import Control.Concurrent.MVar (MVar, newMVar, modifyMVarMasked, modifyMVarMasked_, withMVar)
+import Control.Concurrent.Async
+    ( AsyncCancelled(..), cancel, waitCatch, withAsync, withAsyncWithUnmask, waitSTM )
+import Control.Concurrent.STM
+    ( TMVar, atomically, newEmptyTMVarIO, readTMVar, tryPutTMVar
+    , isEmptyTMVar, takeTMVar, newTBQueueIO, readTBQueue, writeTBQueue, isFullTBQueue
+    , orElse
+    )
 import Control.Exception
     ( AsyncException(UserInterrupt)
     , fromException
@@ -29,15 +38,13 @@ import Control.Exception.Safe
     ( SomeException
     , SyncExceptionWrapper(..)
     , bracket
-    , bracket_
     , catchAny
     , catchAsync
     , catchIO
     , mask
     , throwIO
     )
-import Control.Monad (void)
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Control.Monad (forever, unless, void)
 import Data.Text (Text)
 import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
 import System.Posix.Signals
@@ -73,7 +80,7 @@ data IdleCtrlCResult
     | QuitProcess
     deriving (Eq, Show)
 
--- | Pure policy used by the SIGINT handler and idle-prompt catcher.
+-- | Pure policy shared by signal and keyboard input.
 decideCtrlC :: CtrlCContext -> Bool -> CtrlCDecision
 decideCtrlC Idle withinWindow
     | withinWindow = ForceExit
@@ -84,42 +91,94 @@ decideCtrlC (TurnActive alreadyCancelled) _
 decideCtrlC Exiting _ = ForceExit
 
 data InterruptState = InterruptState
-    { interruptActiveCancel :: !(IORef (Maybe CancelFlag))
-    , interruptLastWarn :: !(IORef (Maybe UTCTime))
-    , interruptExiting :: !(IORef Bool)
+    { interruptPolicy :: !(MVar InterruptPolicy)
+    , interruptExit :: !(TMVar ())
     , interruptOnMessage :: !(Text -> IO ())
+    }
+
+data SessionEvent a = ExitRequested | CtrlCReceived | SessionCompleted a
+
+-- Transitions and turn-target handoffs are serialized. No callback or blocking
+-- IO runs while holding this lock: CancelFlag operations only update STM.
+data InterruptPolicy = InterruptPolicy
+    { activeCancel :: !(Maybe CancelFlag)
+    , lastWarn :: !(Maybe UTCTime)
     }
 
 -- | @onMessage@ prints user-facing hints (already styled by the caller).
 newInterruptState :: (Text -> IO ()) -> IO InterruptState
 newInterruptState onMessage = do
-    active <- newIORef Nothing
-    lastWarn <- newIORef Nothing
-    exiting <- newIORef False
+    policy <- newMVar (InterruptPolicy Nothing Nothing)
+    exiting <- newEmptyTMVarIO
     pure InterruptState
-        { interruptActiveCancel = active
-        , interruptLastWarn = lastWarn
-        , interruptExiting = exiting
+        { interruptPolicy = policy
+        , interruptExit = exiting
         , interruptOnMessage = onMessage
         }
 
--- | Install SIGINT/SIGHUP/SIGTERM handlers for the dynamic extent of @action@.
--- Restores the previous handlers afterward. Force-exit rethrows
--- 'UserInterrupt' on the thread that entered this wrapper. This session-level
--- handler must never terminate its host process: the owner may be GHCi or an
--- embedded runtime, and remains responsible for releasing session resources.
+-- | Own a foreground session until completion or a confirmed exit request.
+-- Signal callbacks only publish intent. Keyboard adapters use the same exit
+-- latch; neither adapter throws exceptions into the session or kills its host.
+-- On exit, notify the UI owner before scoped cancellation joins the worker.
+-- 'Nothing' is a requested quit, not a provider failure or restart.
 --
--- The inline editor reads Ctrl-C directly while a prompt is active; use
--- 'noteIdleCtrlC' from that path instead. Fullscreen raw mode uses
--- 'noteFullscreenCtrlC'.
-withCtrlCHandler :: InterruptState -> IO a -> IO a
-withCtrlCHandler state action = do
-    mainTid <- myThreadId
-    let sigint = Catch (onSigInt mainTid state)
-        hangup = Catch (onHangup mainTid state)
+-- Cancellation joins are deliberately not advertised as bounded: finalizers
+-- must be interruptible. Abandoning a worker would let it use released session
+-- resources. Background/embedded callers should not install process signals.
+withSessionInterrupts :: InterruptState -> IO () -> IO a -> IO (Maybe a)
+withSessionInterrupts state onStop = withSessionInterruptScope state onStop id
+
+-- | Keep adapters installed through owner-side reporting as well as worker
+-- teardown. The wrapper runs outside the canceled worker scope, so it can
+-- report a quit or failure after joining without exposing the host's handlers.
+withSessionInterruptScope
+    :: InterruptState
+    -> IO ()
+    -> (IO (Maybe a) -> IO b)
+    -> IO a
+    -> IO b
+withSessionInterruptScope state onStop around action = do
+    signals <- newTBQueueIO 8
+    notices <- newEmptyTMVarIO
+    let sigint = Catch $ atomically do
+            full <- isFullTBQueue signals
+            exiting <- not <$> isEmptyTMVar state.interruptExit
+            unless (full || exiting) (writeTBQueue signals ())
+        hangup = Catch (requestSessionExit state)
+        -- Rendering a notice must not prevent the next signal from quitting.
+        renderNotices = forever (atomically (takeTMVar notices) >>= notify state)
+        publishNotice message = atomically $ void (tryPutTMVar notices message)
+        supervise worker renderer = do
+            event <- atomically $
+                (readTMVar state.interruptExit >> pure ExitRequested)
+                    `orElse` (readTBQueue signals >> pure CtrlCReceived)
+                    `orElse` (SessionCompleted <$> waitSTM worker)
+                    `orElse` (waitSTM renderer >> pure ExitRequested)
+            case event of
+                ExitRequested -> do
+                    onStop
+                    cancel worker
+                    -- Scoped cancellation joins the worker, but its exception
+                    -- is otherwise discarded. Preserve failed resource cleanup
+                    -- rather than reporting a successful requested quit.
+                    waitCatch worker >>= \case
+                        Right _ -> pure Nothing
+                        Left exception -> case fromException exception of
+                            Just AsyncCancelled -> pure Nothing
+                            Nothing -> throwIO exception
+                SessionCompleted result -> pure (Just result)
+                CtrlCReceived -> do
+                    noteCtrlC state >>= \case
+                        SoftCancel -> publishNotice "Interrupted; press Ctrl-C again to exit"
+                        WarnExit -> publishNotice "Press Ctrl-C again to exit"
+                        ForceExit -> pure ()
+                    supervise worker renderer
     withHandler sigINT sigint $
         withHandler sigHUP hangup $
-            withHandler sigTERM hangup action
+            withHandler sigTERM hangup $
+                around $
+                withAsyncWithUnmask (\unmask -> unmask action) \worker ->
+                    withAsync renderNotices (supervise worker)
   where
     -- Nest acquisition so a later installation failure also restores every
     -- handler already installed.
@@ -133,115 +192,63 @@ withCtrlCHandler state action = do
 -- Nested work (for example voice delegations) must not erase a parent hangup.
 resetIdleTurnCancel :: InterruptState -> CancelFlag -> IO ()
 resetIdleTurnCancel state cancel = do
-    active <- readIORef state.interruptActiveCancel
-    case active of
-        Nothing -> resetCancel cancel
-        Just _ -> pure ()
+    withMVar state.interruptPolicy \policy ->
+        case policy.activeCancel of
+            Nothing -> resetCancel cancel
+            Just _ -> pure ()
 
 withTurnCancel :: InterruptState -> CancelFlag -> IO a -> IO a
 withTurnCancel state cancel action =
     bracket
-        (do
-            previous <- readIORef state.interruptActiveCancel
-            writeIORef state.interruptActiveCancel (Just cancel)
-            pure previous)
-        (writeIORef state.interruptActiveCancel)
+        (modifyMVarMasked state.interruptPolicy \policy ->
+            pure (policy{activeCancel = Just cancel}, policy.activeCancel))
+        (\previous -> modifyMVarMasked_ state.interruptPolicy \policy ->
+            pure policy{activeCancel = previous})
         (const action)
 
 -- | Apply idle Ctrl-C policy from the inline editor.
 noteIdleCtrlC :: InterruptState -> IO IdleCtrlCResult
 noteIdleCtrlC state = do
-    now <- getCurrentTime
-    context <- ctrlCContext state
-    withinWindow <- isWithinWarnWindow state now
-    case decideCtrlC context withinWindow of
+    noteCtrlC state >>= \case
         WarnExit -> do
-            writeIORef state.interruptLastWarn (Just now)
             notify state "Press Ctrl-C again to exit"
             pure ContinuePrompt
-        ForceExit -> do
-            armForceExit state
-            pure QuitProcess
+        ForceExit -> pure QuitProcess
         SoftCancel ->
             pure ContinuePrompt
 
 -- | Apply the same double-Ctrl-C policy when a retained TUI owns stdin.
 -- The caller renders the returned decision in its own UI.
 noteFullscreenCtrlC :: InterruptState -> IO CtrlCDecision
-noteFullscreenCtrlC state = do
-    now <- getCurrentTime
-    mCancel <- readIORef state.interruptActiveCancel
-    withinWindow <- isWithinWarnWindow state now
-    context <- ctrlCContext state
-    let decision = decideCtrlC context withinWindow
-    case decision of
-        SoftCancel -> do
-            case mCancel of
-                Just cancel -> requestCancel cancel
-                Nothing -> pure ()
-            writeIORef state.interruptLastWarn (Just now)
-        WarnExit ->
-            writeIORef state.interruptLastWarn (Just now)
-        ForceExit ->
-            armForceExit state
-    pure decision
+noteFullscreenCtrlC = noteCtrlC
 
-onSigInt :: ThreadId -> InterruptState -> IO ()
-onSigInt mainTid state = do
-    now <- getCurrentTime
-    mCancel <- readIORef state.interruptActiveCancel
-    withinWindow <- isWithinWarnWindow state now
-    ctx <- ctrlCContext state
-    case decideCtrlC ctx withinWindow of
-        SoftCancel -> do
-            case mCancel of
-                Just cancel -> requestCancel cancel
-                Nothing -> pure ()
-            writeIORef state.interruptLastWarn (Just now)
-            notify state "Interrupted; press Ctrl-C again to exit"
-        WarnExit -> do
-            writeIORef state.interruptLastWarn (Just now)
-            notify state "Press Ctrl-C again to exit"
-        ForceExit ->
-            requestForceExit mainTid state
+-- | One transition shared by terminal keys and the session supervisor.
+noteCtrlC :: InterruptState -> IO CtrlCDecision
+noteCtrlC state =
+    modifyMVarMasked state.interruptPolicy \policy -> do
+        now <- getCurrentTime
+        exiting <- atomically (not <$> isEmptyTMVar state.interruptExit)
+        context <- if exiting then pure Exiting else
+            maybe (pure Idle) (fmap TurnActive . isCancelled) policy.activeCancel
+        let withinWindow = case policy.lastWarn of
+                Just previous -> let elapsed = diffUTCTime now previous
+                    in elapsed >= 0 && elapsed <= exitConfirmWindow
+                Nothing -> False
+            decision = decideCtrlC context withinWindow
+        case decision of
+            SoftCancel -> mapM_ requestCancel policy.activeCancel
+            WarnExit -> pure ()
+            ForceExit -> requestSessionExit state
+        pure (policy{lastWarn = if decision == ForceExit then Nothing else Just now}, decision)
 
--- | Closing the terminal or SIGTERM is a confirmed quit: there is no second
--- keypress, and GHCi ignores SIGHUP by default so the agent must handle it.
-onHangup :: ThreadId -> InterruptState -> IO ()
-onHangup = requestForceExit
-
-ctrlCContext :: InterruptState -> IO CtrlCContext
-ctrlCContext state = do
-    exiting <- readIORef state.interruptExiting
-    if exiting
-        then pure Exiting
-        else do
-            mCancel <- readIORef state.interruptActiveCancel
-            case mCancel of
-                Nothing -> pure Idle
-                Just cancel ->
-                    TurnActive <$> isCancelled cancel
-
-armForceExit :: InterruptState -> IO ()
-armForceExit state = do
-    writeIORef state.interruptExiting True
-    writeIORef state.interruptLastWarn Nothing
-
-requestForceExit :: ThreadId -> InterruptState -> IO ()
-requestForceExit mainTid state = do
-    armForceExit state
-    throwTo mainTid UserInterrupt
-
-isWithinWarnWindow :: InterruptState -> UTCTime -> IO Bool
-isWithinWarnWindow state now = do
-    lastWarn <- readIORef state.interruptLastWarn
-    pure $ case lastWarn of
-        Just t -> diffUTCTime now t <= exitConfirmWindow
-        Nothing -> False
+-- | Nonblocking, idempotent session shutdown. Safe for signal adapters and
+-- independent of turn cancellation, so nested turn scopes cannot erase it.
+requestSessionExit :: InterruptState -> IO ()
+requestSessionExit state = atomically $ void (tryPutTMVar state.interruptExit ())
 
 notify :: InterruptState -> Text -> IO ()
 notify state msg =
-    -- Best-effort: never let printing from the signal thread fail the handler.
+    -- Best-effort notice rendering; signal callbacks never print.
     state.interruptOnMessage msg `catchIO` \_ -> pure ()
 
 -- | Recognize a 'UserInterrupt' thrown with safe-exceptions' 'throwIO'.

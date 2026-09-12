@@ -152,7 +152,7 @@ import Control.Applicative ((<|>))
 import Control.Concurrent.Async (wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forever, unless, void, when, (>=>))
-import Control.Concurrent.STM ( STM , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , writeTQueue , writeTVar )
+import Control.Concurrent.STM ( STM , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , tryPutTMVar , writeTQueue , writeTVar )
 import Agent.CLI.Recap ( autoRecapAwayThreshold , autoRecapIdleThreshold , autoRecapRetryInterval )
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
@@ -193,7 +193,10 @@ eventPump :: FullscreenRuntime -> IO ()
 eventPump runtime = loop
   where
     loop = do
-        pending <- atomically (takePendingAppEvent runtime.runtimeMailbox)
+        pending <- atomically $
+            (readTMVar runtime.runtimeStopRequested
+                >> pure (PendingEvent AppStop))
+                `orElse` takePendingAppEvent runtime.runtimeMailbox
         delivered <- case pending of
             PendingUi first -> do
                 threadDelay uiFrameDelayMicros
@@ -206,7 +209,17 @@ eventPump runtime = loop
             PendingEvent event ->
                 pure event
         writeBChan runtime.runtimeEvents delivered
-        loop
+        case delivered of
+            AppStop -> pure ()
+            _ -> loop
+
+-- | Ask the terminal owner to halt without waiting for capacity in either
+-- display queue. Publication is idempotent, including after Brick has exited.
+-- Normal worker completion still enqueues an ordered AppStop so its final
+-- display events are rendered first; confirmed user shutdown uses this lane.
+requestFullscreenStop :: FullscreenRuntime -> IO ()
+requestFullscreenStop runtime =
+    atomically (void (tryPutTMVar runtime.runtimeStopRequested ()))
 
 uiFrameDelayMicros :: Int
 uiFrameDelayMicros = 16000

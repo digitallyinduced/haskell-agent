@@ -29,6 +29,8 @@ module Agent.CLI.TUI.App
     , appEventLogicalBytes
     , closeAppEventMailbox
     , closeFullscreenChannels
+    , deferFullscreenOutput
+    , requestFullscreenStop
     , emitUiEvent
     , enqueueAppEvent
     , externalUrlCommand

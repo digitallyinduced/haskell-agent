@@ -3,6 +3,9 @@ module Agent.CLI.TUIAppSpec (spec) where
 import qualified Agent.TUI.Theme as Theme
 import Agent.CLI.TUI.Keyboard (decodeKeyboardBody, classifyKeyboard, runKeyboardInput)
 import Agent.CLI.TUI.App (finishedMarkdownProseCaches)
+import Agent.CLI.TUI.App.Run (withFullscreenFinalOutput)
+import Agent.CLI.TUI.App.Mailbox (enqueueMailboxEvent, eventPump)
+import Brick.BChan (readBChan)
 import Control.Monad (forM_, when)
 import Control.Monad.IO.Class (liftIO)
 import Graphics.Vty.Platform.Unix.Input.Classify.Types (KClass(..))
@@ -27,7 +30,10 @@ import Agent.CLI.Resume
     )
 import Agent.CLI.TUI.App
     ( applyStoredFullscreenWindowTitle
+    , closeAppEventMailbox
     , closeFullscreenChannels
+    , deferFullscreenOutput
+    , requestFullscreenStop
     , withFullscreenWorker
     , applyMetaConsoleEdit
     , applyTextPromptEdit
@@ -179,6 +185,7 @@ import Control.Exception (AsyncException(UserInterrupt))
 import qualified Control.Exception as Exception
 import Control.Concurrent.STM
     ( atomically
+    , orElse
     , readTVar
     , readTMVar
     , newEmptyTMVarIO
@@ -757,6 +764,97 @@ spec = do
             finalText `shouldSatisfy` Text.isInfixOf "PR #42"
             finalText `shouldBe` renderedAppText bounds finalState
 
+    describe "fullscreen stop control lane" do
+        it "publishes stop without capacity and prioritizes it over queued display work" do
+            runtime <- newScriptRuntime initialUiState
+            reply <- newEmptyTMVarIO
+            -- An opaque suspension occupies the entire payload budget and
+            -- control reserve. Even an ordinary AppStop cannot be enqueued.
+            History.enqueueAppEvent runtime (AppSuspend (pure ()) reply)
+            atomically
+                ((enqueueMailboxEvent runtime.runtimeMailbox AppStop >> pure True)
+                    `orElse` pure False)
+                `shouldReturn` False
+            timeout 1_000_000
+                (replicateM_ 3 (requestFullscreenStop runtime))
+                `shouldReturn` Just ()
+            timeout 1_000_000 (eventPump runtime) `shouldReturn` Just ()
+            delivered <- readBChan runtime.runtimeEvents
+            case delivered of
+                AppStop -> pure ()
+                _ -> expectationFailure "expected stop ahead of the suspended display action"
+            isNothing <$> atomically (tryReadTMVar reply) `shouldReturn` True
+
+        it "remains nonblocking after the display mailbox closes" do
+            runtime <- newScriptRuntime initialUiState
+            atomically (closeAppEventMailbox runtime.runtimeMailbox)
+            timeout 1_000_000
+                (replicateM_ 3 (requestFullscreenStop runtime))
+                `shouldReturn` Just ()
+
+    describe "fullscreen final output" do
+        it "waits for worker teardown and terminal restoration before printing" do
+            runtime <- newScriptRuntime initialUiState
+            started <- newEmptyMVar
+            blocked <- newEmptyMVar
+            events <- newIORef ([] :: [String])
+            let record label = atomicModifyIORef' events \previous ->
+                    (previous <> [label], ())
+                worker =
+                    bracket_
+                        (putMVar started ())
+                        (do
+                            record "worker stopped"
+                            deferFullscreenOutput runtime (record "resume hint"))
+                        (takeMVar blocked :: IO ())
+            timeout 1_000_000
+                (withFullscreenFinalOutput runtime $
+                    bracket_
+                        (pure ())
+                        (record "terminal restored")
+                        (withFullscreenWorker
+                            (closeFullscreenChannels runtime)
+                            worker
+                            (\_ -> takeMVar started >> ioError (userError "UI failure"))))
+                `shouldThrow` (== userError "UI failure")
+            readIORef events `shouldReturn`
+                ["worker stopped", "terminal restored", "resume hint"]
+
+        it "survives mailbox closure and drains each diagnostic only once" do
+            runtime <- newScriptRuntime initialUiState
+            events <- newIORef ([] :: [String])
+            let record label = modifyIORef' events (<> [label])
+            withFullscreenFinalOutput runtime do
+                deferFullscreenOutput runtime (record "before closure")
+                atomically (closeAppEventMailbox runtime.runtimeMailbox)
+                deferFullscreenOutput runtime (record "after closure")
+                readIORef events `shouldReturn` []
+            withFullscreenFinalOutput runtime (pure ())
+            readIORef events `shouldReturn` ["before closure", "after closure"]
+
+        it "preserves the session failure and continues after a diagnostic fails" do
+            runtime <- newScriptRuntime initialUiState
+            events <- newIORef ([] :: [String])
+            let record label = modifyIORef' events (<> [label])
+            (withFullscreenFinalOutput runtime do
+                deferFullscreenOutput runtime do
+                    record "failed hint"
+                    ioError (userError "output failure")
+                deferFullscreenOutput runtime (record "later hint")
+                ioError (userError "session failure"))
+                `shouldThrow` (== userError "session failure")
+            withFullscreenFinalOutput runtime (pure ())
+            readIORef events `shouldReturn` ["failed hint", "later hint"]
+
+        it "prints final diagnostics while preserving an external interrupt" do
+            runtime <- newScriptRuntime initialUiState
+            printed <- newIORef False
+            (withFullscreenFinalOutput runtime do
+                deferFullscreenOutput runtime (writeIORef printed True)
+                Exception.throwIO UserInterrupt)
+                `shouldThrow` (== UserInterrupt)
+            readIORef printed `shouldReturn` True
+
     describe "fullscreen worker ownership" do
         it "closes input and preserves a cooperative worker result" do
             closed <- newEmptyMVar
@@ -765,7 +863,7 @@ spec = do
                     (const (putMVar closed ()))
                     (takeMVar closed >> pure (42 :: Int))
                     (const (pure ())))
-                `shouldReturn` Just 42
+                `shouldReturn` Just (Just 42)
 
         it "closes input and joins the worker when the UI fails" do
             started <- newEmptyMVar
@@ -821,14 +919,11 @@ spec = do
                         (writeIORef stopped True)
                         (takeMVar blocked :: IO ())
             timeout 5_000_000
-                (catchUserInterrupt
-                    (withFullscreenWorker
-                        (const (writeIORef closed True))
-                        worker
-                        (\_ -> takeMVar started)
-                        >> pure False)
-                    (pure True))
-                `shouldReturn` Just True
+                (withFullscreenWorker
+                    (const (writeIORef closed True))
+                    worker
+                    (\_ -> takeMVar started))
+                `shouldReturn` Just Nothing
             readIORef closed `shouldReturn` True
             readIORef stopped `shouldReturn` True
 
@@ -855,7 +950,7 @@ spec = do
                 (closeFullscreenChannels runtime)
                 (pure (42 :: Int))
                 (void . waitCatch)
-                `shouldReturn` 42
+                `shouldReturn` Just 42
             queued <- atomically (Composer.readFullscreenInputs runtime.runtimeInput)
             fmap (.fullscreenInputLine) (toList queued)
                 `shouldBe` [ReplText "queued prompt"]
@@ -869,7 +964,7 @@ spec = do
                     (closeFullscreenChannels runtime)
                     (atomically (Composer.takeFullscreenInput runtime.runtimeInput))
                     (const (pure ()))
-            fmap (.fullscreenInputLine) result `shouldBe` Just ReplEof
+            fmap (fmap (.fullscreenInputLine)) result `shouldBe` Just (Just ReplEof)
 
     describe "dictation readiness" do
         it "does not erase a transcript that arrives before the ready event" do

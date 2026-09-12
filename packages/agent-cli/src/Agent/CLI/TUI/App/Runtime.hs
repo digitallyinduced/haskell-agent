@@ -292,6 +292,8 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
     color
     initial = do
         events <- newBChan appEventChannelCapacity
+        stopRequested <- newEmptyTMVarIO
+        finalOutput <- newTQueueIO
         mailbox <- AppEventMailbox <$> newTVarIO AppEventMailboxState
             { mailboxClosed = False
             , mailboxPendingEvents = Seq.empty
@@ -335,6 +337,8 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
         pure FullscreenRuntime
             { runtimeEvents = events
             , runtimeMailbox = mailbox
+            , runtimeStopRequested = stopRequested
+            , runtimeFinalOutput = finalOutput
             , runtimeInput = inputBuffer
             , runtimeCancel =
                 readIORef sessionActions >>= (.sessionCancel)
@@ -1177,6 +1181,17 @@ requestFullscreenSecret runtime title body = do
             ""
             reply)
     atomically (takeTMVar reply)
+
+-- | Queue best-effort final diagnostics for the terminal owner. Unlike
+-- 'withFullscreenSuspended', this never waits for Brick and remains usable
+-- while the worker unwinds after the display mailbox has closed.
+--
+-- The action runs after session workers and Vty have released their resources.
+-- Capture the diagnostic data now; do not defer resource acquisition or refer
+-- to a provider/session handle that teardown will close.
+deferFullscreenOutput :: FullscreenRuntime -> IO () -> IO ()
+deferFullscreenOutput runtime action =
+    atomically (writeTQueue runtime.runtimeFinalOutput action)
 
 withFullscreenSuspended :: FullscreenRuntime -> IO a -> IO a
 withFullscreenSuspended runtime action = do
