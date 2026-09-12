@@ -195,28 +195,6 @@ test-suite session-temp-test
                     , time
                     , unix
 
-test-suite session-temp-test
-    import:           common-options
-    type:             exitcode-stdio-1.0
-    hs-source-dirs:   test/session-temp src
-    main-is:          Spec.hs
-    other-modules:    Agent.Runtime.Duration
-                    , Agent.Runtime.Error
-                    , Agent.Runtime.Session.TempWorkspace
-                    , Agent.Runtime.SessionLock
-    build-depends:    agent-core
-                    , base >= 4.17 && < 5
-                    , bytestring
-                    , containers
-                    , directory
-                    , filelock
-                    , filepath
-                    , hspec >= 2.11 && < 2.12
-                    , safe-exceptions
-                    , text
-                    , time
-                    , unix
-
 test-suite agent-runtime-test
     import:           common-options
     type:             exitcode-stdio-1.0
