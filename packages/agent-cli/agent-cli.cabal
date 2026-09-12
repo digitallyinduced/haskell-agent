@@ -11,6 +11,11 @@ maintainer:         marc@digitallyinduced.com
 copyright:          (c) 2026 digitally induced GmbH
 category:           Development
 build-type:         Simple
+extra-source-files: benchmark/MemoryUsage.md
+                  , benchmark/ViewportRetention.md
+                  , benchmark/compare-memory.py
+                  , benchmark/compare-session-memory.py
+                  , benchmark/SessionReplay.md
 data-files:         data/CHANGELOG.md
                   , skills/add-model/SKILL.md
                   , skills/learn-about-user/SKILL.md
@@ -265,6 +270,7 @@ library
                     , Agent.CLI.TUI.App
                     , Agent.CLI.TUI.Bridge
                     , Agent.CLI.TUI.Composer
+                    , Agent.CLI.TUI.Composer.Undo
                     , Agent.CLI.TUI.History
                     , Agent.CLI.TUI.SessionHistory
                     , Agent.CLI.TUI.ImagePreview
@@ -641,6 +647,7 @@ test-suite agent-cli-test
                     , Agent.CLI.TUIAppSpec.Motion
                     , Agent.CLI.TUIBridgeSpec
                     , Agent.CLI.TUIComposerSpec
+                    , Agent.CLI.TUIComposerUndoSpec
                     , Agent.CLI.TUIImagePreviewSpec
                     , Agent.CLI.TUIPropertySpec
                     , Agent.CLI.TUIHistorySpec
@@ -769,14 +776,54 @@ benchmark transcript-scrolling-bench
     type:             exitcode-stdio-1.0
     hs-source-dirs:   benchmark
     main-is:          TranscriptScrolling.hs
-    ghc-options:      -O2 -rtsopts "-with-rtsopts=-T"
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
     build-depends:    agent-cli
                     , agent-tui
                     , base >= 4.17 && < 5
                     , brick >= 2.9 && < 3
                     , containers
                     , deepseq
+                    , safe-exceptions
                     , text
+                    , vty >= 6.4 && < 7
+
+benchmark viewport-retention-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          ViewportRetention.hs
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-cli
+                    , agent-core
+                    , agent-responses-types
+                    , base >= 4.17 && < 5
+                    , containers
+                    , safe-exceptions
+                    , text
+
+benchmark session-replay-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          SessionReplay.hs
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-cli
+                    , agent-runtime
+                    , agent-core
+                    , agent-json
+                    , agent-responses-types
+                    , agent-tui
+                    , aeson
+                    , base >= 4.17 && < 5
+                    , brick >= 2.9 && < 3
+                    , bytestring
+                    , containers
+                    , deepseq
+                    , mtl
+                    , safe-exceptions
+                    , text
+                    , time
+                    , transformers
                     , vty >= 6.4 && < 7
 
 benchmark model-picker-latency-bench

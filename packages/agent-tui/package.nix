@@ -1,6 +1,6 @@
 { mkDerivation, aeson, aeson-pretty, agent-core, agent-json
 , agent-syntax, agent-tools, base, brick, bytestring, containers
-, hspec, lib, QuickCheck, text, vty
+, deepseq, hspec, lib, QuickCheck, safe-exceptions, text, vty
 }:
 mkDerivation {
   pname = "agent-tui";
@@ -16,7 +16,7 @@ mkDerivation {
   ];
   benchmarkHaskellDepends = [
     aeson aeson-pretty agent-core agent-json agent-syntax base brick
-    bytestring containers text vty
+    bytestring containers deepseq safe-exceptions text vty
   ];
   description = "Retained terminal UI for the universal agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";
