@@ -224,6 +224,12 @@ spec = describe "web_fetch and LSP runtime support" do
                     unsupported.output `shouldSatisfy`
                         Text.isInfixOf
                             "No initialized LSP server is configured for .txt"
+                    original <- BS.readFile source
+                    BS.writeFile source (BS.replicate (5 * 1024 * 1024 + 1) 120)
+                    oversized <- callLsp tool (fileRequest "hover")
+                    oversized.output `shouldSatisfy`
+                        Text.isInfixOf "lsp document exceeds 5242880 bytes"
+                    BS.writeFile source original
                     definition <- callLsp tool
                         (fileRequest "goToDefinition")
                     definition.output `shouldSatisfy`
@@ -255,6 +261,23 @@ spec = describe "web_fetch and LSP runtime support" do
                         Text.isInfixOf "- Global"
                     closeLspRuntime runtime
                     requests <- Text.pack <$> readFile trace
+                    let documentNotifications =
+                            filter
+                                (\line ->
+                                    Text.isInfixOf "\"method\":\"textDocument/didOpen\"" line
+                                        || Text.isInfixOf "\"method\":\"textDocument/didChange\"" line)
+                                (Text.lines requests)
+                    length documentNotifications `shouldBe` 5
+                    case documentNotifications of
+                        first : rest -> do
+                            first `shouldSatisfy` Text.isInfixOf "\"method\":\"textDocument/didOpen\""
+                            first `shouldSatisfy` Text.isInfixOf "\"version\":1"
+                            mapM_
+                                (\(version, notification) ->
+                                    notification `shouldSatisfy`
+                                        Text.isInfixOf ("\"version\":" <> Text.pack (show version)))
+                                (zip [2 :: Int ..] rest)
+                        [] -> expectationFailure "expected document synchronization notifications"
                     mapM_
                         (\method ->
                             requests `shouldSatisfy`
