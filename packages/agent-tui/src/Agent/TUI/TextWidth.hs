@@ -70,8 +70,10 @@ displayTerminalChar char
     code = ord char
 
 displayTerminalText :: Text -> Text
-displayTerminalText =
-    Text.concat . map displayTerminalCluster . graphemeClusters
+displayTerminalText text
+    -- Printable ASCII needs neither sanitization nor grapheme reconstruction.
+    | Text.all (\character -> character >= ' ' && character <= '~') text = text
+    | otherwise = Text.concat (map displayTerminalCluster (graphemeClusters text))
   where
     -- ZWJ and emoji tag characters are terminal formatting controls when
     -- they occur on their own, but are required source characters inside a

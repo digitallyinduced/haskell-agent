@@ -103,7 +103,7 @@ main = do
             unless (scenario `elem`
                 ["prose", "prose-lines", "fence", "open-fence", "table", "open-table", "mixed", "resize",
                  "history-prose", "history-mixed", "long-line", "incomplete",
-                 "unmatched-code", "unmatched-link"])
+                 "unmatched-code", "unmatched-link", "unicode-prose", "unicode-tail"])
                 (die "unknown scenario")
             count <- positive countArg
             chunkSize <- positive chunkArg
@@ -280,6 +280,8 @@ workload scenario count nonce =
     "# Response " <> Text.pack (show nonce) <> "\n\n" <> case scenario of
         "prose" -> Text.replicate count (prose <> "\n")
         "prose-lines" -> Text.replicate count prose
+        "unicode-prose" -> Text.replicate count unicodeProse
+        "unicode-tail" -> Text.replicate count unicodeTail
         "long-line" -> Text.replicate count (Text.stripEnd prose <> " ")
         "incomplete" -> "**unfinished [label (with nesting) " <> Text.replicate count "plain text and `code` "
         "unmatched-code" -> "`" <> Text.replicate count "unfinished code "
@@ -291,6 +293,14 @@ workload scenario count nonce =
         _ -> Text.replicate count (prose <> "\n" <> fence 3 <> table 3 <> "\n")
   where
     prose = "A **bold** explanation with `inline code` and [docs](https://example.com).\n"
+    -- No blank separators: completed lines remain in the active prose section.
+    unicodeProse =
+        "説明 **重要** cafe\x0301 with `変数` and [資料](https://example.com) "
+            <> "\x1f469\x200d\x1f4bb \x1f1e9\x1f1ea.\n"
+    -- The final non-ASCII character rejects a whole-span ASCII fast path only
+    -- after scanning a long prefix. Keep the prefix free of inline delimiters.
+    unicodeTail =
+        Text.replicate 16 "A representative line of ordinary source text. " <> "界\n"
     code = "value = map (+ 1) [1, 2, 3]\n"
     row = "| item | **some value** |\n"
     fence n = "```haskell\n" <> Text.replicate n code <> "```\n"

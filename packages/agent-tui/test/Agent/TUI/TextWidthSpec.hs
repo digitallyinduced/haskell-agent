@@ -8,11 +8,35 @@ import Test.QuickCheck (elements, forAll, listOf, property)
 
 spec :: Spec
 spec = describe "terminal character width" do
+    it "preserves empty text and the complete printable ASCII range" do
+        displayTerminalText "" `shouldBe` ""
+        let printableAscii = Text.pack [' ' .. '~']
+        displayTerminalText printableAscii `shouldBe` printableAscii
+
     it "preserves arbitrary printable ASCII and structural newlines" $
         property $
             forAll (listOf (elements ('\n' : [' ' .. '~']))) \characters ->
                 let text = Text.pack characters
                 in displayTerminalText text == text
+
+    it "sanitizes controls before and after printable ASCII" do
+        let printableAscii = Text.pack [' ' .. '~']
+        displayTerminalText ("\ESC\t\r\DEL" <> printableAscii)
+            `shouldBe` ("␛⇥↵␡" <> printableAscii)
+        displayTerminalText (printableAscii <> "\ESC\t\r\DEL")
+            `shouldBe` (printableAscii <> "␛⇥↵␡")
+
+    it "preserves grapheme handling between printable ASCII runs" do
+        let womanTechnologist =
+                Text.pack ['\x1f469', '\x200d', '\x1f4bb']
+        displayTerminalText "prefix e\x0301 suffix"
+            `shouldBe` "prefix e\x0301 suffix"
+        displayTerminalText "prefix 1\xfe0f\x20e3 suffix"
+            `shouldBe` "prefix １ suffix"
+        displayTerminalText ("prefix " <> womanTechnologist <> " suffix")
+            `shouldBe` ("prefix " <> womanTechnologist <> " suffix")
+        displayTerminalText "prefix \x200d suffix"
+            `shouldBe` "prefix � suffix"
 
     it "does not bypass sanitization after a long ASCII prefix" do
         let prefix = Text.replicate 1000 "source code "
