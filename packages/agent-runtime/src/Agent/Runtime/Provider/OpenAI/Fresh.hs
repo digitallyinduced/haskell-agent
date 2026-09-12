@@ -1,5 +1,5 @@
 -- | Disposable OpenAI backends used by child agents.
-module Agent.CLI.Subagents.Runtime.OpenAI
+module Agent.Runtime.Provider.OpenAI.Fresh
     ( freshOpenAiBackend
     , freshOpenAiBackendWithTurnState
     ) where

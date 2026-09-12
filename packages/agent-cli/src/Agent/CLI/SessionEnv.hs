@@ -18,7 +18,7 @@ import Agent.Runtime.ModelConfig (ModelCatalog)
 import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.Recap (RecapRequest)
 import Agent.CLI.Command (ShellMode)
-import Agent.CLI.Compaction
+import Agent.Runtime.Compaction.Provider
     ( CompactOutcome
     , OccupancySnapshot
     )

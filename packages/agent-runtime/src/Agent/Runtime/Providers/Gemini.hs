@@ -1,12 +1,12 @@
-module Agent.CLI.Runtime.Orchestration.Providers.Gemini
+module Agent.Runtime.Providers.Gemini
     ( withGeminiProvider
     ) where
 
-import Agent.CLI.Runtime.Orchestration.Providers.Common
+import Agent.Runtime.Providers.Common
     ( HttpProviderTransport(..)
     , withHttpProvider
     )
-import Agent.CLI.Runtime.Orchestration.Providers.Types
+import Agent.Runtime.Providers.Types
     ( ProviderHost(..), ProviderRuntime )
 import Agent.Gemini.LoopBackend (tokenProviderStatelessGeminiBackend)
 import Agent.Provider (TokenProvider, runWithTokenProvider)

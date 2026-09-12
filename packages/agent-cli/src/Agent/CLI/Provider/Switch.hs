@@ -25,7 +25,7 @@ import Agent.CLI.AccountSelection
     , providerSupportsUsageAccountSelection
     , selectProviderAccount
     )
-import Agent.CLI.Session.History
+import Agent.Runtime.Session.History
     ( LiveConversation
     , readLivePreviousResponseId
     , writeLivePreviousResponseId

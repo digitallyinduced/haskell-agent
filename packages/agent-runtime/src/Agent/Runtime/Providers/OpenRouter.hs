@@ -1,12 +1,12 @@
-module Agent.CLI.Runtime.Orchestration.Providers.OpenRouter
+module Agent.Runtime.Providers.OpenRouter
     ( withOpenRouterProvider
     ) where
 
-import Agent.CLI.Runtime.Orchestration.Providers.Common
+import Agent.Runtime.Providers.Common
     ( HttpProviderTransport(..)
     , withHttpProvider
     )
-import Agent.CLI.Runtime.Orchestration.Providers.Types
+import Agent.Runtime.Providers.Types
     ( ProviderHost(..), ProviderRuntime, OpenRouterConfig(..), ProviderCompaction(..) )
 import Agent.OpenRouter.LoopBackend (openRouterBackend)
 import Agent.Provider (runWithTokenProvider)

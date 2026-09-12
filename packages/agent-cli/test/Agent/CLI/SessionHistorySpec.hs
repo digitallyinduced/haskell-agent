@@ -5,9 +5,9 @@ import Agent.Runtime.Session
     , TranscriptEffect(..)
     )
 import Agent.CLI.Session.ConversationStore (newConversationStore)
-import Agent.CLI.Session.History
+import Agent.CLI.Session.History (hydrateUiHistory)
+import Agent.Runtime.Session.History
     ( foldSessionItems
-    , hydrateUiHistory
     , readLiveAttachments
     , readLivePreviousResponseId
     , readLiveTranscript

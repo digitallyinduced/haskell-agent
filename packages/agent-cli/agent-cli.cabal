@@ -63,9 +63,6 @@ library
                     , Agent.CLI.Command.Types
                     , Agent.CLI.Command.Catalog
                     , Agent.CLI.Command.Instructions
-                    , Agent.CLI.Compaction.Continuation
-                    , Agent.CLI.Compaction.Projection
-                    , Agent.CLI.Compaction.Types
                     , Agent.CLI.Clipboard.Linux
                     , Agent.CLI.Clipboard.MacOS
                     , Agent.CLI.McpStatus
@@ -83,7 +80,6 @@ library
                     , Agent.CLI.Lsp.Path
                     , Agent.CLI.Lsp.Protocol
                     , Agent.CLI.PromptHooks
-                    , Agent.CLI.Provider.OpenAI
                     , Agent.CLI.Provider.Switch
                     , Agent.CLI.Runtime
                     , Agent.CLI.Runtime.Internal
@@ -91,12 +87,6 @@ library
                     , Agent.CLI.Runtime.Orchestration.Background
                     , Agent.CLI.Runtime.Orchestration.Flow
                     , Agent.CLI.Runtime.Orchestration.Initialized
-                    , Agent.CLI.Runtime.Orchestration.Providers.Claude
-                    , Agent.CLI.Runtime.Orchestration.Providers.Common
-                    , Agent.CLI.Runtime.Orchestration.Providers.Gemini
-                    , Agent.CLI.Runtime.Orchestration.Providers.OpenAI
-                    , Agent.CLI.Runtime.Orchestration.Providers.OpenRouter
-                    , Agent.CLI.Runtime.Orchestration.Providers.XAI
                     , Agent.CLI.Runtime.Orchestration.Restart
                     , Agent.CLI.Runtime.Orchestration.Session
                     , Agent.CLI.Runtime.Orchestration.Startup
@@ -136,7 +126,6 @@ library
                     , Agent.CLI.TUI.Composer.Buffer
                     , Agent.CLI.TUI.Composer.Edit
                     , Agent.CLI.Subagents.Runtime.Identity
-                    , Agent.CLI.Subagents.Runtime.OpenAI
                     , Agent.CLI.Subagents.Runtime.Storage
                     , Agent.CLI.Subagents.Runtime.Target
                     , Agent.CLI.Subagents.Runtime.Types
@@ -180,7 +169,6 @@ library
                     , Agent.CLI.Claude
                     , Agent.CLI.ClaudeGatewayProxy
                     , Agent.CLI.CodeModeRuntime
-                    , Agent.CLI.Compaction
                     , Agent.CLI.Context
                     , Agent.CLI.Command
                     , Agent.CLI.McpAdd
@@ -238,12 +226,9 @@ library
                     , Agent.CLI.ProviderFallback
                     , Agent.CLI.ProviderAvailability
                     , Agent.CLI.ProviderTransition
-                    , Agent.CLI.ProviderRuntime
                     , Agent.CLI.Render
                     , Agent.CLI.ReplMode
                     , Agent.CLI.Runtime.MetaConsole
-                    , Agent.CLI.Runtime.Orchestration.Providers
-                    , Agent.CLI.Runtime.Orchestration.Providers.Types
                     , Agent.CLI.Runtime.Orchestration.Tools.Resources
                     , Agent.CLI.Resume
                     , Agent.CLI.Session.ConversationStore
@@ -462,6 +447,7 @@ benchmark subagent-retention-bench
     main-is:          SubagentRetention.hs
     ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
     build-depends:    agent-cli
+                    , agent-runtime
                     , agent-json
                     , agent-core
                     , agent-store
@@ -539,6 +525,7 @@ benchmark concurrency-bench
     main-is:          Concurrency.hs
     ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
     build-depends:    agent-cli
+                    , agent-runtime
                     , agent-core
                     , agent-mcp
                     , async
@@ -575,10 +562,6 @@ test-suite agent-cli-test
                     , Agent.CLI.CommandSpec
                     , Agent.CLI.ComputerUseSpec
                     , Agent.CLI.ConfigSpec
-                    , Agent.CLI.CompactionSpec
-                    , Agent.CLI.CompactionSpec.Fixtures
-                    , Agent.CLI.CompactionSpec.ManualOpenAI
-                    , Agent.CLI.CompactionSpec.TaskPlan
                     , Agent.CLI.ContextSpec
                     , Agent.CLI.ConnectivitySpec
                     , Agent.CLI.DialectsSpec
@@ -621,7 +604,6 @@ test-suite agent-cli-test
                     , Agent.CLI.ProviderFallbackSpec
                     , Agent.CLI.ProviderAvailabilitySpec
                     , Agent.CLI.ProviderTransitionSpec
-                    , Agent.CLI.ProviderRuntimeSpec
                     , Agent.CLI.RequestSpec
                     , Agent.CLI.RenderSpec
                     , Agent.CLI.ReplStatusSpec

@@ -25,7 +25,7 @@ import Agent.Runtime.Session
     , cleanupStaleSessionTemps, defaultSessionTempKeepCount
     , loadCurrentTaskPlan, persistenceTempDir, releaseSessionTempLease
     , removeSessionTemp, taskPlanHooksForPersistence )
-import Agent.CLI.Session.History (foldSessionItems)
+import Agent.Runtime.Session.History (foldSessionItems)
 import Agent.CLI.Session.Runtime.Types (StartupRuntime(..))
 import Agent.CLI.Session.Selection (loadPrompt, reservedSessionId)
 import Agent.CLI.Startup.Auth (startupDie)

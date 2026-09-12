@@ -1,13 +1,15 @@
-module Agent.CLI.Runtime.Orchestration.Providers
+-- | Scoped provider orchestration shared by terminal and non-terminal hosts.
+module Agent.Runtime.Providers
     ( withProviderRuntime
+    , module Agent.Runtime.Providers.Types
     ) where
 
-import Agent.CLI.Runtime.Orchestration.Providers.Claude (withClaudeProvider)
-import Agent.CLI.Runtime.Orchestration.Providers.Gemini (withGeminiProvider)
-import Agent.CLI.Runtime.Orchestration.Providers.OpenAI (withOpenAiProvider)
-import Agent.CLI.Runtime.Orchestration.Providers.OpenRouter (withOpenRouterProvider)
-import Agent.CLI.Runtime.Orchestration.Providers.Types
-import Agent.CLI.Runtime.Orchestration.Providers.XAI (withXaiProvider)
+import Agent.Runtime.Providers.Claude (withClaudeProvider)
+import Agent.Runtime.Providers.Gemini (withGeminiProvider)
+import Agent.Runtime.Providers.OpenAI (withOpenAiProvider)
+import Agent.Runtime.Providers.OpenRouter (withOpenRouterProvider)
+import Agent.Runtime.Providers.Types
+import Agent.Runtime.Providers.XAI (withXaiProvider)
 
 -- | Scope provider resources around a consumer. The consumer decides how to
 -- compose the backend with session persistence, notices, and child agents.

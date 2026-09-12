@@ -1,14 +1,14 @@
-module Agent.CLI.Compaction.Continuation
+module Agent.Runtime.Compaction.Continuation
     ( boundCompletedToolContinuations
     ) where
 
-import Agent.CLI.Compaction.Projection
+import Agent.Runtime.Compaction.Projection
     ( automaticCompactionHeadroom
     , occupancyForSubmission
     , projectRequestTokens
     , toolContinuationTooLargeError
     )
-import Agent.CLI.Compaction.Types
+import Agent.Runtime.Compaction.Types
 import Agent.Loop
     ( Backend(..)
     , BackendCallbacks(..)
