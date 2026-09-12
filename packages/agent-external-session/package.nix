@@ -1,7 +1,7 @@
 { mkDerivation, aeson, agent-core, agent-json, agent-tools, async
 , base, bytestring, containers, crypton, direct-sqlite, directory
-, filepath, hspec, lib, network-uri, process, safe-exceptions
-, scientific, text, time, unix, vector
+, extra, filepath, hspec, lib, network-uri, process
+, safe-exceptions, scientific, text, time, unix, vector
 }:
 mkDerivation {
   pname = "agent-external-session";
@@ -9,8 +9,9 @@ mkDerivation {
   src = ./.;
   libraryHaskellDepends = [
     aeson agent-core agent-json agent-tools async base bytestring
-    containers crypton direct-sqlite directory filepath network-uri
-    process safe-exceptions scientific text time unix vector
+    containers crypton direct-sqlite directory extra filepath
+    network-uri process safe-exceptions scientific text time unix
+    vector
   ];
   testHaskellDepends = [
     aeson agent-core base bytestring direct-sqlite directory filepath

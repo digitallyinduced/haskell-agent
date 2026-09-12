@@ -13,9 +13,10 @@ import Agent.CLI.ExternalSession.Types
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (tryAny)
 import Control.Monad (filterM)
+import Control.Monad.Extra (firstJustM)
 import Data.Aeson (Value(..), decodeStrict', encode)
 import qualified Data.ByteString.Lazy as LBS
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding
@@ -486,7 +487,7 @@ truthy = \case
 
 firstNonEmptyText :: [Maybe Text] -> Text
 firstNonEmptyText values =
-    fromMaybe "" $ firstMaybe
+    fromMaybe "" $ listToMaybe
         [ value
         | Just value <- values
         , not (Text.null value)
@@ -496,17 +497,3 @@ nonEmptyText :: Text -> Maybe Text
 nonEmptyText value
     | Text.null value = Nothing
     | otherwise = Just value
-
-firstMaybe :: [value] -> Maybe value
-firstMaybe [] = Nothing
-firstMaybe (value : _) = Just value
-
-firstJustM
-    :: (input -> IO (Maybe output))
-    -> [input]
-    -> IO (Maybe output)
-firstJustM _ [] = pure Nothing
-firstJustM action (value : values) =
-    action value >>= \case
-        Just output -> pure (Just output)
-        Nothing -> firstJustM action values
