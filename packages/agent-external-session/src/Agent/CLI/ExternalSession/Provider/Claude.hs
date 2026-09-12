@@ -15,12 +15,6 @@ import Control.Exception.Safe (tryAny)
 import Control.Monad (filterM)
 import Data.Aeson (Value(..), decodeStrict', encode)
 import qualified Data.ByteString.Lazy as LBS
-import Data.IORef
-    ( IORef
-    , modifyIORef'
-    , newIORef
-    , readIORef
-    )
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -195,15 +189,15 @@ readClaude env candidate maxToolChars =
                                 record
                         pure (nextState, JsonlContinue)
             leaf <- claudeLeaf database
-            stateRef <- newIORef ClaudeReadState
-                { claudeTurnsFromLeaf = []
-                , claudeLastUser = Nothing
-                , claudeLastAssistant = Nothing
-                , claudeSkipped = indexState.claudeIndexUnindexable
-                , claudeOmissions = mempty
-                }
-            mapM_ (walkClaudeChain database maxToolChars stateRef) leaf
-            state <- readIORef stateRef
+            let initialState = ClaudeReadState
+                    { claudeTurnsFromLeaf = []
+                    , claudeLastUser = Nothing
+                    , claudeLastAssistant = Nothing
+                    , claudeSkipped = indexState.claudeIndexUnindexable
+                    , claudeOmissions = mempty
+                    }
+            state <- maybe (pure initialState)
+                (walkClaudeChain database maxToolChars initialState) leaf
             let unsafeWarnings =
                     [ warning
                         "unsafe_records_skipped"
@@ -326,13 +320,13 @@ data ClaudeReadState = ClaudeReadState
 walkClaudeChain
     :: Database
     -> Int
-    -> IORef ClaudeReadState
+    -> ClaudeReadState
     -> Text
-    -> IO ()
-walkClaudeChain database maxToolChars stateRef = go
+    -> IO ClaudeReadState
+walkClaudeChain database maxToolChars = go
   where
-    go uuid
-        | Text.null uuid = pure ()
+    go !state uuid
+        | Text.null uuid = pure state
         | otherwise = do
             execute database
                 "INSERT OR IGNORE INTO claude_visited (uuid) VALUES (?)"
@@ -346,19 +340,14 @@ walkClaudeChain database maxToolChars stateRef = go
                         [SQLText uuid]
                     case rows of
                         ([parent, payload] : _) -> do
-                            case decodePayload payload of
-                                Nothing ->
-                                    modifyIORef' stateRef \state ->
-                                        state
-                                            { claudeSkipped =
-                                                state.claudeSkipped + 1
-                                            }
-                                Just record ->
-                                    modifyIORef' stateRef
-                                        (addClaudeTurn maxToolChars record)
-                            go (sqlDataText parent)
-                        _ -> pure ()
-                _ -> pure ()
+                            let nextState = case decodePayload payload of
+                                    Nothing -> state
+                                        { claudeSkipped = state.claudeSkipped + 1 }
+                                    Just record ->
+                                        addClaudeTurn maxToolChars record state
+                            go nextState (sqlDataText parent)
+                        _ -> pure state
+                _ -> pure state
 
 decodePayload :: SQLData -> Maybe Value
 decodePayload = \case
