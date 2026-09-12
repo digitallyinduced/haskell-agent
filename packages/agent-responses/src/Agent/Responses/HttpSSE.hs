@@ -8,19 +8,8 @@ module Agent.Responses.HttpSSE
 import Agent.Error (ApiError(..))
 import Agent.Http.Header (parseRetryAfterSeconds)
 import Agent.Http.Url (trimTrailingSlash)
-import Agent.Responses.SSE
-    ( feedSseDecoder
-    , finishSseDecoder
-    , newSseDecoder
-    )
-import Agent.Responses.StreamAssembly
-    ( StreamAssemblyConfig
-    , StreamAssemblyState
-    , StreamAssemblyStep(..)
-    , emptyStreamAssemblyState
-    , finishStreamWithoutTerminal
-    , stepStreamResponse
-    )
+import Agent.Responses.StreamAssembly (StreamAssemblyConfig)
+import Agent.Responses.StreamPipeline (consumeResponsesSse)
 import Agent.Responses.Types
 import Control.Exception.Safe (Exception, throwIO, tryAny)
 import qualified Data.ByteString as BS
@@ -60,10 +49,6 @@ data HttpSseConfig = HttpSseConfig
     , responseModelHint :: !(Maybe Text)
       -- ^ Request model used when a provider sends partial lifecycle objects.
     }
-
-data ConsumeResult
-    = ConsumeMore !StreamAssemblyState
-    | ConsumeDone !(Either ApiError Response)
 
 -- | POST one streaming Responses request and deliver decoded events in wire
 -- order. The request modifier supplies provider-specific authentication and
@@ -144,38 +129,9 @@ performResponsesHttpSse
                         then appendBodyTruncatedMessage classified
                         else classified
 
-    consumeSse body = go newSseDecoder emptyStreamAssemblyState
-      where
-        go decoder state = do
-            chunk <- readChunkWithin body
-            if BS.null chunk
-                then case finishSseDecoder decoder of
-                    Left err -> pure (Left err)
-                    Right trailing ->
-                        consumeEvents state trailing >>= \case
-                            ConsumeDone result -> pure result
-                            ConsumeMore finalState ->
-                                pure (finishStreamWithoutTerminal
-                                    assemblyConfig
-                                    finalState)
-                else case feedSseDecoder decoder chunk of
-                    Left err -> pure (Left err)
-                    Right (nextDecoder, events) -> do
-                        consumeEvents state events >>= \case
-                            ConsumeDone result -> pure result
-                            ConsumeMore nextState -> go nextDecoder nextState
-
-    consumeEvents state = \case
-        [] -> pure (ConsumeMore state)
-        event : rest -> do
-            emit event
-            case stepStreamResponse
-                    assemblyConfig
-                    responseModelHint
-                    state
-                    event of
-                StreamFinished result -> pure (ConsumeDone result)
-                StreamContinue next -> consumeEvents next rest
+    consumeSse body =
+        consumeResponsesSse assemblyConfig responseModelHint
+            (readChunkWithin body) emit
 
     consumeBodyBounded body = readChunks [] 0
       where
