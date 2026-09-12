@@ -16,6 +16,8 @@ extra-source-files: benchmark/MemoryUsage.md
                   , benchmark/compare-memory.py
                   , benchmark/compare-session-memory.py
                   , benchmark/SessionReplay.md
+                  , benchmark/CommandCompletion.md
+                  , benchmark/CommandCompletionResults.csv
 data-files:         data/CHANGELOG.md
                   , skills/add-model/SKILL.md
                   , skills/learn-about-user/SKILL.md
@@ -63,6 +65,7 @@ library
                     , Agent.CLI.Command.Types
                     , Agent.CLI.Command.Catalog
                     , Agent.CLI.Command.Instructions
+                    , Agent.CLI.Command.Menu
                     , Agent.CLI.Clipboard.Linux
                     , Agent.CLI.Clipboard.MacOS
                     , Agent.CLI.McpStatus
@@ -149,6 +152,7 @@ library
                     , Agent.CLI.TUI.Render.Workspace
                     , Paths_agent_cli
     exposed-modules:  Agent.CLI
+                    , Agent.CLI.Command.CompletionIndex
                     , Agent.CLI.Runtime.Repl.MetaConsole
                     , Agent.CLI.Session.Choices
                     , Agent.CLI.TUI.Keyboard
@@ -421,6 +425,23 @@ benchmark markdown-streaming-bench
                     , base >= 4.17 && < 5
                     , colour
                     , filepath
+                    , text
+
+benchmark command-completion-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark, src
+    main-is:          CommandCompletion.hs
+    other-modules:    Agent.CLI.Command.Catalog
+                    , Agent.CLI.Command.Menu
+                    , Agent.CLI.Command.Types
+                    , Agent.CLI.Command.CompletionIndex
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-core
+                    , base
+                    , containers
+                    , deepseq
+                    , safe-exceptions
                     , text
 
 benchmark worktree-collection-bench
