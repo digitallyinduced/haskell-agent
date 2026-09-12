@@ -4,6 +4,7 @@ module Agent.CLI.TUI.Composer.Render
     , drawSlashMenu
     , slashMenuWindowStart
     , drawQueuedInputs
+    , drawBackgroundTaskStatus
     , drawComposer
     , controlAttr
     , controlInteractionAttr
@@ -130,6 +131,19 @@ drawQueuedInputs state =
 queuePreview :: Text -> Text
 queuePreview text =
     truncateDisplayText 100 (Text.unwords (Text.words text))
+
+-- | Keep managed work visible without taking focus from the editable prompt.
+-- A new model turn uses the usual activity indicator instead.
+drawBackgroundTaskStatus :: UiState -> Widget Name
+drawBackgroundTaskStatus state
+    | state.uiRunning = emptyWidget
+    | otherwise =
+        padLeftRight 2 $
+            vBox
+                [ withAttr Theme.mutedAttr $
+                    vLimit 1 (terminalTxt row)
+                | row <- state.uiBackgroundTaskStatus
+                ]
 
 drawComposer :: AppState -> Widget Name
 drawComposer appState =

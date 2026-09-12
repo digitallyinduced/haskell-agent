@@ -33,7 +33,8 @@ import Agent.ToolDispatch
     , functionToolCall
     )
 import Agent.Tools.Scheduling (schedulingPlansConflict)
-import Agent.Tools.Background (setBackgroundTaskHooks)
+import Agent.Tools.Background
+    ( BackgroundTaskStatus(..), readBackgroundTasks, setBackgroundTaskHooks )
 import Agent.Tools.IO (CommandResult(..))
 import Agent.Tools.Types
     ( AppTool(..)
@@ -506,8 +507,13 @@ spec = describe "Grok Build dialect" do
                     Right runningId -> pure runningId
                     Left err -> expectationFailure (Text.unpack err) >> pure ""
                 waitForFile output `shouldReturn` True
+                active <- readBackgroundTasks env
+                map (.taskKey) active `shouldBe` ["grok-terminal:t1"]
+                map (.taskAutoResume) active `shouldBe` [True]
+                readBackgroundTasks env `shouldReturn` active
 
                 resetGrokSessionTemp session (unsafeEncodeUtf nextScratch)
+                readBackgroundTasks env `shouldReturn` []
                 setToolSessionTmp env (Just (unsafeEncodeUtf nextScratch))
 
                 before <- Text.readFile output
@@ -536,6 +542,7 @@ spec = describe "Grok Build dialect" do
                     Text.isInfixOf "completion-output"
                 notice.noticeBody `shouldSatisfy`
                     Text.isInfixOf "do not call get_task_output"
+                readBackgroundTasks env `shouldReturn` []
 
     it "retracts a completion notice when output is read explicitly" do
         requireProcessSandbox

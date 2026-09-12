@@ -160,6 +160,7 @@ import qualified Brick.Widgets.Border as Border ()
 import qualified Agent.CLI.TUI.Bridge as Bridge ()
 import qualified Agent.CLI.TUI.Composer as Composer
     ( drawSlashMenu,
+      drawBackgroundTaskStatus,
       drawQueuedInputs,
       drawComposer )
 import qualified Data.Map.Strict as Map ()
@@ -263,6 +264,7 @@ drawMain state =
                 , Composer.drawSlashMenu state
                 , drawLiveTodos (activeConversationUi state)
                 , drawPromptActivity state
+                , Composer.drawBackgroundTaskStatus state.appUi
                 , case textOverlay state of
                     Just prompt
                         | prompt.textInputMode == TextInputPlanning ->
