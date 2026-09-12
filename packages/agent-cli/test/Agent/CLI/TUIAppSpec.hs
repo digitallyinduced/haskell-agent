@@ -3,7 +3,7 @@ module Agent.CLI.TUIAppSpec (spec) where
 import qualified Agent.TUI.Theme as Theme
 import Agent.CLI.TUI.Keyboard (decodeKeyboardBody, classifyKeyboard, runKeyboardInput)
 import Agent.CLI.TUI.App (finishedMarkdownProseCaches)
-import qualified Agent.CLI.TUI.App.Runtime as Runtime
+import qualified Agent.CLI.TUI.App as Runtime
 import Control.Monad (forM_, when)
 import Control.Monad.IO.Class (liftIO)
 import Graphics.Vty.Platform.Unix.Input.Classify.Types (KClass(..))
