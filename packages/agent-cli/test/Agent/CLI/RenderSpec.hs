@@ -55,7 +55,111 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "stepToolRender sequences" do
+        let inputs = ToolRenderInputs False "/workspace" True
+            placeholder = functionToolCall "c1" "shell_command" "  "
+            complete = functionToolCall "c1" "shell_command" "{\"command\":\"echo ok\"}"
+            result = ToolCallResult
+                { callId = "c1", output = "ok", callKind = FunctionCallKind
+                , toolResultMode = BlockingToolCall, toolResultImages = []
+                , toolResultOutcome = Nothing
+                }
+            sequenceSteps events =
+                mapAccumL (\state event -> stepToolRender inputs event state)
+                    emptyRenderState events
+        it "completes a placeholder once and deduplicates execution start" do
+            let (state, commands) = sequenceSteps
+                    [ RenderToolStarted placeholder, RenderToolUpdated complete
+                    , RenderToolUpdated complete, RenderToolStarted complete
+                    , RenderToolFinished result
+                    ]
+            commands `shouldBe`
+                [ [WriteToolLine (formatToolStartedRelative False "/workspace" placeholder), RefreshToolThinking]
+                , [WriteToolLine (formatToolStartedRelative False "/workspace" complete)]
+                , []
+                , [RefreshToolThinking]
+                , [WriteToolLine (truncateToolOutput "ok")]
+                ]
+            stateToolCalls state `shouldBe` Map.empty
+            stateActivity state `shouldBe` summarizeToolCallRelative "/workspace" complete
+        it "orders a nonempty body between the header and spinner refresh" do
+            let code = functionToolCall "code" "exec" "text(1)"
+                (_, commands) = sequenceSteps [RenderToolStarted code, RenderToolStarted code]
+            commands `shouldBe`
+                [ [ WriteToolLine (formatToolStartedRelative False "/workspace" code)
+                  , WriteToolLine "text(1)", RefreshToolThinking
+                  ]
+                , [RefreshToolThinking]
+                ]
+
+        it "suppresses todo lines but retains their lifecycle" do
+            let todo = functionToolCall "c1" "todo_write" ""
+                (state, commands) = sequenceSteps
+                    [ RenderToolStarted todo
+                    , RenderToolUpdated (todo{arguments = "{}"})
+                    , RenderToolFinished result
+                    ]
+            commands `shouldBe` [[RefreshToolThinking], [], []]
+            stateToolCalls state `shouldBe` Map.empty
+        it "tracks an update without a start and suppresses its later start" do
+            let (_, commands) = sequenceSteps
+                    [RenderToolUpdated complete, RenderToolStarted complete]
+            commands `shouldBe` [[], [RefreshToolThinking]]
+        it "prints unknown results and allows a completed id to start again" do
+            let (_, commands) = sequenceSteps
+                    [RenderToolFinished result, RenderToolStarted complete]
+            commands `shouldBe`
+                [ [WriteToolLine (truncateToolOutput "ok")]
+                , [WriteToolLine (formatToolStartedRelative False "/workspace" complete), RefreshToolThinking]
+                ]
+        it "keeps buffers untouched and honors disabled thinking" do
+            let initial = appendRenderReasoning "thought"
+                    (fst (streamMarkdown "unfinished **" emptyRenderState))
+                (state, commands) = stepToolRender
+                    (ToolRenderInputs False "/workspace" False)
+                    (RenderToolStarted complete) initial
+            commands `shouldBe` [WriteToolLine (formatToolStartedRelative False "/workspace" complete)]
+            snd (streamMarkdown "bold**\n" state)
+                `shouldBe` snd (streamMarkdown "bold**\n" initial)
+            textBufferToText (stateReasoningBuffer state) `shouldBe` "thought"
+            stateThinkingVisible state `shouldBe` stateThinkingVisible initial
+            stateLiveActive state `shouldBe` stateLiveActive initial
+
     describe "RenderState transitions" do
+        it "does not register a tool when committing its preceding thought fails" do
+            withRenderConfig True False \config handle _ -> do
+                renderEvent config (ReasoningDelta "pending thought")
+                hClose handle
+                renderEvent config (ToolStarted (functionToolCall "c1" "exec" "text(1)"))
+                    `shouldThrow` anyIOException
+                state <- readIORef config.renderState
+                stateToolCalls state `shouldBe` Map.empty
+                textBufferToText (stateReasoningBuffer state) `shouldBe` ""
+
+        it "retains tool registration and skips spinner restart when tool output fails" do
+            withRenderConfig True False \config handle _ -> do
+                hClose handle
+                let call = functionToolCall "failed-write" "shell_command" "{}"
+                renderEvent config (ToolStarted call) `shouldThrow` anyIOException
+                state <- readIORef config.renderState
+                Map.lookup "failed-write" (stateToolCalls state) `shouldBe` Just call
+                stateThinkingVisible state `shouldBe` False
+                spinner <- readIORef config.renderThinkingSpinner
+                isJust spinner `shouldBe` False
+
+        it "retains tool removal when result output fails" do
+            withRenderConfig False False \config handle _ -> do
+                let call = functionToolCall "c1" "shell_command" "{}"
+                renderEvent config (ToolStarted call)
+                hClose handle
+                renderEvent config (ToolFinished ToolCallResult
+                    { callId = "c1", output = "result", callKind = FunctionCallKind
+                    , toolResultMode = BlockingToolCall, toolResultImages = []
+                    , toolResultOutcome = Nothing
+                    }) `shouldThrow` anyIOException
+                state <- readIORef config.renderState
+                stateToolCalls state `shouldBe` Map.empty
+
         it "starts a fresh turn while retaining immutable defaults" do
             let started =
                     beginRenderTurn
