@@ -928,9 +928,9 @@ buildSessionLoopEventRuntime
 
 data SessionApprovalRuntime = SessionApprovalRuntime
     { approvalApproveClassified
-        :: !(Maybe Bool -> ToolCall -> IO (Either Text.Text Bool))
+        :: !(Maybe Bool -> ToolCall -> IO ToolApproval)
     , approvalApproveRegistered
-        :: !(ToolCall -> IO (Either Text.Text Bool))
+        :: !(ToolCall -> IO ToolApproval)
     }
 
 buildSessionApprovalRuntime
@@ -1326,7 +1326,7 @@ buildSessionLoopConfig
         , loopOnEvent = eventRuntime.loopEventEmit
         , loopApprove = \call ->
             shellRuntime.shellToolDisabledReason call >>= \case
-                Just reason -> pure (Left reason)
+                Just reason -> pure (ToolApprovalDenied reason)
                 Nothing -> approvalRuntime.approvalApproveRegistered call
         , loopReadSteering =
             readSteeringInputs controls.controlSteeringInputs
@@ -1363,10 +1363,10 @@ installSessionToolRuntimes
                 Just reason -> pure (Left reason)
                 Nothing ->
                     approvalRuntime.approvalApproveRegistered call >>= \case
-                        Left denial -> pure (Left denial)
-                        Right False ->
+                        ToolApprovalDenied denial -> pure (Left denial)
+                        ToolApprovalRejected ->
                             pure (Left "Tool call rejected by user.")
-                        Right True -> do
+                        ToolApprovalGranted -> do
                             eventRuntime.loopEventEmit (ToolStarted call)
                             result <- dispatchApprovedRegisteredToolCall
                                 config.loopDispatch

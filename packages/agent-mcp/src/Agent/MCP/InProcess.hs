@@ -31,6 +31,7 @@ import Agent.ToolDispatch
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , ToolApproval(..)
     , ToolRegistry
     , ToolSchema(..)
     , dispatchRegisteredToolCallDetailed
@@ -51,7 +52,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 
-type InProcessMcpApproval = ToolCall -> IO (Either Text Bool)
+type InProcessMcpApproval = ToolCall -> IO ToolApproval
 
 data InProcessMcpServer = InProcessMcpServer
     { serverName :: !Text
@@ -249,11 +250,11 @@ callToolTyped server callId request =
                     toolName
                     (TextEncoding.decodeUtf8 (rawJsonBytes request.callToolArguments))
             server.serverApprove call >>= \case
-                Left denial ->
+                ToolApprovalDenied denial ->
                     pure $ result True denial
-                Right False ->
+                ToolApprovalRejected ->
                     pure $ result True "Tool call rejected by user."
-                Right True -> do
+                ToolApprovalGranted -> do
                     outcome <- dispatchRegisteredToolCallDetailed
                         server.serverDispatch
                         server.serverTools

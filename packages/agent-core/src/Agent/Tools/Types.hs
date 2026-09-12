@@ -11,6 +11,7 @@ module Agent.Tools.Types
     , ToolSchema(..)
     , ApprovalRule(..)
     , ApprovalRequirement(..)
+    , ToolApproval(..)
     , ToolExecutionPolicy(..)
     , ToolRegistry
     , ToolEnv(..)
@@ -126,6 +127,14 @@ data ToolSchema
 data ToolAsyncCapability
     = BlockingOnly
     | AsyncCapable
+    deriving (Eq, Show)
+
+-- | The outcome of checking or requesting permission for one tool call.
+-- Rejection uses the standard user-rejection message; denial supplies its own.
+data ToolApproval
+    = ToolApprovalGranted
+    | ToolApprovalRejected
+    | ToolApprovalDenied !Text
     deriving (Eq, Show)
 
 -- | Approval needed for one concrete tool invocation.

@@ -1349,7 +1349,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 , loopOnEvent = \case
                     ToolFinished _ -> putMVar finished ()
                     _ -> pure ()
-                , loopApprove = const (pure (Right True))
+                , loopApprove = const (pure Loop.ToolApprovalGranted)
                 , loopReadSteering = pure []
                 , loopCommitSteering = const (pure ())
                 , loopInterrupt = pure ()
