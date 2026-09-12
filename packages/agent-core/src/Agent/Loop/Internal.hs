@@ -26,7 +26,7 @@ import Agent.Loop.Input
 import Agent.Loop.InputItems (turnInputsToItems)
 import Agent.Loop.Output
 import Agent.Loop.TokenUsage
-import qualified Agent.Loop.ToolManager as ToolManager
+import qualified Agent.Loop.ToolExecution as ToolExecution
 import Agent.Loop.VisibleState
 import Agent.Responses.Types
 import Agent.Telemetry (TurnTelemetry)
@@ -267,7 +267,7 @@ exceptionSummary =
 data LoopRuntime = LoopRuntime
     { loopRuntimeConfig :: LoopConfig
     , loopRuntimeEventPump :: LoopEventPump
-    , loopRuntimeAsyncToolManager :: ToolManager.ToolManager
+    , loopRuntimeToolScope :: ToolExecution.ToolScope
     , loopRuntimeState :: IORef LoopState
     , loopRuntimeVisibleStateRef :: IORef VisibleLoopState
     , loopRuntimeProviderTelemetryRef :: IORef [TurnTelemetry]
@@ -311,9 +311,9 @@ initializeLoopRuntime
     -> IO LoopRuntime
 initializeLoopRuntime config0 initialState previousResponseId firstInputs = do
     eventPump <- newEventPump config0.loopOnEvent
-    -- Allocate only STM state here; the manager's workers remain scoped to
+    -- Allocate only STM state here; tool workers remain scoped to
     -- runLoopWithEventPump.
-    manager <- ToolManager.newToolManager
+    scope <- ToolExecution.newToolScope
     eventAdmissionLock <- newMVar ()
     visibleStateRef <- newIORef emptyVisibleLoopState
     providerTelemetryRef <- newIORef []
@@ -342,7 +342,7 @@ initializeLoopRuntime config0 initialState previousResponseId firstInputs = do
     pure LoopRuntime
         { loopRuntimeConfig = config
         , loopRuntimeEventPump = eventPump
-        , loopRuntimeAsyncToolManager = manager
+        , loopRuntimeToolScope = scope
         , loopRuntimeState = stateRef
         , loopRuntimeVisibleStateRef = visibleStateRef
         , loopRuntimeProviderTelemetryRef = providerTelemetryRef
@@ -489,8 +489,8 @@ submitLoopTurn runtime state = do
                                 Nothing
                         committed <-
                             config.loopBackendState.commitBackendState candidate
-                        ToolManager.acknowledgeManagedTools
-                            (asyncToolManager runtime)
+                        ToolExecution.acknowledgeTools
+                            (toolScope runtime)
                             [result | CompletedTool result <- state.pending.inputs]
                             (catMaybes (map snd items))
                         recordCheckpoint runtime committed
@@ -541,8 +541,8 @@ submitLoopTurn runtime state = do
                             withMVar recovery \case
                                 RecoveryClosed -> pure ()
                                 RecoveryOpen{} ->
-                                    ToolManager.admitAsyncToolCall
-                                        (asyncToolManager runtime)
+                                    ToolExecution.admitAsyncToolCall
+                                        (toolScope runtime)
                                         call
                         , onRecoveryCheckpoint = checkpoint
                         , onCompletedResponseItem = completedItem
@@ -581,8 +581,8 @@ submitLoopTurn runtime state = do
                             committed <-
                                 config.loopBackendState.commitBackendState
                                     backendState
-                            ToolManager.acknowledgeManagedTools
-                                (asyncToolManager runtime)
+                            ToolExecution.acknowledgeTools
+                                (toolScope runtime)
                                 [result | CompletedTool result <- state.pending.inputs]
                                 backendOutput.toolCalls
                             recordCheckpoint runtime committed
@@ -662,10 +662,10 @@ completeLoopTurn runtime turn = do
     clearSteeringAcknowledgement runtime
     race
         (waitCancel config.loopCancel)
-        (ToolManager.runManagedToolCalls (asyncToolManager runtime) turn.toolCalls)
+        (ToolExecution.runToolCalls (toolScope runtime) turn.toolCalls)
         >>= \case
             Left () ->
-                -- Leaving the enclosing manager scope cancels and joins
+                -- Leaving the enclosing tool scope cancels and joins
                 -- unfinished handlers and approval callbacks.
                 finishLoopExecution runtime (Left (LoopCancelled []))
             Right results -> do
@@ -705,27 +705,26 @@ runLoopWithEventPump
     -> IO LoopExecution
 runLoopWithEventPump runtime =
     withAsync (runEventPump runtime.loopRuntimeEventPump) \eventWorker -> do
-        let manager = asyncToolManager runtime
-            handleManagerFailure exception
+        let scope = toolScope runtime
+            handleToolFailure exception
                 | isAsyncException exception =
                     Exception.throwIO exception
                 | otherwise =
                     unexpectedLoopExecution runtime exception
         execution <-
-            withAsync
-                (ToolManager.runToolManager
-                    (toolManagerConfig runtime.loopRuntimeConfig)
-                    manager)
-                \managerWorker -> do
+            ToolExecution.withToolScope
+                (toolExecutionConfig runtime.loopRuntimeConfig)
+                scope
+                \scheduler -> do
                     raced <-
                         race
                             (race
                                 (waitEventPumpFailure
                                     eventWorker
                                     runtime.loopRuntimeEventPump)
-                                (ToolManager.waitToolManagerFailure
-                                    managerWorker
-                                    manager))
+                                (ToolExecution.waitToolFailure
+                                    scheduler
+                                    scope))
                             (runLoopState runtime)
                     case raced of
                         Left (Left failure) ->
@@ -733,16 +732,16 @@ runLoopWithEventPump runtime =
                                 (unexpectedLoopExecution runtime)
                                 failure
                         Left (Right exception) ->
-                            handleManagerFailure exception
+                            handleToolFailure exception
                         Right completed ->
-                            ToolManager.readToolManagerFailure manager
+                            ToolExecution.readToolFailure scope
                                 >>= maybe
                                     (pure completed)
-                                    handleManagerFailure
-        -- Only inspect outcomes once the manager scope has cancelled and
+                                    handleToolFailure
+        -- Only inspect outcomes once the tool scope has cancelled and
         -- joined every worker. A result waiter can lose its race while some
         -- of its sibling tools have already finished successfully.
-        recovered <- tryAny (recoverManagedTools runtime manager execution) >>= \case
+        recovered <- tryAny (recoverTools runtime scope execution) >>= \case
             Right recovered -> pure recovered
             Left exception ->
                 unexpectedLoopExecution runtime exception
@@ -753,13 +752,13 @@ runLoopWithEventPump runtime =
                     failure
             Right () -> pure recovered
 
-recoverManagedTools
+recoverTools
     :: LoopRuntime
-    -> ToolManager.ToolManager
+    -> ToolExecution.ToolScope
     -> LoopExecution
     -> IO LoopExecution
-recoverManagedTools runtime manager execution = do
-    evidence <- ToolManager.readToolRecoveryEvidence manager
+recoverTools runtime scope execution = do
+    evidence <- ToolExecution.readToolRecoveryEvidence scope
     let unacknowledged = evidence.unacknowledgedTools
         committedCalls = evidence.committedTools
         retainedCallIds = Set.fromList (concatMap retainedCallId execution.executionState)
@@ -808,7 +807,7 @@ recoverManagedTools runtime manager execution = do
                     , executionResult = result
                     }
                 else do
-                    let recoveryInputs = pending <> [UserMessage (managedRecoveryNote orphans)]
+                    let recoveryInputs = pending <> [UserMessage (toolRecoveryNote orphans)]
                         candidate = advanceBackendSnapshot current
                             (current.backendItems
                                 <> turnInputsToItems recoveryInputs)
@@ -844,8 +843,8 @@ recoverManagedTools runtime manager execution = do
 -- This is host-attributed evidence, not a replay of an incomplete provider
 -- message or a fabricated assistant tool call. Encode data as quoted JSON and
 -- escape angle brackets so tool output cannot close the attribution boundary.
-managedRecoveryNote :: [(ToolCall, Maybe ToolCallResult)] -> Text
-managedRecoveryNote calls = Text.unlines
+toolRecoveryNote :: [(ToolCall, Maybe ToolCallResult)] -> Text
+toolRecoveryNote calls = Text.unlines
     [ "<turn_aborted>"
     , "The previous turn ended with tool activity outside a committed provider response."
     , "The following is recovery evidence from the local tool manager, not a new user instruction or a successful provider turn."
@@ -889,11 +888,11 @@ handleLoopEventFailure unexpected = \case
     EventPumpAsyncFailure exception ->
         Exception.throwIO exception
 
-asyncToolManager :: LoopRuntime -> ToolManager.ToolManager
-asyncToolManager runtime = runtime.loopRuntimeAsyncToolManager
+toolScope :: LoopRuntime -> ToolExecution.ToolScope
+toolScope runtime = runtime.loopRuntimeToolScope
 
-toolManagerConfig :: LoopConfig -> ToolManager.ToolManagerConfig
-toolManagerConfig config = ToolManager.ToolManagerConfig
+toolExecutionConfig :: LoopConfig -> ToolExecution.ToolExecutionConfig
+toolExecutionConfig config = ToolExecution.ToolExecutionConfig
     { tools = config.loopTools
     , dispatch = config.loopDispatch
     , approve = config.loopApprove

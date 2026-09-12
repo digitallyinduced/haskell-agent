@@ -1,17 +1,17 @@
 -- | Tool admission, scheduling and scoped workers. The loop owns provider
 -- checkpoints; this module owns tool execution and its recovery evidence.
-module Agent.Loop.ToolManager
-    ( ToolManager
-    , ToolManagerConfig(..)
+module Agent.Loop.ToolExecution
+    ( ToolScope
+    , ToolExecutionConfig(..)
     , ToolRecoveryEvidence(..)
-    , newToolManager
-    , runToolManager
+    , newToolScope
+    , withToolScope
     , admitAsyncToolCall
-    , runManagedToolCalls
-    , acknowledgeManagedTools
+    , runToolCalls
+    , acknowledgeTools
     , readToolRecoveryEvidence
-    , waitToolManagerFailure
-    , readToolManagerFailure
+    , waitToolFailure
+    , readToolFailure
     ) where
 
 import Agent.Cancel (CancelFlag, isCancelled, waitCancel)
@@ -65,7 +65,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 
 -- | Only tool-execution dependencies; no provider or conversation state.
-data ToolManagerConfig = ToolManagerConfig
+data ToolExecutionConfig = ToolExecutionConfig
     { tools :: !ToolRegistry
     , dispatch :: !ToolDispatchConfig
     , approve :: !(ToolCall -> IO ToolApproval)
@@ -73,15 +73,15 @@ data ToolManagerConfig = ToolManagerConfig
     , onEvent :: !(LoopEvent -> IO ())
     }
 
--- | Immutable, atomic snapshot, read after the manager and its workers join.
+-- | Immutable, atomic snapshot, read after the scope's workers join.
 data ToolRecoveryEvidence = ToolRecoveryEvidence
     { unacknowledgedTools :: ![(ToolCall, Maybe ToolCallResult)]
     , committedTools :: !(Map Text ToolCall)
     }
 
-data ToolManager = ToolManager
-    { asyncToolRequests :: !(TQueue ManagedToolCall)
-    , asyncToolCalls :: !(TVar (Map Text ManagedToolCall))
+data ToolScope = ToolScope
+    { asyncToolRequests :: !(TQueue AdmittedToolCall)
+    , asyncToolCalls :: !(TVar (Map Text AdmittedToolCall))
     , asyncToolScheduled :: !(TVar (IntMap ToolSchedulingPlan))
     , asyncToolOutstanding :: !(TVar Int)
     , asyncToolCompleted :: !(TQueue ToolCallResult)
@@ -90,13 +90,13 @@ data ToolManager = ToolManager
     , asyncToolCommittedCalls :: !(TVar (Map Text ToolCall))
     }
 
-data ManagedToolCall = ManagedToolCall
-    { managedCall :: !ToolCall
-    , managedResult :: !(TMVar (Maybe ToolCallResult))
-    -- Recorded by the worker before event delivery; unlike managedResult,
+data AdmittedToolCall = AdmittedToolCall
+    { admittedCall :: !ToolCall
+    , admittedResult :: !(TMVar (Maybe ToolCallResult))
+    -- Recorded by the worker before event delivery; unlike admittedResult,
     -- this does not release scheduling barriers or normal result waiters.
-    , managedTrustedResult :: !(TVar (Maybe ToolCallResult))
-    , managedAdmissionSequence :: !Int
+    , admittedTrustedResult :: !(TVar (Maybe ToolCallResult))
+    , admissionSequence :: !Int
     }
 
 data AsyncToolCallConflict = AsyncToolCallConflict !Text
@@ -106,10 +106,10 @@ instance Show AsyncToolCallConflict where
 
 instance Exception.Exception AsyncToolCallConflict
 
--- | Allocate state only. All workers are scoped to 'runToolManager'.
-newToolManager :: IO ToolManager
-newToolManager =
-    ToolManager
+-- | Allocate state only. All workers are scoped to 'withToolScope'.
+newToolScope :: IO ToolScope
+newToolScope =
+    ToolScope
         <$> newTQueueIO
         <*> newTVarIO Map.empty
         <*> newTVarIO IntMap.empty
@@ -121,60 +121,60 @@ newToolManager =
 
 -- | A result is acknowledged only when the response consuming it commits,
 -- not when a waiter drains it. Keep that fact across history compaction.
-acknowledgeManagedTools :: ToolManager -> [ToolCallResult] -> [ToolCall] -> IO ()
-acknowledgeManagedTools manager results calls = atomically do
-    modifyTVar' manager.asyncToolAcknowledged $
+acknowledgeTools :: ToolScope -> [ToolCallResult] -> [ToolCall] -> IO ()
+acknowledgeTools scope results calls = atomically do
+    modifyTVar' scope.asyncToolAcknowledged $
         Set.union (Set.fromList [result.callId | result <- results])
-    modifyTVar' manager.asyncToolCommittedCalls $
+    modifyTVar' scope.asyncToolCommittedCalls $
         Map.union (Map.fromList [(call.callId, call) | call <- calls])
 
-readToolRecoveryEvidence :: ToolManager -> IO ToolRecoveryEvidence
-readToolRecoveryEvidence manager = atomically do
-    calls <- readTVar manager.asyncToolCalls
+readToolRecoveryEvidence :: ToolScope -> IO ToolRecoveryEvidence
+readToolRecoveryEvidence scope = atomically do
+    calls <- readTVar scope.asyncToolCalls
     records <- traverse
         (\record -> do
-            result <- readTVar record.managedTrustedResult
-            pure (record.managedCall, result))
-        (sortOn (.managedAdmissionSequence) (Map.elems calls))
-    acknowledged <- readTVar manager.asyncToolAcknowledged
-    committedTools <- readTVar manager.asyncToolCommittedCalls
+            result <- readTVar record.admittedTrustedResult
+            pure (record.admittedCall, result))
+        (sortOn (.admissionSequence) (Map.elems calls))
+    acknowledged <- readTVar scope.asyncToolAcknowledged
+    committedTools <- readTVar scope.asyncToolCommittedCalls
     pure ToolRecoveryEvidence
         { unacknowledgedTools =
             [(call, result) | (call, result) <- records, Set.notMember call.callId acknowledged]
         , committedTools
         }
 
-readToolManagerFailure :: ToolManager -> IO (Maybe SomeException)
-readToolManagerFailure manager = atomically (tryReadTMVar manager.asyncToolFailure)
+readToolFailure :: ToolScope -> IO (Maybe SomeException)
+readToolFailure scope = atomically (tryReadTMVar scope.asyncToolFailure)
 
-admitAsyncToolCall :: ToolManager -> ToolCall -> IO ()
-admitAsyncToolCall manager call
+admitAsyncToolCall :: ToolScope -> ToolCall -> IO ()
+admitAsyncToolCall scope call
     | toolCallMode call /= AsyncToolCall =
         atomically $
             throwSTM $
                 AsyncToolCallConflict
                     ("Backend announced a non-async tool call: " <> call.callId)
     | otherwise = do
-        _ <- atomically (admitManagedToolCall manager call)
+        _ <- atomically (admitToolCall scope call)
         pure ()
 
 admitBlockingToolCall
-    :: ToolManager
+    :: ToolScope
     -> ToolCall
     -> IO (TMVar (Maybe ToolCallResult))
-admitBlockingToolCall manager call =
-    atomically (admitManagedToolCall manager call)
+admitBlockingToolCall scope call =
+    atomically (admitToolCall scope call)
 
-admitManagedToolCall
-    :: ToolManager
+admitToolCall
+    :: ToolScope
     -> ToolCall
     -> STM (TMVar (Maybe ToolCallResult))
-admitManagedToolCall manager call = do
-    calls <- readTVar manager.asyncToolCalls
+admitToolCall scope call = do
+    calls <- readTVar scope.asyncToolCalls
     case Map.lookup call.callId calls of
         Just existing
-            | existing.managedCall == call ->
-                pure existing.managedResult
+            | existing.admittedCall == call ->
+                pure existing.admittedResult
             | otherwise ->
                 throwSTM $
                     AsyncToolCallConflict
@@ -184,29 +184,29 @@ admitManagedToolCall manager call = do
             trustedResult <- newTVar Nothing
             -- The registry retains every admitted call for deduplication and
             -- recovery, so its size is also the next admission sequence.
-            let record = ManagedToolCall
-                    { managedCall = call
-                    , managedResult = result
-                    , managedTrustedResult = trustedResult
-                    , managedAdmissionSequence = Map.size calls
+            let record = AdmittedToolCall
+                    { admittedCall = call
+                    , admittedResult = result
+                    , admittedTrustedResult = trustedResult
+                    , admissionSequence = Map.size calls
                     }
             writeTVar
-                manager.asyncToolCalls
+                scope.asyncToolCalls
                 (Map.insert call.callId record calls)
             when (toolCallMode call == AsyncToolCall) $
-                modifyTVar' manager.asyncToolOutstanding (+ 1)
-            writeTQueue manager.asyncToolRequests record
+                modifyTVar' scope.asyncToolOutstanding (+ 1)
+            writeTQueue scope.asyncToolRequests record
             pure result
 
-runManagedToolCalls :: ToolManager -> [ToolCall] -> IO [ToolCallResult]
-runManagedToolCalls manager calls = do
+runToolCalls :: ToolScope -> [ToolCall] -> IO [ToolCallResult]
+runToolCalls scope calls = do
     blocking <- catMaybes <$> traverse admit calls
     blockingResults <-
         catMaybes <$> traverse (atomically . readTMVar) blocking
     completedAsync <- atomically do
-        ready <- takeAsyncToolCompletions manager
-        admitted <- readTVar manager.asyncToolCalls
-        committed <- readTVar manager.asyncToolCommittedCalls
+        ready <- takeAsyncToolCompletions scope
+        admitted <- readTVar scope.asyncToolCalls
+        committed <- readTVar scope.asyncToolCommittedCalls
         -- A restarted provider stream may omit a call that already executed.
         -- Keep its trusted evidence for host-attributed recovery, but never
         -- submit an unmatched native tool result on the normal path.
@@ -214,9 +214,9 @@ runManagedToolCalls manager calls = do
                 [ result
                 | result <- ready
                 , Just record <- [Map.lookup result.callId admitted]
-                , Map.lookup result.callId committed == Just record.managedCall
+                , Map.lookup result.callId committed == Just record.admittedCall
                 ]
-        outstanding <- readTVar manager.asyncToolOutstanding
+        outstanding <- readTVar scope.asyncToolOutstanding
         -- An orphan-only batch is not the end of the turn while other
         -- asynchronous tools are still running. Retry also restores the queue.
         if null canonical && outstanding > 0
@@ -227,22 +227,22 @@ runManagedToolCalls manager calls = do
     admit call =
         case toolCallMode call of
             AsyncToolCall ->
-                admitAsyncToolCall manager call >> pure Nothing
+                admitAsyncToolCall scope call >> pure Nothing
             BlockingToolCall ->
-                Just <$> admitBlockingToolCall manager call
+                Just <$> admitBlockingToolCall scope call
 
-takeAsyncToolCompletions :: ToolManager -> STM [ToolCallResult]
-takeAsyncToolCompletions manager = do
-    ready <- drainTQueue manager.asyncToolCompleted
+takeAsyncToolCompletions :: ToolScope -> STM [ToolCallResult]
+takeAsyncToolCompletions scope = do
+    ready <- drainTQueue scope.asyncToolCompleted
     case ready of
         _ : _ -> pure ready
         [] -> do
-            outstanding <- readTVar manager.asyncToolOutstanding
+            outstanding <- readTVar scope.asyncToolOutstanding
             if outstanding == 0
                 then pure []
                 else do
-                    first <- readTQueue manager.asyncToolCompleted
-                    rest <- drainTQueue manager.asyncToolCompleted
+                    first <- readTQueue scope.asyncToolCompleted
+                    rest <- drainTQueue scope.asyncToolCompleted
                     pure (first : rest)
 
 drainTQueue :: TQueue value -> STM [value]
@@ -251,9 +251,14 @@ drainTQueue queue =
         Nothing -> pure []
         Just value -> (value :) <$> drainTQueue queue
 
-runToolManager :: ToolManagerConfig -> ToolManager -> IO ()
-runToolManager config manager = do
-    request <- atomically (readTQueue manager.asyncToolRequests)
+-- | Run the scheduler and its children for the duration of the callback.
+-- Recovery evidence remains available after every worker has been joined.
+withToolScope :: ToolExecutionConfig -> ToolScope -> (Async () -> IO a) -> IO a
+withToolScope config scope = withAsync (runToolScheduler config scope)
+
+runToolScheduler :: ToolExecutionConfig -> ToolScope -> IO ()
+runToolScheduler config scope = do
+    request <- atomically (readTQueue scope.asyncToolRequests)
     cancelledBefore <- isCancelled config.cancel
     if cancelledBefore
         then completeCancelledRequest request
@@ -262,7 +267,7 @@ runToolManager config manager = do
                 (waitCancel config.cancel)
                 (do
                     prepared <-
-                        prepareManagedToolCall config request.managedCall
+                        prepareAdmittedToolCall config request.admittedCall
                     plan <- schedulingPlanForPrepared config prepared
                     pure (prepared, plan))
                 >>= \case
@@ -275,29 +280,29 @@ runToolManager config manager = do
                             else do
                                 atomically $
                                     modifyTVar'
-                                        manager.asyncToolScheduled
+                                        scope.asyncToolScheduled
                                         (IntMap.insert
-                                            request.managedAdmissionSequence
+                                            request.admissionSequence
                                             plan)
                                 withAsync
-                                    (runManagedToolWorker
-                                        config manager request prepared plan)
+                                    (runToolWorker
+                                        config scope request prepared plan)
                                     \worker ->
                                         withAsync
                                             (waitCatch worker
-                                                >>= completeManagedToolRequest
-                                                    manager request)
+                                                >>= completeToolRequest
+                                                    scope request)
                                             \_monitor ->
-                                                runToolManager config manager
+                                                runToolScheduler config scope
   where
     -- Approval and scheduling are allowed to perform IO. Complete cancelled
     -- requests so blocking result waiters cannot be stranded.
     completeCancelledRequest request = do
-        completeManagedToolRequest manager request (Right Nothing)
-        runToolManager config manager
+        completeToolRequest scope request (Right Nothing)
+        runToolScheduler config scope
 
-prepareManagedToolCall :: ToolManagerConfig -> ToolCall -> IO PreparedToolCall
-prepareManagedToolCall config call
+prepareAdmittedToolCall :: ToolExecutionConfig -> ToolCall -> IO PreparedToolCall
+prepareAdmittedToolCall config call
     | toolCallMode call == AsyncToolCall
         && not (toolSupportsAsync config.tools call) =
             pure $
@@ -308,22 +313,22 @@ prepareManagedToolCall config call
     | otherwise =
         prepareToolCall config call
 
-runManagedToolWorker
-    :: ToolManagerConfig
-    -> ToolManager
-    -> ManagedToolCall
+runToolWorker
+    :: ToolExecutionConfig
+    -> ToolScope
+    -> AdmittedToolCall
     -> PreparedToolCall
     -> ToolSchedulingPlan
     -> IO (Maybe ToolCallResult)
-runManagedToolWorker config manager request prepared plan = do
+runToolWorker config scope request prepared plan = do
     atomically do
-        scheduled <- readTVar manager.asyncToolScheduled
+        scheduled <- readTVar scope.asyncToolScheduled
         check $
             not $
                 IntMap.foldrWithKey
                     (\sequenceNumber earlierPlan conflicts ->
                         conflicts
-                            || ( sequenceNumber < request.managedAdmissionSequence
+                            || ( sequenceNumber < request.admissionSequence
                                 && schedulingPlansConflict earlierPlan plan
                                ))
                     False
@@ -331,60 +336,60 @@ runManagedToolWorker config manager request prepared plan = do
     race
         (waitCancel config.cancel)
         (runPreparedToolCallWithCompletion
-            (atomically . writeTVar request.managedTrustedResult . Just)
+            (atomically . writeTVar request.admittedTrustedResult . Just)
             config
             prepared)
         >>= \case
             Left () -> pure Nothing
             Right result -> pure result
 
-completeManagedToolRequest
-    :: ToolManager
-    -> ManagedToolCall
+completeToolRequest
+    :: ToolScope
+    -> AdmittedToolCall
     -> Either SomeException (Maybe ToolCallResult)
     -> IO ()
-completeManagedToolRequest manager request outcome =
+completeToolRequest scope request outcome =
     atomically do
         modifyTVar'
-            manager.asyncToolScheduled
-            (IntMap.delete request.managedAdmissionSequence)
-        let call = request.managedCall
+            scope.asyncToolScheduled
+            (IntMap.delete request.admissionSequence)
+        let call = request.admittedCall
         case outcome of
             Left exception -> do
                 -- Do not publish a synthetic empty completion for a crashed
-                -- worker. Keeping any waiter blocked makes the manager-failure
+                -- worker. Keeping any waiter blocked makes the tool-failure
                 -- branch of the enclosing structured race authoritative.
-                _ <- tryPutTMVar manager.asyncToolFailure exception
+                _ <- tryPutTMVar scope.asyncToolFailure exception
                 pure ()
             Right result -> do
-                putTMVar request.managedResult result
+                putTMVar request.admittedResult result
                 when (toolCallMode call == AsyncToolCall) do
                     modifyTVar'
-                        manager.asyncToolOutstanding
+                        scope.asyncToolOutstanding
                         (\count -> count - 1)
                     case result of
                         Nothing -> pure ()
                         Just completed ->
-                            writeTQueue manager.asyncToolCompleted completed
+                            writeTQueue scope.asyncToolCompleted completed
 
-waitToolManagerFailure :: Async () -> ToolManager -> IO SomeException
-waitToolManagerFailure managerWorker manager =
+waitToolFailure :: Async () -> ToolScope -> IO SomeException
+waitToolFailure scheduler scope =
     race
-        (waitCatch managerWorker)
-        (atomically (readTMVar manager.asyncToolFailure))
+        (waitCatch scheduler)
+        (atomically (readTMVar scope.asyncToolFailure))
         >>= \case
             Left (Left exception) -> pure exception
             Left (Right ()) ->
                 pure $
                     Exception.toException $
                         AsyncToolCallConflict
-                            "Async tool manager stopped unexpectedly."
+                            "Tool scheduler stopped unexpectedly."
             Right exception -> pure exception
 
 data PreparedToolCall = PreparedToolCall !ToolCall !ToolApproval
 
 schedulingPlanForPrepared
-    :: ToolManagerConfig
+    :: ToolExecutionConfig
     -> PreparedToolCall
     -> IO ToolSchedulingPlan
 schedulingPlanForPrepared config (PreparedToolCall call approval) =
@@ -398,7 +403,7 @@ schedulingPlanForPrepared config (PreparedToolCall call approval) =
 
 -- | Approval may touch interactive or otherwise order-sensitive state, so it
 -- is prepared serially even when the resulting handlers may run concurrently.
-prepareToolCall :: ToolManagerConfig -> ToolCall -> IO PreparedToolCall
+prepareToolCall :: ToolExecutionConfig -> ToolCall -> IO PreparedToolCall
 prepareToolCall config call = do
     approval <- tryAny (config.approve call)
     pure $
@@ -413,7 +418,7 @@ prepareToolCall config call = do
 
 runPreparedToolCallWithCompletion
     :: (ToolCallResult -> IO ())
-    -> ToolManagerConfig
+    -> ToolExecutionConfig
     -> PreparedToolCall
     -> IO (Maybe ToolCallResult)
 runPreparedToolCallWithCompletion completed config (PreparedToolCall call approval) = do
@@ -438,7 +443,7 @@ runPreparedToolCallWithCompletion completed config (PreparedToolCall call approv
                         config.tools
                         call
             -- The trusted result must survive cancellation or a failing event
-            -- consumer after the tool has returned. The manager's monitor is
+            -- consumer after the tool has returned. The worker's monitor is
             -- not authoritative: its own scope can be cancelled first.
             completed result
             config.onEvent (ToolFinished result)
