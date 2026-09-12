@@ -20,7 +20,7 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (dropWhileEnd)
-import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -50,7 +50,7 @@ discoverCursor env cwd = do
             (hash (encodeUtf8 (Text.pack canonicalCwd)) :: Digest MD5)
         chats = env.externalCursorRoot </> "chats" </> digest
     cliDirectories <- directoryChildren chats
-    cli <- mapMaybe id <$> traverse
+    cli <- catMaybes <$> traverse
         (\directory -> cursorCliCandidate env directory (Just cwd))
         cliDirectories
     desktop <- concat <$> traverse (discoverDesktop env cwd)
@@ -70,7 +70,7 @@ discoverDesktop _env cwd databasePath = do
         else tryAny
             (withReadOnlyDatabase databasePath \database -> do
                 headers <- cursorHeaderValues database
-                mapMaybe id <$> traverse (headerCandidate databasePath) headers)
+                catMaybes <$> traverse (headerCandidate databasePath) headers)
             >>= pure . either (const []) id
   where
     headerCandidate databasePath header
@@ -163,7 +163,7 @@ discoverCursorTranscripts env cwd = do
     let projects = env.externalCursorRoot </> "projects"
     paths <- recursiveFiles projects
         (Text.isSuffixOf ".jsonl" . Text.pack)
-    mapMaybe id <$> traverse (cursorTranscriptCandidate env cwd) paths
+    catMaybes <$> traverse (cursorTranscriptCandidate env cwd) paths
 
 cursorTranscriptCandidate
     :: ExternalSessionEnv
@@ -371,7 +371,7 @@ findDesktop _env reference databasePath = do
     result <- tryAny $
         withReadOnlyDatabase databasePath \database -> do
             headers <- cursorHeaderValues database
-            mapMaybe id <$> traverse convert headers
+            catMaybes <$> traverse convert headers
     pure (either (const []) id result)
   where
     convert header =

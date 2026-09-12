@@ -63,7 +63,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlphaNum, isSpace, toLower)
-import Data.Maybe (fromMaybe, isJust, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Encoding
@@ -205,7 +205,7 @@ instance Aeson.FromJSON OAuthTokenFileExtra where
             <*> o Aeson..:? "redirect_uri"
 
 tokenExtraPairs :: OAuthTokenFileExtra -> [AesonTypes.Pair]
-tokenExtraPairs extra = mapMaybe id
+tokenExtraPairs extra = catMaybes
     [ ("issuer" Aeson..=) <$> extra.extraIssuer
     , ("scope" Aeson..=) <$> extra.extraScope
     , ("resource" Aeson..=) <$> extra.extraResource
@@ -387,9 +387,7 @@ probeAuthorizationChallenge manager endpoint = do
             let challenges = [value | (name, value) <- HC.responseHeaders response, name == "WWW-Authenticate"]
             in Right AuthorizationProbe
                 { probeStatus = statusCode (responseStatus response)
-                , probeChallenge = case mapMaybe parseWwwAuthenticate challenges of
-                    challenge : _ -> Just challenge
-                    [] -> Nothing
+                , probeChallenge = listToMaybe (mapMaybe parseWwwAuthenticate challenges)
                 }
 
 -- ---------------------------------------------------------------------------

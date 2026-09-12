@@ -25,7 +25,7 @@ import Data.IORef
     , writeIORef
     )
 import Data.List (maximumBy)
-import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
 import Data.Ord (comparing)
 import Data.Scientific (fromFloatDigits)
 import qualified Data.Set as Set
@@ -86,7 +86,7 @@ discoverCodex env cwd = do
                                     <> "ORDER BY " <> updatedExpression
                                     <> " DESC, id ASC"
                         rows <- queryRows database sql []
-                        Just . mapMaybe id <$> traverse
+                        Just . catMaybes <$> traverse
                             (candidateFromDatabaseRow env cwd)
                             rows
         pure (either (const Nothing) id result)
@@ -94,7 +94,7 @@ discoverCodex env cwd = do
         paths <- recursiveFiles
             (env.externalCodexRoot </> "sessions")
             isCodexTranscript
-        candidates <- mapMaybe id <$> traverse (codexMetadata env) paths
+        candidates <- catMaybes <$> traverse (codexMetadata env) paths
         filterM (\candidate ->
             if candidate.candidateSource
                     `notElem` ["codex-cli", "codex-vscode"]
