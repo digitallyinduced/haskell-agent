@@ -440,6 +440,40 @@ spec = describe "code-mode Bun host" do
                     ]
                 }
 
+    it "reads running cell activity without consuming completion output" do
+        releaseHandler <- newEmptyMVar
+        let config = defaultCodeModeConfig
+                "data/code-mode/worker.mjs"
+                (\_ _ -> readMVar releaseHandler >> pure (Right Null))
+        withCodeModeHost config \host -> do
+            before <- getCurrentTime
+            started <- execCodeCell host
+                "await tools.gate({}); text('completed output');"
+                ["gate"] 1
+            started `shouldBe` Right CodeModeRunning
+                { cellId = "1", cellOutput = emptyContent }
+            tasks <- readRunningCodeCells host
+            map fst tasks `shouldBe` ["1"]
+            map snd tasks `shouldSatisfy` all (>= before)
+            readRunningCodeCells host `shouldReturn` tasks
+            putMVar releaseHandler ()
+            let awaitCompletion = readRunningCodeCells host >>= \case
+                    [] -> pure ()
+                    _ -> threadDelay 1000 >> awaitCompletion
+            timeout 5000000 awaitCompletion `shouldReturn` Just ()
+            waitCodeCell host "1" 1000 `shouldReturn` Right CodeModeFinished
+                { cellId = "1", cellValue = textContent "completed output" }
+
+    it "removes running cell activity when the host closes" do
+        let config = defaultCodeModeConfig
+                "data/code-mode/worker.mjs"
+                (\_ _ -> pure (Left "no tools"))
+        withCodeModeHost config \host -> do
+            _ <- execCodeCell host "await new Promise(() => {});" [] 1
+            map fst <$> readRunningCodeCells host `shouldReturn` ["1"]
+            closeCodeModeHost host
+            readRunningCodeCells host `shouldReturn` []
+
     it "retains a yielded cell until it is terminated" do
         let config = defaultCodeModeConfig
                 "data/code-mode/worker.mjs"
@@ -461,6 +495,7 @@ spec = describe "code-mode Bun host" do
                 { cellId = "1"
                 , cellValue = emptyContent
                 }
+        readRunningCodeCells host `shouldReturn` []
         closeCodeModeHost host
 
     it "returns output accumulated after the last timed yield on termination" do

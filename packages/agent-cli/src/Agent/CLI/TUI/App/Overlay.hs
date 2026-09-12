@@ -378,6 +378,7 @@ resolveResume confirmed = do
 openCommandPalette :: EventM Name AppState ()
 openCommandPalette = do
     state <- get
+    liftIO (dismissPendingChoice state)
     let catalog = state.appSlashCatalog
         rows = commandPaletteRows catalog
         reply = \case

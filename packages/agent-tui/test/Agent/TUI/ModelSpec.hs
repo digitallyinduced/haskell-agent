@@ -28,6 +28,19 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "fullscreen UI reducer" do
+    it "updates background work without changing the draft or adding transcript blocks" do
+        let draft = reduceUi (UiSetDraft "follow-up message" 4) initialUiState
+            active = reduceUi (UiSetBackgroundTaskStatus ["1 background task"]) draft
+            completed = reduceUi (UiSetBackgroundTaskStatus []) active
+        active.uiBackgroundTaskStatus `shouldBe` ["1 background task"]
+        active.uiDraft `shouldBe` draft.uiDraft
+        active.uiCursor `shouldBe` draft.uiCursor
+        active.uiBlocks `shouldBe` draft.uiBlocks
+        completed.uiBackgroundTaskStatus `shouldBe` []
+    it "does not restore stale background work when the conversation is cleared" do
+        let active = reduceUi (UiSetBackgroundTaskStatus ["1 background task"]) initialUiState
+        (reduceUi UiConversationCleared active).uiBackgroundTaskStatus `shouldBe` []
+
     it "cycles across all four permission choices" do
         let shown = reduceUi (UiPermissionShown "write a file") initialUiState
             moved count = iterate (reduceUi (UiPermissionMoved 1)) shown !! count

@@ -80,6 +80,7 @@ import Agent.Tools.MultiAgents
     )
 import Agent.Tools.Types
     ( AppTool(..)
+    , BackgroundTaskStatus
     , ToolSchema(..)
     )
 import Control.Exception.Safe (tryAny)
@@ -165,6 +166,7 @@ data CodeModeSessionRuntime = CodeModeSessionRuntime
       -- enabled or disabled during the session.
     , codeModeNestedSlot :: !CodeModeNestedSlot
     , codeModeNestedToolNames :: ![Text]
+    , codeModeReadBackgroundTasks :: !(IO [BackgroundTaskStatus])
     , codeModeClose :: !(IO ())
     }
 
@@ -388,6 +390,7 @@ buildRuntime imageDetail mode strategy projection = do
             , codeModeProjectionStrategy = strategy
             , codeModeNestedSlot = slot
             , codeModeNestedToolNames = toolSet.codeModeNestedToolNames
+            , codeModeReadBackgroundTasks = toolSet.codeModeReadBackgroundTasks
             , codeModeClose = toolSet.closeCodeModeToolSet
             }
 

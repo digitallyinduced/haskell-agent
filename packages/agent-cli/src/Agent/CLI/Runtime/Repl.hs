@@ -66,7 +66,7 @@ import Agent.CLI.Session.Lifecycle ( SessionContinuation(..) )
 import Agent.CLI.SessionEnv ( SessionEnv(..), SessionInboxRuntime(..) )
 import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.CLI.Skills ( skillInvocationCommand )
-import Agent.CLI.Status ( formatReplStatusLine )
+import Agent.CLI.Status ( formatReplStatusLine, formatBackgroundTaskStatus )
 import Agent.CLI.Style
     ( beginBackground,
       endBackground,
@@ -106,18 +106,21 @@ import Agent.Skills
     ( SkillInvocation(invocationSkill), Skill(skillUserInvocable) )
 import Agent.TUI.Model
     ( PromptState
-    , UiEvent(UiSetPromptLimitStatus, UiSystemMessage) )
+    , UiEvent(UiSetPromptLimitStatus, UiSystemMessage, UiSetBackgroundTaskStatus) )
 import Agent.Tools.PlanMode
     ( PlanModeEnv(planStateRef),
       PlanModeState(PlanPending, PlanActive) )
 import Agent.Runtime.Session.Inbox (releaseInboxPending)
 import Control.Concurrent.Async ( race, withAsync )
+import Control.Concurrent (threadDelay)
+import Control.Exception.Safe (finally)
 import Control.Concurrent.MVar ( withMVar )
 import Control.Concurrent.STM (atomically, orElse, retry, takeTMVar, tryTakeTMVar)
 import Control.Monad ( when, forM_ )
 import Data.IORef ( atomicModifyIORef', readIORef, writeIORef )
 import Data.Maybe ( fromMaybe, isJust )
 import Data.Text ( Text )
+import Data.Time.Clock (getCurrentTime)
 import System.Console.ANSI ( getTerminalSize )
 import System.Console.ANSI.Codes ( clearFromCursorToLineEndCode )
 import System.IO ( stdout, hFlush )
@@ -406,12 +409,30 @@ readFullscreenPrompt
                     Just unavailable ->
                         (ProviderUnavailableWake <$> unavailable)
                             `orElse` backgroundWake
-            readFullscreenLineOrWithCatalog
-                runtime
-                slashCatalog
-                promptState
-                draft
-                wake
+            (withAsync
+                (refreshBackgroundTaskStatus env runtime (not (isJust failedTurn)))
+                \_ ->
+                    readFullscreenLineOrWithCatalog
+                        runtime
+                        slashCatalog
+                        promptState
+                        draft
+                        wake)
+                `finally` emitUiEvent runtime (UiSetBackgroundTaskStatus [])
+
+-- | Scoped to the idle prompt, so elapsed time remains live without keeping a
+-- permanent polling worker or allowing a late update after a turn starts.
+refreshBackgroundTaskStatus :: SessionEnv -> FullscreenRuntime -> Bool -> IO ()
+refreshBackgroundTaskStatus env runtime canResume = refresh Nothing
+  where
+    refresh previous = do
+        tasks <- env.sessionReadBackgroundTasks
+        now <- getCurrentTime
+        let rows = formatBackgroundTaskStatus now canResume tasks
+        when (previous /= Just rows) $
+            emitUiEvent runtime (UiSetBackgroundTaskStatus rows)
+        threadDelay 1000000
+        refresh (Just rows)
 
 refreshPromptAccountLimit
     :: SessionEnv

@@ -3,6 +3,7 @@ module Agent.CLI.TUIAppSpec (spec) where
 import qualified Agent.TUI.Theme as Theme
 import Agent.CLI.TUI.Keyboard (decodeKeyboardBody, classifyKeyboard, runKeyboardInput)
 import Agent.CLI.TUI.App (finishedMarkdownProseCaches)
+import qualified Agent.CLI.TUI.App as Runtime
 import Control.Monad (forM_, when)
 import Control.Monad.IO.Class (liftIO)
 import Graphics.Vty.Platform.Unix.Input.Classify.Types (KClass(..))
@@ -172,7 +173,7 @@ import Agent.TUI.Presentation
     )
 import Agent.TUI.Motion
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, threadDelay)
-import Control.Concurrent.Async (waitCatch, withAsync)
+import Control.Concurrent.Async (cancel, waitCatch, withAsync)
 import Control.Exception.Safe (bracket, bracket_)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import Control.Exception (AsyncException(UserInterrupt))
@@ -182,6 +183,7 @@ import Control.Concurrent.STM
     , readTVar
     , readTMVar
     , newEmptyTMVarIO
+    , putTMVar
     , newTChanIO
     , retry
     , tryReadTMVar
@@ -581,6 +583,111 @@ spec = do
                 `shouldBe` Just [("Current", "")]
 
     describe "idle choice closure" do
+        it "replaces a choice whose reply has already completed without blocking" do
+            runtime <- newScriptRuntime initialUiState
+            previous <- newEmptyTMVarIO
+            current <- newEmptyTMVarIO
+            atomically (putTMVar previous (Just 0))
+            result <- timeout 1_000_000 $
+                runFullscreenScriptWithState
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    [ FullscreenScriptApp
+                        (AppAskChoice ChoiceDialog "Completed approval" "" 0
+                            [("Allow", "")] previous)
+                    , FullscreenScriptApp
+                        (AppAskChoice ChoiceDialog "Current question" "" 0
+                            [("Continue", "")] current)
+                    , FullscreenScriptHalt
+                    ]
+            case result of
+                Nothing -> expectationFailure "replacing a completed reply blocked the event loop"
+                Just (_, replaced) ->
+                    fmap (.dialogOverlay.choiceTitle) replaced.appChoice
+                        `shouldBe` Just "Current question"
+            atomically (tryReadTMVar previous) `shouldReturn` Just (Just 0)
+            atomically (tryReadTMVar current) `shouldReturn` Nothing
+
+        it "releases a displaced plan approval without approving it" do
+            runtime <- newScriptRuntime initialUiState
+            approval <- newEmptyTMVarIO
+            question <- newEmptyTMVarIO
+            let initial = initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, replaced) <- runFullscreenScriptWithState initial
+                [ FullscreenScriptApp
+                    (AppAskChoice ChoiceDialog "Enter plan mode?" "" 0
+                        [("Enter", ""), ("Stay", "")] approval)
+                , FullscreenScriptApp
+                    (AppAskChoice ChoicePlanning "Planning question" "" 0
+                        [("Continue", "")] question)
+                , FullscreenScriptHalt
+                ]
+            atomically (tryReadTMVar approval) `shouldReturn` Just Nothing
+            atomically (tryReadTMVar question) `shouldReturn` Nothing
+            (_, closed) <- runFullscreenScriptWithState replaced
+                [ FullscreenScriptApp (AppCloseChoice approval)
+                , FullscreenScriptVty (V.EvKey V.KEnter [])
+                , FullscreenScriptHalt
+                ]
+            atomically (tryReadTMVar question) `shouldReturn` Just (Just 0)
+            isNothing closed.appChoice `shouldBe` True
+
+        it "releases a choice displaced by a searchable or adjustable picker" do
+            forM_ (["filter", "adjustable", "dynamic"] :: [String]) \picker -> do
+                runtime <- newScriptRuntime initialUiState
+                approval <- newEmptyTMVarIO
+                indexReply <- newEmptyTMVarIO
+                adjustmentReply <- newEmptyTMVarIO
+                dynamicReply <- newEmptyTMVarIO
+                let replacement = case picker of
+                        "filter" -> AppAskFilterChoice "Select" 0 [("Item", "")] indexReply
+                        "adjustable" -> AppAskAdjustableFilterChoice "Select" 0
+                            [("Item", "", ["high"], 0)] adjustmentReply
+                        _ -> AppAskDynamicAdjustableFilterChoice "Select" "" 0
+                            [("item", "Item", "", ["high"], 0)] dynamicReply
+                _ <- runFullscreenScriptWithState
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    [ FullscreenScriptApp
+                        (AppAskChoice ChoiceDialog "Enter plan mode?" "" 0
+                            [("Enter", "")] approval)
+                    , FullscreenScriptApp replacement
+                    , FullscreenScriptHalt
+                    ]
+                atomically (tryReadTMVar approval) `shouldReturn` Just Nothing
+
+        it "closes the published choice when its waiting caller is cancelled" do
+            runtime <- newScriptRuntime initialUiState
+            withAsync
+                (Runtime.requestFullscreenChoiceWithBody runtime "Enter plan mode?"
+                    "" 0 [("Enter", "")]) \worker -> do
+                published <- timeout 1_000_000 $ atomically do
+                    let AppEventMailbox mailbox = runtime.runtimeMailbox
+                    pending <- readTVar mailbox
+                    case
+                        [ (event, reply)
+                        | PendingEvent event@(AppAskChoice _ _ _ _ _ reply) <-
+                            toList pending.mailboxPendingEvents
+                        ] of
+                        entry : _ -> pure entry
+                        _ -> retry
+                case published of
+                    Nothing -> expectationFailure "choice was not published"
+                    Just (event, reply) -> do
+                        cancel worker
+                        let AppEventMailbox mailbox = runtime.runtimeMailbox
+                        pending <- atomically (readTVar mailbox)
+                        let closes =
+                                [ close
+                                | PendingEvent close@(AppCloseChoice token) <-
+                                    toList pending.mailboxPendingEvents
+                                , token == reply
+                                ]
+                        length closes `shouldBe` 1
+                        (_, closed) <- runFullscreenScriptWithState
+                            (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                            (map FullscreenScriptApp (event : closes) ++ [FullscreenScriptHalt])
+                        isNothing closed.appChoice `shouldBe` True
+                        atomically (tryReadTMVar reply) `shouldReturn` Just Nothing
+
         it "renders fresh approval details literally and denies on Escape" do
             runtime <- newScriptRuntime initialUiState
             reply <- newEmptyTMVarIO
@@ -3055,6 +3162,28 @@ spec = do
                 Text.isInfixOf "› ✗ $ false"
             failedText `shouldNotSatisfy`
                 Text.isInfixOf "failed-output-marker"
+
+    describe "background task prompt status" do
+        it "renders idle work above the editable prompt and hides it during a turn" do
+            runtime <- newScriptRuntime initialUiState
+            let base = initialFullscreenAppState runtime [] AgentRoot [] 0
+                idle = initialUiState
+                    { uiAwaitingInput = True
+                    , uiDraft = "follow-up message"
+                    , uiCursor = 17
+                    , uiBackgroundTaskStatus =
+                        [ "◌ 1 background task · 4m 32s · Release build"
+                        , "  Agent will resume when a shell task finishes."
+                        ]
+                    }
+                rendered ui = renderedAppText (100, 24) (base { appUi = ui })
+            rendered idle `shouldSatisfy` Text.isInfixOf "1 background task"
+            rendered idle `shouldSatisfy` Text.isInfixOf "follow-up message"
+            rendered idle `shouldSatisfy` Text.isInfixOf "Agent will resume"
+            rendered (idle { uiRunning = True })
+                `shouldNotSatisfy` Text.isInfixOf "1 background task"
+            rendered (idle { uiBackgroundTaskStatus = [] })
+                `shouldNotSatisfy` Text.isInfixOf "1 background task"
 
     describe "conversation scrollbar" do
         it "uses a visible trough that repaints old thumb cells" do

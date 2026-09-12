@@ -7,6 +7,7 @@ module Agent.Tools.Types
     , hostToolsFromGroups
     , BackgroundTaskHooks(..)
     , BackgroundTaskNotice(..)
+    , BackgroundTaskStatus(..)
     , ToolSchema(..)
     , ApprovalRule(..)
     , ApprovalRequirement(..)
@@ -93,6 +94,7 @@ import Data.IORef
     )
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
+import Data.Time.Clock (UTCTime)
 import qualified Data.Text as Text
 import System.OsPath
     ( OsPath
@@ -214,6 +216,17 @@ data BackgroundTaskNotice = BackgroundTaskNotice
     , noticeBody :: !Text
     } deriving (Eq, Show)
 
+-- | Live managed work, independent of retained output and completion notices.
+-- Auto-resume denotes a worker with a completion delivery callback; the UI
+-- must also account for whether the session has installed delivery hooks and
+-- can accept an automatic turn.
+data BackgroundTaskStatus = BackgroundTaskStatus
+    { taskKey :: !Text
+    , taskLabel :: !Text
+    , taskStartedAt :: !UTCTime
+    , taskAutoResume :: !Bool
+    } deriving (Eq, Show)
+
 data BackgroundTaskHooks = BackgroundTaskHooks
     { backgroundTaskCompleted :: !(BackgroundTaskNotice -> IO Bool)
     , backgroundTaskDismissed :: !(Text -> IO ())
@@ -255,6 +268,7 @@ data ToolEnv = ToolEnv
       -- Stored behind an IORef because the CLI runner is installed after the
       -- provider-native tool runtimes are constructed.
     , toolBackgroundTaskHooks :: !(IORef BackgroundTaskHooks)
+    , toolBackgroundTasks :: !(IORef (Map.Map Text BackgroundTaskStatus))
       -- | Soft-cancel latch for the active turn. Shell tools race against it.
     , toolCancel :: !CancelFlag
     }
@@ -270,6 +284,7 @@ defaultToolEnv cwd = do
     sessionTmp <- newIORef Nothing
     outputMemory <- newOutputArtifactMemoryStore
     backgroundTaskHooks <- newIORef noBackgroundTaskHooks
+    backgroundTasks <- newIORef Map.empty
     pure ToolEnv
         { toolCwd = dropTrailingPathSeparator cwd
         , toolResourceArbiter = arbiter
@@ -285,6 +300,7 @@ defaultToolEnv cwd = do
         , toolOutputMemoryCap = 16 * 1024 * 1024
         , toolStdoutCap = 16 * 1024
         , toolBackgroundTaskHooks = backgroundTaskHooks
+        , toolBackgroundTasks = backgroundTasks
         , toolCancel = cancel
         }
 
