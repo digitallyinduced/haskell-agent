@@ -8,8 +8,8 @@ module Agent.Telegram.Internal.Support
     ) where
 
 
-import Agent.CLI.ManagedTurn (ManagedTurnMedia(..))
-import Agent.CLI.Session
+import Agent.Runtime.ManagedTurn (ManagedTurnMedia(..))
+import Agent.Runtime.Session
     ( SessionCreate(..)
     , SessionHandle(..)
     , SessionMeta(..)

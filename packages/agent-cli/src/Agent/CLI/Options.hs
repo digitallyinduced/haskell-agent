@@ -3,6 +3,7 @@ module Agent.CLI.Options
     ( ApprovalAnswer(..)
     , ApprovalPolicy(..)
     , CliOptions(..)
+    , Override(..)
     , Command(..)
     , GatewayCommand(..)
     , McpAddCommand(..)
@@ -15,6 +16,7 @@ module Agent.CLI.Options
     , StorageCommand(..)
     , WorktreeCommand(..)
     , defaultCliOptions
+    , applyBackgroundApproval
     , defaultEffortFor
     , freshSessionOptions
     , gatewayRoutingChanged
@@ -39,7 +41,7 @@ import Agent.ReasoningEffort
     , parseReasoningEffort
     )
 import qualified Agent.ReasoningEffort as ReasoningEffort
-import Agent.CLI.Runtime.Options
+import Agent.Runtime.Options
     ( ApprovalPolicy(..)
     , GatewayCommand(..)
     , defaultEffortFor
@@ -161,13 +163,19 @@ parseApprovalAnswer raw
         "yolo" -> AllowAll
         _ -> Deny
 
+-- | Keep an inherited default distinct from either explicit flag value.
+-- Parsing replaces the whole override, so opposite flags cannot coexist.
+data Override a = Inherit | Explicit !a
+    deriving (Eq, Show)
+
 data CliOptions = CliOptions
     { optProvider :: !(Maybe Provider)
     , optModel :: !(Maybe Text)
     , optCwd :: !(Maybe OsPath)
     , optWorktree :: !Bool
-    , optYolo :: !Bool
-    , optNoYolo :: !Bool
+    , optYolo :: !(Override Bool)
+      -- ^ Inherit the invocation/project approval defaults, or explicitly
+      -- enable/disable auto-approval. Managed denial is resolved separately.
     , optManagedDenyMutations :: !Bool
     , optMaxTurns :: !Int
     , optMaxConcurrentAgents :: !(Maybe Int)
@@ -193,12 +201,9 @@ data CliOptions = CliOptions
       -- ^ Expose the persistent run_ghci tool (default: False).
     , optBash :: !Bool
       -- ^ Expose the provider's explicit shell execution tool (default: True).
-    , optComputerUse :: !Bool
+    , optComputerUse :: !(Override Bool)
       -- ^ Allow the model to request control of the local Linux/macOS desktop.
       -- Interactive terminal sessions default to 'True'.
-    , optComputerUseExplicit :: !Bool
-      -- ^ Whether a computer-use flag was supplied explicitly. This lets
-      -- native clients opt in while non-interactive defaults stay safe.
     , optCodeMode :: !CodeModeOption
       -- ^ Whether to start JavaScript code mode. 'CodeModeCatalog' follows
       -- the model catalog's @tool_mode@ (Codex default).
@@ -214,8 +219,7 @@ defaultCliOptions = CliOptions
     , optModel = Nothing
     , optCwd = Nothing
     , optWorktree = False
-    , optYolo = False
-    , optNoYolo = False
+    , optYolo = Inherit
     , optManagedDenyMutations = False
     , optMaxTurns = defaultLoopMaxTurns
     , optMaxConcurrentAgents = Nothing
@@ -231,8 +235,7 @@ defaultCliOptions = CliOptions
     , optSkills = True
     , optGhci = False
     , optBash = True
-    , optComputerUse = True
-    , optComputerUseExplicit = False
+    , optComputerUse = Inherit
     , optCodeMode = CodeModeCatalog
     , optScreenMode = ScreenAuto
     , optMotionMode = MotionFull
@@ -272,26 +275,48 @@ isOneShot options =
 -- one-shot or non-interactive runs.
 resolveComputerUseEnabled :: CliOptions -> Bool -> Bool
 resolveComputerUseEnabled options stdinTty =
-    options.optComputerUse
-        && ( options.optComputerUseExplicit
-                || (stdinTty && not (isOneShot options))
-           )
+    case options.optComputerUse of
+        Inherit -> stdinTty && not (isOneShot options)
+        Explicit enabled -> enabled
 
 -- | One-shot without a TTY auto-approves so scripts do not hang, unless
 -- @--no-yolo@ is set. Interactive sessions prompt on mutating tools, unless
 -- project settings already enabled auto-approve (and @--no-yolo@ was not set).
 resolveApprovalPolicy :: CliOptions -> Bool -> Bool -> ApprovalPolicy
 resolveApprovalPolicy options isTty projectAutoApprove
-    | options.optYolo && not options.optNoYolo = ApproveAll
+    | options.optYolo == Explicit True = ApproveAll
     | options.optManagedDenyMutations = DenyMutating
-    | isJust options.optManagedTurnFile && options.optNoYolo =
+    | isJust options.optManagedTurnFile && options.optYolo == Explicit False =
         PromptMutating
-    | options.optNoYolo && not isTty = DenyMutating
+    | options.optYolo == Explicit False && not isTty = DenyMutating
     | not isTty && isOneShot options = ApproveAll
     | not isTty = DenyMutating
-    | options.optNoYolo = PromptMutating
+    | options.optYolo == Explicit False = PromptMutating
     | projectAutoApprove = ApproveAll
     | otherwise = PromptMutating
+
+-- | Preserve a parent's policy in a background turn without borrowing stdin.
+applyBackgroundApproval :: ApprovalPolicy -> CliOptions -> CliOptions
+applyBackgroundApproval policy options =
+    case policy of
+        ApproveAll ->
+            options
+                { optYolo = Explicit True
+                , optManagedDenyMutations = False
+                }
+        DenyMutating ->
+            options
+                { optYolo = Explicit False
+                , optManagedDenyMutations = True
+                }
+        PromptMutating ->
+            -- Background sessions cannot safely borrow the caller's stdin.
+            -- Keep the prompt policy marker; non-TTY one-shot resolution
+            -- conservatively denies mutating calls.
+            options
+                { optYolo = Explicit False
+                , optManagedDenyMutations = False
+                }
 
 parseArgs :: [String] -> Either String Command
 parseArgs args
@@ -564,14 +589,13 @@ optionUpdateParser = asum
     , flagUpdate "worktree" "Create a new git worktree"
         (\options -> options { optWorktree = True })
     , flagUpdate "yolo" "Auto-approve tools (computer use asks separately)"
-        (\options -> options { optYolo = True, optNoYolo = False })
+        (\options -> options { optYolo = Explicit True })
     , flagUpdate "no-yolo" "Deny mutating tools without a TTY"
-        (\options -> options { optNoYolo = True, optYolo = False })
+        (\options -> options { optYolo = Explicit False })
     , flagUpdate "managed-deny-mutations" "Deny mutations in a managed turn"
         (\options -> options
             { optManagedDenyMutations = True
-            , optNoYolo = True
-            , optYolo = False
+            , optYolo = Explicit False
             })
     , optionUpdate "max-turns" "N" "Stop after N model turns"
         (positiveIntReader "--max-turns")
@@ -625,13 +649,11 @@ optionUpdateParser = asum
     , boolFlagUpdate "computer-use" True
         "Enable local Linux/macOS computer use (default with a TTY)"
         (\value options -> options
-            { optComputerUse = value
-            , optComputerUseExplicit = True
+            { optComputerUse = Explicit value
             })
     , boolFlagUpdate "no-computer-use" False "Disable local computer use"
         (\value options -> options
-            { optComputerUse = value
-            , optComputerUseExplicit = True
+            { optComputerUse = Explicit value
             })
     , codeModeFlagUpdate "code-mode" CodeModeEnabled
         "Enable JavaScript code mode when the catalog omits tool_mode"

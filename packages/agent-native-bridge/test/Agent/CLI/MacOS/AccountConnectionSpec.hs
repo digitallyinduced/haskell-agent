@@ -3,7 +3,7 @@ module Agent.CLI.MacOS.AccountConnectionSpec (spec) where
 import Agent.CLI.MacOS.AccountConnection
 import Agent.CLI.MacOS.NativeSupervisor (runIntegrationAdmin)
 import Agent.CLI.NativeRuntime
-import Agent.CLI.GatewayClient (GatewayCredential(..))
+import Agent.Runtime.GatewayClient (GatewayCredential(..))
 import Agent.CLI.IntegrationGateway (gatewayIntegrationMcpConfig)
 import Agent.Integration.API
 import Agent.Json (rawJsonFromEncoding)

@@ -3,10 +3,10 @@ module Agent.CLI.Runtime.Persistence
     , shouldPersist
     ) where
 
-import Agent.CLI.Models (ModelTarget(..))
+import Agent.Runtime.Models (ModelTarget(..))
 import Agent.CLI.Options (CliOptions(..), isOneShot)
 import Agent.CLI.Render (putTextLn)
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( Persistence(..)
     , SessionCreate(..)
     , SessionHandle(..)

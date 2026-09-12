@@ -37,6 +37,7 @@ module Agent.CLI.TUI.Types
     , ResumeActions(..)
     , ResumeOverlay(..)
     , choiceOverlay
+    , dismissPendingChoice
     , resumeOverlay
     , textOverlay
     , SyntaxHighlighterState(..)
@@ -501,6 +502,14 @@ data ResumeActions = ResumeActions
 
 choiceOverlay :: AppState -> Maybe ChoiceOverlay
 choiceOverlay state = (.dialogOverlay) <$> state.appChoice
+
+-- | A replaced dialog must release its caller, never silently abandon an
+-- approval or question. Replacement has the same fail-closed result as Esc.
+dismissPendingChoice :: AppState -> IO ()
+dismissPendingChoice state =
+    case state.appChoice of
+        Nothing -> pure ()
+        Just pending -> pending.dialogReply Nothing
 
 resumeOverlay :: AppState -> Maybe ResumeOverlay
 resumeOverlay state = (.dialogOverlay) <$> state.appResume

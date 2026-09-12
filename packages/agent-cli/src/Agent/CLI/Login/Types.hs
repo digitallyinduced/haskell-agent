@@ -10,7 +10,7 @@ module Agent.CLI.Login.Types
     , initialLoginState
     ) where
 
-import Agent.CLI.CredentialStore (ManagedAuthKind)
+import Agent.Accounts.CredentialStore (ManagedAuthKind)
 import Agent.CLI.Picker (PickerKey(..))
 import Agent.Provider (Provider)
 import Data.Text (Text)

@@ -18,7 +18,7 @@ import Agent.CLI.MacOS.NativeSupervisor
     , shutdownIntegrationWorkers
     , shutdownOrganizationIntegrationWorkers
     )
-import Agent.CLI.GatewayClient
+import Agent.Runtime.GatewayClient
     ( GatewayCredential(..)
     , registerGatewayCredentialInvalidatorAt
     , saveGatewayCredentialAt

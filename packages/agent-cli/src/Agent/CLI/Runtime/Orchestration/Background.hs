@@ -3,10 +3,12 @@ module Agent.CLI.Runtime.Orchestration.Background
     , runInProcessSessionTurn
     ) where
 
-import Agent.CLI.Options ( ApprovalPolicy(..), CliOptions(..), ScreenMode(..) )
+import Agent.CLI.Options
+    ( ApprovalPolicy, CliOptions(..), Override(..), ScreenMode(..)
+    , applyBackgroundApproval )
 import Agent.CLI.Runtime.Orchestration.Types ( AgentRunMode, backgroundRunMode )
 import Agent.CLI.Runtime.Types ( DevResult(..) )
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( SessionHandle(..), SessionMeta(..) )
 import Agent.OsPath ( unsafeToFilePath )
 import Data.Text ( Text )
@@ -52,32 +54,6 @@ runInProcessSessionTurn runAgent parentOptions policy ghciEnabled bashEnabled
                 , optSaveSession = True
                 , optGhci = ghciEnabled
                 , optBash = bashEnabled
-                , optComputerUse = False
-                , optComputerUseExplicit = True
+                , optComputerUse = Explicit False
                 , optScreenMode = ScreenMinimal
-                }
-
-applyBackgroundApproval :: ApprovalPolicy -> CliOptions -> CliOptions
-applyBackgroundApproval policy options =
-    case policy of
-        ApproveAll ->
-            options
-                { optYolo = True
-                , optNoYolo = False
-                , optManagedDenyMutations = False
-                }
-        DenyMutating ->
-            options
-                { optYolo = False
-                , optNoYolo = True
-                , optManagedDenyMutations = True
-                }
-        PromptMutating ->
-            -- Background sessions cannot safely borrow the caller's stdin.
-            -- Keep the prompt policy marker; non-TTY one-shot resolution
-            -- conservatively denies mutating calls.
-            options
-                { optYolo = False
-                , optNoYolo = True
-                , optManagedDenyMutations = False
                 }

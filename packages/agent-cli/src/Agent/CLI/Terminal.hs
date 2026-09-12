@@ -42,7 +42,7 @@ module Agent.CLI.Terminal
     ) where
 
 import Agent.CLI.FileUri (fileUri)
-import Agent.CLI.Environment (lookupNonEmpty)
+import Agent.Environment (lookupNonEmpty)
 import Control.Exception.Safe (bracket_)
 import qualified Data.ByteString.Base64 as Base64
 import Data.Char (ord, toLower, toUpper)

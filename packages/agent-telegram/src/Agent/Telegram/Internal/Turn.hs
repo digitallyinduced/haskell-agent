@@ -1,15 +1,15 @@
 module Agent.Telegram.Internal.Turn where
 
 
-import Agent.CLI.AgentSessions.Process (launchManagedTurnBounded)
-import Agent.CLI.ManagedTurn
+import Agent.Runtime.AgentSessions.Process (launchManagedTurnBounded)
+import Agent.Runtime.ManagedTurn
     ( ManagedTurnMedia(..)
     , ManagedTurnContext(..)
     , ManagedTurnRequest(..)
     , managedTurnRequestFromText
     , managedTurnRequestWithGateway
     )
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( SessionHandle(..)
     , SessionMeta(metaId)
     , loadSessionHandle

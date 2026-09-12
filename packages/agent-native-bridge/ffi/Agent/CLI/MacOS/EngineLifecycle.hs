@@ -2,7 +2,7 @@
 module Agent.CLI.MacOS.EngineLifecycle (workerLifecycle) where
 
 import Agent.CLI.MacOS.BrowserBridge (BrowserHost)
-import Agent.CLI.GatewayClient (registerGatewayCredentialInvalidator)
+import Agent.Runtime.GatewayClient (registerGatewayCredentialInvalidator)
 import Agent.CLI.MacOS.BundledIntegrations
     (bundledIntegrationProvider, bundledOrganizationIntegrationProvider)
 import Agent.CLI.MacOS.ComputerBridge (ComputerHost)
@@ -27,6 +27,7 @@ import Agent.CLI.MacOS.NativeSupervisor
 import Agent.CLI.MacOS.TurnState
 import Agent.CLI.MacOS.Marshalling (withText)
 import Agent.CLI.NativeRuntime
+import Agent.Runtime.McpConnectionCredentials (CredentialRuntime)
 import Agent.Loop (ImageAttachment)
 import Agent.Store.Postgres (ManagedPostgresConfig)
 import Control.Concurrent.MVar (newMVar)
@@ -42,7 +43,8 @@ import Foreign.Ptr (FunPtr, Ptr, castPtr, nullPtr)
 import System.OsPath (OsPath)
 
 workerLifecycle
-    :: FunPtr EventCallback
+    :: CredentialRuntime
+    -> FunPtr EventCallback
     -> Ptr ()
     -> ManagedPostgresConfig
     -> OsPath
@@ -54,13 +56,13 @@ workerLifecycle
     -> TVar (Map Text NativeTurnOptions)
     -> InteractionRuntime
     -> IO ()
-workerLifecycle
+workerLifecycle credentials
         callback context config root commands stagedImages browser computer chartRenderingEnabled
         stagedTurnOptions interactions =
     (do
         store <- newMVar Nothing
-        processRuntime <- newNativeProcessRuntimeWithOrganizationIntegrations
-            bundledIntegrationProvider bundledOrganizationIntegrationProvider root
+        processRuntime <- newNativeProcessRuntimeWithCredentialRuntime
+            credentials bundledIntegrationProvider bundledOrganizationIntegrationProvider root
         workerRegistry <- newTVarIO Map.empty
         integrationWorkers <- newIntegrationWorkerRegistry
         let closeResources =

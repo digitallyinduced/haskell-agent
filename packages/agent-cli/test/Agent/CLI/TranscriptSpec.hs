@@ -2,7 +2,7 @@
 
 module Agent.CLI.TranscriptSpec (spec) where
 
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( SessionMeta(..)
     , SessionTurn(..)
     , TranscriptEffect(..)

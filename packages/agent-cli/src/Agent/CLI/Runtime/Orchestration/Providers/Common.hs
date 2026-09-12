@@ -5,7 +5,7 @@ module Agent.CLI.Runtime.Orchestration.Providers.Common
     , decorateManualCompact
     ) where
 
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( readSessionRequestParams
     )
 import Agent.CLI.Compaction

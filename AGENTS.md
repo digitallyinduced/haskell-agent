@@ -49,7 +49,10 @@ Load every library you may edit so `:r` recompiles across package boundaries (`a
 nix develop
 cabal repl \
   agent-cli:lib:agent-cli \
-  agent-cli-runtime:lib:agent-cli-runtime \
+  agent-runtime:lib:agent-runtime \
+  agent-accounts:lib:agent-accounts \
+  agent-computer-use:lib:agent-computer-use \
+  agent-tools:lib:agent-tools \
   agent-external-session:lib:agent-external-session \
   agent-repository:lib:agent-repository \
   agent-native-bridge:lib:agent-native-bridge \
@@ -215,6 +218,10 @@ separately and reverted because flattening the complete body for every Markdown
 render made it slower and allocated more than the strict-`Text` baseline.
 
 # haskell
+- Prefer strict `Text` for application text and retained textual state, and
+  `ByteString` for encoded or binary data. Keep `String` conversions at APIs
+  that require them; do not replace `FilePath` with `Text` mechanically.
+  Audit `Text.unpack` and `[Char]` as well as explicit `String` signatures.
 - Prefer Control.Exception.Safe over Control.Exception
 - Never use bare `Control.Concurrent.Async.async`. Prefer structured
   concurrency (`withAsync`, `race`, `concurrently`, etc.) so child lifetimes

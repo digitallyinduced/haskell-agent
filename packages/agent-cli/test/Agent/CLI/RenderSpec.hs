@@ -82,14 +82,36 @@ spec = do
                 ]
             stateToolCalls state `shouldBe` Map.empty
             stateActivity state `shouldBe` summarizeToolCallRelative "/workspace" complete
-        it "orders a nonempty body between the header and spinner refresh" do
-            let code = functionToolCall "code" "exec" "text(1)"
+        it "renders a compact exec wrapper without JavaScript source" do
+            let code = customToolCall "code" "exec" "text(1)"
                 (_, commands) = sequenceSteps [RenderToolStarted code, RenderToolStarted code]
             commands `shouldBe`
                 [ [ WriteToolLine (formatToolStartedRelative False "/workspace" code)
-                  , WriteToolLine "text(1)", RefreshToolThinking
+                  , RefreshToolThinking
                   ]
                 , [RefreshToolThinking]
+                ]
+            formatToolStartedRelative False "/workspace" code
+                `shouldSatisfy` Text.isInfixOf "JavaScript execution"
+            formatToolBody False code `shouldBe` ""
+
+        it "retains readable nested calls beside the compact exec wrapper" do
+            let execution = customToolCall "outer" "exec" "await tools.read_file({target_file: 'A.hs'});"
+                nested = functionToolCall "code-mode:1:read_file" "read_file" "{\"target_file\":\"A.hs\"}"
+                nestedResult = (result :: ToolCallResult){callId = nested.callId}
+                outerResult = result
+                    { callId = execution.callId
+                    , callKind = CustomCallKind, output = "Error: execution failed"
+                    }
+                (_, commands) = sequenceSteps
+                    [ RenderToolStarted execution, RenderToolStarted nested
+                    , RenderToolFinished nestedResult, RenderToolFinished outerResult
+                    ]
+            commands `shouldBe`
+                [ [WriteToolLine (formatToolStartedRelative False "/workspace" execution), RefreshToolThinking]
+                , [WriteToolLine (formatToolStartedRelative False "/workspace" nested), RefreshToolThinking]
+                , [WriteToolLine (truncateToolOutput "ok")]
+                , [WriteToolLine (truncateToolOutput "Error: execution failed")]
                 ]
 
         it "suppresses todo lines but retains their lifecycle" do

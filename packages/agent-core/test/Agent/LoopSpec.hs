@@ -28,15 +28,9 @@ import Agent.Tools.Scheduling
     , ToolSchedulingPlan(..)
     , schedulingPlansConflict
     )
-import Agent.Tools.IO
-    ( RunningCommand(..)
-    , startShellCommandWithCompletion
-    , stopShellCommand
-    )
 import Agent.Tools.Types
     ( ApprovalRule(..)
     , ToolExecutionPolicy(..)
-    , defaultToolEnv
     , jsonAppToolWithExecution
     , toolExecutionPolicyFor
     , withAsyncToolCalls
@@ -60,7 +54,7 @@ import Codec.Picture
 import Codec.Picture.Types (convertImage)
 import qualified Codec.Compression.Zlib as Zlib
 import Control.Concurrent (forkIO, threadDelay)
-import Control.Concurrent.Async (cancel, poll, wait, withAsync)
+import Control.Concurrent.Async (cancel, wait, withAsync)
 import Control.Concurrent.MVar
     ( newEmptyMVar
     , putMVar
@@ -70,7 +64,6 @@ import Control.Concurrent.MVar
     , tryReadMVar
     )
 import qualified Control.Exception as Exception
-import qualified Control.Exception.Safe as Safe
 import Control.Monad (void, when)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -89,7 +82,6 @@ import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
-import Data.Time.Clock (getCurrentTime)
 import Data.Word (Word32)
 import System.Timeout (timeout)
 import System.OsPath (unsafeEncodeUtf)
@@ -1292,6 +1284,54 @@ spec = describe "runLoop" do
                 expectationFailure $
                     "unexpected async submissions: " <> show seen
 
+    it "admits ordered fresh calls after a completed async call is replayed" do
+        invocations <- newIORef ([] :: [Text])
+        step <- newIORef (0 :: Int)
+        let completedCall = asyncFunctionToolCall "completed" "first" "{}"
+            freshCalls =
+                [ functionToolCall "fresh-1" "second" "{}"
+                , functionToolCall "fresh-2" "third" "{}"
+                ]
+            record name = do
+                atomicModifyIORef' invocations \names -> (names <> [name], ())
+                pure (Right name)
+            sequentialTool name =
+                jsonAppToolWithExecution name "" [] AlwaysReadOnly TurnSequential
+                    (noArgsTool name (record name))
+            tools =
+                [ asyncNoArgsTool "first" (record "first")
+                , sequentialTool "second"
+                , sequentialTool "third"
+                ]
+            backend = backendWithCallbacks \state _previous _inputs callbacks -> do
+                current <- atomicModifyIORef' step \value ->
+                    (value + 1, value + 1)
+                output <- case current of
+                    1 -> do
+                        callbacks.onAsyncToolCall completedCall
+                        pure $ emptyTurnOutput "resp-first" [completedCall] Nothing
+                    2 -> do
+                        -- The previous result was consumed before this model
+                        -- request; replay must not requeue it or reset ordering.
+                        callbacks.onAsyncToolCall completedCall
+                        pure $ emptyTurnOutput "resp-fresh" freshCalls Nothing
+                    _ ->
+                        pure $ emptyTurnOutput "resp-done" [] (Just "done")
+                pure $ Right BackendResult
+                    { backendOutput = output
+                    , backendState = appendStateMarker state
+                    }
+        config <- testConfig backend
+        timeout concurrencyProbeMicros
+            (runLoop config { loopTools = registryFromTools tools } Nothing "go")
+            `shouldReturn` Just (Right LoopResult
+                { finalResponseId = "resp-done"
+                , finalText = Just "done"
+                , turnsUsed = 3
+                , tokenUsage = emptyTokenUsage
+                })
+        readIORef invocations `shouldReturn` ["first", "second", "third"]
+
     it "fails closed when an async call_id is reused for a different call" do
         firstInvocations <- newIORef (0 :: Int)
         secondInvocations <- newIORef (0 :: Int)
@@ -1473,62 +1513,6 @@ spec = describe "runLoop" do
             timeout concurrencyProbeMicros (wait running)
                 `shouldReturn` Just (Left (LoopCancelled []))
             readMVar handlerFinished `shouldReturn` ()
-
-    it "joins asynchronous command cleanup after provider credentials are exhausted" do
-        let workdir = unsafeEncodeUtf "."
-        env <- defaultToolEnv workdir
-        callbackStarted <- newEmptyMVar
-        callbackFinished <- newEmptyMVar
-        releaseCallback <- newEmptyMVar
-        commandStarted <- newEmptyMVar
-        releaseHandler <- newEmptyMVar
-        cleanupMask <- newEmptyMVar
-        handlerFinished <- newEmptyMVar
-        retryAt <- getCurrentTime
-        let providerFailure = CredentialsExhausted retryAt []
-            call = asyncFunctionToolCall "async-command" "command" "{}"
-            acquire =
-                startShellCommandWithCompletion env workdir "true"
-                    (\_ ->
-                        (putMVar callbackStarted () >> readMVar releaseCallback)
-                            `Safe.finally` putMVar callbackFinished ())
-                    >>= either (Safe.throwString . Text.unpack) pure
-            release command = do
-                Exception.getMaskingState >>= putMVar cleanupMask
-                stopShellCommand command
-                putMVar handlerFinished ()
-            tool = asyncNoArgsTool "command" $
-                Safe.bracket acquire release \command -> do
-                    putMVar commandStarted command
-                    readMVar releaseHandler
-                    pure (Right "unexpected completion")
-            backend = backendWithCallbacks \_ _ _ callbacks -> do
-                callbacks.onAsyncToolCall call
-                void (readMVar commandStarted)
-                readMVar callbackStarted
-                pure (Left providerFailure)
-            unblock = do
-                void (tryPutMVar releaseCallback ())
-                void (tryPutMVar releaseHandler ())
-        config0 <- testConfig backend
-        let config = config0 { loopTools = registryFromTools [tool] }
-        withAsync (runLoop config Nothing "go") \running ->
-            (do
-                timeout 3000000 (readMVar cleanupMask)
-                    `shouldReturn` Just Exception.MaskedUninterruptible
-                -- Escape can arrive while provider failure is already
-                -- unwinding the asynchronous tool-manager scope.
-                requestCancel config.loopCancel
-                timeout 3000000 (wait running)
-                    `shouldReturn` Just (Left (LoopTransport providerFailure))
-                tryReadMVar handlerFinished `shouldReturn` Just ()
-                tryReadMVar callbackFinished `shouldReturn` Just ()
-                command <- readMVar commandStarted
-                poll command.runningSupervisor
-                    >>= (`shouldSatisfy` maybe False (const True)))
-            -- Release gates before withAsync joins a regressed worker, so the
-            -- expected timeout failure cannot strand the rest of the suite.
-            `Safe.finally` unblock
 
     it "cancels promptly while an admitted async call is awaiting approval" do
         approvalStarted <- newEmptyMVar
@@ -1743,6 +1727,38 @@ spec = describe "runLoop" do
         execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
         execution.executionPendingInputs `shouldBe`
             [CompletedTool (ToolCallResult "c1" "echo:hi" FunctionCallKind BlockingToolCall [] (Just ToolSucceeded))]
+
+    it "retains completed tools when reading the next steering inputs throws" do
+        submissions <- newIORef []
+        steeringReads <- newIORef (0 :: Int)
+        acknowledgements <- newIORef []
+        backend <- retainingEchoCall <$> scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing
+            ]
+        config0 <- testConfig backend
+        let config = config0
+                { loopReadSteering = do
+                    count <- atomicModifyIORef' steeringReads \n -> (n + 1, n)
+                    if count == 0
+                        then pure [UserMessage "also verify tests"]
+                        else Exception.throwIO (userError "steering unavailable")
+                , loopCommitSteering = \count ->
+                    modifyIORef' acknowledgements (<> [count])
+                }
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        stored <- config.loopBackendState.readBackendState
+        execution.executionState `shouldBe` stored.backendItems
+        length execution.executionState `shouldBe` 1
+        execution.executionProgress `shouldBe` ResponseCommitted
+        execution.executionPendingInputs `shouldBe`
+            [CompletedTool (functionResult "c1" "echo:hi")]
+        execution.executionResult `shouldBe`
+            Left (LoopUnexpected "user error (steering unavailable)")
+        readIORef acknowledgements `shouldReturn` [1]
+        readIORef submissions `shouldReturn`
+            [(Nothing, [UserMessage "hello", UserMessage "also verify tests"])]
 
     it "interrupts the provider in-band before tearing down a cancelled submission" do
         started <- newEmptyMVar
@@ -2499,6 +2515,58 @@ spec = describe "runLoop" do
             , (Just "resp-1", [UserMessage "use the existing schema"])
             ]
         readIORef pending `shouldReturn` []
+
+    it "retains cleared input's steering acknowledgement debt through tool recovery" do
+        toolFinished <- newEmptyMVar
+        acknowledgements <- newIORef []
+        invocations <- newIORef (0 :: Int)
+        let initialInputs = [UserMessage "hello", UserMessage "also verify tests"]
+            call = asyncFunctionToolCall "saved" "save" "{}"
+            tool = asyncNoArgsTool "save" do
+                modifyIORef' invocations (+ 1)
+                pure (Right "saved once")
+            backend = backendWithCallbacks \state _ inputs callbacks -> do
+                inputs `shouldBe` initialInputs
+                callbacks.onAsyncToolCall call
+                -- The host work finishes, but the final provider response omits
+                -- its call. Teardown must retain it as attributed recovery.
+                takeMVar toolFinished
+                pure $ Right BackendResult
+                    { backendOutput = emptyTurnOutput "resp-1" [] (Just "done")
+                    , backendState = advanceBackendSnapshot state
+                        (turnInputsToItems inputs) Nothing
+                    }
+        config0 <- testConfig backend
+        let config = config0
+                { loopTools = registryFromTools [tool]
+                , loopReadSteering = pure [UserMessage "also verify tests"]
+                , loopCommitSteering = \count ->
+                    modifyIORef' acknowledgements (<> [count])
+                , loopOnEvent = \case
+                    ToolFinished _ -> putMVar toolFinished ()
+                    _ -> pure ()
+                , loopBackendState = config0.loopBackendState
+                    { commitBackendState = \snapshot -> do
+                        committed <- config0.loopBackendState.commitBackendState snapshot
+                        -- Deterministically cancel after publication but before
+                        -- normal completion can acknowledge the steering.
+                        requestCancel config0.loopCancel
+                        pure committed
+                    }
+                }
+        execution <- timeout concurrencyProbeMicros
+            (runLoopInputsDetailed config Nothing [UserMessage "hello"])
+            >>= maybe (fail "loop did not finish recovering the completed tool") pure
+        execution.executionProgress `shouldBe` ResponseCommitted
+        execution.executionPendingInputs `shouldBe` []
+        execution.executionResult `shouldBe` Left (LoopCancelled [])
+        take 2 execution.executionState `shouldBe` turnInputsToItems initialInputs
+        length execution.executionState `shouldBe` 3
+        show execution.executionState `shouldContain` "saved once"
+        stored <- config.loopBackendState.readBackendState
+        stored.backendItems `shouldBe` execution.executionState
+        readIORef acknowledgements `shouldReturn` [1]
+        readIORef invocations `shouldReturn` 1
 
     it "commits terminal incomplete responses without running their tools" do
         submissions <- newIORef []

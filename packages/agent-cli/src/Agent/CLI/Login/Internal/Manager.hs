@@ -4,7 +4,7 @@ module Agent.CLI.Login.Internal.Manager
     ) where
 
 import Agent.CLI.Input (readApprovalLine)
-import Agent.CLI.Error (formatException)
+import Agent.Runtime.Error (formatException)
 import Agent.CLI.Login.Internal.Accounts
     ( discoverLoginAccounts
     , disconnectLoginAccount

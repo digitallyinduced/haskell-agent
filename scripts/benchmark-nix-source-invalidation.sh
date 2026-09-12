@@ -25,14 +25,14 @@ root="$(git rev-parse --show-toplevel)"
 marker="$root/packages/agent-cli/test/Agent/CLI/OptionsSpec.hs"
 case "$stage" in
   baseline)
-    if grep -q 'agent-cli-runtime' \
+    if grep -q 'agent-runtime' \
         "$root/packages/agent-telegram/agent-telegram.cabal"; then
       echo "baseline stage requested for a refactored package graph" >&2
       exit 2
     fi
     ;;
   refactored)
-    if ! grep -q 'agent-cli-runtime' \
+    if ! grep -q 'agent-runtime' \
         "$root/packages/agent-telegram/agent-telegram.cabal"; then
       echo "refactored stage requested for a baseline package graph" >&2
       exit 2

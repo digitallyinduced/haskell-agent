@@ -59,6 +59,7 @@ import qualified Agent.CLI.GitDiffSpec as GitDiffSpec
 import qualified Agent.CLI.ImagePreviewSpec as ImagePreviewSpec
 import qualified Agent.CLI.ChartImageSpec as ChartImageSpec
 import qualified Agent.CLI.InputSpec as InputSpec
+import qualified Agent.CLI.InputHistorySpec as InputHistorySpec
 import qualified Agent.CLI.InterruptSpec as InterruptSpec
 import qualified Agent.CLI.VoiceAudioSpec as VoiceAudioSpec
 import qualified Agent.CLI.LoginSpec as LoginSpec
@@ -203,6 +204,7 @@ specs = do
     ImagePreviewSpec.spec
     ChartImageSpec.spec
     InputSpec.spec
+    InputHistorySpec.spec
     InterruptSpec.spec
     VoiceAudioSpec.spec
     LoginSpec.spec

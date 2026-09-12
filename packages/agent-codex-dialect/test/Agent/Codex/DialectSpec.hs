@@ -22,7 +22,8 @@ import Agent.Codex.Dialect.Shell
     )
 import Agent.Codex.Dialect.Tools (shellCommandIsReadOnly)
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
-import Agent.Tools.Background (setBackgroundTaskHooks)
+import Agent.Tools.Background
+    ( BackgroundTaskStatus(..), readBackgroundTasks, setBackgroundTaskHooks )
 import Agent.Tools.IO (CommandResult(..))
 import Agent.ToolDispatch
     ( ToolOutcome(..)
@@ -479,6 +480,7 @@ spec = describe "Codex dialect" do
                         Right _ ->
                             expectationFailure "stale command remained available"
                     readMVar notices `shouldReturn` Nothing
+                    readBackgroundTasks env `shouldReturn` []
 
     it "formats project instructions as a contextual user fragment" do
         let loaded = LoadedAgentsMd
@@ -741,6 +743,26 @@ spec = describe "Codex dialect" do
                         Text.isInfixOf "completion-output"
                     notice.noticeBody `shouldSatisfy`
                         Text.isInfixOf "do not call write_stdin"
+                    readBackgroundTasks env `shouldReturn` []
+
+    it "tracks retained commands without consuming output and clears status on reset" do
+        requireProcessSandbox
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket (newCodexShellSession env) closeCodexShellSession \session -> do
+                started <- startCodexShellCommand session env.toolCwd
+                    "read value; printf '%s' \"$value\"" 1 (\_ _ -> pure ())
+                commandId <- case started of
+                    Right CodexShellRunning { codexShellSessionId = identifier } ->
+                        pure identifier
+                    _ -> expectationFailure "expected a retained command" >> pure 0
+                active <- readBackgroundTasks env
+                map (.taskKey) active `shouldBe`
+                    ["codex-shell:" <> Text.pack (show commandId)]
+                map (.taskAutoResume) active `shouldBe` [True]
+                readBackgroundTasks env `shouldReturn` active
+                resetCodexShellSession session
+                readBackgroundTasks env `shouldReturn` []
 
     it "does not publish a notice when the initial wait returns the result" do
         requireProcessSandbox

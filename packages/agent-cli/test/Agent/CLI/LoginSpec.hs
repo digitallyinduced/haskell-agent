@@ -1,7 +1,7 @@
 module Agent.CLI.LoginSpec (spec) where
 
 import Agent.CLI.Login
-import Agent.CLI.CredentialStore (ManagedAuthKind(..))
+import Agent.Accounts.CredentialStore (ManagedAuthKind(..))
 import Agent.CLI.Picker (PickerKey(..))
 import Agent.Provider (Provider(..))
 import Agent.TUI.Markdown (inlinePlainText, parseInline)

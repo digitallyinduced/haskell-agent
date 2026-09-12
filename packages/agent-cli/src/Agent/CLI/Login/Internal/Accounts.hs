@@ -11,7 +11,7 @@ module Agent.CLI.Login.Internal.Accounts
     , toggleLoginAccount
     ) where
 
-import Agent.CLI.Auth
+import Agent.Accounts.Auth
     ( GrokAuthState(..)
     , externalAuthSelectionId
     , grokCredentialFromAuthJson
@@ -19,9 +19,9 @@ import Agent.CLI.Auth
     , managedAuthSelectionId
     , openaiAuthStateFromJson
     )
-import Agent.CLI.Auth.Gemini (geminiAuthStateFromJson)
-import Agent.CLI.Auth.Grok (refreshGrokLoginPayload)
-import Agent.CLI.CredentialStore
+import Agent.Accounts.Auth (geminiAuthStateFromJson)
+import Agent.Accounts.Auth (refreshGrokLoginPayload)
+import Agent.Accounts.CredentialStore
     ( ManagedAuthKind(..)
     , ManagedCredential(..)
     , ManagedSecret(..)
@@ -31,9 +31,9 @@ import Agent.CLI.CredentialStore
     , setManagedCredentialEnabled
     , upsertManagedCredential
     )
-import Agent.CLI.Environment (lookupNonEmpty)
-import Agent.CLI.Error (formatApiErrorInlineAt)
-import Agent.CLI.GatewayClient
+import Agent.Environment (lookupNonEmpty)
+import Agent.Runtime.Error (formatApiErrorInlineAt)
+import Agent.Runtime.GatewayClient
     ( GatewayCredential(..)
     , loadGatewayCredential
     , removeGatewayCredential

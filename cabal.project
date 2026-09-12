@@ -4,7 +4,10 @@ packages:
     packages/agent-webrtc
     packages/agent-mail
     packages/agent-integration-api
-    packages/agent-cli-runtime
+    packages/agent-runtime
+    packages/agent-accounts
+    packages/agent-computer-use
+    packages/agent-tools
     packages/agent-external-session
     packages/agent-cli
     packages/agent-repository

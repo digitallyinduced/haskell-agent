@@ -33,6 +33,9 @@ appendBlock kind title body detail blockState callId state =
             , blockExpanded =
                 kind `elem` [BlockUser, BlockAssistant, BlockSystem, BlockRecap, BlockError]
                     || (kind == BlockShell
+                        -- Execution source stays available on expansion,
+                        -- while nested operations provide the live activity.
+                        && title `notElem` ["JavaScript execution", "$ exec"]
                         && blockState `elem` [BlockStreaming, BlockRunning])
             , blockCallId = callId
             , blockInspectionGroupable = False

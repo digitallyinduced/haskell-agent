@@ -3,6 +3,7 @@ module Agent.Server.EventSpec (spec) where
 import Agent.Loop
     ( LoopEvent(..) )
 import Agent.Server.Event
+import Agent.Runtime.AgentSnapshot
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
@@ -13,6 +14,7 @@ import Agent.ToolDispatch
     )
 import Data.Aeson
     ( encode
+    , toJSON
     , object
     , (.=)
     )
@@ -22,6 +24,56 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "public loop-event projection" do
+    it "preserves the agent snapshot wire fields and all step states" do
+        let states =
+                [ (AgentStepRunning, "running")
+                , (AgentStepCompleted, "completed")
+                , (AgentStepFailed, "failed")
+                , (AgentStepInfo, "info")
+                ]
+            snapshot = AgentSnapshot
+                { agentPath = "/root/worker"
+                , agentStatus = "active"
+                , agentModel = Just "model"
+                , agentSteps =
+                    [ AgentStep state "title" (Just "detail")
+                    | (state, _) <- states
+                    ]
+                }
+        projectAgentEntries [snapshot] `shouldBe` toJSON
+            [ object
+                [ "path" .= ("/root/worker" :: Text.Text)
+                , "status" .= ("active" :: Text.Text)
+                , "model" .= ("model" :: Text.Text)
+                , "steps" .=
+                    [ object
+                        [ "state" .= (state :: Text.Text)
+                        , "title" .= ("title" :: Text.Text)
+                        , "detail" .= ("detail" :: Text.Text)
+                        ]
+                    | (_, state) <- states
+                    ]
+                ]
+            ]
+
+    it "preserves absent snapshot metadata as JSON null" do
+        projectAgentEntries [AgentSnapshot "/root" "active" Nothing
+                [AgentStep AgentStepInfo "notice" Nothing]]
+            `shouldBe` toJSON
+                [ object
+                    [ "path" .= ("/root" :: Text.Text)
+                    , "status" .= ("active" :: Text.Text)
+                    , "model" .= (Nothing :: Maybe Text.Text)
+                    , "steps" .=
+                        [ object
+                            [ "state" .= ("info" :: Text.Text)
+                            , "title" .= ("notice" :: Text.Text)
+                            , "detail" .= (Nothing :: Maybe Text.Text)
+                            ]
+                        ]
+                    ]
+                ]
+
     it "never serializes encrypted tool arguments" do
         let (_, value) = projectLoopEvent
                 (ToolStarted ToolCall

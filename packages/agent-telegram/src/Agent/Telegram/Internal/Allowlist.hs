@@ -1,7 +1,7 @@
 module Agent.Telegram.Internal.Allowlist where
 
 
-import Agent.CLI.ManagedTurn (ManagedTurnRequest(..))
+import Agent.Runtime.ManagedTurn (ManagedTurnRequest(..))
 import Agent.Telegram.Types
 import Agent.Telegram.Classify
     ( grantableTelegramUser

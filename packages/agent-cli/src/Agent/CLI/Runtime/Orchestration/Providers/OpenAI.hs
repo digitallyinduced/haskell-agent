@@ -2,7 +2,7 @@ module Agent.CLI.Runtime.Orchestration.Providers.OpenAI
     ( withOpenAiProvider
     ) where
 
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( readSessionRequestParams
     )
 import Agent.CLI.Compaction

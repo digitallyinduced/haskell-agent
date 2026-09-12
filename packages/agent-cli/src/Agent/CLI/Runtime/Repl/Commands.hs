@@ -5,7 +5,7 @@ module Agent.CLI.Runtime.Repl.Commands
     , preparePromptSkillInputsWithPaste
     ) where
 
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( readSessionRequestParams
     )
 import Agent.CLI.AgentViewport
@@ -49,7 +49,7 @@ import Agent.CLI.Input
                ReplClipboardPaste, ReplClipboardPasteCaptured, ReplClipboardPasteOrText, ReplChooseModel,
                ReplChooseEffort, ReplChooseAccount, ReplRemovePendingImage, ReplRemoveCapturedImage,
                ReplPasted) )
-import Agent.CLI.GatewayClient ( loadGatewayCredential )
+import Agent.Runtime.GatewayClient ( loadGatewayCredential )
 import Agent.CLI.Login
     ( runFullscreenLoginManager
     , runLoginManager
@@ -108,7 +108,7 @@ import Agent.CLI.Runtime.Repl.Workflow ( handleWorkflowAction )
 import Agent.CLI.Runtime.Types
     ( RunResult(RunEnableCodeMode, RunFreshSession, RunRestart, RunUpdateAndRestart,
                 RunSwitchProvider, RunReload, RunQuit) )
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( TranscriptEffect(TranscriptReplace),
       appendTurnWithMetaUpdateIndexed,
       ensureSession,

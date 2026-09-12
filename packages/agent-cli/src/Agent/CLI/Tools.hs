@@ -17,7 +17,7 @@ module Agent.CLI.Tools
     , xSearchTool
     ) where
 
-import Agent.CLI.ComputerUse (computerFunctionParameters)
+import Agent.ComputerUse (computerFunctionParameters)
 import Agent.Responses.Types.Tools
     ( ResponseTool(..)
     , ResponseToolType(..)

@@ -15,7 +15,7 @@ import Agent.CLI.Approval
     , resolveApprovalPromptWith
     )
 import Agent.CLI.Options (ApprovalPolicy(..))
-import Agent.CLI.ComputerUse (computerToolName, computerUseTool)
+import Agent.ComputerUse (computerToolName, computerUseTool)
 import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.ToolDispatch
     ( ToolCall(..)

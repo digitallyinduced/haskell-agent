@@ -50,7 +50,6 @@ import Agent.Tools.Types
     )
 import Control.Concurrent.Async
     ( Async
-    , mapConcurrently
     , race
     , waitCatch
     , withAsync
@@ -96,7 +95,6 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (IORef, atomicModifyIORef', atomicWriteIORef, modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.IntMap.Strict as IntMap
 import Data.IntMap.Strict (IntMap)
-import qualified Data.IntSet as IntSet
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Maybe (catMaybes, fromMaybe)
@@ -211,63 +209,66 @@ emptyContinuationWarning :: Text
 emptyContinuationWarning =
     "The model produced no assistant text or tool calls after reasoning; stopping."
 
-data LoopCursor = LoopCursor
-    { cursorState :: !BackendSnapshot
-    , cursorProgress :: !LoopProgress
-    , cursorPreviousResponseId :: !(Maybe Text)
-    , cursorTurnsUsed :: !Int
-    , cursorInputs :: ![TurnInput]
-    , cursorSteeringCount :: !Int
-    , cursorLastOutput :: !(Maybe TurnOutput)
-    , cursorTokenUsage :: !TokenUsage
-    , cursorEmptyContinuations :: !Int
+-- | The loop's last owned checkpoint and the work following it. The state
+-- store may publish a newer reset/compaction; recovery must still check ownership.
+-- Normal execution and failure recovery read the same runtime-owned value.
+data LoopState = LoopState
+    { checkpoint :: !BackendSnapshot
+    , progress :: !LoopProgress
+    , pending :: !PendingInputs
+    , previousResponseId :: !(Maybe Text)
+    , turnsUsed :: !Int
+    , lastOutput :: !(Maybe TurnOutput)
+    , tokenUsage :: !TokenUsage
+    , emptyContinuations :: !Int
+    }
+
+-- | A response can absorb its inputs before the caller's steering queue is
+-- acknowledged. Clearing inputs must not erase that acknowledgement debt.
+data PendingInputs = PendingInputs
+    { inputs :: ![TurnInput]
+    , steeringToAcknowledge :: !Int
     }
 
 data CompletedTurnDecision
-    = ContinueLoop !LoopCursor
+    = ContinueLoop { nextEmptyContinuations :: !Int }
     | FinishLoop !LoopResult
     | WarnAndFinishLoop !LoopResult
 
 decideCompletedTurn
-    :: LoopCursor
+    :: LoopState
     -> TurnOutput
     -> [TurnInput]
-    -> Int
     -> CompletedTurnDecision
-decideCompletedTurn cursor turn continuation steeringCount
+decideCompletedTurn state turn continuation
     | not (null continuation) =
-        ContinueLoop cursor
-            { cursorPreviousResponseId = Just turn.responseId
-            , cursorTurnsUsed = nextTurnsUsed
-            , cursorInputs = continuation
-            , cursorSteeringCount = steeringCount
-            , cursorLastOutput = Just turn
-            , cursorTokenUsage = usage
-            , cursorEmptyContinuations = 0
-            }
+        ContinueLoop 0
     | hasVisibleAssistantText turn.assistantText =
         FinishLoop result
-    | cursor.cursorEmptyContinuations >= maxEmptyContinuations =
+    | state.emptyContinuations >= maxEmptyContinuations =
         WarnAndFinishLoop result
     | otherwise =
-        ContinueLoop cursor
-            { cursorPreviousResponseId = Just turn.responseId
-            , cursorTurnsUsed = nextTurnsUsed
-            , cursorInputs = []
-            , cursorSteeringCount = 0
-            , cursorLastOutput = Just turn
-            , cursorTokenUsage = usage
-            , cursorEmptyContinuations =
-                cursor.cursorEmptyContinuations + 1
-            }
+        ContinueLoop (state.emptyContinuations + 1)
   where
-    nextTurnsUsed = cursor.cursorTurnsUsed + 1
-    usage = addTokenUsage cursor.cursorTokenUsage turn.tokenUsage
+    nextTurnsUsed = state.turnsUsed + 1
+    usage = addTokenUsage state.tokenUsage turn.tokenUsage
     result = LoopResult
         { finalResponseId = turn.responseId
         , finalText = turn.assistantText
         , turnsUsed = nextTurnsUsed
         , tokenUsage = usage
+        }
+
+-- | Advance only continuation bookkeeping; the owned checkpoint is untouched.
+advanceLoopState :: TurnOutput -> PendingInputs -> Int -> LoopState -> LoopState
+advanceLoopState turn pending emptyContinuations state =
+    state
+        { previousResponseId = Just turn.responseId
+        , turnsUsed = state.turnsUsed + 1
+        , lastOutput = Just turn
+        , tokenUsage = addTokenUsage state.tokenUsage turn.tokenUsage
+        , pending
+        , emptyContinuations
         }
 
 runLoop
@@ -310,16 +311,30 @@ data LoopRuntime = LoopRuntime
     { loopRuntimeConfig :: LoopConfig
     , loopRuntimeEventPump :: LoopEventPump
     , loopRuntimeAsyncToolManager :: AsyncToolManager
-    , loopRuntimeProgressRef :: IORef (BackendSnapshot, LoopProgress)
-    , loopRuntimePendingRef :: IORef [TurnInput]
-    , loopRuntimePendingSteeringRef :: IORef Int
+    , loopRuntimeState :: IORef LoopState
     , loopRuntimeVisibleStateRef :: IORef VisibleLoopState
     , loopRuntimeProviderTelemetryRef :: IORef [TurnTelemetry]
-    , loopRuntimeInitialSteering :: [TurnInput]
     }
 
-type LoopSubmissionResult =
-    Either () (Either LoopError BackendResult)
+-- A returned response is not necessarily complete or a valid checkpoint.
+data SubmissionOutcome
+    = SubmissionReturned !BackendResult
+    | SubmissionCancelled
+    | SubmissionFailed !LoopError
+
+-- Closing consumes the journal and rejects any callbacks retained by a backend.
+data RecoveryJournal
+    = RecoveryClosed
+    | RecoveryOpen
+        { recoverySummary :: !(Maybe Text)
+        -- Newest first while the journal is open.
+        , recoveryItems :: ![(ResponseItem, Maybe ToolCall)]
+        }
+
+data AttemptVisibility = AttemptVisibility
+    { previousAttemptVisible :: !Bool
+    , currentAttemptVisible :: !Bool
+    }
 
 runLoopInputsUnsafe
     :: LoopConfig
@@ -328,26 +343,34 @@ runLoopInputsUnsafe
     -> [TurnInput]
     -> IO LoopExecution
 runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
-    runtime <- initializeLoopRuntime config0 initialState firstInputs
-    runLoopWithEventPump runtime initialState previousResponseId firstInputs
+    runtime <- initializeLoopRuntime config0 initialState previousResponseId firstInputs
+    runLoopWithEventPump runtime
 
 initializeLoopRuntime
     :: LoopConfig
     -> BackendSnapshot
+    -> Maybe Text
     -> [TurnInput]
     -> IO LoopRuntime
-initializeLoopRuntime config0 initialState firstInputs = do
+initializeLoopRuntime config0 initialState previousResponseId firstInputs = do
     eventPump <- newEventPump config0.loopOnEvent
     -- Allocate only STM state here; the manager's workers remain scoped to
     -- runLoopWithEventPump.
     manager <- newAsyncToolManager
     eventAdmissionLock <- newMVar ()
-    progressRef <- newIORef (initialState, NoResponseCommitted)
     visibleStateRef <- newIORef emptyVisibleLoopState
     providerTelemetryRef <- newIORef []
     initialSteering <- config0.loopReadSteering
-    pendingRef <- newIORef (firstInputs <> initialSteering)
-    pendingSteeringRef <- newIORef (length initialSteering)
+    stateRef <- newIORef LoopState
+        { checkpoint = initialState
+        , progress = NoResponseCommitted
+        , pending = PendingInputs (firstInputs <> initialSteering) (length initialSteering)
+        , previousResponseId
+        , turnsUsed = 0
+        , lastOutput = Nothing
+        , tokenUsage = emptyTokenUsage
+        , emptyContinuations = 0
+        }
     let config = config0
             { loopOnEvent = \event ->
                 -- Provider streaming and async host tools can publish at the
@@ -363,30 +386,41 @@ initializeLoopRuntime config0 initialState firstInputs = do
         { loopRuntimeConfig = config
         , loopRuntimeEventPump = eventPump
         , loopRuntimeAsyncToolManager = manager
-        , loopRuntimeProgressRef = progressRef
-        , loopRuntimePendingRef = pendingRef
-        , loopRuntimePendingSteeringRef = pendingSteeringRef
+        , loopRuntimeState = stateRef
         , loopRuntimeVisibleStateRef = visibleStateRef
         , loopRuntimeProviderTelemetryRef = providerTelemetryRef
-        , loopRuntimeInitialSteering = initialSteering
         }
+
+-- Updates belong to the loop worker, or recovery after that worker is joined.
+-- Never restore an entire pre-submission snapshot after running effects.
+recordCheckpoint :: LoopRuntime -> BackendSnapshot -> IO ()
+recordCheckpoint runtime checkpoint =
+    modifyIORef' runtime.loopRuntimeState \state ->
+        state { checkpoint, progress = ResponseCommitted }
+
+setPendingInputs :: LoopRuntime -> [TurnInput] -> IO ()
+setPendingInputs runtime inputs =
+    modifyIORef' runtime.loopRuntimeState \state ->
+        state { pending = state.pending { inputs } }
+
+clearSteeringAcknowledgement :: LoopRuntime -> IO ()
+clearSteeringAcknowledgement runtime =
+    modifyIORef' runtime.loopRuntimeState \state ->
+        state { pending = state.pending { steeringToAcknowledge = 0 } }
 
 finishLoopExecution
     :: LoopRuntime
-    -> BackendSnapshot
-    -> LoopProgress
     -> Either LoopError LoopResult
     -> IO LoopExecution
-finishLoopExecution runtime state progress result = do
-    writeIORef runtime.loopRuntimeProgressRef (state, progress)
-    pending <- readIORef runtime.loopRuntimePendingRef
+finishLoopExecution runtime result = do
+    state <- readIORef runtime.loopRuntimeState
     visibleState <- readIORef runtime.loopRuntimeVisibleStateRef
     providerTelemetry <-
         reverse <$> readIORef runtime.loopRuntimeProviderTelemetryRef
     pure LoopExecution
-        { executionState = state.backendItems
-        , executionPendingInputs = pending
-        , executionProgress = progress
+        { executionState = state.checkpoint.backendItems
+        , executionPendingInputs = state.pending.inputs
+        , executionProgress = state.progress
         , executionUncommittedAssistantText =
             visibleAssistantText visibleState
         , executionUncommittedDisplayEvents = visibleDisplayEvents visibleState
@@ -394,111 +428,77 @@ finishLoopExecution runtime state progress result = do
         , executionResult = result
         }
 
-finishLoopCursor
-    :: LoopRuntime
-    -> LoopCursor
-    -> Either LoopError LoopResult
-    -> IO LoopExecution
-finishLoopCursor runtime cursor =
-    finishLoopExecution
-        runtime
-        cursor.cursorState
-        cursor.cursorProgress
-
 unexpectedLoopExecution
     :: LoopRuntime
-    -> BackendSnapshot
-    -> LoopProgress
     -> SomeException
     -> IO LoopExecution
-unexpectedLoopExecution runtime state progress exception =
-    finishLoopExecution runtime state progress
+unexpectedLoopExecution runtime exception =
+    finishLoopExecution runtime
         (Left (LoopUnexpected (exceptionSummary exception)))
 
-unexpectedLoopCursor
+protectLoop
     :: LoopRuntime
-    -> LoopCursor
-    -> SomeException
     -> IO LoopExecution
-unexpectedLoopCursor runtime _cursor exception = do
-    (state, progress) <- readIORef runtime.loopRuntimeProgressRef
-    unexpectedLoopExecution runtime state progress exception
+    -> IO LoopExecution
+protectLoop runtime action =
+    tryAny action >>= either (unexpectedLoopExecution runtime) pure
 
-protectLoopCursor
-    :: LoopRuntime
-    -> LoopCursor
-    -> IO LoopExecution
-    -> IO LoopExecution
-protectLoopCursor runtime cursor action =
-    tryAny action >>= either (unexpectedLoopCursor runtime cursor) pure
-
-runLoopCursor :: LoopRuntime -> LoopCursor -> IO LoopExecution
-runLoopCursor runtime cursor = do
+runLoopState :: LoopRuntime -> IO LoopExecution
+runLoopState runtime = do
     let config = runtime.loopRuntimeConfig
-    writeIORef runtime.loopRuntimeProgressRef
-        (cursor.cursorState, cursor.cursorProgress)
-    writeIORef runtime.loopRuntimePendingRef cursor.cursorInputs
-    writeIORef runtime.loopRuntimePendingSteeringRef cursor.cursorSteeringCount
-    if cursor.cursorTurnsUsed >= config.loopMaxTurns
-        then finishLoopCursor runtime cursor $ case cursor.cursorLastOutput of
+    state <- readIORef runtime.loopRuntimeState
+    if state.turnsUsed >= config.loopMaxTurns
+        then finishLoopExecution runtime $ case state.lastOutput of
             Just turn -> Left (LoopMaxTurns turn)
             Nothing -> Left LoopNoResponseId
-        else protectLoopCursor runtime cursor do
+        else protectLoop runtime do
             cancelled <- isCancelled config.loopCancel
             if cancelled
-                then finishLoopCursor runtime cursor
+                then finishLoopExecution runtime
                     (Left (LoopCancelled []))
                 else do
                     config.loopOnEvent TurnStarted
-                    submission <- submitLoopTurn runtime cursor
-                    (latestState, latestProgress) <-
-                        readIORef runtime.loopRuntimeProgressRef
-                    let interruptedCursor = cursor
-                            { cursorState = latestState
-                            , cursorProgress = latestProgress
-                            }
+                    submission <- submitLoopTurn runtime state
                     case submission of
-                        Left () ->
-                            finishLoopCursor runtime interruptedCursor
+                        SubmissionCancelled ->
+                            finishLoopExecution runtime
                                 (Left (LoopCancelled []))
-                        Right (Left err) ->
-                            finishLoopCursor runtime interruptedCursor (Left err)
-                        Right
-                            (Right BackendResult{backendOutput = turn})
+                        SubmissionFailed err ->
+                            finishLoopExecution runtime (Left err)
+                        SubmissionReturned BackendResult{backendOutput = turn}
                             | Text.null turn.responseId ->
-                                finishLoopCursor runtime interruptedCursor
+                                finishLoopExecution runtime
                                     (Left LoopNoResponseId)
-                        Right (Right BackendResult{..}) ->
-                            continueCommittedLoop
-                                runtime
-                                cursor
-                                    { cursorState = backendState
-                                    , cursorProgress = ResponseCommitted
-                                    }
-                                backendOutput
+                        SubmissionReturned BackendResult{backendOutput} ->
+                            continueCommittedLoop runtime backendOutput
 
 submitLoopTurn
     :: LoopRuntime
-    -> LoopCursor
-    -> IO LoopSubmissionResult
-submitLoopTurn runtime cursor = do
+    -> LoopState
+    -> IO SubmissionOutcome
+submitLoopTurn runtime state = do
     let config = runtime.loopRuntimeConfig
-    visibleAttempts <- newIORef (False, False)
+    visibleAttempts <- newIORef (AttemptVisibility False False)
     cancellationMode <- newIORef InterruptThenCancel
     -- The callback belongs to this submission, not to the backend process.
     -- Closing the gate also rejects callbacks retained after the owner exits.
-    recovery <- newMVar (True, Nothing, [])
-    let checkpoint text = modifyMVar_ recovery \(active, previous, items) ->
-            if active
-                then let bounded = Text.copy (Text.take 32768 text)
-                     in bounded `seq` pure (active, Just bounded, items)
-                else pure (active, previous, items)
-        completedItem item call = modifyMVar_ recovery \(active, summary, items) ->
-            pure (active, summary, if active then (item, call) : items else items)
-        clearRecovery = modifyMVar_ recovery \(active, _, _) ->
-            pure (active, Nothing, [])
-        closeRecovery = modifyMVar recovery \(_, summary, items) ->
-            pure ((False, Nothing, []), (summary, reverse items))
+    recovery <- newMVar (RecoveryOpen Nothing [])
+    let checkpoint text = modifyMVar_ recovery \case
+            RecoveryClosed -> pure RecoveryClosed
+            journal@RecoveryOpen{} ->
+                let bounded = Text.copy (Text.take 32768 text)
+                in bounded `seq` pure journal { recoverySummary = Just bounded }
+        completedItem item call = modifyMVar_ recovery \case
+            RecoveryClosed -> pure RecoveryClosed
+            journal@RecoveryOpen{recoveryItems} ->
+                pure journal { recoveryItems = (item, call) : recoveryItems }
+        clearRecovery = modifyMVar_ recovery \case
+            RecoveryClosed -> pure RecoveryClosed
+            RecoveryOpen{} -> pure (RecoveryOpen Nothing [])
+        closeRecovery = modifyMVar recovery \case
+            RecoveryClosed -> pure (RecoveryClosed, (Nothing, []))
+            RecoveryOpen{..} ->
+                pure (RecoveryClosed, (recoverySummary, reverse recoveryItems))
         publishRecovery = do
             (summary, items) <- closeRecovery
             current <- config.loopBackendState.readBackendState
@@ -509,7 +509,7 @@ submitLoopTurn runtime cursor = do
             case () of
                 _
                     | hasSummary || not (null items)
-                    , current == cursor.cursorState -> do
+                    , current == state.checkpoint -> do
                         let note = Text.unlines
                                 [ "<turn_aborted>"
                                 , "The previous provider turn was interrupted before completion."
@@ -524,7 +524,7 @@ submitLoopTurn runtime cursor = do
                             candidate = advanceBackendSnapshot
                                 current
                                 (current.backendItems
-                                    <> turnInputsToItems cursor.cursorInputs
+                                    <> turnInputsToItems state.pending.inputs
                                     <> map fst items
                                     <> if hasSummary
                                         then turnInputsToItems [UserMessage note]
@@ -534,13 +534,12 @@ submitLoopTurn runtime cursor = do
                             config.loopBackendState.commitBackendState candidate
                         acknowledgeManagedTools
                             (asyncToolManager runtime)
-                            cursor.cursorInputs
+                            state.pending.inputs
                             (catMaybes (map snd items))
-                        writeIORef runtime.loopRuntimeProgressRef
-                            (committed, ResponseCommitted)
-                        writeIORef runtime.loopRuntimePendingRef []
-                        config.loopCommitSteering cursor.cursorSteeringCount
-                        writeIORef runtime.loopRuntimePendingSteeringRef 0
+                        recordCheckpoint runtime committed
+                        setPendingInputs runtime []
+                        config.loopCommitSteering state.pending.steeringToAcknowledge
+                        clearSteeringAcknowledgement runtime
                 _ -> pure ()
     let onBackendEvent event = do
             case event of
@@ -548,21 +547,26 @@ submitLoopTurn runtime cursor = do
                     | visibleResponseActivity event ->
                         modifyIORef'
                             visibleAttempts
-                            (\(prior, _) -> (prior, True))
+                            (\visibility -> visibility { currentAttemptVisible = True })
                 -- A retry keeps the previous attempt visible while opening a
                 -- fresh current attempt.
                 ResponseRestarted _ -> do
                     clearRecovery
                     modifyIORef'
                         visibleAttempts
-                        (\(prior, current) -> (prior || current, False))
+                        (\visibility -> AttemptVisibility
+                            { previousAttemptVisible =
+                                visibility.previousAttemptVisible
+                                    || visibility.currentAttemptVisible
+                            , currentAttemptVisible = False
+                            })
                 -- The backend rolled that attempt back, but earlier restarted
                 -- attempts remain visible.
                 ResponseAttemptDiscarded -> do
                     clearRecovery
                     modifyIORef'
                         visibleAttempts
-                        (\(prior, _) -> (prior, False))
+                        (\visibility -> visibility { currentAttemptVisible = False })
                 _ -> pure ()
             config.loopOnEvent event
     -- Race the model call against cancel so Ctrl-C / Esc can stop reasoning
@@ -571,22 +575,24 @@ submitLoopTurn runtime cursor = do
         normalized <- (withAsync
             (restore $
                 config.loopBackend.submitTurnWithCallbacks
-                    (normalizeBackendSnapshotImages cursor.cursorState)
-                    cursor.cursorPreviousResponseId
-                    (normalizeTurnInputs cursor.cursorInputs)
+                    (normalizeBackendSnapshotImages state.checkpoint)
+                    state.previousResponseId
+                    (normalizeTurnInputs state.pending.inputs)
                     BackendCallbacks
                         { onLoopEvent = onBackendEvent
                         , onAsyncToolCall = \call ->
-                            withMVar recovery \(active, _, _) ->
-                                when active $
+                            withMVar recovery \case
+                                RecoveryClosed -> pure ()
+                                RecoveryOpen{} ->
                                     admitAsyncToolCall
                                         (asyncToolManager runtime)
                                         call
                         , onRecoveryCheckpoint = checkpoint
                         , onCompletedResponseItem = completedItem
                         , onCancellationMode = \mode ->
-                            withMVar recovery \(active, _, _) ->
-                                when active (writeIORef cancellationMode mode)
+                            withMVar recovery \case
+                                RecoveryClosed -> pure ()
+                                RecoveryOpen{} -> writeIORef cancellationMode mode
                         })
             \submission -> do
                 result <- restore $ race
@@ -604,65 +610,60 @@ submitLoopTurn runtime cursor = do
                             _ <- restore $
                                 timeout 2000000 (waitCatch submission)
                             pure ()
-                        pure (Left ())
+                        pure SubmissionCancelled
                     Right (Left exception) ->
                         -- Preserve the provider thread's asynchronous-exception
                         -- identity. Safe.throwIO would turn ThreadKilled into
                         -- LoopUnexpected.
                         Exception.throwIO exception
                     Right (Right completed) ->
-                        pure (Right completed)
+                        pure (either (SubmissionFailed . LoopTransport) SubmissionReturned completed)
                 case normalized of
-                    Right (Right backendResult@BackendResult{..})
+                    SubmissionReturned backendResult@BackendResult{..}
                         | not (Text.null backendOutput.responseId) -> do
                             committed <-
                                 config.loopBackendState.commitBackendState
                                     backendState
                             acknowledgeManagedTools
                                 (asyncToolManager runtime)
-                                cursor.cursorInputs
+                                state.pending.inputs
                                 backendOutput.toolCalls
-                            writeIORef runtime.loopRuntimeProgressRef
-                                (committed, ResponseCommitted)
+                            recordCheckpoint runtime committed
                             pure
-                                (Right
-                                    (Right backendResult
-                                        { backendState = committed
-                                        }))
+                                (SubmissionReturned backendResult
+                                    { backendState = committed
+                                    })
                     _ -> pure normalized)
             `onException` publishRecovery
         case normalized of
-            Right (Right BackendResult{backendOutput})
+            SubmissionReturned BackendResult{backendOutput}
                 | not (Text.null backendOutput.responseId) -> do
                     _ <- closeRecovery
                     pure normalized
             _ -> publishRecovery >> pure normalized
     case raced of
-        Left () -> pure (Left ())
-        Right (Left err) -> do
-            (priorVisible, currentVisible) <- readIORef visibleAttempts
-            let emitted = priorVisible || currentVisible
+        SubmissionCancelled -> pure SubmissionCancelled
+        SubmissionFailed (LoopTransport err) -> do
+            visibility <- readIORef visibleAttempts
+            let emitted =
+                    visibility.previousAttemptVisible || visibility.currentAttemptVisible
             when emitted $
                 config.loopOnEvent ResponseAttemptFailed
-            pure $ Right $ Left $
+            pure $ SubmissionFailed $
                 if emitted
                     then LoopTransportAfterOutput err
                     else LoopTransport err
-        Right (Right backendResult) ->
-            pure (Right (Right backendResult))
+        outcome -> pure outcome
 
 continueCommittedLoop
     :: LoopRuntime
-    -> LoopCursor
     -> TurnOutput
     -> IO LoopExecution
-continueCommittedLoop runtime cursor turn = do
+continueCommittedLoop runtime turn = do
     let config = runtime.loopRuntimeConfig
-    writeIORef runtime.loopRuntimeProgressRef
-        (cursor.cursorState, ResponseCommitted)
     -- The committed response absorbed every input submitted with it, and its
     -- assistant text now lives in the committed state.
-    writeIORef runtime.loopRuntimePendingRef []
+    setPendingInputs runtime []
     -- Async tool publishers may still be active. Reset the whole snapshot
     -- atomically without introducing a blocking checkpoint during commit.
     atomicWriteIORef runtime.loopRuntimeVisibleStateRef emptyVisibleLoopState
@@ -674,12 +675,12 @@ continueCommittedLoop runtime cursor turn = do
             modifyIORef'
                 runtime.loopRuntimeProviderTelemetryRef
                 (telemetry :)
-    protectLoopCursor runtime cursor do
+    protectLoop runtime do
         -- A cancel that landed during submitTurn after the race chose Right
         -- still counts, but its returned state is committed.
         cancelledMid <- isCancelled config.loopCancel
         if cancelledMid
-            then finishLoopCursor runtime cursor
+            then finishLoopExecution runtime
                 (Left (LoopCancelled []))
             else do
                 config.loopOnEvent (TurnFinished turn)
@@ -689,89 +690,70 @@ continueCommittedLoop runtime cursor turn = do
                         -- than an assistant completion. Leaving the enclosing
                         -- loop scope cancels and joins any async calls that
                         -- were announced before the incomplete response.
-                        finishLoopCursor runtime cursor
+                        finishLoopExecution runtime
                             (Left (LoopIncomplete turn))
                     TurnCompleted -> do
-                        config.loopCommitSteering cursor.cursorSteeringCount
-                        writeIORef runtime.loopRuntimePendingSteeringRef 0
-                        racedResults <-
-                            race
-                                (waitCancel config.loopCancel)
-                                (runManagedToolCalls
-                                    (asyncToolManager runtime)
-                                    turn.toolCalls)
-                        case racedResults of
-                            Left () ->
-                                -- The manager itself is scoped by
-                                -- 'runLoopWithEventPump'. Returning here lets
-                                -- that scope cancel and join a handler or an
-                                -- approval callback that has not completed.
-                                finishLoopCursor runtime cursor
-                                    (Left (LoopCancelled []))
-                            Right results -> do
-                                writeIORef
-                                    runtime.loopRuntimePendingRef
-                                    (map CompletedTool results)
-                                cancelledAfter <-
-                                    isCancelled config.loopCancel
-                                if cancelledAfter
-                                    then finishLoopCursor runtime cursor
-                                        (Left (LoopCancelled results))
-                                    else do
-                                        steering <- config.loopReadSteering
-                                        let continuation =
-                                                map CompletedTool results
-                                                    <> steering
-                                        case decideCompletedTurn
-                                            cursor
-                                            turn
-                                            continuation
-                                            (length steering) of
-                                            ContinueLoop nextCursor ->
-                                                runLoopCursor runtime nextCursor
-                                            FinishLoop result ->
-                                                finishLoopCursor runtime cursor
-                                                    (Right result)
-                                            WarnAndFinishLoop result -> do
-                                                config.loopOnEvent
-                                                    (WarningRaised
-                                                        emptyContinuationWarning)
-                                                finishLoopCursor runtime cursor
-                                                    (Right result)
+                        completeLoopTurn runtime turn
+
+-- | The response is committed before acknowledging its inputs or waiting for
+-- tools. Keep these boundaries explicit: recovery observes each completed effect.
+completeLoopTurn :: LoopRuntime -> TurnOutput -> IO LoopExecution
+completeLoopTurn runtime turn = do
+    let config = runtime.loopRuntimeConfig
+    state <- readIORef runtime.loopRuntimeState
+    config.loopCommitSteering state.pending.steeringToAcknowledge
+    clearSteeringAcknowledgement runtime
+    race
+        (waitCancel config.loopCancel)
+        (runManagedToolCalls (asyncToolManager runtime) turn.toolCalls)
+        >>= \case
+            Left () ->
+                -- Leaving the enclosing manager scope cancels and joins
+                -- unfinished handlers and approval callbacks.
+                finishLoopExecution runtime (Left (LoopCancelled []))
+            Right results -> do
+                -- Retain completed results even if cancellation or reading
+                -- steering interrupts the transition to the next turn.
+                setPendingInputs runtime (map CompletedTool results)
+                cancelled <- isCancelled config.loopCancel
+                if cancelled
+                    then finishLoopExecution runtime (Left (LoopCancelled results))
+                    else advanceCompletedTurn runtime turn results
+
+advanceCompletedTurn
+    :: LoopRuntime
+    -> TurnOutput
+    -> [ToolCallResult]
+    -> IO LoopExecution
+advanceCompletedTurn runtime turn results = do
+    let config = runtime.loopRuntimeConfig
+    steering <- config.loopReadSteering
+    let continuation = map CompletedTool results <> steering
+    state <- readIORef runtime.loopRuntimeState
+    case decideCompletedTurn state turn continuation of
+        ContinueLoop{nextEmptyContinuations} -> do
+            modifyIORef' runtime.loopRuntimeState $
+                advanceLoopState turn
+                    (PendingInputs continuation (length steering))
+                    nextEmptyContinuations
+            runLoopState runtime
+        FinishLoop result ->
+            finishLoopExecution runtime (Right result)
+        WarnAndFinishLoop result -> do
+            config.loopOnEvent (WarningRaised emptyContinuationWarning)
+            finishLoopExecution runtime (Right result)
 
 runLoopWithEventPump
     :: LoopRuntime
-    -> BackendSnapshot
-    -> Maybe Text
-    -> [TurnInput]
     -> IO LoopExecution
-runLoopWithEventPump runtime initialState previousResponseId firstInputs =
+runLoopWithEventPump runtime =
     withAsync (runEventPump runtime.loopRuntimeEventPump) \eventWorker -> do
         let manager = asyncToolManager runtime
-            initialSteering = runtime.loopRuntimeInitialSteering
-            run =
-                runLoopCursor runtime LoopCursor
-                    { cursorState = initialState
-                    , cursorProgress = NoResponseCommitted
-                    , cursorPreviousResponseId = previousResponseId
-                    , cursorTurnsUsed = 0
-                    , cursorInputs = firstInputs <> initialSteering
-                    , cursorSteeringCount = length initialSteering
-                    , cursorLastOutput = Nothing
-                    , cursorTokenUsage = emptyTokenUsage
-                    , cursorEmptyContinuations = 0
-                    }
             handleManagerFailure exception
                 | isAsyncException exception =
                     Exception.throwIO exception
-                | otherwise = do
-                    (state, progress) <-
-                        readIORef runtime.loopRuntimeProgressRef
-                    unexpectedLoopExecution
-                        runtime
-                        state
-                        progress
-                        exception
+                | otherwise =
+                    unexpectedLoopExecution runtime exception
         execution <-
             withAsync
                 (runAsyncToolManager
@@ -787,16 +769,11 @@ runLoopWithEventPump runtime initialState previousResponseId firstInputs =
                                 (waitAsyncToolManagerFailure
                                     managerWorker
                                     manager))
-                            run
+                            (runLoopState runtime)
                     case raced of
-                        Left (Left failure) -> do
-                            (state, progress) <-
-                                readIORef
-                                    runtime.loopRuntimeProgressRef
+                        Left (Left failure) ->
                             handleLoopEventFailure
                                 (unexpectedLoopExecution runtime)
-                                state
-                                progress
                                 failure
                         Left (Right exception) ->
                             handleManagerFailure exception
@@ -811,18 +788,13 @@ runLoopWithEventPump runtime initialState previousResponseId firstInputs =
         -- of its sibling tools have already finished successfully.
         recovered <- tryAny (recoverManagedTools runtime manager execution) >>= \case
             Right recovered -> pure recovered
-            Left exception -> do
-                (state, progress) <- readIORef runtime.loopRuntimeProgressRef
-                unexpectedLoopExecution runtime state progress exception
+            Left exception ->
+                unexpectedLoopExecution runtime exception
         flushEventPump runtime.loopRuntimeEventPump >>= \case
             Left failure ->
-                readIORef runtime.loopRuntimeProgressRef
-                    >>= \(state, progress) ->
-                        handleLoopEventFailure
-                            (unexpectedLoopExecution runtime)
-                            state
-                            progress
-                            failure
+                handleLoopEventFailure
+                    (unexpectedLoopExecution runtime)
+                    failure
             Right () -> pure recovered
 
 -- | A tool result is acknowledged only when the response consuming it commits,
@@ -884,14 +856,14 @@ recoverManagedTools runtime manager execution = do
                     (\completed -> all ((/= completed.callId) . (.callId)) previous)
                     salvaged))
             other -> other
-    writeIORef runtime.loopRuntimePendingRef pending
+    setPendingInputs runtime pending
     if null orphans
         then pure execution
             { executionPendingInputs = pending
             , executionResult = result
             }
         else do
-            (owned, _) <- readIORef runtime.loopRuntimeProgressRef
+            owned <- (.checkpoint) <$> readIORef runtime.loopRuntimeState
             current <- runtime.loopRuntimeConfig.loopBackendState.readBackendState
             -- Reset/compaction may have installed a newer checkpoint. Do not
             -- resurrect a submission's superseded history.
@@ -909,16 +881,16 @@ recoverManagedTools runtime manager execution = do
                     -- A failed checkpoint must still return the trusted host
                     -- evidence as pending input, rather than lose it to an
                     -- exception escaping the detailed loop result.
-                    writeIORef runtime.loopRuntimePendingRef recoveryInputs
+                    setPendingInputs runtime recoveryInputs
                     committed <-
                         runtime.loopRuntimeConfig.loopBackendState.commitBackendState
                             candidate
-                    writeIORef runtime.loopRuntimeProgressRef
-                        (committed, ResponseCommitted)
-                    writeIORef runtime.loopRuntimePendingRef []
-                    steeringCount <- readIORef runtime.loopRuntimePendingSteeringRef
-                    runtime.loopRuntimeConfig.loopCommitSteering steeringCount
-                    writeIORef runtime.loopRuntimePendingSteeringRef 0
+                    recordCheckpoint runtime committed
+                    setPendingInputs runtime []
+                    state <- readIORef runtime.loopRuntimeState
+                    runtime.loopRuntimeConfig.loopCommitSteering
+                        state.pending.steeringToAcknowledge
+                    clearSteeringAcknowledgement runtime
                     pure execution
                         { executionState = committed.backendItems
                         , executionPendingInputs = []
@@ -973,21 +945,18 @@ managedRecoveryNote calls = Text.unlines
                     ]
 
 handleLoopEventFailure
-    :: (BackendSnapshot -> LoopProgress -> SomeException -> IO LoopExecution)
-    -> BackendSnapshot
-    -> LoopProgress
+    :: (SomeException -> IO LoopExecution)
     -> EventPumpFailure
     -> IO LoopExecution
-handleLoopEventFailure unexpected state progress = \case
+handleLoopEventFailure unexpected = \case
     EventPumpSyncFailure exception ->
-        unexpected state progress exception
+        unexpected exception
     EventPumpAsyncFailure exception ->
         Exception.throwIO exception
 
 data AsyncToolManager = AsyncToolManager
-    { asyncToolRequests :: !(TQueue ManagedToolRequest)
+    { asyncToolRequests :: !(TQueue ManagedToolCall)
     , asyncToolCalls :: !(TVar (Map Text ManagedToolCall))
-    , asyncToolNextSequence :: !(TVar Int)
     , asyncToolScheduled :: !(TVar (IntMap ToolSchedulingPlan))
     , asyncToolOutstanding :: !(TVar Int)
     , asyncToolCompleted :: !(TQueue ToolCallResult)
@@ -1005,11 +974,6 @@ data ManagedToolCall = ManagedToolCall
     , managedAdmissionSequence :: !Int
     }
 
-data ManagedToolRequest = ManagedToolRequest
-    { managedSequence :: !Int
-    , managedRecord :: !ManagedToolCall
-    }
-
 data AsyncToolCallConflict = AsyncToolCallConflict !Text
 
 instance Show AsyncToolCallConflict where
@@ -1022,7 +986,6 @@ newAsyncToolManager =
     AsyncToolManager
         <$> newTQueueIO
         <*> newTVarIO Map.empty
-        <*> newTVarIO 0
         <*> newTVarIO IntMap.empty
         <*> newTVarIO 0
         <*> newTQueueIO
@@ -1068,25 +1031,20 @@ admitManagedToolCall manager call = do
         Nothing -> do
             result <- newEmptyTMVar
             trustedResult <- newTVar Nothing
-            sequenceNumber <- readTVar manager.asyncToolNextSequence
+            -- The registry retains every admitted call for deduplication and
+            -- recovery, so its size is also the next admission sequence.
             let record = ManagedToolCall
                     { managedCall = call
                     , managedResult = result
                     , managedTrustedResult = trustedResult
-                    , managedAdmissionSequence = sequenceNumber
+                    , managedAdmissionSequence = Map.size calls
                     }
             writeTVar
                 manager.asyncToolCalls
                 (Map.insert call.callId record calls)
-            writeTVar
-                manager.asyncToolNextSequence
-                (sequenceNumber + 1)
             when (toolCallMode call == AsyncToolCall) $
                 modifyTVar' manager.asyncToolOutstanding (+ 1)
-            writeTQueue manager.asyncToolRequests ManagedToolRequest
-                { managedSequence = sequenceNumber
-                , managedRecord = record
-                }
+            writeTQueue manager.asyncToolRequests record
             pure result
 
 runManagedToolCalls
@@ -1160,7 +1118,7 @@ runAsyncToolManager config manager = do
                     prepared <-
                         prepareManagedToolCall
                             config
-                            request.managedRecord.managedCall
+                            request.managedCall
                     plan <- schedulingPlanForPrepared config prepared
                     pure (prepared, plan))
                 >>= \case
@@ -1175,7 +1133,7 @@ runAsyncToolManager config manager = do
                                     modifyTVar'
                                         manager.asyncToolScheduled
                                         (IntMap.insert
-                                            request.managedSequence
+                                            request.managedAdmissionSequence
                                             plan)
                                 withAsync
                                     (runManagedToolWorker
@@ -1216,7 +1174,7 @@ prepareManagedToolCall config call
 runManagedToolWorker
     :: LoopConfig
     -> AsyncToolManager
-    -> ManagedToolRequest
+    -> ManagedToolCall
     -> PreparedToolCall
     -> ToolSchedulingPlan
     -> IO (Maybe ToolCallResult)
@@ -1228,7 +1186,7 @@ runManagedToolWorker config manager request prepared plan = do
                 IntMap.foldrWithKey
                     (\sequenceNumber earlierPlan conflicts ->
                         conflicts
-                            || ( sequenceNumber < request.managedSequence
+                            || ( sequenceNumber < request.managedAdmissionSequence
                                 && schedulingPlansConflict earlierPlan plan
                                ))
                     False
@@ -1236,7 +1194,7 @@ runManagedToolWorker config manager request prepared plan = do
     race
         (waitCancel config.loopCancel)
         (runPreparedToolCallWithCompletion
-            (atomically . writeTVar request.managedRecord.managedTrustedResult . Just)
+            (atomically . writeTVar request.managedTrustedResult . Just)
             config
             prepared)
         >>= \case
@@ -1245,15 +1203,15 @@ runManagedToolWorker config manager request prepared plan = do
 
 completeManagedToolRequest
     :: AsyncToolManager
-    -> ManagedToolRequest
+    -> ManagedToolCall
     -> Either SomeException (Maybe ToolCallResult)
     -> IO ()
 completeManagedToolRequest manager request outcome =
     atomically do
         modifyTVar'
             manager.asyncToolScheduled
-            (IntMap.delete request.managedSequence)
-        let call = request.managedRecord.managedCall
+            (IntMap.delete request.managedAdmissionSequence)
+        let call = request.managedCall
         case outcome of
             Left exception -> do
                 -- Do not publish a synthetic empty completion for a crashed
@@ -1262,7 +1220,7 @@ completeManagedToolRequest manager request outcome =
                 _ <- tryPutTMVar manager.asyncToolFailure exception
                 pure ()
             Right result -> do
-                putTMVar request.managedRecord.managedResult result
+                putTMVar request.managedResult result
                 when (toolCallMode call == AsyncToolCall) do
                     modifyTVar'
                         manager.asyncToolOutstanding
@@ -1290,110 +1248,6 @@ waitAsyncToolManagerFailure managerWorker manager =
                         AsyncToolCallConflict
                             "Async tool manager stopped unexpectedly."
             Right exception -> pure exception
-
--- | Preserve model order between conflicting calls while allowing independent
--- calls from the same model turn to overlap. Results are returned in model
--- order regardless of completion order.
-runToolCalls :: LoopConfig -> [ToolCall] -> IO [ToolCallResult]
-runToolCalls config calls = do
-    prepared <- prepareIndexedToolCalls config (zip [0..] calls)
-    scheduled <- traverse schedule prepared
-    go scheduled IntMap.empty
-  where
-    schedule
-        :: IndexedPreparedToolCall
-        -> IO PreparedScheduledToolCall
-    schedule indexed = do
-        plan <- schedulingPlanForPrepared config indexed.prepared
-        pure PreparedScheduledToolCall
-            { index = indexed.index
-            , plan
-            , prepared = indexed.prepared
-            }
-
-    go
-        :: [PreparedScheduledToolCall]
-        -> IntMap ToolCallResult
-        -> IO [ToolCallResult]
-    go [] completed =
-        pure (IntMap.elems completed)
-    go remaining completed = do
-        let ready = readyCalls remaining
-            readyIndexes = IntSet.fromList (map (.index) ready)
-            pending =
-                filter
-                    (\scheduled ->
-                        IntSet.notMember scheduled.index readyIndexes)
-                    remaining
-        raced <- race
-            (waitCancel config.loopCancel)
-            (mapConcurrently
-                (\scheduled -> do
-                    result <-
-                        runPreparedToolCall config scheduled.prepared
-                    pure (fmap (\value -> (scheduled.index, value)) result))
-                ready)
-        case raced of
-            Left () ->
-                -- 'race' cancels and joins the structured concurrent batch,
-                -- so no tool handler survives the cancelled turn.
-                pure (IntMap.elems completed)
-            Right batchResults -> do
-                let completed' =
-                        foldr
-                            (\result acc ->
-                                maybe
-                                    acc
-                                    (\(index, value) ->
-                                        IntMap.insert index value acc)
-                                    result)
-                            completed
-                            batchResults
-                go pending completed'
-
-data IndexedPreparedToolCall = IndexedPreparedToolCall
-    { index :: !Int
-    , prepared :: !PreparedToolCall
-    }
-
-data PreparedScheduledToolCall = PreparedScheduledToolCall
-    { index :: !Int
-    , plan :: !ToolSchedulingPlan
-    , prepared :: !PreparedToolCall
-    }
-
-readyCalls :: [PreparedScheduledToolCall] -> [PreparedScheduledToolCall]
-readyCalls calls =
-    [ call
-    | call <- calls
-    , not
-        (any
-            (\earlier ->
-                earlier.index < call.index
-                    && schedulingPlansConflict earlier.plan call.plan)
-            calls)
-    ]
-
-prepareIndexedToolCalls
-    :: LoopConfig
-    -> [(Int, ToolCall)]
-    -> IO [IndexedPreparedToolCall]
-prepareIndexedToolCalls _ [] = pure []
-prepareIndexedToolCalls config ((index, call) : rest) = do
-    cancelled <- isCancelled config.loopCancel
-    if cancelled
-        then pure []
-        else do
-            prepared <- prepareToolCall config call
-            cancelledAfter <- isCancelled config.loopCancel
-            if cancelledAfter
-                then pure []
-                else
-                    (IndexedPreparedToolCall
-                        { index
-                        , prepared
-                        } :)
-                        <$> prepareIndexedToolCalls config rest
 
 data ToolApproval
     = ToolApprovalDenied !Text
@@ -1436,12 +1290,6 @@ prepareToolCall config call = do
         Left denial -> ToolApprovalDenied denial
         Right False -> ToolApprovalRejected
         Right True -> ToolApprovalGranted
-
-runPreparedToolCall
-    :: LoopConfig
-    -> PreparedToolCall
-    -> IO (Maybe ToolCallResult)
-runPreparedToolCall = runPreparedToolCallWithCompletion (const (pure ()))
 
 runPreparedToolCallWithCompletion
     :: (ToolCallResult -> IO ())

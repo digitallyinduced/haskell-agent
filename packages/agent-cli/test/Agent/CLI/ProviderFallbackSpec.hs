@@ -1,12 +1,12 @@
 module Agent.CLI.ProviderFallbackSpec (spec) where
 
-import Agent.CLI.ModelConfig
+import Agent.Runtime.ModelConfig
     ( ModelCatalog
     , decodeModelConfig
     , packagedModelCatalogPath
     )
 import Agent.CLI.AccountSelection (SelectedAccount(..))
-import Agent.CLI.Models (ModelOption(..), ModelTarget(..), rawModelOption)
+import Agent.Runtime.Models (ModelOption(..), ModelTarget(..), rawModelOption)
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
     , automaticCooldownRetryDelay

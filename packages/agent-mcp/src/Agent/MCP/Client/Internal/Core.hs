@@ -67,7 +67,7 @@ import Agent.MCP.Types
       emptyCapturedStderr,
       projectRawOr )
 import Agent.ToolDispatch ()
-import Agent.Tools.IO ( terminateProcessGroup )
+import Agent.Process ( terminateProcessGroup )
 import Agent.Tools.Types ()
 import Control.Concurrent ()
 import Control.Concurrent.Async ( asyncWithUnmask, cancel )

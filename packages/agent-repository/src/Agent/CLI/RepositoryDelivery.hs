@@ -48,7 +48,7 @@ import Crypto.Hash (Digest, SHA1, SHA256, hash)
 import Data.Aeson ((.:), (.:?), (.!=))
 import qualified Data.Aeson.Types as AesonTypes
 import qualified Data.Aeson.KeyMap as KeyMap
-import Agent.CLI.Session.PullRequest (pullRequestURLs, conversationPullRequestURLs)
+import Agent.Runtime.Session.PullRequest (pullRequestURLs, conversationPullRequestURLs)
 import Data.List (nub)
 import Data.Maybe (fromMaybe)
 import Text.Read (readMaybe)

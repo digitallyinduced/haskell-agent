@@ -17,8 +17,8 @@ module Agent.CLI.CompactionSpec.Fixtures
     , testRequestState
     ) where
 
-import Agent.CLI.Session.Request (SessionRequestState, newSessionRequestState)
-import Agent.CLI.Session (Persistence(..))
+import Agent.Runtime.Session.Request (SessionRequestState, newSessionRequestState)
+import Agent.Runtime.Session (Persistence(..))
 import Agent.Error (ApiError)
 import Agent.Json.Decode qualified as Hermes
 import Agent.Loop

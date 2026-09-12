@@ -1,7 +1,7 @@
 module Agent.CLI.ClaudeGatewayProxySpec (spec) where
 
 import Agent.CLI.ClaudeGatewayProxy (withClaudeGatewayProxy)
-import Agent.CLI.GatewayClient (GatewayCredential(..))
+import Agent.Runtime.GatewayClient (GatewayCredential(..))
 import Agent.Claude (ClaudeCodeTransport(..))
 import Agent.ClientIdentity (gatewayUserAgent)
 import Data.ByteString (ByteString)
