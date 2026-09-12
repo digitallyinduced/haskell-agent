@@ -27,8 +27,15 @@ data ImageDetailVisibility
     | ImageDetailHidden
     deriving (Eq, Show)
 
+-- | Automatic selection honors AGENT_CODE_MODE_BACKEND. Explicit selection
+-- ignores that variable, which permits differential tests in one process.
+data CodeModeBackend = AutomaticBackend | BunBackend | JavaScriptCoreBackend
+    deriving (Eq, Show)
+
 data CodeModeConfig = CodeModeConfig
     { bunExecutable :: !FilePath
+    , codeModeBackend :: !CodeModeBackend
+    , nativeWorkerExecutable :: !FilePath
     , workerScript :: !FilePath
     , startupTimeoutMs :: !Int
     , maxActiveCells :: !Int
@@ -36,7 +43,7 @@ data CodeModeConfig = CodeModeConfig
     , toolHandler :: !CodeModeToolHandler
     , notifyHandler :: !(Text -> IO ())
     , imageDetailVisibility :: !ImageDetailVisibility
-    -- | Maximum idle Bun processes retained between cells. Set to zero to
+    -- | Maximum idle worker processes retained between cells. Set to zero to
     -- retain the legacy one-process-per-cell behavior.
     , workerPoolSize :: !Int
     }
@@ -44,6 +51,8 @@ data CodeModeConfig = CodeModeConfig
 defaultCodeModeConfig :: FilePath -> CodeModeToolHandler -> CodeModeConfig
 defaultCodeModeConfig script handler = CodeModeConfig
     { bunExecutable = "bun"
+    , codeModeBackend = AutomaticBackend
+    , nativeWorkerExecutable = "agent-code-mode-worker"
     , workerScript = script
     , startupTimeoutMs = 3000
     , maxActiveCells = 64
@@ -134,6 +143,7 @@ data WorkerPool = WorkerPool
 
 data CodeModeHost = CodeModeHost
     { hostConfig :: !CodeModeConfig
+    , hostWorkerCommand :: !(Either Text (FilePath, [String]))
     , hostCells :: !(MVar (Map.Map Text Cell))
     , hostNextId :: !(IORef Int)
     , hostStoredValues :: !(MVar (Map.Map Text Value))

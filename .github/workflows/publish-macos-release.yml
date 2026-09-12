@@ -152,11 +152,9 @@ jobs:
               -f lavfi -i 'sine=frequency=440:duration=0.01' \
               -f s16le "$short_root/tone.pcm"
           test -s "$short_root/tone.pcm"
+          test ! -e "$bundle/bin/bun"
           env -i HOME="$home" PATH=/usr/bin:/bin LC_ALL=C \
-            "$bundle/bin/bun" --version
-          env -i HOME="$home" PATH=/usr/bin:/bin LC_ALL=C \
-            "$bundle/bin/bun" \
-              -e 'if (1 + 1 !== 2) process.exit(1)'
+            "$bundle/bin/agent-code-mode-worker" --check
           env -i HOME="$home" PATH=/usr/bin:/bin LC_ALL=C \
             "$bundle/bin/rg" --version
           env -i HOME="$home" PATH=/usr/bin:/bin LC_ALL=C \

@@ -14,6 +14,8 @@ build-type:         Simple
 extra-source-files: README.md
                   , benchmark/ArtifactRetrieval.md
                   , benchmark/ArtifactStorage.md
+                  , cbits/javascriptcore-worker.mm
+                  , data/code-mode/javascriptcore/*.js
 data-files:         data/code-mode/worker.mjs
 
 common common-opts

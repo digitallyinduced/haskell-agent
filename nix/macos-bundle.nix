@@ -6,7 +6,7 @@
     agentToolsSource,
     agentCoreSource,
     skylightingSyntaxes,
-    bun,
+    agentCodeModeWorker,
     sourceDateEpoch ? 1,
 }:
 assert pkgs.stdenv.hostPlatform.isDarwin;
@@ -48,10 +48,6 @@ let
             # by agent-cli instead.
             doCheck = false;
         });
-    bunLicense = pkgs.fetchurl {
-        url = "https://raw.githubusercontent.com/oven-sh/bun/bun-v${bun.version}/LICENSE.md";
-        hash = "sha256-ucr1JyhpG0BX43EjLCIaEyiDGYvi89Ld+SyQQEyYSxo=";
-    };
     macosDylibBundler = pkgs.writers.writeHaskellBin "bundle-macos-dylibs" {
         ghcArgs = [
             "-O2"
@@ -91,6 +87,7 @@ let
                 "$out/share/agent-cli" \
                 "$out/share/agent-runtime" \
                 "$out/share/agent-tools" \
+                "$out/share/agent-code-mode-worker" \
                 "$out/share/agent-core" \
                 "$out/share/haskell-agent" \
                 "$out/share/skylighting" \
@@ -103,7 +100,10 @@ let
             # Preserve the capabilities of the normal Nix package without
             # requiring any of these tools to be installed on the host.
             install -m 755 ${portableFfmpeg}/bin/ffmpeg "$out/bin/ffmpeg"
-            install -m 755 ${bun}/bin/bun "$out/bin/bun"
+            install -m 755 ${agentCodeModeWorker}/bin/agent-code-mode-worker \
+                "$out/bin/agent-code-mode-worker"
+            cp -R ${agentCodeModeWorker}/share/agent-code-mode-worker/. \
+                "$out/share/agent-code-mode-worker/"
             install -m 755 ${pkgs.ripgrep}/bin/rg "$out/bin/rg"
             install -m 755 ${pkgs.zstd}/bin/zstd "$out/bin/zstd"
 
@@ -135,7 +135,9 @@ let
                 "$licenses/FFmpeg-LICENSE.md"
             install -m 644 ${portableFfmpeg.src}/COPYING.LGPLv2.1 \
                 "$licenses/FFmpeg-COPYING.LGPLv2.1"
-            install -m 644 ${bunLicense} "$licenses/Bun-LICENSE.md"
+            install -m 644 \
+                ${agentCodeModeWorker}/share/licenses/agent-code-mode-worker/acorn-LICENSE \
+                "$licenses/Acorn-LICENSE"
             install -m 644 ${pkgs.postgresql_18.src}/COPYRIGHT \
                 "$licenses/PostgreSQL-COPYRIGHT"
             install -m 644 ${pkgs.ripgrep.src}/COPYING \
@@ -152,16 +154,19 @@ let
             This standalone archive includes these directly distributed tools:
 
             - FFmpeg ${portableFfmpeg.version} (LGPL-2.1-or-later)
-            - Bun ${bun.version} (MIT; its JavaScriptCore component is LGPL-2.1-only)
+            - Acorn JavaScript parser (MIT), used by the native code-mode helper
             - PostgreSQL ${pkgs.postgresql_18.version} (PostgreSQL License)
             - ripgrep ${pkgs.ripgrep.version} (MIT OR Unlicense)
             - zstd ${pkgs.zstd.version} (BSD-3-Clause OR GPL-2.0-only)
 
             The corresponding available license texts are in the `licenses`
-            directory. Bun's complete notices and source are available from:
+            directory. Acorn's source and license are available from:
 
-            - https://github.com/oven-sh/bun/blob/main/LICENSE.md
-            - https://bun.sh/docs/project/licensing
+            - https://github.com/acornjs/acorn
+
+            The native code-mode helper uses the JavaScriptCore framework
+            supplied by macOS. This archive does not distribute JavaScriptCore
+            or Bun.
             EOF
 
             chmod -R u+w "$out"
@@ -188,7 +193,7 @@ let
                 --install-prefix '@executable_path/../lib/deps/' \
                 "$out/bin/agent-cli" \
                 "$out/bin/ffmpeg" \
-                "$out/bin/bun" \
+                "$out/bin/agent-code-mode-worker" \
                 "$out/bin/rg" \
                 "$out/bin/zstd"
 
@@ -266,9 +271,14 @@ let
                 -ar 24000 \
                 -y "$TMPDIR/tone.pcm"
             test -s "$TMPDIR/tone.pcm"
-            run_clean "$out/bin/bun" --version
-            run_clean "$out/bin/bun" \
-                -e 'if (1 + 1 !== 2) process.exit(1)'
+            # The helper resolves its parser and runtime relative to its own
+            # executable, without Bun or a Nix-provided PATH.
+            run_clean "$out/bin/agent-code-mode-worker" --check
+            test ! -e "$out/bin/bun"
+            test ! -e "$out/bin/bunx"
+            test ! -e "$out/share/doc/haskell-agent/licenses/Bun-LICENSE.md"
+            otool -L "$out/bin/agent-code-mode-worker" \
+                | grep -F '/System/Library/Frameworks/JavaScriptCore.framework/'
             run_clean "$out/bin/rg" --version
             run_clean "$out/bin/zstd" --version
             run_clean "$postgresRoot/bin/postgres" --version
@@ -281,7 +291,16 @@ let
 
             test -f "$out/share/agent-runtime/config/models.default.json"
             test -f "$out/share/agent-tools/data/code-mode/worker.mjs"
+            test -f "$out/share/agent-code-mode-worker/acorn.js"
+            test -f "$out/share/agent-code-mode-worker/lower-module.js"
+            test -f "$out/share/agent-code-mode-worker/worker.js"
+            test -s "$out/share/doc/haskell-agent/licenses/Acorn-LICENSE"
             test -f "$out/share/haskell-agent/portable"
+
+            relocated="$TMPDIR/relocated-code-mode-bundle"
+            mkdir -p "$relocated"
+            cp -R "$out"/. "$relocated/"
+            run_clean "$relocated/bin/agent-code-mode-worker" --check
 
             is_macho() {
                 file -b "$1" | grep -q '^Mach-O'
@@ -301,7 +320,7 @@ let
             license = lib.unique (lib.flatten [
                 agentCli.meta.license
                 portableFfmpeg.meta.license
-                bun.meta.license
+                agentCodeModeWorker.meta.license
                 pkgs.postgresql_18.meta.license
                 pkgs.ripgrep.meta.license
                 pkgs.zstd.meta.license

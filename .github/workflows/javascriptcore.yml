@@ -1,0 +1,92 @@
+name: JavaScriptCore compatibility
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: javascriptcore-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compatibility:
+    name: macOS native code-mode compatibility
+    # Do not execute fork PR code on the persistent release runner.
+    if: >-
+      github.repository == 'digitallyinduced/haskell-agent' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, haskell-agent, ihp-ci-mac, aarch64-darwin]
+    timeout-minutes: 30
+    env:
+      NIX_CONFIG: |
+        experimental-features = nix-command flakes
+      GIT_PACKAGE: github:NixOS/nixpkgs/afe3d8ac4395617bdcdac9f188ac8717a062e014#git
+    steps:
+      - name: Check out the triggering revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          nix_bin="$(command -v nix)"
+          git_path=$(
+            "$nix_bin" build "$GIT_PACKAGE" \
+              --no-link --print-out-paths \
+              --option substituters https://cache.nixos.org/ \
+              --option extra-substituters ""
+          )
+          git_bin="$git_path/bin/git"
+          source_dir="$RUNNER_TEMP/javascriptcore-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test ! -e "$source_dir"
+          printf 'SOURCE_DIR=%s\n' "$source_dir" >> "$GITHUB_ENV"
+          "$git_bin" init "$source_dir"
+          "$git_bin" -C "$source_dir" remote add origin \
+            https://github.com/digitallyinduced/haskell-agent.git
+          "$git_bin" -C "$source_dir" fetch --depth=1 --no-tags origin "$GITHUB_SHA"
+          "$git_bin" -C "$source_dir" checkout --detach FETCH_HEAD
+
+      - name: Build and check packaged system-JavaScriptCore helper
+        shell: bash
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          set -euo pipefail
+          helper_out=$(
+            nix build .#agent-code-mode-worker \
+              --out-link "$RUNNER_TEMP/javascriptcore-helper-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+              --print-out-paths --no-write-lock-file \
+              --print-build-logs --max-jobs 2 --cores 2
+          )
+          printf 'HELPER_OUT=%s\n' "$helper_out" >> "$GITHUB_ENV"
+          env -i PATH=/usr/bin:/bin \
+            "$helper_out/bin/agent-code-mode-worker" --check
+          test -s "$helper_out/share/licenses/agent-code-mode-worker/acorn-LICENSE"
+          test ! -e "$helper_out/bin/bun"
+          otool -L "$helper_out/bin/agent-code-mode-worker" |
+            grep -F '/System/Library/Frameworks/JavaScriptCore.framework/'
+
+      - name: Run lowering and native-versus-Bun protocol checks
+        shell: bash
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          set -euo pipefail
+          # Bun is solely the pinned test oracle; it is not a runtime dependency
+          # of the native helper. Acorn comes from that helper's hashed package.
+          nix develop --no-write-lock-file --command bash -euo pipefail -c '
+            bun packages/agent-tools/benchmark/javascriptcore/lowering.mjs \
+              "$HELPER_OUT/share/agent-code-mode-worker/acorn.js"
+            bun packages/agent-tools/benchmark/javascriptcore/worker-tests.mjs \
+              "$HELPER_OUT/bin/agent-code-mode-worker"
+          '
+
+      - name: Run actual Haskell host lifecycle and approval regressions
+        shell: bash
+        working-directory: ${{ env.SOURCE_DIR }}
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          bash packages/agent-tools/benchmark/javascriptcore/host-tests.sh \
+            "$HELPER_OUT/bin/agent-code-mode-worker"

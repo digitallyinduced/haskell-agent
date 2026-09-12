@@ -280,7 +280,7 @@
 
                 agentToolsSource = nix-filter.lib {
                     root = ./packages/agent-tools;
-                    include = [ "src" "test" "benchmark" "data" "agent-tools.cabal" "LICENSE" "README.md" ];
+                    include = [ "src" "test" "benchmark" "data" "cbits" "agent-tools.cabal" "LICENSE" "README.md" ];
                 };
 
                 agentAccountsSource = nix-filter.lib {
@@ -647,7 +647,8 @@
                             (pkgs.haskell.lib.overrideSrc
                                 (final.callPackage ./packages/agent-tools/package.nix { })
                                 { src = agentToolsSource; })
-                            [ pkgs.git bun_1_4 pkgs.ripgrep ]);
+                            ([ pkgs.git bun_1_4 pkgs.ripgrep ]
+                                ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ agentCodeModeWorker ]));
                         agent-accounts = localPackage (pkgs.haskell.lib.overrideSrc
                             (final.callPackage ./packages/agent-accounts/package.nix { })
                             { src = agentAccountsSource; });
@@ -881,7 +882,7 @@
                                     # concurrently.
                                     AGENT_CLI_TEST_SHARDS = "6";
                                 }))
-                            [
+                            ([
                                 pkgs.bash
                                 pkgs.coreutils
                                 pkgs.git
@@ -889,7 +890,7 @@
                                 pkgs.postgresql_18
                                 pkgs.python3
                                 pkgs.zstd
-                            ]);
+                            ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ agentCodeModeWorker ]));
                         agent-native-bridge = localPackage
                             (pkgs.haskell.lib.addBuildDepends
                                 ((pkgs.haskell.lib.overrideSrc
@@ -1041,9 +1042,9 @@
                         pkgs.xdotool
                         pkgs.xrandr
                     ];
+                agentCodeModeWorker = pkgs.callPackage ./nix/javascriptcore-worker.nix { };
                 agentCliRuntimeTools = [
                     pkgs.ffmpeg
-                    bun_1_4
                     pkgs.curl
                     pkgs.gh
                     pkgs.git
@@ -1051,7 +1052,9 @@
                     pkgs.postgresql_18
                     pkgs.ripgrep
                     pkgs.zstd
-                ] ++ agentCliLinuxComputerUseTools;
+                ] ++ agentCliLinuxComputerUseTools
+                  ++ pkgs.lib.optionals (!pkgs.stdenv.hostPlatform.isDarwin) [ bun_1_4 ]
+                  ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ agentCodeModeWorker ];
                 prepareAgentCli = package:
                     package.overrideAttrs
                         (old: {
@@ -1163,7 +1166,7 @@
                                 agentRuntimeProductionSource;
                             inherit agentToolsSource;
                             inherit agentCoreSource;
-                            bun = bun_1_4;
+                            inherit agentCodeModeWorker;
                             sourceDateEpoch = self.lastModified or 1;
                         }
                     else
@@ -1481,6 +1484,8 @@
                 packages.default = agentCliStaticExecutable;
                 packages.agent-cli-static = agentCliStaticExecutable;
                 packages.agent-cli = agentCliExecutable;
+                packages.${if pkgs.stdenv.hostPlatform.isDarwin then "agent-code-mode-worker" else null} =
+                    agentCodeModeWorker;
                 packages.agent-telegram = agentTelegramExecutable;
                 packages.agent-server = agentServerExecutable;
                 packages.agent-server-client = agentServerClientPackage;
@@ -1625,6 +1630,7 @@
                         ])
                         ++ agentCliLinuxComputerUseTools
                         ++ agentCliGstreamerPlugins
+                        ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ agentCodeModeWorker ]
                         ++ [ agentRepl ];
                 };
 

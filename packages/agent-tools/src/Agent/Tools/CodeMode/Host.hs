@@ -5,6 +5,7 @@
 -- worker. Effects remain restricted to the typed 'CodeModeToolHandler'.
 module Agent.Tools.CodeMode.Host
     ( CodeModeConfig(..)
+    , CodeModeBackend(..)
     , CodeModeError(..)
     , CodeModeHost
     , CodeModeResult(..)
@@ -40,6 +41,7 @@ import Agent.Tools.CodeMode.Host.Types
     , CellObservation(..)
     , CellOutcome(..)
     , CodeModeConfig(..)
+    , CodeModeBackend(..)
     , CodeModeError(..)
     , CodeModeHost(..)
     , CodeModeResult(..)
@@ -52,8 +54,7 @@ import Agent.Tools.CodeMode.Host.Types
     )
 import Agent.Tools.CodeMode.Host.Availability
     ( checkCodeModeAvailability
-    , resolveBunExecutable
-    , resolveWorkerScript
+    , resolveWorkerCommand
     )
 import Agent.Tools.CodeMode.Host.Worker
     ( bundledCodeModeWorkerPath
@@ -136,9 +137,12 @@ import System.Process
     , waitForProcess
     )
 newCodeModeHost :: CodeModeConfig -> IO CodeModeHost
-newCodeModeHost config =
+newCodeModeHost config = do
+    -- Snapshot executable/backend selection once. Pool replenishment must not
+    -- switch runtimes if the application's environment subsequently changes.
+    command <- resolveWorkerCommand config
     bracketOnError
-        (CodeModeHost config
+        (CodeModeHost config command
             <$> newMVar Map.empty
             <*> newIORef 0
             <*> newMVar Map.empty
@@ -150,7 +154,7 @@ newCodeModeHost config =
                 -- rollback scope, so cancellation cannot close it both here
                 -- and through the host's newly populated pool.
                 then mask_ $ bracketOnError
-                    (spawnIdleWorker config)
+                    (spawnIdleWorker config command)
                     (either (const (pure ())) stopIdleWorker)
                     \case
                         Right worker -> modifyMVar_ host.hostWorkerPool \pool ->
@@ -352,7 +356,7 @@ startFreshCell
     -> [CodeModeToolMetadata]
     -> IO (Either CodeModeError Cell)
 startFreshCell host identifier tools =
-    spawnIdleWorker host.hostConfig >>= \case
+    spawnIdleWorker host.hostConfig host.hostWorkerCommand >>= \case
         Left err -> pure (Left err)
         Right worker -> startCellFromIdleWorker host identifier tools worker
 
@@ -374,7 +378,7 @@ replenishPool host = do
     gate <- newEmptyMVar
     filler <- asyncWithUnmask \unmask -> do
         readMVar gate
-        result <- unmask (spawnIdleWorker host.hostConfig)
+        result <- unmask (spawnIdleWorker host.hostConfig host.hostWorkerCommand)
         discarded <- modifyMVar host.hostWorkerPool \pool -> do
             let poolWithoutFiller = pool { poolFiller = Nothing }
             case result of
@@ -399,28 +403,13 @@ replenishPool host = do
             cancel filler
             void $ waitCatch filler
 
-spawnIdleWorker :: CodeModeConfig -> IO (Either CodeModeError IdleWorker)
-spawnIdleWorker config =
-  resolveBunExecutable config.bunExecutable >>= \case
-        Nothing ->
-            pure $ Left $ CodeModeStartupError $
-                "Bun runtime executable was not found: "
-                    <> Text.pack config.bunExecutable
-        Just executable -> do
-            resolveWorkerScript config.workerScript >>= \case
-                Nothing ->
-                    pure $ Left $ CodeModeStartupError $
-                        "code-mode worker script was not found: "
-                            <> Text.pack config.workerScript
-                Just worker -> do
+spawnIdleWorker :: CodeModeConfig -> Either Text (FilePath, [String]) -> IO (Either CodeModeError IdleWorker)
+spawnIdleWorker config command =
+  case command of
+        Left err -> pure (Left (CodeModeStartupError err))
+        Right (executable, arguments) -> do
                     started <- try @_ @SomeException $ createWorkerProcess $
-                        (proc executable
-                            [ "--smol"
-                            , "--no-install"
-                            , "--no-env-file"
-                            , "--no-addons"
-                            , worker
-                            ])
+                        (proc executable arguments)
                             { std_in = CreatePipe
                             , std_out = CreatePipe
                             , std_err = CreatePipe
