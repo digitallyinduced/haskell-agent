@@ -44,6 +44,57 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "OpenAI transcription" do
+    it "returns completed Realtime state despite malformed events and callback failures" do
+        callbacks <- newIORef []
+        let server pending = do
+                connection <- WS.acceptRequest pending
+                _ <- WS.receiveData connection :: IO Text
+                WS.sendTextData connection ("{\"type\":\"session.updated\"}" :: Text)
+                _ <- WS.receiveData connection :: IO Text
+                mapM_ (WS.sendTextData connection)
+                    [ "{\"type\":\"conversation.item.input_audio_transcription.delta\",\"delta\":\"hello \"}"
+                    , "invalid JSON"
+                    , "{\"type\":\"future.event\"}"
+                    , "{\"type\":\"conversation.item.input_audio_transcription.delta\",\"delta\":\"world\"}"
+                    , "{\"type\":\"conversation.item.input_audio_transcription.completed\",\"transcript\":\" final text \"}"
+                    :: Text
+                    ]
+                (WS.receiveData connection :: IO Text) `shouldThrow` anyException
+        withWebSocketServer server \port ->
+            Timeout.timeout (5 * 1_000_000)
+                (WS.runClient "127.0.0.1" port "/" \connection ->
+                    transcribeOnConnection connection (const (pure ())) \text -> do
+                        modifyIORef' callbacks (<> [text])
+                        throwString "callback failed")
+                `shouldReturn` Just "final text"
+        readIORef callbacks `shouldReturn` ["hello ", "hello world", " final text "]
+
+    it "retains ChatGPT state on a normal WebSocket close after callback failure" do
+        callbacks <- newIORef []
+        let server pending = do
+                connection <- WS.acceptRequest pending
+                _ <- WS.receiveData connection :: IO Text
+                sendEvent connection $ Aeson.object ["type" .= ("session.started" :: Text)]
+                _ <- WS.receiveData connection :: IO Text
+                sendEvent connection $ Aeson.object
+                    [ "type" .= ("transcript.delta" :: Text)
+                    , "utterance_id" .= ("u1" :: Text)
+                    , "revision" .= (1 :: Int)
+                    , "text" .= ("retained speech" :: Text)
+                    ]
+                WS.sendClose connection ("done" :: Text)
+        withWebSocketServer server \port ->
+            Timeout.timeout (5 * 1_000_000)
+                (transcribePcmWithChatGPTStreamAt
+                    ("ws://127.0.0.1:" <> Text.pack (show port) <> "/")
+                    []
+                    (const (pure ()))
+                    (\text -> do
+                        modifyIORef' callbacks (<> [text])
+                        throwString "callback failed"))
+                `shouldReturn` Just (Right "retained speech")
+        readIORef callbacks `shouldReturn` ["retained speech"]
+
     it "decodes incremental and completed transcript events" do
         decodeTranscriptEvent
             "{\"type\":\"conversation.item.input_audio_transcription.delta\",\"delta\":\"hello \"}"

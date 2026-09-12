@@ -6,6 +6,7 @@ module Agent.OpenAI.Transcription
     , chatGPTTranscriptionBaseUrl
     , decodeChatGPTDictationEvent
     , decodeTranscriptEvent
+    , transcribeOnConnection
     , decodeTranscriptionResponse
     , encodePcm16Wav
     , openAITranscriptionModel
@@ -41,10 +42,7 @@ import Control.Concurrent.Async
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Concurrent.MVar
     ( MVar
-    , modifyMVar
     , newEmptyMVar
-    , newMVar
-    , readMVar
     , takeMVar
     , tryPutMVar
     , tryReadMVar
@@ -620,16 +618,14 @@ chatGPTStreamSession
                 Just (Left message) ->
                     pure (ChatGPTStreamUnavailable message)
                 Just (Right ()) -> do
-                    state <- newMVar emptyChatGPTStreamState
                     finished <- newEmptyMVar
                     withAsync
                         (receiveChatGPTDictation
                             connection
-                            state
                             finished
                             onTranscript)
                         \receiver ->
-                            runCapture state finished
+                            runCapture finished
                                 `finally` do
                                     cancel receiver
                                     ignoreSynchronousException $
@@ -637,7 +633,7 @@ chatGPTStreamSession
                                             connection
                                             ("done" :: Text)
   where
-    runCapture state finished = do
+    runCapture finished = do
         sendQueuedChatGPTAudio connection finished audio
         sendChatGPTMessage
             finished
@@ -651,8 +647,7 @@ chatGPTStreamSession
                         "ChatGPT dictation stream timed out while closing"
                 Just (Left message) ->
                     pure (ChatGPTStreamUnavailable message)
-                Just (Right ()) -> do
-                    current <- readMVar state
+                Just (Right current) -> do
                     let transcript =
                             Text.strip
                                 (renderChatGPTTranscript current)
@@ -664,7 +659,7 @@ chatGPTStreamSession
 
 sendQueuedChatGPTAudio
     :: WS.Connection
-    -> MVar (Either Text ())
+    -> MVar (Either Text ChatGPTStreamState)
     -> Chan (Maybe BS.ByteString)
     -> IO ()
 sendQueuedChatGPTAudio connection finished audio =
@@ -683,7 +678,7 @@ sendQueuedChatGPTAudio connection finished audio =
             sendQueuedChatGPTAudio connection finished audio
 
 sendChatGPTMessage
-    :: MVar (Either Text ())
+    :: MVar (Either Text ChatGPTStreamState)
     -> WS.Connection
     -> Text
     -> IO ()
@@ -721,22 +716,31 @@ awaitChatGPTSessionStarted connection = do
 
 receiveChatGPTDictation
     :: WS.Connection
-    -> MVar ChatGPTStreamState
-    -> MVar (Either Text ())
+    -> MVar (Either Text ChatGPTStreamState)
     -> (Text -> IO ())
     -> IO ()
-receiveChatGPTDictation connection state finished onTranscript =
-    tryAny loop >>= \case
+receiveChatGPTDictation connection finished onTranscript =
+    tryAny (loop emptyChatGPTStreamState) >>= \case
         Left err
             | isSyncException err ->
-                void $ tryPutMVar finished (receiverFailure err)
+                void $ tryPutMVar finished (Left (receiverFailure err))
             | otherwise ->
                 throwIO err
         Right result ->
             void (tryPutMVar finished result)
   where
-    loop = do
-        bytes <- WS.receiveData connection
+    loop :: ChatGPTStreamState -> IO (Either Text ChatGPTStreamState)
+    loop previous = do
+        -- A normal close also completes the transcript. Catch it at the
+        -- receive checkpoint where the receiver still owns the latest state.
+        received <- tryAny (WS.receiveData connection)
+        case received of
+            Left err
+                | Just (WS.CloseRequest 1000 _) <- fromException err ->
+                    pure (Right previous)
+                | otherwise -> throwIO err
+            Right bytes -> handleEvent previous bytes
+    handleEvent previous bytes =
         case decodeChatGPTDictationEvent bytes of
             Left message ->
                 pure $ Left
@@ -746,54 +750,30 @@ receiveChatGPTDictation connection state finished onTranscript =
                 case event of
                     ChatGPTSessionUpdated status
                         | status == "closed" ->
-                            pure (Right ())
+                            pure (Right previous)
                     ChatGPTTranscriptFailed message ->
                         pure (Left message)
                     ChatGPTSessionError True message ->
                         pure (Left message)
                     ChatGPTTranscriptDelta _ _ _ ->
-                        updateTranscript event >> loop
+                        updateTranscript event previous >>= loop
                     ChatGPTTranscriptSegment _ _ _ ->
-                        updateTranscript event >> loop
+                        updateTranscript event previous >>= loop
                     ChatGPTTranscriptFinal _ _ _ ->
-                        updateTranscript event >> loop
-                    _ -> do
-                        modifyMVar state \previous ->
-                            pure
-                                ( applyChatGPTDictationEvent
-                                    event
-                                    previous
-                                , ()
-                                )
-                        loop
-    updateTranscript event = do
-        notification <- modifyMVar state \previous ->
-            let next =
-                    applyChatGPTDictationEvent
-                        event
-                        previous
-                before = renderChatGPTTranscript previous
-                after = renderChatGPTTranscript next
-            in pure
-                ( next
-                , if after == before then Nothing else Just after
-                )
-        case notification of
-            Nothing ->
-                pure ()
-            Just transcript ->
-                ignoreSynchronousException
-                    (onTranscript transcript)
+                        updateTranscript event previous >>= loop
+                    _ -> loop (applyChatGPTDictationEvent event previous)
+    updateTranscript event previous = do
+        let next = applyChatGPTDictationEvent event previous
+            before = renderChatGPTTranscript previous
+            after = renderChatGPTTranscript next
+        unless (after == before) $
+            ignoreSynchronousException (onTranscript after)
+        pure next
 
-receiverFailure :: SomeException -> Either Text ()
+receiverFailure :: SomeException -> Text
 receiverFailure err =
-    case (fromException err :: Maybe WS.ConnectionException) of
-        Just (WS.CloseRequest 1000 _) ->
-            Right ()
-        _ ->
-            Left
-                ("ChatGPT dictation stream receive failed: "
-                    <> Text.pack (displayException err))
+    "ChatGPT dictation stream receive failed: "
+        <> Text.pack (displayException err)
 
 applyChatGPTDictationEvent
     :: ChatGPTDictationEvent
@@ -1188,28 +1168,31 @@ transcribe credential produceAudio onTranscript =
         [ ("Authorization"
           , "Bearer " <> Text.encodeUtf8 credential.accessToken)
         ]
-        \connection -> Json.withDecoderSession \decoderSession -> do
-            WS.sendTextData connection sessionUpdateMessage
-            awaitSessionUpdated decoderSession connection
-            state <- newMVar emptyTranscriptState
-            finished <- newEmptyMVar
-            withAsync
-                (receiveTranscripts
-                    decoderSession
-                    connection
-                    state
-                    finished
-                    onTranscript)
-                \receiver ->
-                    (do
-                        produceAudio \bytes ->
-                            WS.sendTextData connection (audioAppendMessage bytes)
-                        WS.sendTextData connection audioCommitMessage
-                        waitForTranscript state finished)
-                        `finally` do
-                            void (tryAny
-                                (WS.sendClose connection ("done" :: Text)))
-                            cancel receiver
+        \connection -> transcribeOnConnection connection produceAudio onTranscript
+
+-- | Run transcription on an already authenticated WebSocket. The caller owns
+-- the transport; this scopes the receiver and closes the transcription session.
+transcribeOnConnection
+    :: WS.Connection
+    -> ((BS.ByteString -> IO ()) -> IO ())
+    -> (Text -> IO ())
+    -> IO Text
+transcribeOnConnection connection produceAudio onTranscript =
+    Json.withDecoderSession \decoderSession -> do
+        WS.sendTextData connection sessionUpdateMessage
+        awaitSessionUpdated decoderSession connection
+        finished <- newEmptyMVar
+        withAsync
+            (receiveTranscripts decoderSession connection finished onTranscript)
+            \receiver ->
+                (do
+                    produceAudio \bytes ->
+                        WS.sendTextData connection (audioAppendMessage bytes)
+                    WS.sendTextData connection audioCommitMessage
+                    waitForTranscript finished)
+                    `finally` do
+                        void (tryAny (WS.sendClose connection ("done" :: Text)))
+                        cancel receiver
 
 sessionUpdateMessage :: Text
 sessionUpdateMessage =
@@ -1271,24 +1254,23 @@ awaitSessionUpdated decoderSession connection = do
 receiveTranscripts
     :: Json.DecoderSession
     -> WS.Connection
-    -> MVar TranscriptState
-    -> MVar (Either SomeException ())
+    -> MVar (Either SomeException TranscriptState)
     -> (Text -> IO ())
     -> IO ()
-receiveTranscripts decoderSession connection state finished onTranscript =
-    tryAny loop >>= void . tryPutMVar finished
+receiveTranscripts decoderSession connection finished onTranscript =
+    tryAny (loop emptyTranscriptState) >>= void . tryPutMVar finished
   where
-    loop = do
+    -- The receiver owns accumulation; only the final state crosses threads.
+    loop :: TranscriptState -> IO TranscriptState
+    loop previous = do
         bytes <- WS.receiveData connection
         Json.decodeIO
             decoderSession
             transcriptEventDecoder
             (LBS.toStrict bytes) >>= \case
-            Left _ -> loop
+            Left _ -> loop previous
             Right event -> do
-                current <- modifyMVar state \previous ->
-                    let next = applyTranscriptEvent event previous
-                    in pure (next, next)
+                let current = applyTranscriptEvent event previous
                 case event of
                     TranscriptDelta{} ->
                         notify current
@@ -1297,9 +1279,9 @@ receiveTranscripts decoderSession connection state finished onTranscript =
                     _ ->
                         pure ()
                 case event of
-                    TranscriptCompleted{} -> pure ()
-                    TranscriptError{} -> pure ()
-                    _ -> loop
+                    TranscriptCompleted{} -> pure current
+                    TranscriptError{} -> pure current
+                    _ -> loop current
     notify current =
         void (tryAny (onTranscript (renderTranscript current)))
 
@@ -1321,18 +1303,16 @@ applyTranscriptEvent event state =
             state
 
 waitForTranscript
-    :: MVar TranscriptState
-    -> MVar (Either SomeException ())
+    :: MVar (Either SomeException TranscriptState)
     -> IO Text
-waitForTranscript state finished = do
+waitForTranscript finished = do
     completedInTime <- Timeout.timeout (30 * 1_000_000) (takeMVar finished)
     case completedInTime of
         Nothing ->
             fail "timed out waiting for OpenAI Realtime transcription"
         Just (Left err) ->
             throwIO err
-        Just (Right ()) -> do
-            current <- readMVar state
+        Just (Right current) -> do
             case current.failure of
                 Just message ->
                     fail (Text.unpack message)
