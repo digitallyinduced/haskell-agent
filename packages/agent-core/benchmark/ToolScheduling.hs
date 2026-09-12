@@ -6,6 +6,7 @@ import Agent.Loop
     , BackendResult(..)
     , BackendStateStore(..)
     , LoopConfig(..)
+    , ToolApproval(..)
     , LoopResult(..)
     , defaultLoopDispatch
     , defaultLoopMaxTurns
@@ -163,7 +164,7 @@ runWorkload workload callCount delayMicros = do
             , loopDispatch = defaultLoopDispatch
             , loopMaxTurns = defaultLoopMaxTurns
             , loopOnEvent = \_ -> pure ()
-            , loopApprove = \_ -> pure (Right True)
+            , loopApprove = \_ -> pure ToolApprovalGranted
             , loopReadSteering = pure []
             , loopCommitSteering = \_ -> pure ()
             , loopInterrupt = pure ()

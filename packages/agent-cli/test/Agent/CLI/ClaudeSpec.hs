@@ -6,6 +6,7 @@ import Agent.Claude
     , ClaudeCodePermissionResult(..)
     )
 import Agent.ToolDispatch (ToolCall(..), functionToolCall)
+import Agent.Tools.Types (ToolApproval(..))
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
     , PlanModeHooks(..)
@@ -51,7 +52,7 @@ spec =
             observed <- newIORef []
             (slot, plan) <- testRuntime \call readOnly -> do
                 modifyIORef' observed (<> [(call.name, readOnly)])
-                pure (Right True)
+                pure ToolApprovalGranted
             result <-
                 handleClaudePermissionRequest slot
                     (permissionRequest "Read"
@@ -69,7 +70,7 @@ spec =
             observed <- newIORef (0 :: Int)
             (slot, _) <- testRuntimeWithNativeTools False \_ _ -> do
                 modifyIORef' observed (+ 1)
-                pure (Right True)
+                pure ToolApprovalGranted
             forM_ ["Read", "Bash", "WebFetch"] \toolName ->
                 handleClaudePermissionRequest slot
                     (permissionRequest toolName (Aeson.object []))
@@ -94,14 +95,14 @@ spec =
             observed <- newIORef []
             (slot, _) <- testRuntime \call readOnly -> do
                 modifyIORef' observed (<> [(call.name, readOnly)])
-                pure (Right False)
+                pure ToolApprovalRejected
             let call =
                     functionToolCall
                         "registered"
                         "database_query"
                         "{\"sql\":\"select 1\"}"
             approveClaudeRegisteredTool slot call
-                `shouldReturn` Right False
+                `shouldReturn` ToolApprovalRejected
             readIORef observed
                 `shouldReturn` [("database_query", Nothing)]
 
@@ -110,7 +111,7 @@ spec =
             approveClaudeRegisteredTool slot
                 (functionToolCall "registered" "database_query" "{}")
                 `shouldReturn`
-                    Left "The host approval pipeline is not ready."
+                    ToolApprovalDenied "The host approval pipeline is not ready."
             handleClaudePermissionRequest slot
                 (permissionRequest "FutureNativeTool" (Aeson.object []))
                 `shouldReturn`
@@ -124,7 +125,7 @@ spec =
             observed <- newIORef []
             (slot, _) <- testRuntime \call readOnly -> do
                 modifyIORef' observed (<> [(call.name, readOnly)])
-                pure (Left "host policy denied the unknown tool")
+                pure (ToolApprovalDenied "host policy denied the unknown tool")
             handleClaudePermissionRequest slot
                 (permissionRequest "FutureNativeTool" (Aeson.object []))
                 `shouldReturn`
@@ -136,7 +137,7 @@ spec =
                 `shouldReturn` [("FutureNativeTool", Just False)]
 
         it "returns native AskUserQuestion answers in updatedInput" do
-            (slot, _) <- testRuntime \_ _ -> pure (Right True)
+            (slot, _) <- testRuntime \_ _ -> pure ToolApprovalGranted
             let input =
                     Aeson.object
                         [ "questions" Aeson..=
@@ -173,7 +174,7 @@ spec =
                         ("expected an updated allow result, got " <> show result)
 
         it "synchronizes Claude's native EnterPlanMode with host policy" do
-            (slot, plan) <- testRuntime \_ _ -> pure (Right True)
+            (slot, plan) <- testRuntime \_ _ -> pure ToolApprovalGranted
             handleClaudePermissionRequest slot
                 (permissionRequest "EnterPlanMode"
                     (Aeson.object
@@ -189,7 +190,7 @@ spec =
             observed <- newIORef (0 :: Int)
             (slot, _) <- testRuntime \_ _ -> do
                 modifyIORef' observed (+ 1)
-                pure (Right True)
+                pure ToolApprovalGranted
             handleClaudePermissionRequest slot
                 (permissionRequest
                     "mcp__haskell-agent__database_query"
@@ -207,7 +208,7 @@ spec =
             readIORef observed `shouldReturn` 1
 
         it "rejects ExitPlanMode when planning is inactive" do
-            (slot, plan) <- testRuntime \_ _ -> pure (Right True)
+            (slot, plan) <- testRuntime \_ _ -> pure ToolApprovalGranted
             handleClaudePermissionRequest slot
                 (permissionRequest "ExitPlanMode" (Aeson.object []))
                 `shouldReturn`
@@ -220,7 +221,7 @@ spec =
         it "persists a supplied native plan before presenting it" $
             withPlanDirectory \directory -> do
                 (slot, plan) <-
-                    testRuntimeAt directory \_ _ -> pure (Right True)
+                    testRuntimeAt directory \_ _ -> pure ToolApprovalGranted
                 _ <- handleClaudePermissionRequest slot
                     (permissionRequest "EnterPlanMode" (Aeson.object []))
                 handleClaudePermissionRequest slot
@@ -238,7 +239,7 @@ spec =
 testRuntime
     :: (ToolCall
         -> Maybe Bool
-        -> IO (Either Text Bool))
+        -> IO ToolApproval)
     -> IO (ClaudeSessionRuntimeSlot, PlanModeEnv)
 testRuntime approve = do
     testRuntimeWithNativeTools True approve
@@ -247,7 +248,7 @@ testRuntimeWithNativeTools
     :: Bool
     -> (ToolCall
         -> Maybe Bool
-        -> IO (Either Text Bool))
+        -> IO ToolApproval)
     -> IO (ClaudeSessionRuntimeSlot, PlanModeEnv)
 testRuntimeWithNativeTools enabled approve =
     testRuntimeAtWithNativeTools
@@ -259,7 +260,7 @@ testRuntimeAt
     :: OsPath
     -> (ToolCall
         -> Maybe Bool
-        -> IO (Either Text Bool))
+        -> IO ToolApproval)
     -> IO (ClaudeSessionRuntimeSlot, PlanModeEnv)
 testRuntimeAt directory approve = do
     testRuntimeAtWithNativeTools True directory approve
@@ -269,7 +270,7 @@ testRuntimeAtWithNativeTools
     -> OsPath
     -> (ToolCall
         -> Maybe Bool
-        -> IO (Either Text Bool))
+        -> IO ToolApproval)
     -> IO (ClaudeSessionRuntimeSlot, PlanModeEnv)
 testRuntimeAtWithNativeTools enabled directory approve = do
     let hooks = PlanModeHooks

@@ -44,6 +44,7 @@ import Agent.Tools.Scheduling
     )
 import Agent.Tools.Types
     ( ToolRegistry
+    , ToolApproval(..)
     , dispatchApprovedRegisteredToolCall
     , toolSupportsAsync
     , toolSchedulingPlanFor
@@ -158,9 +159,8 @@ data LoopConfig = LoopConfig
     , loopDispatch :: !ToolDispatchConfig
     , loopMaxTurns :: !Int
     , loopOnEvent :: !(LoopEvent -> IO ())
-    -- | 'Left' denies with that tool-output message; 'Right True' runs the
-    -- tool; 'Right False' uses the usual user-rejection string.
-    , loopApprove :: !(ToolCall -> IO (Either Text Bool))
+    -- | Check or request permission before running a tool.
+    , loopApprove :: !(ToolCall -> IO ToolApproval)
     -- | Read pending user guidance submitted while this loop is active.
     -- Guidance is acknowledged only after the model response commits, so a
     -- failed submission can be retried without losing it.
@@ -1249,11 +1249,6 @@ waitAsyncToolManagerFailure managerWorker manager =
                             "Async tool manager stopped unexpectedly."
             Right exception -> pure exception
 
-data ToolApproval
-    = ToolApprovalDenied !Text
-    | ToolApprovalRejected
-    | ToolApprovalGranted
-
 data PreparedToolCall =
     PreparedToolCall !ToolCall !ToolApproval
 
@@ -1283,13 +1278,7 @@ prepareToolCall config call = do
                         ("Tool " <> call.name
                             <> " could not be prepared: "
                             <> exceptionSummary exception)
-                Right decision ->
-                    normalizeApproval decision
-  where
-    normalizeApproval = \case
-        Left denial -> ToolApprovalDenied denial
-        Right False -> ToolApprovalRejected
-        Right True -> ToolApprovalGranted
+                Right decision -> decision
 
 runPreparedToolCallWithCompletion
     :: (ToolCallResult -> IO ())
@@ -1304,25 +1293,9 @@ runPreparedToolCallWithCompletion completed config (PreparedToolCall call approv
             config.loopOnEvent (ToolStarted call)
             result <- case approval of
                 ToolApprovalDenied denial ->
-                    pure $
-                        ToolCallResult
-                            { callId = call.callId
-                            , output = denial
-                            , callKind = call.callKind
-                            , toolResultMode = toolCallMode call
-                            , toolResultImages = []
-                            , toolResultOutcome = Just ToolDenied
-                            }
+                    pure (deniedResult denial)
                 ToolApprovalRejected ->
-                    pure $
-                        ToolCallResult
-                            { callId = call.callId
-                            , output = "Tool call rejected by user."
-                            , callKind = call.callKind
-                            , toolResultMode = toolCallMode call
-                            , toolResultImages = []
-                            , toolResultOutcome = Just ToolDenied
-                            }
+                    pure (deniedResult "Tool call rejected by user.")
                 ToolApprovalGranted ->
                     dispatchApprovedRegisteredToolCall
                         config.loopDispatch
@@ -1339,3 +1312,12 @@ runPreparedToolCallWithCompletion completed config (PreparedToolCall call approv
             completed result
             config.loopOnEvent (ToolFinished result)
             pure (Just result)
+  where
+    deniedResult message = ToolCallResult
+        { callId = call.callId
+        , output = message
+        , callKind = call.callKind
+        , toolResultMode = toolCallMode call
+        , toolResultImages = []
+        , toolResultOutcome = Just ToolDenied
+        }

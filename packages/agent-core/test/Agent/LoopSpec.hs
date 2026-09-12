@@ -879,14 +879,14 @@ spec = describe "runLoop" do
             , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
             ]
         config0 <- testConfig backend
-        let approve :: ToolCall -> IO (Either Text Bool)
+        let approve :: ToolCall -> IO ToolApproval
             approve call
                 | call.name == "a" = do
                     putMVar firstApprovalStarted ()
                     takeMVar releaseFirstApproval
-                    pure (Right True)
+                    pure ToolApprovalGranted
                 | otherwise =
-                    putMVar secondApprovalStarted () >> pure (Right True)
+                    putMVar secondApprovalStarted () >> pure ToolApprovalGranted
             handlers =
                 [ noArgsTool "a" (pure (Right "a"))
                 , noArgsTool "b" (pure (Right "b"))
@@ -1169,7 +1169,7 @@ spec = describe "runLoop" do
                     modifyIORef' approvalOrder (<> [call.name])
                     when (call.name == "independent") $
                         putMVar approvalsFinished ()
-                    pure (Right True)
+                    pure ToolApprovalGranted
                 }
         withAsync (runLoop config Nothing "go") \running -> do
             timeout concurrencyProbeMicros (takeMVar firstStarted)
@@ -1206,7 +1206,7 @@ spec = describe "runLoop" do
                         (noArgsTool "guarded" (pure (Right "unexpected"))))
             config = config0
                 { loopTools = registryFromTools [tool]
-                , loopApprove = \_ -> pure (Right False)
+                , loopApprove = \_ -> pure ToolApprovalRejected
                 }
         result <- runLoop config Nothing "go"
         result `shouldSatisfy` either (const False) (const True)
@@ -1536,7 +1536,7 @@ spec = describe "runLoop" do
                 , loopApprove = \_ -> do
                     putMVar approvalStarted ()
                     takeMVar releaseApproval
-                    pure (Right True)
+                    pure ToolApprovalGranted
                 , loopCancel = cancelFlag
                 }
         withAsync (runLoop config Nothing "go") \running -> do
@@ -1580,7 +1580,7 @@ spec = describe "runLoop" do
             , Right $ emptyTurnOutput "resp-2" [] (Just "understood")
             ]
         config0 <- testConfig backend
-        let config = config0 { loopApprove = \_ -> pure (Right False) }
+        let config = config0 { loopApprove = \_ -> pure ToolApprovalRejected }
         result <- runLoop config Nothing "please"
         result `shouldBe` Right LoopResult
             { finalResponseId = "resp-2"
@@ -1592,6 +1592,32 @@ spec = describe "runLoop" do
         case seen of
             [_, (Just "resp-1", [CompletedTool denied])] -> do
                 denied.output `shouldBe` "Tool call rejected by user."
+                toolCallResultOutcome denied `shouldBe` Just ToolDenied
+            other -> expectationFailure ("unexpected submissions: " <> show other)
+
+    it "preserves an explicit approval denial without invoking the tool" do
+        submissions <- newIORef []
+        invocations <- newIORef (0 :: Int)
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "blocked" "{}"] Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "understood")
+            ]
+        config0 <- testConfig backend
+        let tool = noArgsTool "blocked" do
+                modifyIORef' invocations (+ 1)
+                pure (Right "should not run")
+            config = config0
+                { loopTools = registryFromHandlers [tool]
+                , loopApprove = \_ -> pure (ToolApprovalDenied "Blocked by policy.")
+                }
+        result <- runLoop config Nothing "please"
+        fmap (.finalText) result `shouldBe` Right (Just "understood")
+        readIORef invocations `shouldReturn` 0
+        seen <- readIORef submissions
+        case seen of
+            [_, (Just "resp-1", [CompletedTool denied])] -> do
+                denied.output `shouldBe` "Blocked by policy."
                 toolCallResultOutcome denied `shouldBe` Just ToolDenied
             other -> expectationFailure ("unexpected submissions: " <> show other)
 
@@ -2196,7 +2222,7 @@ spec = describe "runLoop" do
             config = config0
                 { loopApprove = \_ -> do
                     requestCancel cancel
-                    pure (Right False)
+                    pure ToolApprovalRejected
                 , loopOnEvent = \event -> modifyIORef' events (event :)
                 }
         result <- runLoop config Nothing "go"
@@ -2226,7 +2252,7 @@ spec = describe "runLoop" do
                 { loopApprove = \call -> do
                     modifyIORef' approvals (<> [call.callId])
                     requestCancel cancel
-                    pure (Right False)
+                    pure ToolApprovalRejected
                 }
         result <- runLoop config Nothing "go"
         result `shouldBe` Left (LoopCancelled [])

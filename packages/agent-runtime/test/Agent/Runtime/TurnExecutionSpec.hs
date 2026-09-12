@@ -97,7 +97,7 @@ spec = describe "prepared turn execution" do
                 tools <- guardedTools (modifyIORef' calls (+ 1))
                 result <- runner prepared config
                     { loopTools = tools
-                    , loopApprove = const (pure (Right True))
+                    , loopApprove = const (pure ToolApprovalGranted)
                     }
                 readIORef calls `shouldReturn` 1
                 pure result
@@ -242,7 +242,7 @@ configFor initial backend = do
         , loopDispatch = defaultLoopDispatch
         , loopMaxTurns = 3
         , loopOnEvent = const (pure ())
-        , loopApprove = const (pure (Right False))
+        , loopApprove = const (pure ToolApprovalRejected)
         , loopReadSteering = pure []
         , loopCommitSteering = const (pure ())
         , loopInterrupt = pure ()
@@ -311,7 +311,7 @@ cancelledApproval runner = do
     let config = config0
             { loopTools = tools
             , loopApprove = \_ ->
-                (putMVar started () >> takeMVar released >> pure (Right True))
+                (putMVar started () >> takeMVar released >> pure ToolApprovalGranted)
                     `finally` writeIORef closed True
             }
     withAsync (runner prepared config) \running -> do
