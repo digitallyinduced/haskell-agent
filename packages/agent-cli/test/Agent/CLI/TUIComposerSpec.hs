@@ -25,7 +25,15 @@ import Agent.CLI.Input
     )
 import Agent.CLI.TUI.Composer
 import Agent.CLI.TUI.Types
-import Agent.Loop (ImageAttachment(..))
+import Agent.CLI.SteeringInputs
+    ( awaitSteeringInput
+    , commitSteeringInputs
+    , enqueueSteeringInputs
+    , hasSteeringInputWake
+    , newSteeringInputs
+    , readSteeringInputs
+    )
+import Agent.Loop (ImageAttachment(..), TurnInput(..))
 import Agent.TUI.Model
     ( NoticeKind(..)
     , PromptState(..)
@@ -656,6 +664,41 @@ spec = describe "fullscreen composer" do
                 (pure ("provider unavailable" :: Text))
         fmap (.fullscreenInputLine) result
             `shouldBe` Right (ReplText "submitted")
+
+    it "wakes an idle prompt reader for late guidance without consuming the input" do
+        buffer <- newFullscreenInputBuffer
+        steering <- newSteeringInputs
+        let readPrompt = fmap (fmap (.fullscreenInputLine)) $ atomically $
+                takeFullscreenInputOr buffer (awaitSteeringInput steering)
+        withAsync readPrompt \reader -> do
+            timeout 20_000 (wait reader) `shouldReturn` Nothing
+            enqueueSteeringInputs steering [UserMessage "make a pr"]
+                `shouldReturn` Right ()
+            timeout 1_000_000 (wait reader) `shouldReturn` Just (Left ())
+        readSteeringInputs steering `shouldReturn` [UserMessage "make a pr"]
+        hasSteeringInputWake steering `shouldReturn` False
+        timeout 20_000 readPrompt `shouldReturn` Nothing
+        commitSteeringInputs steering 1
+        readSteeringInputs steering `shouldReturn` []
+
+    it "leaves a simultaneous guidance wake intact when a submitted prompt wins" do
+        buffer <- newFullscreenInputBuffer
+        steering <- newSteeringInputs
+        atomically (appendFullscreenInput buffer (input (ReplText "submitted")))
+            `shouldReturn` Right ()
+        enqueueSteeringInputs steering [UserMessage "guidance"]
+            `shouldReturn` Right ()
+        let readPrompt = fmap (fmap (.fullscreenInputLine)) $ atomically $
+                takeFullscreenInputOr buffer (awaitSteeringInput steering)
+        result <- readPrompt
+        result `shouldBe` Right (ReplText "submitted")
+        hasSteeringInputWake steering `shouldReturn` True
+        readSteeringInputs steering `shouldReturn` [UserMessage "guidance"]
+        -- The explicit turn consumes this guidance through the normal loop;
+        -- its commit must remove the edge, avoiding a redundant synthetic turn.
+        commitSteeringInputs steering 1
+        hasSteeringInputWake steering `shouldReturn` False
+        timeout 20_000 readPrompt `shouldReturn` Nothing
 
     it "bounds queued prompts and admits another after consumption" do
         buffer <- newFullscreenInputBuffer

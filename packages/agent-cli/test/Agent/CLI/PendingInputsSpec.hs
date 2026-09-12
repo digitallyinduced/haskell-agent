@@ -17,15 +17,18 @@ import Agent.CLI.PendingInputs
     , withPendingInputs
     )
 import Agent.CLI.SteeringInputs
-    ( awaitBackgroundCompletion
+    ( awaitSteeringInput
+    , clearSteeringInputs
     , commitSteeringInputs
     , dismissBackgroundCompletion
     , enqueueBackgroundCompletion
     , enqueueSteeringInputs
     , hasBackgroundCompletions
+    , hasSteeringInputWake
     , newSteeringInputs
     , readSteeringInputs
     , steeringInputCountLimit
+    , suppressUserSteeringWake
     )
 import Agent.Error (ApiError(..))
 import Agent.Loop
@@ -521,6 +524,14 @@ spec = do
             all (`notElem` [UserMessage "omitted one", UserMessage "omitted two"])
 
   describe "SteeringInputs" do
+    it "does not wake for an empty enqueue" do
+        steering <- newSteeringInputs
+        enqueueSteeringInputs steering [] `shouldReturn` Right ()
+        readSteeringInputs steering `shouldReturn` []
+        hasSteeringInputWake steering `shouldReturn` False
+        timeout 10000 (atomically (awaitSteeringInput steering))
+            `shouldReturn` Nothing
+
     it "bounds, commits, and admits steering inputs in order" do
         steering <- newSteeringInputs
         let queued =
@@ -539,12 +550,81 @@ spec = do
         readSteeringInputs steering `shouldReturn`
             drop 2 queued <> [UserMessage "new-1", UserMessage "new-2"]
 
-    it "wakes only for keyed background completions and dismisses them" do
+    it "wakes for ordinary input, retains it until commit, and does not hot-loop" do
+        steering <- newSteeringInputs
+        enqueueSteeringInputs steering [UserMessage "make a pr"]
+            `shouldReturn` Right ()
+        hasSteeringInputWake steering `shouldReturn` True
+        timeout 100000 (atomically (awaitSteeringInput steering))
+            `shouldReturn` Just ()
+        readSteeringInputs steering `shouldReturn` [UserMessage "make a pr"]
+        hasSteeringInputWake steering `shouldReturn` False
+        timeout 10000 (atomically (awaitSteeringInput steering))
+            `shouldReturn` Nothing
+        commitSteeringInputs steering 1
+        readSteeringInputs steering `shouldReturn` []
+
+    it "preserves the wake for guidance arriving after the active turn snapshot" do
+        steering <- newSteeringInputs
+        enqueueSteeringInputs steering [UserMessage "first"]
+            `shouldReturn` Right ()
+        snapshot <- readSteeringInputs steering
+        enqueueSteeringInputs steering [UserMessage "late"]
+            `shouldReturn` Right ()
+        commitSteeringInputs steering (length snapshot)
+        timeout 100000 (atomically (awaitSteeringInput steering))
+            `shouldReturn` Just ()
+        readSteeringInputs steering `shouldReturn` [UserMessage "late"]
+
+    it "does not wake for inputs already committed by the active turn" do
+        steering <- newSteeringInputs
+        enqueueSteeringInputs steering [UserMessage "consumed"]
+            `shouldReturn` Right ()
+        commitSteeringInputs steering 1
+        hasSteeringInputWake steering `shouldReturn` False
+        timeout 10000 (atomically (awaitSteeringInput steering))
+            `shouldReturn` Nothing
+
+    it "wakes again for new guidance after a previous wake was consumed" do
+        steering <- newSteeringInputs
+        enqueueSteeringInputs steering [UserMessage "first"]
+            `shouldReturn` Right ()
+        atomically (awaitSteeringInput steering)
+        enqueueSteeringInputs steering [UserMessage "second"]
+            `shouldReturn` Right ()
+        timeout 100000 (atomically (awaitSteeringInput steering))
+            `shouldReturn` Just ()
+        readSteeringInputs steering `shouldReturn`
+            [UserMessage "first", UserMessage "second"]
+        clearSteeringInputs steering
+        readSteeringInputs steering `shouldReturn` []
+        hasSteeringInputWake steering `shouldReturn` False
+
+    it "suppresses cancelled guidance wakes without dropping input or future wakes" do
+        steering <- newSteeringInputs
+        enqueueSteeringInputs steering [UserMessage "cancelled guidance"]
+            `shouldReturn` Right ()
+        suppressUserSteeringWake steering
+        hasSteeringInputWake steering `shouldReturn` False
+        readSteeringInputs steering `shouldReturn`
+            [UserMessage "cancelled guidance"]
+        enqueueSteeringInputs steering [UserMessage "new guidance"]
+            `shouldReturn` Right ()
+        hasSteeringInputWake steering `shouldReturn` True
+
+    it "preserves background wakes when suppressing cancelled guidance" do
+        steering <- newSteeringInputs
+        enqueueBackgroundCompletion steering "task-1" (UserMessage "completed")
+            `shouldReturn` Right True
+        suppressUserSteeringWake steering
+        hasSteeringInputWake steering `shouldReturn` True
+
+    it "deduplicates keyed background completions and dismisses them" do
         steering <- newSteeringInputs
         enqueueSteeringInputs steering [UserMessage "ordinary"]
             `shouldReturn` Right ()
-        timeout 10000 (atomically (awaitBackgroundCompletion steering))
-            `shouldReturn` Nothing
+        timeout 100000 (atomically (awaitSteeringInput steering))
+            `shouldReturn` Just ()
 
         enqueueBackgroundCompletion
             steering
@@ -557,9 +637,9 @@ spec = do
             (UserMessage "duplicate")
             `shouldReturn` Right False
         hasBackgroundCompletions steering `shouldReturn` True
-        timeout 100000 (atomically (awaitBackgroundCompletion steering))
+        timeout 100000 (atomically (awaitSteeringInput steering))
             `shouldReturn` Just ()
-        timeout 10000 (atomically (awaitBackgroundCompletion steering))
+        timeout 10000 (atomically (awaitSteeringInput steering))
             `shouldReturn` Nothing
         readSteeringInputs steering `shouldReturn`
             [UserMessage "ordinary", UserMessage "completed"]

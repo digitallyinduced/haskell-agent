@@ -1,19 +1,20 @@
 -- | A bounded queue of steering inputs retained while a turn is active.
 module Agent.CLI.SteeringInputs
     ( SteeringInputs
-    , awaitBackgroundCompletion
+    , awaitSteeringInput
     , clearSteeringInputs
     , commitSteeringInputs
     , dismissBackgroundCompletion
     , enqueueBackgroundCompletion
     , enqueueSteeringInputs
-    , hasBackgroundCompletionWake
+    , hasSteeringInputWake
     , hasBackgroundCompletions
     , newSteeringInputs
     , prepareBackgroundCompletion
     , readSteeringInputs
     , steeringInputByteLimit
     , steeringInputCountLimit
+    , suppressUserSteeringWake
     ) where
 
 import Agent.CLI.InputBudget
@@ -46,7 +47,7 @@ data SteeringEntry = SteeringEntry
     { steeringInput :: !TurnInput
     , steeringBytes :: !Int
     , steeringBackgroundKey :: !(Maybe Text)
-    , steeringBackgroundWake :: !Bool
+    , steeringWake :: !Bool
     }
 
 data SteeringState = SteeringState
@@ -73,7 +74,7 @@ enqueueSteeringInputs (SteeringInputs ref) inputs =
                     input
                     (logicalTurnInputBytes input)
                     Nothing
-                    False
+                    True
                 | input <- inputs
                 ]
             addedCount = length measured
@@ -163,22 +164,24 @@ hasBackgroundCompletions (SteeringInputs ref) = do
         any (maybe False (const True) . (.steeringBackgroundKey))
             state.steeringQueue
 
-hasBackgroundCompletionWake :: SteeringInputs -> IO Bool
-hasBackgroundCompletionWake (SteeringInputs ref) = do
+hasSteeringInputWake :: SteeringInputs -> IO Bool
+hasSteeringInputWake (SteeringInputs ref) = do
     state <- readTVarIO ref
-    pure $ any (.steeringBackgroundWake) state.steeringQueue
+    pure $ any (.steeringWake) state.steeringQueue
 
--- | Consume pending idle-wake edges without removing their notices. Keeping
--- notice queued preserves the loop's commit-on-provider-success semantics;
+-- | Consume pending idle-wake edges without removing their inputs. Every
+-- accepted input has an edge: guidance arriving after the active loop's final
+-- read must start a follow-up turn rather than remain stranded at the prompt.
+-- Keeping inputs queued preserves the loop's commit-on-provider-success semantics;
 -- consuming the edge prevents a failed synthetic turn from hot-looping.
-awaitBackgroundCompletion :: SteeringInputs -> STM ()
-awaitBackgroundCompletion (SteeringInputs ref) = do
+awaitSteeringInput :: SteeringInputs -> STM ()
+awaitSteeringInput (SteeringInputs ref) = do
     state <- readTVar ref
-    check $ any (.steeringBackgroundWake) state.steeringQueue
+    check $ any (.steeringWake) state.steeringQueue
     writeTVar ref state
         { steeringQueue =
             fmap
-                (\entry -> entry { steeringBackgroundWake = False })
+                (\entry -> entry { steeringWake = False })
                 state.steeringQueue
         }
 
@@ -199,6 +202,19 @@ dismissBackgroundCompletion (SteeringInputs ref) key =
             { steeringQueue = kept
             , steeringBytes = keptBytes
             }
+
+-- | Cancelling a turn must not immediately restart it with earlier guidance.
+-- Retain that guidance for the next explicit turn, without changing managed
+-- background completion wake behavior.
+suppressUserSteeringWake :: SteeringInputs -> IO ()
+suppressUserSteeringWake (SteeringInputs ref) =
+    atomically $ modifyTVar' ref \state ->
+        state
+            { steeringQueue = fmap suppress state.steeringQueue }
+  where
+    suppress entry = case entry.steeringBackgroundKey of
+        Nothing -> entry { steeringWake = False }
+        Just _ -> entry
 
 commitSteeringInputs :: SteeringInputs -> Int -> IO ()
 commitSteeringInputs (SteeringInputs ref) count =
