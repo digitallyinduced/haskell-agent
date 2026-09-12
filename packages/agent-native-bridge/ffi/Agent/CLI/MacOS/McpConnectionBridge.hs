@@ -11,7 +11,7 @@ module Agent.CLI.MacOS.McpConnectionBridge
 
 import Agent.CLI.MacOS.Marshalling (decodeUtf8Input, withText)
 import Agent.CLI.MacOS.McpConnectionOperation (startMcpConnectionOperation)
-import Agent.CLI.MacOS.McpCredentialStore (ensureNativeMcpCredentialStore)
+import Agent.CLI.MacOS.McpCredentialStore (nativeMcpCredentialRuntime)
 import Agent.CLI.McpAdmin (McpAdminError(..), McpAdminSnapshot(..))
 import Agent.CLI.McpConnection
 import Agent.CLI.McpConnectionRuntime (readMcpConnectionIcons)
@@ -141,7 +141,7 @@ ha_mcp_connection_remove expected identifier identifierLength callback context o
         [connectionId] -> startConnectionResult callback context output 0 do
             home <- getHomeDirectory
             fmap (fmap (\snapshot -> snapshot { mcpAdminValue = [] })) $
-                removeMcpConnection home expected connectionId
+                removeMcpConnection nativeMcpCredentialRuntime home expected connectionId
         _ -> pure 2
 
 ha_mcp_connection_authorize
@@ -156,7 +156,7 @@ ha_mcp_connection_authorize expected identifier identifierLength authorization
             [connectionId] -> startConnectionResult callback context output 3 do
                 home <- getHomeDirectory
                 fmap (fmap singletonSnapshot) $
-                    authorizeMcpConnection home expected connectionId \url ->
+                    authorizeMcpConnection nativeMcpCredentialRuntime home expected connectionId \url ->
                         withText url (invokeAuthorizationCallback authorization context)
                             >> pure (Right ())
             _ -> pure 2
@@ -200,7 +200,7 @@ startConnectionResultWithIcons
     -> IO (Either McpAdminError (McpAdminSnapshot [McpConnection]))
     -> IO CInt
 startConnectionResultWithIcons icons callback context output state action =
-    startMcpConnectionOperation output (ensureNativeMcpCredentialStore >> action) complete
+    startMcpConnectionOperation output action complete
         (emitConnectionTerminal callback context (-1) 0
             "MCP connection operation failed.")
   where
