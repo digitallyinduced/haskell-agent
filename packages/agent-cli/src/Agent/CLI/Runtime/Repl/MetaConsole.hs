@@ -11,7 +11,7 @@ import Agent.CLI.Command
     , SlashCatalog
     , parseReplLineWithCatalog
     )
-import Agent.CLI.Config
+import Agent.Runtime.Config
     ( HarnessConfig(..)
     , McpServerConfig(..)
     , loadHarnessConfig
@@ -19,7 +19,7 @@ import Agent.CLI.Config
     )
 import Agent.CLI.Input ( readApprovalLine )
 import Agent.CLI.Login ( connectProviderAccount )
-import Agent.CLI.McpOAuth ( loginMcp )
+import Agent.Runtime.McpOAuth ( loginMcp )
 import Agent.CLI.Options ( ApprovalPolicy(..) )
 import Agent.CLI.Render ( clearThinking, putTextLn, renderEvent )
 import Agent.CLI.Runtime.MetaConsole
@@ -41,7 +41,7 @@ import Agent.CLI.Runtime.Repl.Selection ( selectRequestedAccount )
 import Agent.CLI.Runtime.Types
     ( RunResult(RunQuit, RunRestart) )
 import Agent.CLI.Secret ( promptSecretLine )
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( Persistence(..)
     , SessionHandle(sessionMeta)
     , SessionMeta(metaId)

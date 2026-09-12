@@ -1,8 +1,8 @@
 module Agent.CLI.ProjectSpec (spec) where
 
 import Agent.CLI.Project
-import Agent.CLI.Models (ModelTarget(..))
-import Agent.CLI.ModelConfig (organizationGatewayConnectionId)
+import Agent.Runtime.Models (ModelTarget(..))
+import Agent.Runtime.ModelConfig (organizationGatewayConnectionId)
 import Agent.Dialect (DialectId(..))
 import Agent.Provider (Provider(..))
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)

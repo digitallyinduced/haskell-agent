@@ -22,19 +22,19 @@ import Agent.CLI.AgentSessions
                            toolsGatewayIdentity, toolsCwd, toolsEffort,
                            toolsCurrentSessionId, toolsLaunchTurn, toolsPrepareSessionWait,
                            toolsDeliverToOwner) )
-import Agent.CLI.Auth (isGatewayLoadedAuth)
-import qualified Agent.CLI.ComputerUse as ComputerUse
-import Agent.CLI.Config (HarnessConfig(..))
-import Agent.CLI.Database ( databaseTools )
-import Agent.CLI.Database.Store
+import Agent.Accounts.Auth (isGatewayLoadedAuth)
+import qualified Agent.ComputerUse as ComputerUse
+import Agent.Runtime.Config (HarnessConfig(..))
+import Agent.Runtime.Database ( databaseTools )
+import Agent.Runtime.Database.Store
     (databaseToolsEnvForStore)
 import Agent.CLI.Dialects
     ( CodingTools(..),
       codingToolsForWithTypes,
       filterBashTools,
       filterGhciTools )
-import Agent.CLI.Error ( formatException )
-import Agent.CLI.GatewayBridge ( managedGatewayTools )
+import Agent.Runtime.Error ( formatException )
+import Agent.Runtime.GatewayBridge ( managedGatewayTools )
 import Agent.CLI.LearnedSkills ( learnedSkillTools )
 import Agent.CLI.LearnedSkills.Store
     ( learnedSkillToolsEnvForStore
@@ -49,8 +49,8 @@ import Agent.Integration.API
     , acquireIntegrationRuntime
     )
 import Agent.OsPath (unsafeToFilePath)
-import Agent.CLI.ModelConfig (builtinConnectionId)
-import Agent.CLI.Models (ModelTarget(targetConnectionId, targetWireModelId))
+import Agent.Runtime.ModelConfig (builtinConnectionId)
+import Agent.Runtime.Models (ModelTarget(targetConnectionId, targetWireModelId))
 import Agent.CLI.Options
     ( isOneShot, resolveComputerUseEnabled
     , CliOptions(optGhci, optBash, optSkills)
@@ -81,7 +81,7 @@ import Agent.CLI.Runtime.Orchestration.Session ( AgentSessionRequest(..)
 import Agent.CLI.Runtime.Orchestration.Startup
     ( reportStartupWarning )
 import Agent.CLI.Runtime.Types (RunResult)
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( SessionHandle(sessionDir, sessionMeta), SessionMeta(metaId)
     , SessionTurn(turnAssistantText) )
 import Agent.CLI.Session.Runtime.Types
@@ -89,11 +89,11 @@ import Agent.CLI.Session.Runtime.Types
     , StartupRuntime(startupDatabaseStore, startupNativeHooks, startupStdinTty) )
 import Agent.CLI.Session.Selection
     ( currentSessionId, reservedSessionId )
-import Agent.CLI.Session.Inbox
+import Agent.Runtime.Session.Inbox
     ( deliverSessionInboxMessage
     , inboxUnavailableError
     )
-import Agent.CLI.SessionLock
+import Agent.Runtime.SessionLock
     ( acquireSessionLock,
       releaseSessionLock,
       sessionLockFilePath,

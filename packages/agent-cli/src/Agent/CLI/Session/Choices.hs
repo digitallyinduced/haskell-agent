@@ -8,8 +8,8 @@ module Agent.CLI.Session.Choices
     , showAccountUsage
     ) where
 
-import Agent.CLI.Error (formatApiErrorInlineAt)
-import Agent.CLI.GatewayClient
+import Agent.Runtime.Error (formatApiErrorInlineAt)
+import Agent.Runtime.GatewayClient
     ( GatewayModelAccess
     , cachedGatewayModels
     , cachedGatewayUsage
@@ -20,7 +20,7 @@ import Agent.CLI.GatewayModels
     ( modelOptionsForGatewayModels
     , selectGatewayModelOption
     )
-import Agent.CLI.ModelConfig
+import Agent.Runtime.ModelConfig
     ( ModelCatalog
     , builtinConnectionId
     , organizationGatewayConnectionId
@@ -33,7 +33,7 @@ import Agent.CLI.ModelPicker
     , pickModelStateWithUpdates
     , renderEffortIndicator
     )
-import Agent.CLI.Models
+import Agent.Runtime.Models
     ( ModelOption(..)
     , ModelTarget(..)
     , PickerState(..)

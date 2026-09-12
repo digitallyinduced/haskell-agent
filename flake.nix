@@ -278,6 +278,21 @@
                     ];
                 };
 
+                agentToolsSource = nix-filter.lib {
+                    root = ./packages/agent-tools;
+                    include = [ "src" "test" "benchmark" "data" "agent-tools.cabal" "LICENSE" "README.md" ];
+                };
+
+                agentAccountsSource = nix-filter.lib {
+                    root = ./packages/agent-accounts;
+                    include = [ "src" "test" "agent-accounts.cabal" "LICENSE" "README.md" ];
+                };
+
+                agentComputerUseSource = nix-filter.lib {
+                    root = ./packages/agent-computer-use;
+                    include = [ "src" "test" "benchmark" "agent-computer-use.cabal" "LICENSE" "README.md" ];
+                };
+
                 agentMcpSource = nix-filter.lib {
                     root = ./packages/agent-mcp;
                     include = [
@@ -407,23 +422,23 @@
                     ];
                 };
 
-                agentCliRuntimeProductionSource = nix-filter.lib {
-                    root = ./packages/agent-cli-runtime;
+                agentRuntimeProductionSource = nix-filter.lib {
+                    root = ./packages/agent-runtime;
                     include = [
                         "config"
                         "src"
-                        "agent-cli-runtime.cabal"
+                        "agent-runtime.cabal"
                         "LICENSE"
                     ];
                 };
 
-                agentCliRuntimeCheckSource = nix-filter.lib {
-                    root = ./packages/agent-cli-runtime;
+                agentRuntimeCheckSource = nix-filter.lib {
+                    root = ./packages/agent-runtime;
                     include = [
                         "config"
                         "src"
                         "test"
-                        "agent-cli-runtime.cabal"
+                        "agent-runtime.cabal"
                         "LICENSE"
                     ];
                 };
@@ -628,6 +643,19 @@
                                 bun_1_4
                                 pkgs.ripgrep
                             ]);
+                        agent-tools = localPackage (pkgs.haskell.lib.addTestToolDepends
+                            (pkgs.haskell.lib.overrideSrc
+                                (final.callPackage ./packages/agent-tools/package.nix { })
+                                { src = agentToolsSource; })
+                            [ pkgs.git bun_1_4 pkgs.ripgrep ]);
+                        agent-accounts = localPackage (pkgs.haskell.lib.overrideSrc
+                            (final.callPackage ./packages/agent-accounts/package.nix { })
+                            { src = agentAccountsSource; });
+                        agent-computer-use = localPackage (pkgs.haskell.lib.addTestToolDepends
+                            (pkgs.haskell.lib.overrideSrc
+                                (final.callPackage ./packages/agent-computer-use/package.nix { })
+                                { src = agentComputerUseSource; })
+                            [ pkgs.bash ]);
                         agent-mcp = localPackage (pkgs.haskell.lib.overrideSrc
                             (final.callPackage ./packages/agent-mcp/package.nix { })
                             {
@@ -762,17 +790,17 @@
                                 {
                                     src = agentServerClientSource;
                                 });
-                        agent-cli-runtime = localPackage
+                        agent-runtime = localPackage
                             (pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc
                                 (final.callPackage
-                                    ./packages/agent-cli-runtime/package.nix
+                                    ./packages/agent-runtime/package.nix
                                     { })
                                 {
                                     src =
                                         if packageMode != "production"
-                                            then agentCliRuntimeCheckSource
-                                            else agentCliRuntimeProductionSource;
+                                            then agentRuntimeCheckSource
+                                            else agentRuntimeProductionSource;
                                 })
                             [ pkgs.postgresql_18 ]);
                         agent-external-session = localPackage
@@ -961,8 +989,8 @@
                 agentClaudePackage = productionHaskellPackages.agent-claude;
                 agentTuiPackage = productionHaskellPackages.agent-tui;
                 agentStorePackage = productionHaskellPackages.agent-store;
-                agentCliRuntimePackage =
-                    productionHaskellPackages.agent-cli-runtime;
+                agentRuntimePackage =
+                    productionHaskellPackages.agent-runtime;
                 agentExternalSessionPackage =
                     productionHaskellPackages.agent-external-session;
                 agentRepositoryPackage =
@@ -1131,8 +1159,9 @@
                             inherit pkgs skylightingSyntaxes;
                             agentCli = agentCliBareExecutable;
                             agentCliSource = agentCliProductionSource;
-                            agentCliRuntimeSource =
-                                agentCliRuntimeProductionSource;
+                            agentRuntimeSource =
+                                agentRuntimeProductionSource;
+                            inherit agentToolsSource;
                             inherit agentCoreSource;
                             bun = bun_1_4;
                             sourceDateEpoch = self.lastModified or 1;
@@ -1468,13 +1497,16 @@
                 packages.${if pkgs.stdenv.hostPlatform.isDarwin
                     then "agent-cli-macos-archive" else null} =
                     agentCliMacosRelease.archive;
-                packages.agent-cli-runtime = agentCliRuntimePackage;
+                packages.agent-runtime = agentRuntimePackage;
                 packages.agent-external-session =
                     agentExternalSessionPackage;
                 packages.agent-repository = agentRepositoryPackage;
                 packages.agent-native-bridge-library =
                     agentNativeBridgeHaskellPackage;
                 packages.agent-core = agentCorePackage;
+                packages.agent-tools = productionHaskellPackages.agent-tools;
+                packages.agent-accounts = productionHaskellPackages.agent-accounts;
+                packages.agent-computer-use = productionHaskellPackages.agent-computer-use;
                 packages.agent-mcp = agentMcpPackage;
                 packages.agent-mail = agentMailPackage;
                 packages.agent-integration-api = agentIntegrationApiPackage;
@@ -1528,13 +1560,16 @@
                 devShells.default = developmentHaskellPackages.shellFor {
                     packages = packages: [
                         packages.agent-cli
-                        packages.agent-cli-runtime
+                        packages.agent-runtime
                         packages.agent-external-session
                         packages.agent-repository
                         packages.agent-native-bridge
                         packages.agent-telegram
                         packages.agent-server
                         packages.agent-core
+                        packages.agent-tools
+                        packages.agent-accounts
+                        packages.agent-computer-use
                         packages.agent-mcp
                         packages.agent-mail
                         packages.agent-integration-api
@@ -1598,7 +1633,7 @@
                     # The package check does not exercise the wrapped
                     # justStaticExecutables output or its requisite assertions.
                     agent-cli-executable = agentCliExecutable;
-                    agent-cli-runtime = haskellPackages.agent-cli-runtime;
+                    agent-runtime = haskellPackages.agent-runtime;
                     agent-external-session =
                         haskellPackages.agent-external-session;
                     agent-repository = haskellPackages.agent-repository;
@@ -1611,6 +1646,7 @@
                             nativeBuildInputs = [
                                 pkgs.bash
                                 pkgs.ripgrep
+                                pkgs.python3
                             ];
                         }
                         ''
@@ -1623,6 +1659,9 @@
                     agent-server-client =
                         haskellPackages.agent-server-client;
                     agent-core = haskellPackages.agent-core;
+                    agent-tools = haskellPackages.agent-tools;
+                    agent-accounts = haskellPackages.agent-accounts;
+                    agent-computer-use = haskellPackages.agent-computer-use;
                     agent-mcp = haskellPackages.agent-mcp;
                     agent-mail = haskellPackages.agent-mail;
                     agent-json = haskellPackages.agent-json;

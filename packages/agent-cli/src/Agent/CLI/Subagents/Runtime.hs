@@ -11,7 +11,7 @@ module Agent.CLI.Subagents.Runtime
     , runXaiSubagent, resolveGatewaySubagentTarget, grokSpawnedChildIdentity
     , usesOpenAiChildTransport, validatePersistedSubagentTarget
     ) where
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( readSessionRequestParams
     )
 import Agent.CLI.Approval (childApprove)
@@ -32,8 +32,8 @@ import Agent.CLI.Prompt
     , systemPrompt
     , systemPromptForTools
     )
-import Agent.CLI.Request (requestParams)
-import Agent.CLI.Session (LegacySubagentTarget(..))
+import Agent.Runtime.ProviderRequest (requestParams)
+import Agent.Runtime.Session (LegacySubagentTarget(..))
 import Agent.CLI.SubagentStore
     ( SubagentDiskFields(..)
     , SubagentDiskMeta(..)
@@ -66,7 +66,7 @@ import Agent.CLI.SteeringInputs
     , newSteeringInputs
     , readSteeringInputs
     )
-import Agent.CLI.ModelConfig
+import Agent.Runtime.ModelConfig
     (connectionSupportsDialect, organizationGatewayConnectionId)
 import Agent.CLI.Tools
     (hostedSearchToolNames, requireToolRegistry, schemasFromAppTools)

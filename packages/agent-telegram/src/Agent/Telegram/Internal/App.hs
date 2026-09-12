@@ -1,12 +1,12 @@
 module Agent.Telegram.Internal.App where
 
 
-import Agent.CLI.AgentSessions.Process ()
-import Agent.CLI.ManagedTurn ()
-import Agent.CLI.Runtime.Options ()
-import Agent.CLI.Models ()
-import Agent.CLI.ModelConfig ()
-import Agent.CLI.Session ()
+import Agent.Runtime.AgentSessions.Process ()
+import Agent.Runtime.ManagedTurn ()
+import Agent.Runtime.Options ()
+import Agent.Runtime.Models ()
+import Agent.Runtime.ModelConfig ()
+import Agent.Runtime.Session ()
 import Agent.Telegram.Types
 import Agent.Telegram.Classify
     ( telegramUserLabel )

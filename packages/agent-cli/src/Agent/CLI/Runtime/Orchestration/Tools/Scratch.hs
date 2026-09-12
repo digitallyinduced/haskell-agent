@@ -6,11 +6,11 @@ module Agent.CLI.Runtime.Orchestration.Tools.Scratch
     , startStaleResourceCleanup
     ) where
 
-import Agent.CLI.Error (formatException)
-import Agent.CLI.Config (HarnessConfig(..), WorktreeConfig(..))
+import Agent.Runtime.Error (formatException)
+import Agent.Runtime.Config (HarnessConfig(..), WorktreeConfig(..))
 import Agent.CLI.ExternalSession (defaultExternalSessionEnv, externalSessionTool)
-import Agent.CLI.ManagedTurn (ManagedTurnRequest(..))
-import Agent.CLI.Models (ModelTarget(..))
+import Agent.Runtime.ManagedTurn (ManagedTurnRequest(..))
+import Agent.Runtime.Models (ModelTarget(..))
 import Agent.CLI.Options (CliOptions(..))
 import Agent.CLI.Runtime.HistorySource (emptyFullscreenHistoryPage, loadFullscreenHistoryPage)
 import Agent.CLI.Runtime.Orchestration.Startup (reportStartupWarning)
@@ -19,7 +19,7 @@ import Agent.CLI.Runtime.Orchestration.Tools.Model
 import Agent.CLI.Runtime.Orchestration.Tools.Request
 import Agent.CLI.Runtime.Orchestration.Types (AgentProcessRuntime(..), NativeRunCapabilities(..))
 import Agent.CLI.Runtime.Persistence (preparePersistence)
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( Persistence, SessionTempCleanupReport(..)
     , acquireSessionTempLease, allocateSessionTemp, cleanupPendingPersistence
     , cleanupStaleSessionTemps, defaultSessionTempKeepCount

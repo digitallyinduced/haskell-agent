@@ -1,7 +1,7 @@
 module Agent.CLI.McpOAuthSpec (spec) where
 
-import Agent.CLI.McpOAuth
-import Agent.CLI.McpOAuthStore (loadMcpOAuthRecord, saveMcpOAuthRecord, mcpOAuthStorePath)
+import Agent.Runtime.McpOAuth
+import Agent.Runtime.McpOAuthStore (loadMcpOAuthRecord, saveMcpOAuthRecord, mcpOAuthStorePath)
 import qualified Agent.MCP.OAuth as OAuth
 import Control.Concurrent.Async (cancel, concurrently, waitCatch, withAsync)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)

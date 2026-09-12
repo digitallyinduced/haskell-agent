@@ -13,8 +13,8 @@ module Agent.CLI.Usage
     , shortAccountId
     ) where
 
-import Agent.CLI.Duration (formatDuration)
-import Agent.CLI.Error (formatApiErrorInlineAt)
+import Agent.Runtime.Duration (formatDuration)
+import Agent.Runtime.Error (formatApiErrorInlineAt)
 import Agent.CLI.Style (roleMuted, roleSuccess, roleWarn)
 import Agent.Error (ApiError)
 import Agent.OpenAI.Usage (UsageLimit(..), UsageSnapshot(..), UsageWindow(..))

@@ -2,7 +2,7 @@
 module Agent.CLI.MacOS.EngineLifecycle (workerLifecycle) where
 
 import Agent.CLI.MacOS.BrowserBridge (BrowserHost)
-import Agent.CLI.GatewayClient (registerGatewayCredentialInvalidator)
+import Agent.Runtime.GatewayClient (registerGatewayCredentialInvalidator)
 import Agent.CLI.MacOS.BundledIntegrations
     (bundledIntegrationProvider, bundledOrganizationIntegrationProvider)
 import Agent.CLI.MacOS.ComputerBridge (ComputerHost)
@@ -27,7 +27,7 @@ import Agent.CLI.MacOS.NativeSupervisor
 import Agent.CLI.MacOS.TurnState
 import Agent.CLI.MacOS.Marshalling (withText)
 import Agent.CLI.NativeRuntime
-import Agent.CLI.McpConnectionCredentials (CredentialRuntime)
+import Agent.Runtime.McpConnectionCredentials (CredentialRuntime)
 import Agent.Loop (ImageAttachment)
 import Agent.Store.Postgres (ManagedPostgresConfig)
 import Control.Concurrent.MVar (newMVar)

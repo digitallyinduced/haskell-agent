@@ -13,7 +13,7 @@ module Agent.CLI.Btw
     ) where
 
 import Agent.Cancel (CancelFlag, newCancelFlag, waitCancel)
-import Agent.CLI.Error (formatApiErrorInline)
+import Agent.Runtime.Error (formatApiErrorInline)
 import Agent.Error (ApiError)
 import Agent.Loop
     ( Backend(..)

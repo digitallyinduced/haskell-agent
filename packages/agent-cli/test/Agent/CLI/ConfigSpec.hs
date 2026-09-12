@@ -1,6 +1,6 @@
 module Agent.CLI.ConfigSpec (spec) where
 
-import Agent.CLI.Config
+import Agent.Runtime.Config
 import Control.Concurrent.Async (mapConcurrently)
 import Control.Exception.Safe (bracket)
 import Agent.MCP (McpLogLevel(..), McpProtocolPreference(..))
@@ -30,7 +30,7 @@ import System.Posix.Files
 import Test.Hspec
 
 spec :: Spec
-spec = describe "Agent.CLI.Config" do
+spec = describe "Agent.Runtime.Config" do
     it "preserves the credential-store default for existing managed identities" do
         mcpUsesConnectionCredentials httpMcpServer
             { mcpConnectionId = Just "existing" } `shouldBe` True

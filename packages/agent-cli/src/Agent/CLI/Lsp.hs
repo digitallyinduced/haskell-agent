@@ -7,7 +7,7 @@ module Agent.CLI.Lsp
     , lspRuntimeTool
     , encodeLspFrame
     ) where
-import Agent.CLI.Config
+import Agent.Runtime.Config
     ( LspConfig(..)
     , LspServerConfig(..)
     )

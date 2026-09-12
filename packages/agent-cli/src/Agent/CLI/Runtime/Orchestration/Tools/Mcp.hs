@@ -4,13 +4,13 @@ module Agent.CLI.Runtime.Orchestration.Tools.Mcp
     , acquireMcpRuntime
     ) where
 
-import Agent.CLI.Config
+import Agent.Runtime.Config
     ( HarnessConfig(..), McpServerConfig(..)
     , mcpServersForRuntime, useProgressiveMcp, mcpUsesConnectionCredentials )
 import Agent.CLI.FileUri (fileUri)
 import Agent.CLI.IntegrationGateway (integrationEndpointServers)
 import Agent.CLI.McpElicitation (cliMcpElicitation)
-import Agent.CLI.McpOAuthStore (mcpOAuthStorePath)
+import Agent.Runtime.McpOAuthStore (mcpOAuthStorePath)
 import Agent.CLI.McpStatus
     ( formatMcpInstructionsNotice, formatMcpModelNoticeFor
     , formatMcpProgress, summarizeMcpStatuses )

@@ -14,7 +14,7 @@ module Agent.CLI.ProviderAvailability
     , xaiUsageFailure
     ) where
 
-import Agent.CLI.Auth (LoadedAuth(..))
+import Agent.Accounts.Auth (LoadedAuth(..))
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.OpenAI.WebSocketClient (isGatewayWebSocketCredential)
 import qualified Agent.OpenAI.Usage as OpenAI

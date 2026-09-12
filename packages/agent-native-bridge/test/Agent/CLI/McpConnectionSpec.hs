@@ -1,10 +1,10 @@
 module Agent.CLI.McpConnectionSpec (spec) where
 
-import Agent.CLI.Config (HarnessConfig(..), McpServerConfig(..), loadHarnessConfig, harnessConfigPath, saveHarnessConfig, mcpUsesConnectionCredentials)
+import Agent.Runtime.Config (HarnessConfig(..), McpServerConfig(..), loadHarnessConfig, harnessConfigPath, saveHarnessConfig, mcpUsesConnectionCredentials)
 import Control.Concurrent.Async (concurrently)
 import Agent.CLI.McpAdmin
 import Agent.CLI.McpConnection
-import Agent.CLI.McpConnectionCredentials (newCredentialRuntime)
+import Agent.Runtime.McpConnectionCredentials (newCredentialRuntime)
 import Control.Exception.Safe (bracket)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import qualified Data.Map.Strict as Map

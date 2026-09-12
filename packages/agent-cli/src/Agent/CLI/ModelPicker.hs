@@ -25,11 +25,11 @@ module Agent.CLI.ModelPicker
     , decodePickerKey
     ) where
 
-import Agent.CLI.ModelConfig
+import Agent.Runtime.ModelConfig
     ( ModelCatalog
     , organizationGatewayConnectionId
     )
-import Agent.CLI.Models
+import Agent.Runtime.Models
 import Agent.CLI.Options
     ( defaultEffortFor
     , normalizeReasoningEffortForDialect

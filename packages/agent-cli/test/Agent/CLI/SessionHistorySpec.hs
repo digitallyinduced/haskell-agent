@@ -1,6 +1,6 @@
 module Agent.CLI.SessionHistorySpec (spec) where
 
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( SessionTurn(..)
     , TranscriptEffect(..)
     )

@@ -18,7 +18,7 @@ import Agent.CLI.Database.Storage
     ( postgresStorageCommandEnv
     , runStorageCommand
     )
-import Agent.CLI.ComputerUse
+import Agent.ComputerUse
     ( summarizeComputerCall
     , summarizeComputerToolCall
     )
@@ -33,7 +33,7 @@ import Agent.CLI.Options
     , SessionPageRequest(..)
     , StorageCommand
     )
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( SessionMeta(..)
     , SessionTurn(..)
     , SessionTurnPage(..)
@@ -50,7 +50,7 @@ import Agent.CLI.Session
     , sessionsRoot
     , sessionTransferDecoder
     )
-import Agent.CLI.SessionLock
+import Agent.Runtime.SessionLock
     ( sessionActivityLockPath
     , sessionLockIsActive
     , sessionLockPath

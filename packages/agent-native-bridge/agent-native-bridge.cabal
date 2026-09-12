@@ -43,8 +43,9 @@ library
                     , Agent.CLI.McpAdmin
                     , Agent.CLI.McpConnection
                     , Agent.CLI.ResourceAdmin
-    build-depends:    agent-cli >= 0.1 && < 0.2
+    build-depends:    agent-runtime >= 0.1 && < 0.2
                     , agent-core >= 0.1 && < 0.2
+                    , agent-tools >= 0.1 && < 0.2
                     , agent-json >= 0.1 && < 0.2
                     , agent-mcp >= 0.1 && < 0.2
                     , agent-store >= 0.1 && < 0.2
@@ -128,10 +129,12 @@ foreign-library haskell-agent-bridge
     install-includes: HaskellAgentBridge.h
     ghc-options:      -threaded
     build-depends:    agent-native-bridge
+                    , agent-computer-use >= 0.1 && < 0.2
+                    , agent-accounts >= 0.1 && < 0.2
                     , agent-repository >= 0.1 && < 0.2
                     , agent-cli >= 0.1 && < 0.2
                     , agent-mcp >= 0.1 && < 0.2
-                    , agent-cli-runtime >= 0.1 && < 0.2
+                    , agent-runtime >= 0.1 && < 0.2
                     , agent-integration-api >= 0.1 && < 0.2
                     , agent-json >= 0.1 && < 0.2
                     , agent-runtime-daemon >= 0.1 && < 0.2
@@ -176,11 +179,13 @@ test-suite agent-native-bridge-test
                     , Agent.CLI.McpConnectionSpec
                     , Agent.CLI.ResourceAdminSpec
     build-depends:    agent-native-bridge
+                    , agent-computer-use >= 0.1 && < 0.2
                     , agent-cli
-                    , agent-cli-runtime
+                    , agent-runtime
                     , agent-responses-types
                     , agent-integration-api
                     , agent-core
+                    , agent-tools
                     , agent-json
                     , agent-mcp
                     , agent-runtime-daemon

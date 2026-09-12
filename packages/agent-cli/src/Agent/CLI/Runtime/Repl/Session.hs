@@ -3,7 +3,7 @@ module Agent.CLI.Runtime.Repl.Session
     ( handleSessionAction
     ) where
 
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( readSessionRequestParams
     )
 import Agent.CLI.Afk
@@ -18,7 +18,7 @@ import Agent.CLI.Command
       ShellMode(ShellNone, ShellGhci, ShellBash, ShellBoth),
       SlashCatalog(slashCatalogToolNames) )
 import Agent.CLI.Input ( readChoiceSelection, readChoiceSelectionAt )
-import Agent.CLI.Models
+import Agent.Runtime.Models
     ( ModelTarget(targetModelId, ModelTarget, targetProvider,
                   targetConnectionId, targetWireModelId, targetDialect) )
 import Agent.CLI.Render ( clearThinking, putTextLn, renderEvent )
@@ -27,7 +27,7 @@ import Agent.CLI.Runtime.HistorySource
 import Agent.CLI.Runtime.Types
     ( RunResult(RunDeleteSession, RunForkSession, RunSwitchWorktree, RunRestart,
                 RunQuit) )
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( TranscriptEffect(TranscriptReset),
       appendTurnKeepTitleIndexed,
       appendTurnWithPromptResetAndTaskPlanClearIndexed,

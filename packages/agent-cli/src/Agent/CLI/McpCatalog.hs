@@ -15,7 +15,7 @@ module Agent.CLI.McpCatalog
     , setMcpCatalogEnabled
     ) where
 
-import Agent.CLI.Config
+import Agent.Runtime.Config
     ( HarnessConfig(..)
     , McpServerConfig(..)
     , loadHarnessConfig
@@ -29,7 +29,7 @@ import Agent.CLI.McpAdd
     , parseMcpAddName
     , parseMcpTargetWithTransport
     )
-import Agent.CLI.McpOAuth
+import Agent.Runtime.McpOAuth
     ( LoginOptions(..)
     , defaultLoginOptions
     , loginMcpWith

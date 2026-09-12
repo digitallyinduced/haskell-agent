@@ -4,7 +4,7 @@
 module Agent.CLI.MacOS.McpCredentialStore (nativeMcpCredentialRuntime) where
 
 import Agent.CLI.MacOS.McpKeychain
-import Agent.CLI.McpConnectionCredentials
+import Agent.Runtime.McpConnectionCredentials
     ( CredentialRuntime, McpCredentialStore(..), newCredentialRuntime )
 import System.IO.Unsafe (unsafePerformIO)
 

@@ -15,7 +15,7 @@ module Agent.CLI.Provider.Switch
     , requestStartupProviderFallback
     ) where
 
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( SessionRequestState
     , readSessionRequestParams
     , setSessionRequestModel
@@ -30,24 +30,24 @@ import Agent.CLI.Session.History
     , readLivePreviousResponseId
     , writeLivePreviousResponseId
     )
-import Agent.CLI.Auth
+import Agent.Accounts.Auth
     ( LoadedAuth(..)
     , gatewayAuthSelectionId
     , loadAuth
     , loadAuthForAccount
     )
-import Agent.CLI.Error
+import Agent.Runtime.Error
     ( formatApiErrorAt
     , formatApiErrorInlineAt
     , formatApiErrorRetryCountdownParts
     )
-import Agent.CLI.ModelConfig
+import Agent.Runtime.ModelConfig
     ( ModelCatalog
     , builtinConnectionId
     , connectionSupportsDialect
     , loadModelCatalogAt
     )
-import Agent.CLI.Models
+import Agent.Runtime.Models
     ( ModelOption(..)
     , ModelTarget(..)
     , defaultModelOptionFor
@@ -85,7 +85,7 @@ import Agent.CLI.Render
 import Agent.CLI.Runtime.Types
     ( RunResult(..)
     )
-import Agent.CLI.Session
+import Agent.Runtime.Session
 import Agent.CLI.SessionEnv (SessionEnv(..))
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.Style

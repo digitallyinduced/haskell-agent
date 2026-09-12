@@ -5,7 +5,7 @@ module Agent.CLI.Subagents.Runtime.Target
     , validatePersistedSubagentTarget
     ) where
 
-import Agent.CLI.Session (LegacySubagentTarget(..))
+import Agent.Runtime.Session (LegacySubagentTarget(..))
 import Agent.CLI.SubagentStore
     ( LegacySubagentTargetFields(..)
     , SubagentDiskMeta(..)

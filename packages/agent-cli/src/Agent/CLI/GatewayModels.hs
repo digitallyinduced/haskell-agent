@@ -9,7 +9,7 @@ module Agent.CLI.GatewayModels
     , withGatewayModelsForStartup
     ) where
 
-import Agent.CLI.GatewayClient
+import Agent.Runtime.GatewayClient
     ( GatewayCredential
     , GatewayModelAccess
     , GatewayModel(..)
@@ -18,11 +18,11 @@ import Agent.CLI.GatewayClient
     , newGatewayModelAccess
     , refreshGatewayModels
     )
-import Agent.CLI.ModelConfig
+import Agent.Runtime.ModelConfig
     ( ModelCatalog
     , loadModelCatalogAt
     )
-import Agent.CLI.Models
+import Agent.Runtime.Models
     ( ModelOption(modelTarget)
     , ModelTarget(targetProvider, targetModelId)
     , gatewayModelOptions

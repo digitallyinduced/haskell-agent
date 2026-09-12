@@ -77,6 +77,8 @@ summarizeToolCall = summarizeToolCallRelative ""
 -- | Like 'summarizeToolCall', but filesystem paths inside the workspace are
 -- shown relative to that workspace.
 summarizeToolCallRelative :: Text -> ToolCall -> Text
+summarizeToolCallRelative _ call
+    | canonicalToolName call.name == "exec" = "JavaScript execution"
 summarizeToolCallRelative workspace call =
     let verb = case canonicalToolName call.name of
             "mcp_call" -> mcpCallDisplayName call.arguments
@@ -135,7 +137,7 @@ toolCallTitle = toolCallTitleRelative ""
 toolCallTitleRelative :: Text -> ToolCall -> Text
 toolCallTitleRelative workspace call
     | canonicalToolName call.name == "run_ghci" = "$ ghci"
-    | canonicalToolName call.name == "exec" = "$ exec"
+    | canonicalToolName call.name == "exec" = "JavaScript execution"
     | otherwise = summarizeToolCallRelative workspace call
 
 -- | Separate a filesystem action from its path so renderers can style the

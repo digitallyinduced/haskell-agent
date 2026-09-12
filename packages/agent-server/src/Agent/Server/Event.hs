@@ -6,8 +6,8 @@ module Agent.Server.Event
     , boundedPublicText
     ) where
 
-import Agent.CLI.AgentViewport
-    ( AgentEntry(..)
+import Agent.Runtime.AgentSnapshot
+    ( AgentSnapshot(..)
     , AgentStep(..)
     , AgentStepState(..)
     )
@@ -143,7 +143,7 @@ projectLoopEvent = \case
 
 -- | Public agent snapshots intentionally omit transcripts and retained UI
 -- state. Those may contain arbitrarily large or sensitive model/tool output.
-projectAgentEntries :: [AgentEntry] -> Value
+projectAgentEntries :: [AgentSnapshot] -> Value
 projectAgentEntries entries =
     projectPublicValue $
     toJSONList

@@ -24,7 +24,7 @@ module Agent.CLI.AgentSessions
     , sessionProcessStatus
     ) where
 
-import Agent.CLI.AgentSessions.Process
+import Agent.Runtime.AgentSessions.Process
     ( SessionProcessLifetime(..)
     , SessionProcessManager
     , closeSessionProcessManager
@@ -38,7 +38,7 @@ import Agent.CLI.AgentSessions.Process
     )
 import Agent.CLI.AgentSessions.Render (renderAgentSession)
 import Agent.CLI.AgentSessions.WaitGraph (withSessionWaitEdge)
-import Agent.CLI.Session.Threads
+import Agent.Runtime.Session.Threads
     ( SessionThreadManager
     , closeSessionThreadManager
     , launchSessionThread
@@ -47,7 +47,7 @@ import Agent.CLI.Session.Threads
     , prepareSessionThreadWait
     , sessionThreadStatus
     )
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( SessionCreate(..)
     , SessionHandle(..)
     , SessionMeta(..)
@@ -59,12 +59,12 @@ import Agent.CLI.Session
     , sessionTempDirForId
     , sessionTitleFromPrompt
     )
-import Agent.CLI.SessionLock
+import Agent.Runtime.SessionLock
     ( sessionLockIsActive
     , sessionLockPath
     )
 import Agent.Store.Postgres.Connection (StorePool)
-import Agent.CLI.Models
+import Agent.Runtime.Models
     ( ModelOption(..)
     , ModelTarget(..)
     , resolveModelOptionDialect

@@ -6,12 +6,12 @@ module Agent.CLI.Runtime.Orchestration.Flow
 import Agent.CLI.CancelWatch (newStdinControl)
 import Agent.CLI.AgentSessions ( signalManagedSessionReady )
 import Agent.CLI.AgentViewport ( AgentTarget(AgentRoot) )
-import Agent.CLI.Config
+import Agent.Runtime.Config
     ( HarnessConfig(configTheme)
     , loadHarnessConfig
     )
-import Agent.CLI.Error ( formatApiErrorAt )
-import Agent.CLI.GatewayClient
+import Agent.Runtime.Error ( formatApiErrorAt )
+import Agent.Runtime.GatewayClient
     ( GatewayCredential
     , GatewayModelAccess
     , gatewayCredentialIdentity
@@ -24,8 +24,8 @@ import Agent.CLI.Interrupt
       noteFullscreenCtrlC,
       CtrlCDecision(ForceExit) )
 import Agent.CLI.Login ( runLoginManager )
-import Agent.CLI.ModelConfig ( loadModelCatalogAt )
-import Agent.CLI.Models
+import Agent.Runtime.ModelConfig ( loadModelCatalogAt )
+import Agent.Runtime.Models
     ( defaultModelOptionFor,
       resolveConfiguredModel,
       ModelOption(modelTarget),
@@ -90,7 +90,7 @@ import Agent.CLI.Runtime.Orchestration.Types
     )
 import Agent.CLI.Runtime.Types
     ( DevResult(..), PreparedAgent(..), RunResult(..) )
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( deleteSession,
       loadActiveSession,
       loadSessionMeta,
@@ -116,7 +116,7 @@ import Agent.CLI.Session.Runtime.Types
                      startupSyntaxLoadDuration, startupFinished,
                      startupNativeHooks) )
 import Agent.CLI.SessionAdmin ( managedPostgresConfigForHome )
-import Agent.CLI.SessionLock
+import Agent.Runtime.SessionLock
     ( acquireSessionLock, releaseSessionLock, SessionLock )
 import Agent.CLI.SessionState ( SessionState(..), newSessionState )
 import Agent.CLI.Startup.Auth

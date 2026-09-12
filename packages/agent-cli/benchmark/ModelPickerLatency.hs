@@ -4,7 +4,7 @@
 module Main (main) where
 
 import Agent.CLI.AgentViewport (AgentTarget(..))
-import Agent.CLI.GatewayClient
+import Agent.Runtime.GatewayClient
     ( GatewayModel(..)
     , GatewayModelAccess
     , GatewayModelProtocol(..)
@@ -16,9 +16,9 @@ import Agent.CLI.GatewayClient
     )
 import Agent.CLI.GatewayModels
     ( modelOptionsForGatewayModels, selectGatewayModelOption, withGatewayModelsForStartup )
-import Agent.CLI.Models (ModelOption(..))
+import Agent.Runtime.Models (ModelOption(..))
 import Agent.CLI.Interrupt (CtrlCDecision(..))
-import Agent.CLI.ModelConfig
+import Agent.Runtime.ModelConfig
     ( ModelCatalog
     , decodeModelConfig
     , organizationGatewayConnectionId

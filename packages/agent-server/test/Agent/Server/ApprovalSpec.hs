@@ -1,6 +1,6 @@
 module Agent.Server.ApprovalSpec (spec) where
 
-import Agent.CLI.Permission.Types (PermissionChoice(..))
+import Agent.Runtime.Permission.Types (PermissionChoice(..))
 import Agent.Server.Runtime (requestFreshToolApproval)
 import Agent.Server.Types
 import Agent.ToolDispatch (ToolCall(..), ToolCallKind(..))

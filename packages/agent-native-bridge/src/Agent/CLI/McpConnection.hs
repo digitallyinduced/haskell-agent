@@ -17,11 +17,11 @@ module Agent.CLI.McpConnection
     , probeMcpConnection
     ) where
 
-import Agent.CLI.Config (HarnessConfig(..), McpServerConfig(..), withHarnessConfigSnapshot, mcpUsesConnectionCredentials)
+import Agent.Runtime.Config (HarnessConfig(..), McpServerConfig(..), withHarnessConfigSnapshot, mcpUsesConnectionCredentials)
 import Agent.CLI.McpAdmin
-import Agent.CLI.McpConnectionCredentials (CredentialRuntime, loadMcpConnectionRecord, saveMcpConnectionRecord, deleteMcpConnectionRecord)
-import Agent.CLI.McpConnectionRuntime (invalidateMcpConnectionRuntimes, observeMcpConnectionInfo)
-import Agent.CLI.McpOAuth (McpOAuthHost(..), authorizeMcpWith, defaultLoginOptions)
+import Agent.Runtime.McpConnectionCredentials (CredentialRuntime, loadMcpConnectionRecord, saveMcpConnectionRecord, deleteMcpConnectionRecord)
+import Agent.Runtime.McpConnectionRuntime (invalidateMcpConnectionRuntimes, observeMcpConnectionInfo)
+import Agent.Runtime.McpOAuth (McpOAuthHost(..), authorizeMcpWith, defaultLoginOptions)
 import Agent.MCP (McpProtocolPreference(..))
 import qualified Agent.MCP as MCP
 import Agent.MCP.OAuth (OAuthTokenFile(..), OAuthTokenFileExtra)

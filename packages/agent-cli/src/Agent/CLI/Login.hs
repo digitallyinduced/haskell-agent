@@ -44,7 +44,7 @@ import Agent.CLI.Login.Internal.Accounts
     , loginAccountSelectionId
     , refreshLoginAccount
     )
-import Agent.CLI.Login.Internal.Browser (launchBrowserCommand)
+import Agent.Runtime.Browser (launchBrowserCommand)
 import Agent.CLI.Login.Internal.Dashboard
     ( loginAccountActionRows
     , loginAccountDetail

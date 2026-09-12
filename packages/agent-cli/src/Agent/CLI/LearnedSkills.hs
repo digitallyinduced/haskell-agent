@@ -20,7 +20,7 @@ module Agent.CLI.LearnedSkills
     , queueLearnedSkillContextWithOmissions
     ) where
 
-import Agent.CLI.Database (CustomDatabaseScope(..), customDatabaseScopeDecoder)
+import Agent.Runtime.Database (CustomDatabaseScope(..), customDatabaseScopeDecoder)
 import Agent.CLI.Skills (resolveSkillContent)
 import Agent.MCP.Types (McpFleet)
 import Agent.Skills
@@ -43,7 +43,7 @@ import Agent.Store.Postgres.Skill
     )
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
-import Agent.CLI.Json (integer)
+import Agent.Runtime.Json (integer)
 import Agent.Json.Decode (defaultKey, optionalKey)
 import Agent.Json.Decode qualified as Hermes
 import Agent.Tools.Types

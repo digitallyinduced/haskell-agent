@@ -1,10 +1,9 @@
-{ mkDerivation, aeson, agent-json, agent-process
-, agent-responses-types, async, base, base64-bytestring, bytestring
-, containers, crypton-connection, directory, entropy, extra
-, filepath, hspec, JuicyPixels, lib, process, QuickCheck, resourcet
-, retry, safe-exceptions, scientific, stm, template-haskell, text
-, text-builder, time, tls, transformers, unix, vector, websockets
-, yaml, zlib
+{ mkDerivation, aeson, agent-json, agent-responses-types, async
+, base, base64-bytestring, bytestring, containers
+, crypton-connection, directory, entropy, extra, filelock, filepath
+, hspec, JuicyPixels, lib, process, QuickCheck, resourcet, retry
+, safe-exceptions, scientific, stm, text, text-builder, time, tls
+, transformers, unix, vector, websockets, yaml, zlib
 }:
 mkDerivation {
   pname = "agent-core";
@@ -12,11 +11,11 @@ mkDerivation {
   src = ./.;
   enableSeparateDataOutput = true;
   libraryHaskellDepends = [
-    aeson agent-json agent-process agent-responses-types async base
-    base64-bytestring bytestring containers crypton-connection
-    directory entropy extra filepath JuicyPixels process resourcet
-    retry safe-exceptions scientific stm template-haskell text time tls
-    transformers unix vector websockets yaml zlib
+    aeson agent-json agent-responses-types async base base64-bytestring
+    bytestring containers crypton-connection directory entropy extra
+    filelock filepath JuicyPixels process resourcet retry
+    safe-exceptions scientific stm text time tls transformers unix
+    vector websockets yaml zlib
   ];
   testHaskellDepends = [
     aeson agent-json agent-responses-types async base base64-bytestring
@@ -26,8 +25,7 @@ mkDerivation {
   ];
   benchmarkHaskellDepends = [
     aeson agent-json agent-responses-types async base bytestring
-    containers directory filepath process safe-exceptions stm text
-    text-builder time unix
+    containers filepath safe-exceptions stm text text-builder time
   ];
   description = "Provider-neutral infrastructure for the agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";
