@@ -16,9 +16,9 @@ import Agent.CLI.MetaConsole
 import Agent.CLI.Runtime.MetaConsole
     ( MetaSecretValue(..)
     , applyMetaConfigActions
+    , collectMetaSecretsWith
     )
 import Agent.MCP (McpLogLevel(..), McpProtocolPreference(..))
-import Agent.CLI.Runtime.Repl.MetaConsole (collectMetaSecretsWith)
 import Data.IORef (newIORef, modifyIORef', readIORef)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
