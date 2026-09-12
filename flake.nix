@@ -926,7 +926,9 @@
                                     }))
                                 # cabal2nix does not include foreign-library
                                 # dependencies in libraryHaskellDepends.
-                                [ final.agent-repository
+                                [ final.agent-cli
+                                  final.agent-computer-use
+                                  final.agent-repository
                                   final.agent-runtime-daemon
                                   final.agent-integration-api
                                 ]);
