@@ -94,6 +94,8 @@ library
                     , Agent.Runtime.Session.Activity
                     , Agent.Runtime.Session.Codec
                     , Agent.Runtime.Session.History
+                    , Agent.Runtime.Session.Preparation
+                    , Agent.Runtime.Session.Resources
                     , Agent.Runtime.Session.Inbox
                     , Agent.Runtime.Session.Observation
                     , Agent.Runtime.Session.PullRequest
@@ -252,6 +254,8 @@ test-suite agent-runtime-test
                     , Agent.Runtime.TurnRecordSpec
                     , Agent.Runtime.SessionThreadsSpec
                     , Agent.Runtime.SessionSpec
+                    , Agent.Runtime.Session.ResourcesSpec
+                    , Agent.Runtime.Session.PreparationSpec
                     , Agent.Runtime.SessionSpec.Compatibility
                     , Agent.Runtime.SessionSpec.Fixtures
                     , Agent.Runtime.SessionSpec.JsonCodec

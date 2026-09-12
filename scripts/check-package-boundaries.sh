@@ -162,6 +162,9 @@ for registration in \
 done
 
 required_files=(
+  packages/agent-runtime/src/Agent/Runtime/Session/Preparation.hs
+  packages/agent-runtime/src/Agent/Runtime/Session/Resources.hs
+  packages/agent-runtime/test/Agent/Runtime/Session/ResourcesSpec.hs
   packages/agent-runtime/src/Agent/Runtime/Tools/Dialects.hs
   packages/agent-runtime/src/Agent/Runtime/Tools/Resources.hs
   packages/agent-runtime/src/Agent/Runtime/Tools/Startup.hs
