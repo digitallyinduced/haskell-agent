@@ -72,7 +72,9 @@ displayTerminalChar char
 displayTerminalText :: Text -> Text
 displayTerminalText text
     -- Printable ASCII needs neither sanitization nor grapheme reconstruction.
-    | Text.all (\character -> character >= ' ' && character <= '~') text = text
+    -- Rendered slices outlive their source frame in Brick's image cache. Copy
+    -- them so a short span cannot retain the entire source backing array.
+    | Text.all (\character -> character >= ' ' && character <= '~') text = Text.copy text
     | otherwise = Text.concat (map displayTerminalCluster (graphemeClusters text))
   where
     -- ZWJ and emoji tag characters are terminal formatting controls when

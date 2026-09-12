@@ -1,10 +1,17 @@
+{-# LANGUAGE MagicHash #-}
 module Agent.TUI.TextWidthSpec (spec) where
 
 import Agent.TUI.TextWidth
 import qualified Data.Text as Text
+import Data.Array.Byte (ByteArray (..))
+import GHC.Exts (Int (I#), sizeofByteArray#)
+import qualified Data.Text.Internal as TextInternal
 import qualified Graphics.Vty as V
 import Test.Hspec
 import Test.QuickCheck (elements, forAll, listOf, property)
+
+sizeofByteArray :: ByteArray -> Int
+sizeofByteArray (ByteArray array) = I# (sizeofByteArray# array)
 
 spec :: Spec
 spec = describe "terminal character width" do
@@ -12,6 +19,21 @@ spec = describe "terminal character width" do
         displayTerminalText "" `shouldBe` ""
         let printableAscii = Text.pack [' ' .. '~']
         displayTerminalText printableAscii `shouldBe` printableAscii
+
+    it "detaches printable ASCII slices from a larger source buffer" do
+        let source = Text.replicate 4096 "x" <> "visible" <> Text.replicate 4096 "y"
+            slice = Text.take 7 (Text.drop 4096 source)
+            TextInternal.Text sourceArray sourceOffset _ = slice
+            rendered@(TextInternal.Text renderedArray renderedOffset renderedLength) =
+                displayTerminalText slice
+        -- Check the fixture really is a nonzero-offset slice, then inspect
+        -- ownership directly instead of relying on nondeterministic GC timing.
+        sourceOffset `shouldSatisfy` (> 0)
+        sizeofByteArray sourceArray `shouldSatisfy` (> 7)
+        rendered `shouldBe` "visible"
+        renderedOffset `shouldBe` 0
+        renderedLength `shouldBe` 7
+        sizeofByteArray renderedArray `shouldBe` renderedLength
 
     it "preserves arbitrary printable ASCII and structural newlines" $
         property $
