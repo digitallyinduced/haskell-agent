@@ -922,10 +922,96 @@ spec = describe "fullscreen UI reducer" do
         case Foldable.toList state.uiBlocks of
             [block] -> do
                 block.blockKind `shouldBe` BlockShell
-                block.blockTitle `shouldBe` "$ exec"
+                block.blockTitle `shouldBe` "JavaScript execution"
                 block.blockDetail `shouldBe` source
                 blockCodeLanguage block `shouldBe` Just "javascript"
+                blockCodeLanguage block{blockTitle = "$ exec"}
+                    `shouldBe` Just "javascript"
+                block.blockExpanded `shouldBe` False
+                state.uiActivity `shouldBe` "JavaScript execution"
             _ -> expectationFailure "expected one running exec block"
+
+    it "keeps streaming exec source collapsed and retains it for expansion" do
+        let source = "const answer = await tools.read_file({target_file: \"A.hs\"});"
+            partialCall = customToolCall "c1" "exec" ""
+            call = customToolCall "c1" "exec" source
+            started = apply [UiLoop TurnStarted, UiLoop (ToolStarted partialCall)]
+            updated = reduceUi (UiLoop (ToolArgumentsUpdated call)) started
+            running = reduceUi (UiLoop (ToolStarted call)) updated
+            completed = reduceUi (UiLoop (ToolFinished
+                ToolCallResult
+                    { toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
+                    , callId = "c1"
+                    , output = "done"
+                    , callKind = CustomCallKind
+                    })) running
+            expanded = reduceUi UiToggleSelected completed
+        map (.blockExpanded) (Foldable.toList started.uiBlocks) `shouldBe` [False]
+        map (.blockExpanded) (Foldable.toList running.uiBlocks) `shouldBe` [False]
+        map (.blockExpanded) (Foldable.toList expanded.uiBlocks) `shouldBe` [True]
+        map (.blockDetail) (Foldable.toList expanded.uiBlocks) `shouldBe` [source]
+        running.uiActivity `shouldBe` "JavaScript execution"
+
+    it "retains independent parallel nested operations beside collapsed exec" do
+        let source = "await Promise.all([tools.inspect_configuration(), tools.inspect_dependencies()]);"
+            execution = customToolCall "c1" "exec" source
+            configurationCall = functionToolCall
+                "code-mode:1:inspect_configuration" "inspect_configuration" "{}"
+            dependenciesCall = functionToolCall
+                "code-mode:2:inspect_dependencies" "inspect_dependencies" "{}"
+            running = apply
+                [ UiLoop TurnStarted
+                , UiLoop (ToolStarted execution)
+                , UiLoop (ToolStarted configurationCall)
+                , UiLoop (ToolStarted dependenciesCall)
+                ]
+            dependenciesFinished = reduceUi (UiLoop (ToolFinished
+                ToolCallResult
+                    { toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
+                    , callId = "code-mode:2:inspect_dependencies"
+                    , output = "done"
+                    , callKind = FunctionCallKind
+                    })) running
+            configurationFailed = reduceUi (UiLoop (ToolFinished
+                ToolCallResult
+                    { toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
+                    , callId = "code-mode:1:inspect_configuration"
+                    , output = "Error: denied"
+                    , callKind = FunctionCallKind
+                    })) dependenciesFinished
+            executionFailed = reduceUi (UiLoop (ToolFinished
+                ToolCallResult
+                    { toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
+                    , callId = "c1"
+                    , output = "Error: nested operation failed"
+                    , callKind = CustomCallKind
+                    })) configurationFailed
+            blocks = Foldable.toList executionFailed.uiBlocks
+        map (.blockState) (Foldable.toList dependenciesFinished.uiBlocks)
+            `shouldBe` [BlockRunning, BlockRunning, BlockComplete]
+        map (.blockState) blocks `shouldBe` [BlockFailed, BlockFailed, BlockComplete]
+        map (.blockTitle) blocks
+            `shouldBe` ["JavaScript execution", "inspect_configuration", "inspect_dependencies"]
+        map (.blockBody) blocks
+            `shouldBe` ["Error: nested operation failed", "Error: denied", "done"]
+        Map.null executionFailed.uiToolCalls `shouldBe` True
+        case blocks of
+            block : _ -> do
+                block.blockExpanded `shouldBe` False
+                block.blockDetail `shouldBe` source
+                let expanded = reduceUi (UiActivateBlock block.blockId) executionFailed
+                fmap (.blockExpanded) (Foldable.find
+                    ((== block.blockId) . (.blockId)) expanded.uiBlocks)
+                    `shouldBe` Just True
+            _ -> expectationFailure "expected retained execution and nested operations"
 
     it "renders the public Grok terminal alias as a shell block" do
         let call = functionToolCall

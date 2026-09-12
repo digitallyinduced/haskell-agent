@@ -346,7 +346,8 @@ spec = describe "tool presentation" do
     it "renders exec source and hides successful protocol boilerplate" do
         let source = "const result = await tools.grep({pattern: \"needle\"});\ntext(result);"
             call = customToolCall "exec" "exec" source
-        toolCallTitle call `shouldBe` "$ exec"
+        toolCallTitle call `shouldBe` "JavaScript execution"
+        summarizeToolCall call `shouldBe` "JavaScript execution"
         toolCallInput call `shouldBe` source
         formatToolOutput call
             "Script completed\nWall time 0.1 seconds\nOutput:\nmatch"
