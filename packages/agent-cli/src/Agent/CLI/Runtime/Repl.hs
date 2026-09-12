@@ -38,7 +38,7 @@ import Agent.OpenAI.Models.Types (ModelInfo(..), modelServiceTierForRequest)
 import Agent.Runtime.Models ( catalogModelIds )
 import Agent.CLI.SteeringInputs
     ( awaitSteeringInput
-    , readSteeringInputs
+    , readSteeringTurn
     )
 import Agent.CLI.Provider.Switch
     ( reportProviderUnavailable, requestStartupProviderFallback )
@@ -319,8 +319,8 @@ replWithDraft env@SessionEnv
                         Right line -> (line, False)
     case mlineResult of
         Left SteeringInputWake -> do
-            pending <-
-                readSteeringInputs env.sessionSteeringInputs
+            (promptText, pending) <-
+                readSteeringTurn env.sessionSteeringInputs
             if null pending
                 then replWithDraft env draft
                 else do
@@ -329,8 +329,10 @@ replWithDraft env@SessionEnv
                             (UiSystemMessage
                                 "Queued input received; resuming the agent.")
                     -- Keep inputs in the normal steering queue so each is
-                    -- acknowledged only after the provider commits it.
-                    result <- runOneTurn env "" []
+                    -- acknowledged only after the provider commits it. The
+                    -- prompt text preserves user guidance in durable history;
+                    -- it does not add a second copy to provider inputs.
+                    result <- runOneTurn env promptText []
                     finishTurn env False result
         Left (ProviderUnavailableWake apiError) -> do
             -- The startup check is one-shot. If no fallback account is usable,

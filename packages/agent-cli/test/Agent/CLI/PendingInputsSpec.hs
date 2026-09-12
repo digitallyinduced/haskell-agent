@@ -27,6 +27,7 @@ import Agent.CLI.SteeringInputs
     , hasSteeringInputWake
     , newSteeringInputs
     , readSteeringInputs
+    , readSteeringTurn
     , steeringInputCountLimit
     , suppressUserSteeringWake
     )
@@ -524,6 +525,33 @@ spec = do
             all (`notElem` [UserMessage "omitted one", UserMessage "omitted two"])
 
   describe "SteeringInputs" do
+    it "snapshots idle guidance as turn text without consuming or duplicating inputs" do
+        steering <- newSteeringInputs
+        let guidance = [UserMessage "make a pr", UserMessage "include tests"]
+        enqueueSteeringInputs steering guidance `shouldReturn` Right ()
+        atomically (awaitSteeringInput steering)
+        readSteeringTurn steering `shouldReturn`
+            ("make a pr\n\ninclude tests", guidance)
+        -- A failed attempt can read the same inputs again. Only the normal
+        -- provider acknowledgement removes them.
+        readSteeringTurn steering `shouldReturn`
+            ("make a pr\n\ninclude tests", guidance)
+        readSteeringInputs steering `shouldReturn` guidance
+        commitSteeringInputs steering (length guidance)
+        readSteeringTurn steering `shouldReturn` ("", [])
+
+    it "preserves attachment guidance text but excludes background notices from user text" do
+        steering <- newSteeringInputs
+        let attached = userMessageWithAttachments "inspect this"
+                [ImageAttachmentItem (ImageAttachment "image/png" "abc")]
+            background = UserMessage "background tool completed"
+        enqueueBackgroundCompletion steering "tool" background
+            `shouldReturn` Right True
+        readSteeringTurn steering `shouldReturn` ("", [background])
+        enqueueSteeringInputs steering [attached] `shouldReturn` Right ()
+        readSteeringTurn steering `shouldReturn`
+            ("inspect this", [background, attached])
+
     it "does not wake for an empty enqueue" do
         steering <- newSteeringInputs
         enqueueSteeringInputs steering [] `shouldReturn` Right ()

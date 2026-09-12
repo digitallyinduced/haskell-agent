@@ -12,6 +12,7 @@ module Agent.CLI.SteeringInputs
     , newSteeringInputs
     , prepareBackgroundCompletion
     , readSteeringInputs
+    , readSteeringTurn
     , steeringInputByteLimit
     , steeringInputCountLimit
     , suppressUserSteeringWake
@@ -21,7 +22,7 @@ import Agent.CLI.InputBudget
     ( logicalTurnInputBytes
     , saturatingAdd
     )
-import Agent.Loop (TurnInput)
+import Agent.Loop (TurnInput(..))
 import Data.Foldable (toList)
 import Control.Concurrent.STM
     ( STM
@@ -36,6 +37,7 @@ import Control.Concurrent.STM
     )
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
+import qualified Data.Text as Text
 
 steeringInputCountLimit :: Int
 steeringInputCountLimit = 128
@@ -156,6 +158,24 @@ readSteeringInputs :: SteeringInputs -> IO [TurnInput]
 readSteeringInputs (SteeringInputs ref) = do
     state <- readTVarIO ref
     pure [entry.steeringInput | entry <- toList state.steeringQueue]
+
+-- | Snapshot an idle wake's display text and pending inputs together. Inputs
+-- remain queued until the provider acknowledges them; the text is metadata
+-- for the enclosing turn, not another provider input. Background notices
+-- must not acquire the identity of a user submission.
+readSteeringTurn :: SteeringInputs -> IO (Text, [TurnInput])
+readSteeringTurn (SteeringInputs ref) = do
+    state <- readTVarIO ref
+    let entries = toList state.steeringQueue
+        userText entry =
+            case (entry.steeringBackgroundKey, entry.steeringInput) of
+                (Nothing, UserMessage text) -> [text]
+                (Nothing, UserMessageWithAttachments text _) -> [text]
+                _ -> []
+    pure
+        ( Text.intercalate "\n\n" (concatMap userText entries)
+        , map (.steeringInput) entries
+        )
 
 hasBackgroundCompletions :: SteeringInputs -> IO Bool
 hasBackgroundCompletions (SteeringInputs ref) = do
