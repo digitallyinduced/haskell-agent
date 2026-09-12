@@ -1,8 +1,8 @@
-module Agent.CLI.WebLspSpec (spec) where
+module Agent.Runtime.Tools.WebLspSpec (spec) where
 
 import Agent.Runtime.Config
-import Agent.CLI.Lsp
-import Agent.CLI.WebFetch
+import Agent.Runtime.Lsp
+import Agent.Runtime.WebFetch
 import Agent.Json (rawJsonFromEncoding)
 import Agent.Loop (defaultLoopDispatch)
 import Agent.OsPath (unsafeToFilePath)

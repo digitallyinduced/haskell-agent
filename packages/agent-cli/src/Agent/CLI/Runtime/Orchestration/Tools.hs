@@ -41,8 +41,8 @@ import Agent.CLI.LearnedSkills.Store
     , loadApplicableLearnedSkillsForStore
     , successfulLearnedSkillsPreload
     )
-import Agent.CLI.Lsp
-    ( LspStartup(..), closeLspRuntime, lspRuntimeTool, newLspRuntime )
+import Agent.Runtime.Lsp
+    ( LspStartup(..), lspRuntimeTool )
 import Agent.CLI.IntegrationGateway (gatewayIntegrationAuthority)
 import Agent.Integration.API
     ( IntegrationRuntime
@@ -98,12 +98,8 @@ import Agent.Runtime.SessionLock
       sessionLockPath )
 import Agent.CLI.Startup.Auth (startupDie)
 import Agent.CLI.Skills (loadMcpSkillsCatalog)
-import Agent.CLI.WebFetch
-    ( WebFetchRuntime
-    , closeWebFetchRuntime
-    , newWebFetchRuntime
-    , webFetchRuntimeTool
-    )
+import Agent.Runtime.WebFetch
+    ( webFetchRuntimeTool )
 import Agent.Dialect (DialectId(CodexDialect, GrokBuildDialect))
 import Agent.OpenAI.ImageGeneration
     ( clearImageGenerationHistory
@@ -121,6 +117,9 @@ import Agent.Runtime.Tools.Resources
     ( SessionResourceScopes(..), withSessionResourceScopes )
 import Agent.Runtime.Tools.Startup
     ( ToolAcquisitions(..), ToolStartupResources(..), acquireToolStartup )
+import Agent.Runtime.Tools.LocalStartup
+    ( LocalToolSettings(..), LocalToolPolicy(..), LocalToolAcquisitions(..)
+    , localToolAcquisitions, resolveLocalToolPolicy )
 import Agent.Skills
     ( SkillCatalog(..)
     , SkillInvocation
@@ -217,6 +216,14 @@ runAgentTools request = withSessionResourceScopes \resources -> do
                 collaborationRuntime)
             (logSlowCleanup "session temporary resources" . (.scratchCleanup))
     integrationRuntime <- acquireSessionIntegrationRuntime request
+    let localAcquisitions =
+            localToolAcquisitions
+                (localToolSettings request toolStartup toolModelRuntime)
+                toolStartup.toolHarnessConfig.configWebFetch
+                toolStartup.toolHarnessConfig.configLsp
+                request.baseToolEnv
+                (\err -> startupDie request.startup
+                    ("Failed to initialize web_fetch: " <> err))
     startupResources <- acquireToolStartup resources ToolAcquisitions
         { acquireMcp = mkAcquire
             (acquireMcpRuntime
@@ -226,15 +233,9 @@ runAgentTools request = withSessionResourceScopes \resources -> do
         , acquireCoding = acquireLocalToolRuntime
             request toolModelRuntime toolHostHooks
             collaborationRuntime scratchRuntime
-        , acquireWebFetch = mkAcquire
-            (acquireWebFetchRuntime request toolStartup toolModelRuntime)
-            (logSlowCleanup "web fetch runtime" . mapM_ closeWebFetchRuntime)
-        , acquireLsp = mkAcquire
-            (acquireLspStartup request toolStartup toolModelRuntime)
-            (logSlowCleanup "language server runtime" . mapM_ closeLspRuntime . (.lspStartupRuntime))
-        , acquireComputerUse = mkAcquire
-            (acquireComputerUseRuntime toolModelRuntime)
-            (logSlowCleanup "computer use runtime" . mapM_ ComputerUse.closeComputerUseRuntime)
+        , acquireWebFetch = localAcquisitions.localAcquireWebFetch
+        , acquireLsp = localAcquisitions.localAcquireLsp
+        , acquireComputerUse = localAcquisitions.localAcquireComputerUse
         , preloadContext = prepareInitialContextPreload request toolModelRuntime
         }
     let mcpRuntime = startupResources.startupMcp
@@ -353,64 +354,27 @@ acquireLocalToolRuntime AgentToolsRequest
     let localInitialSkills = initialSkills
     pure LocalToolRuntime{..}
 
-acquireWebFetchRuntime
+localToolSettings
     :: AgentToolsRequest windowTitleResult
     -> ToolStartup
     -> ToolModelRuntime
-    -> IO (Maybe WebFetchRuntime)
-acquireWebFetchRuntime AgentToolsRequest
+    -> LocalToolSettings
+localToolSettings AgentToolsRequest
     { startup
-    , baseToolEnv
+    , options
     } ToolStartup
     { toolNativeCapabilities = nativeCapabilities
-    , toolHarnessConfig = harnessConfig
     } ToolModelRuntime
     { toolDialectId = dialectId
-    }
-    | not nativeCapabilities.nativeHostExtensions
-        || dialectId /= GrokBuildDialect =
-        pure Nothing
-    | otherwise =
-        newWebFetchRuntime
-            harnessConfig.configWebFetch
-            baseToolEnv >>= \case
-                Left err ->
-                    startupDie startup
-                        ("Failed to initialize web_fetch: " <> err)
-                Right runtime -> pure runtime
-
-acquireLspStartup
-    :: AgentToolsRequest windowTitleResult
-    -> ToolStartup
-    -> ToolModelRuntime
-    -> IO LspStartup
-acquireLspStartup AgentToolsRequest
-    { baseToolEnv
-    } ToolStartup
-    { toolNativeCapabilities = nativeCapabilities
-    , toolHarnessConfig = harnessConfig
-    } ToolModelRuntime
-    { toolDialectId = dialectId
-    }
-    | not nativeCapabilities.nativeHostExtensions
-        || dialectId /= GrokBuildDialect =
-        pure LspStartup
-            { lspStartupRuntime = Nothing
-            , lspStartupWarnings = []
-            }
-    | otherwise =
-        newLspRuntime harnessConfig.configLsp baseToolEnv
-
-acquireComputerUseRuntime
-    :: ToolModelRuntime
-    -> IO (Maybe ComputerUse.ComputerUseRuntime)
-acquireComputerUseRuntime ToolModelRuntime
-    { toolProvider = provider
-    }
-    | provider == OpenAIProvider
-        && os `elem` ["darwin", "linux"] =
-        Just <$> ComputerUse.newComputerUseRuntime
-    | otherwise = pure Nothing
+    , toolProvider = provider
+    } = LocalToolSettings
+        { localHostExtensions = nativeCapabilities.nativeHostExtensions
+        , localDialectId = dialectId
+        , localProvider = provider
+        , localPlatform = Text.pack os
+        , localComputerUseEnabled =
+            resolveComputerUseEnabled options startup.startupStdinTty
+        }
 
 prepareInitialContextPreload
     :: AgentToolsRequest windowTitleResult
@@ -586,7 +550,7 @@ assembleSessionToolsRuntime
     -> CodingRuntime
     -> SessionControlRuntime
     -> IO SessionToolsRuntime
-assembleSessionToolsRuntime AgentToolsRequest
+assembleSessionToolsRuntime request@AgentToolsRequest
     { startup
     , databaseScopes
     , gatewayIdentity
@@ -595,9 +559,9 @@ assembleSessionToolsRuntime AgentToolsRequest
     , tokenProvider
     , baseToolEnv
     , resumed
-    } ToolStartup
+    } toolStartup@ToolStartup
     { toolNativeCapabilities = nativeCapabilities
-    } ToolModelRuntime
+    } toolModelRuntime@ToolModelRuntime
     { toolProvider = provider
     , toolDialectId = dialectId
     , toolInferredTarget = inferredTarget
@@ -677,7 +641,8 @@ assembleSessionToolsRuntime AgentToolsRequest
                 computerUseRuntime
         activeComputerTools =
             [ tool
-            | resolveComputerUseEnabled options startup.startupStdinTty
+            | (resolveLocalToolPolicy
+                (localToolSettings request toolStartup toolModelRuntime)).localComputerToolExposed
             , tool <- computerTools
             ]
         imageGenerationTools =

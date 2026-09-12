@@ -36,6 +36,10 @@ library
     hs-source-dirs:   src
     autogen-modules:  Paths_agent_runtime
     other-modules:    Agent.Runtime.Gateway.Account
+                    , Agent.Runtime.Lsp.Capabilities
+                    , Agent.Runtime.Lsp.Formatting
+                    , Agent.Runtime.Lsp.Path
+                    , Agent.Runtime.Lsp.Protocol
                     , Agent.Runtime.Provider.OpenAI
                     , Agent.Runtime.Providers.Claude
                     , Agent.Runtime.Providers.Common
@@ -70,6 +74,9 @@ library
                     , Agent.Runtime.Database.Store
                     , Agent.Runtime.Duration
                     , Agent.Runtime.Error
+                    , Agent.Runtime.FileUri
+                    , Agent.Runtime.Lsp
+                    , Agent.Runtime.WebFetch
                     , Agent.Runtime.GatewayBoundary
                     , Agent.Runtime.GatewayBridge
                     , Agent.Runtime.GatewayClient
@@ -123,6 +130,7 @@ library
                     , Agent.Runtime.TurnExecution
                     , Agent.Runtime.TurnState
                     , Agent.Runtime.Tools.Dialects
+                    , Agent.Runtime.Tools.LocalStartup
                     , Agent.Runtime.Tools.Resources
                     , Agent.Runtime.Tools.Startup
     build-depends:    agent-accounts >= 0.1 && < 0.2
@@ -130,6 +138,7 @@ library
                     , agent-grok-build-dialect >= 0.1 && < 0.2
                     , agent-claude >= 0.1 && < 0.2
                     , agent-connectivity >= 0.1 && < 0.2
+                    , agent-computer-use >= 0.1 && < 0.2
                     , agent-core >= 0.1 && < 0.2
                     , agent-gemini >= 0.1 && < 0.2
                     , agent-integration-api >= 0.1 && < 0.2
@@ -167,6 +176,7 @@ library
                     , safe-exceptions
                     , scientific
                     , stm
+                    , tagsoup
                     , text >= 2.0 && < 2.2
                     , time
                     , transformers
@@ -237,6 +247,8 @@ test-suite agent-runtime-test
                     , Agent.Runtime.Tools.DialectsSpec
                     , Agent.Runtime.Tools.ResourcesSpec
                     , Agent.Runtime.Tools.StartupSpec
+                    , Agent.Runtime.Tools.LocalStartupSpec
+                    , Agent.Runtime.Tools.WebLspSpec
                     , Agent.Runtime.ProviderRuntimeSpec
                     , Agent.Runtime.CompactionSpec
                     , Agent.Runtime.CompactionSpec.Fixtures
