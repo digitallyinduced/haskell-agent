@@ -105,6 +105,7 @@ library
                     , Agent.Tools.Types
                     , Agent.Tools.ViewImage
                     , Agent.Tools.RenderChart
+                    , Agent.Transport.SSE
                     , Agent.Transport.WebSocket
     other-modules:    Agent.Image.Normalize
                     , Agent.Loop.Backend
@@ -362,6 +363,7 @@ test-suite agent-core-test
                     , Agent.Tools.RenderChartSpec
                     , Agent.Tools.ResourceArbiterSpec
                     , Agent.ToolDSLSpec
+                    , Agent.Transport.SSESpec
                     , Agent.Transport.WebSocketSpec
                     , Paths_agent_core
     autogen-modules:  Paths_agent_core
