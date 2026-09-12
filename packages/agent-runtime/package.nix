@@ -30,8 +30,8 @@ mkDerivation {
     aeson agent-accounts agent-connectivity agent-core agent-json
     agent-openai agent-openrouter agent-responses agent-responses-types
     agent-store agent-tools agent-xai async base bytestring containers
-    directory filepath hspec http-client http-types network QuickCheck
-    safe-exceptions stm text time transformers unix wai warp
+    directory filelock filepath hspec http-client http-types network
+    QuickCheck safe-exceptions stm text time transformers unix wai warp
   ];
   description = "Frontend-independent conversation and turn lifecycle";
   license = lib.meta.getLicenseFromSpdxId "MIT";
