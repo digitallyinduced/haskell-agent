@@ -20,10 +20,108 @@ import Control.Exception.Safe (throwString)
 import Data.IORef
 import Data.Text (Text)
 import Test.Hspec
+import System.Timeout (timeout)
 
 spec :: Spec
 spec = do
     describe "ConversationStore" do
+        it "restores the lock when an eviction decision throws before publication" do
+            let items = [messageItem "unchanged"]
+            store <- newConversationStore Nothing items []
+            evictConversationTranscript store (error "generation comparison failed")
+                (TranscriptCheckpoint "unused" (pure [])) `shouldThrow` anyErrorCall
+            withConversationTranscript store (`shouldBe` items)
+            conversationResidency store `shouldReturn` ConversationResident
+
+        it "keeps the load under lock and publishes the acquired snapshot before a waiting commit" do
+            loading <- newEmptyMVar
+            finishLoad <- newEmptyMVar
+            writerStarted <- newEmptyMVar
+            writerDone <- newEmptyMVar
+            let oldItems = [messageItem "old"]
+                newItems = [messageItem "new"]
+                checkpoint = TranscriptCheckpoint "blocked" do
+                    putMVar loading ()
+                    takeMVar finishLoad
+                    pure oldItems
+            store <- newColdConversationStore (Just "old-response") checkpoint []
+            withAsync (withConversationBackendState store pure) \reader -> do
+                takeMVar loading
+                withAsync (do
+                    putMVar writerStarted ()
+                    result <- commitConversationBackendState store
+                        (BackendSnapshot newItems (BackendRevision 99)
+                            (Just (BackendContinuation "claude" "new-response")))
+                    putMVar writerDone result) \writer -> do
+                    takeMVar writerStarted
+                    timeout 100000 (takeMVar writerDone) `shouldReturn` Nothing
+                    putMVar finishLoad ()
+                    acquired <- wait reader
+                    acquired.backendItems `shouldBe` oldItems
+                    acquired.backendRevision `shouldBe` BackendRevision 0
+                    acquired.backendContinuation `shouldBe`
+                        Just (BackendContinuation "openai.responses" "old-response")
+                    wait writer
+                    committed <- takeMVar writerDone
+                    committed.backendRevision `shouldBe` BackendRevision 1
+                    withConversationBackendState store (`shouldBe` committed)
+
+        it "retargets nested hydration leases and only loads the new identity after final release" do
+            loads <- newIORef ([] :: [Text])
+            let items = [messageItem "same"]
+                checkpoint name = TranscriptCheckpoint name do
+                    modifyIORef' loads (<> [name])
+                    pure items
+            store <- newColdConversationStore Nothing (checkpoint "original") []
+            withConversationTranscript store \outer -> do
+                withConversationTranscript store \inner -> do
+                    inner `shouldBe` outer
+                    retargetConversationCheckpoint store (checkpoint "fork")
+                conversationResidency store `shouldReturn` ConversationResident
+                readIORef loads `shouldReturn` ["original"]
+            conversationResidency store `shouldReturn` ConversationCold
+            withConversationTranscript store (`shouldBe` items)
+            readIORef loads `shouldReturn` ["original", "fork"]
+
+        it "does not let a throwing old reader release a post-reset hydration lease" do
+            let checkpoint = TranscriptCheckpoint "old" (pure [messageItem "old"])
+            store <- newColdConversationStore Nothing checkpoint []
+            entered <- newEmptyMVar
+            finish <- newEmptyMVar
+            withAsync (withConversationTranscript store \_ -> do
+                putMVar entered ()
+                takeMVar finish
+                throwString "old reader failed") \reader -> do
+                takeMVar entered
+                resetConversationStore store
+                generation <- currentTranscriptGeneration store
+                evictConversationTranscript store generation
+                    (TranscriptCheckpoint "reset" (pure [])) `shouldReturn` True
+                withConversationTranscript store \items -> do
+                    items `shouldBe` []
+                    putMVar finish ()
+                    wait reader `shouldThrow` anyException
+                    conversationResidency store `shouldReturn` ConversationResident
+                conversationResidency store `shouldReturn` ConversationCold
+
+        it "retries a failed load without running the callback or losing other fields" do
+            attempts <- newIORef (0 :: Int)
+            callbacks <- newIORef (0 :: Int)
+            let image = ImageAttachment "image/png" "queued"
+                checkpoint = TranscriptCheckpoint "retry" do
+                    n <- atomicModifyIORef' attempts (\n -> (n + 1, n))
+                    if n == 0 then throwString "load failed" else pure []
+                callback _ = modifyIORef' callbacks (+ 1)
+            store <- newColdConversationStore (Just "response") checkpoint [image]
+            withConversationTranscript store callback `shouldThrow` anyException
+            readIORef callbacks `shouldReturn` 0
+            readConversationAttachments store `shouldReturn` [image]
+            readConversationPreviousResponseId store `shouldReturn` Just "response"
+            withConversationTranscript store callback
+            readIORef callbacks `shouldReturn` 1
+            readIORef attempts `shouldReturn` 2
+            conversationResidency store `shouldReturn` ConversationCold
+
         it "hydrates a cold transcript only for the scoped read" do
             loads <- newIORef (0 :: Int)
             let items = [messageItem "cold"]

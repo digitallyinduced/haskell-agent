@@ -41,6 +41,7 @@ library
     hs-source-dirs:   src
     autogen-modules:  Paths_agent_cli_runtime
     other-modules:    Agent.CLI.Gateway.Account
+                    , Agent.Runtime.ConversationStore.Lifecycle
                     , Agent.CLI.Gateway.Catalog
                     , Agent.CLI.Gateway.Credentials
                     , Agent.CLI.Gateway.Dictation
@@ -143,6 +144,18 @@ library
                     , vector
                     , wai
                     , warp
+
+test-suite conversation-lifecycle-test
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test/lifecycle src
+    main-is:          Spec.hs
+    other-modules:    Agent.Runtime.ConversationStore.Lifecycle
+    build-depends:    agent-core
+                    , agent-responses-types
+                    , base >= 4.17 && < 5
+                    , hspec >= 2.11 && < 2.12
+                    , text
 
 test-suite session-framing-test
     import:           common-options
