@@ -265,7 +265,6 @@ simpleSlashCommands =
         , ("permissions", ReplPermissions)
         , ("fast", ReplSelection ReplToggleFast)
         , ("view-plan", ReplViewPlan)
-        , ("queue", ReplQueue)
         , ("transcript", ReplTranscript)
         , ("edit-prompt", ReplEditPrompt)
         , ("context", ReplContext)
@@ -335,6 +334,11 @@ parseSpecializedSlashCommand catalog raw spec args commandTail =
         "model" -> parseModelCommand args
         "theme" -> parseThemeCommand args
         "plan" -> parseOptionalTextCommand ReplPlan commandTail
+        "queue" ->
+            if Text.null commandTail
+                then ReplQueue
+                else ReplQueuedPrompt commandTail
+        "steer" -> parseRequiredTextCommand ReplPrompt spec commandTail
         "btw" ->
             parseRequiredTextCommand
                 ReplBtw

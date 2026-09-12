@@ -40,6 +40,7 @@ data ReplAction
     | ReplReload
     | ReplUpdateAndRestart
     | ReplPrompt Text
+    | ReplQueuedPrompt !Text
     | ReplExpandedPrompt !Text !Text
       -- ^ Original user-visible text and the model-visible expansion.
     | ReplInit
