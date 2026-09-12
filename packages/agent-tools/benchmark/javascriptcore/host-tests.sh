@@ -48,7 +48,7 @@ test_binary=$(cabal list-bin agent-tools:test:agent-tools-test \
   --project-file="$out/cabal.project" --builddir="$out/build")
 # Match cabal test/repl working-directory semantics for the explicit Bun fixtures.
 cd packages/agent-tools
-timeout --kill-after=10s 3m "$test_binary" --match "code-mode Bun host" \
+timeout --kill-after=10s 3m "$test_binary" --no-color --match "code-mode Bun host" \
   | tee "$out/results.txt"
 # Fail closed if the matcher stops selecting tests, or availability skips them.
 grep -Eq "^[1-9][0-9]* examples?, 0 failures?$" "$out/results.txt"
