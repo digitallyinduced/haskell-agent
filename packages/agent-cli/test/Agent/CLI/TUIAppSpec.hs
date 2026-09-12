@@ -267,6 +267,50 @@ spec = do
                     <> map (`FullscreenScriptCachePresent` False) names
                     <> [FullscreenScriptHalt]
                 pure ()
+    describe "active-turn prompt routing" do
+        it "queues explicit queued prompts and steers explicit and plain prompts" $
+            withSystemTempDirectory "agent-tui-prompt-routing" \directory ->
+                bracket
+                    (lookupEnv "HOME")
+                    (\previous -> maybe (unsetEnv "HOME") (setEnv "HOME") previous)
+                    \_ -> do
+                        setEnv "HOME" directory
+                        forM_
+                            [ ("/queue inspect the tests", True)
+                            , ("/steer inspect the tests", False)
+                            , ("inspect the tests", False)
+                            ]
+                            \(draft, queuedPrompt) -> do
+                                completed <- timeout 5_000_000 do
+                                    steeringCalls <- newIORef []
+                                    let running = reduceUi
+                                            (UiSetDraft draft (Text.length draft)) $
+                                                reduceUi (UiLoop TurnStarted) initialUiState
+                                    baseRuntime <- newScriptRuntime running
+                                    let runtime = baseRuntime
+                                            { runtimeSteer = \pasted prompt -> do
+                                                modifyIORef' steeringCalls (<> [(pasted, prompt)])
+                                                pure (Right ())
+                                            }
+                                    (_, submitted) <- runFullscreenScriptWithState
+                                        (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                                        [ FullscreenScriptVty (V.EvKey V.KEnter [])
+                                        , FullscreenScriptHalt
+                                        ]
+                                    queued <- toList <$> atomically
+                                        (Composer.readFullscreenInputs runtime.runtimeInput)
+                                    map (.fullscreenInputLine) queued `shouldBe`
+                                        if queuedPrompt then [ReplText draft] else []
+                                    map (.fullscreenInputQueued) queued `shouldBe`
+                                        if queuedPrompt then [True] else []
+                                    readIORef steeringCalls `shouldReturn`
+                                        if queuedPrompt
+                                            then []
+                                            else [(False, "inspect the tests")]
+                                    submitted.appUi.uiDraft `shouldBe` ""
+                                    submitted.appUi.uiRunning `shouldBe` True
+                                completed `shouldBe` Just ()
+
     describe "active-turn image paste" do
         it "shows a bracketed image paste before the REPL consumes it and survives delayed refreshes" $
             withPastedImageFixtures \path _ -> do

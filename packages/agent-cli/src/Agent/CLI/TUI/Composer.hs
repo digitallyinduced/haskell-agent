@@ -423,6 +423,9 @@ steeringPrompt ui pasted text
         case parseReplLine text of
             ReplPrompt prompt -> Just (pasted, prompt)
             ReplExpandedPrompt _ prompt -> Just (pasted, prompt)
+            -- Keep explicit queued prompts on the normal input channel;
+            -- it is consumed only after the active turn returns.
+            ReplQueuedPrompt _ -> Nothing
             _ -> Nothing
 
 -- | Handle one composer key. The host supplies Ctrl-C policy and conversation

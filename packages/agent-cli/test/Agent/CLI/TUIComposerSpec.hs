@@ -130,6 +130,34 @@ spec = describe "fullscreen composer" do
         steeringPrompt initialUiState True "not running"
             `shouldBe` Nothing
 
+    it "steers plain and explicit prompts while a turn is running" do
+        let running = initialUiState { uiRunning = True }
+        steeringPrompt running False "inspect the tests"
+            `shouldBe` Just (False, "inspect the tests")
+        steeringPrompt running False "/steer inspect the tests"
+            `shouldBe` Just (False, "inspect the tests")
+        steeringPrompt running True "/steer keep  spaces\nand newlines"
+            `shouldBe` Just (True, "keep  spaces\nand newlines")
+        steeringPrompt initialUiState False "/steer inspect the tests"
+            `shouldBe` Nothing
+        steeringPrompt running False "/steer"
+            `shouldBe` Nothing
+
+    it "keeps explicit queued prompts out of steering and immediate commands" do
+        let running = initialUiState { uiRunning = True }
+        steeringPrompt running False "/queue inspect the tests"
+            `shouldBe` Nothing
+        steeringPrompt running True "/queue keep  spaces\nand newlines"
+            `shouldBe` Nothing
+        steeringPrompt initialUiState False "/queue inspect the tests"
+            `shouldBe` Nothing
+        immediateReplCommand running (ReplText "/queue inspect the tests")
+            `shouldBe` Nothing
+        immediateReplCommand running (ReplPasted "/queue inspect the tests")
+            `shouldBe` Nothing
+        immediateBtwQuestion running (ReplText "/queue inspect the tests")
+            `shouldBe` Nothing
+
     it "keeps prompts with images out of text-only steering" do
         let prompt = initialUiState.uiPrompt
         steeringPrompt

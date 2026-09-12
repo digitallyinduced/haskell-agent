@@ -365,6 +365,8 @@ submitReplLine handlerContext finishTurn retryPendingTurn slashCatalog skillInvo
                         runMetaConsoleRequest request
                     ReplPrompt text ->
                         submitPrompt handlerContext finishTurn pasted continue color text
+                    ReplQueuedPrompt text ->
+                        submitPrompt handlerContext finishTurn pasted continue color text
                     ReplExpandedPrompt original expanded ->
                         submitExpandedTurnWithPaste
                             pasted continue color original expanded

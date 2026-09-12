@@ -408,14 +408,34 @@ spec = do
             parseReplLine "/context" `shouldBe` ReplContext
             parseReplLine "/view-plan now"
                 `shouldBe` ReplCommandError "usage: /view-plan"
-            parseReplLine "/queue now"
-                `shouldBe` ReplCommandError "usage: /queue"
             parseReplLine "/transcript now"
                 `shouldBe` ReplCommandError "usage: /transcript"
             parseReplLine "/edit-prompt now"
                 `shouldBe` ReplCommandError "usage: /edit-prompt"
             parseReplLine "/context now"
                 `shouldBe` ReplCommandError "usage: /context"
+
+        it "queues a prompt while preserving the full suffix" do
+            parseReplLine "/queue inspect the tests"
+                `shouldBe` ReplQueuedPrompt "inspect the tests"
+            parseReplLine "/QUEUE   keep  spaces\nand newlines"
+                `shouldBe` ReplQueuedPrompt "keep  spaces\nand newlines"
+            parseReplLine "/queue /steer literal prompt"
+                `shouldBe` ReplQueuedPrompt "/steer literal prompt"
+            parseReplLine "/queue   "
+                `shouldBe` ReplQueue
+
+        it "steers explicitly while preserving the full suffix" do
+            parseReplLine "/steer inspect the tests"
+                `shouldBe` ReplPrompt "inspect the tests"
+            parseReplLine "/STEER   keep  spaces\nand newlines"
+                `shouldBe` ReplPrompt "keep  spaces\nand newlines"
+            parseReplLine "/steer /queue literal prompt"
+                `shouldBe` ReplPrompt "/queue literal prompt"
+            parseReplLine "/steer"
+                `shouldBe` ReplCommandError "usage: /steer <prompt>"
+            parseReplLine "/steer   "
+                `shouldBe` ReplCommandError "usage: /steer <prompt>"
 
         it "asks a side question with the full suffix" do
             parseReplLine "/btw why this file?"
@@ -483,6 +503,7 @@ spec = do
                     , "plan"
                     , "view-plan"
                     , "queue"
+                    , "steer"
                     , "transcript"
                     , "edit-prompt"
                     , "context"

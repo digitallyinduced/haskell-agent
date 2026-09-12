@@ -10,6 +10,13 @@ An independent agent harness, written in Haskell.
 nix run --accept-flake-config "github:digitallyinduced/haskell-agent"
 ```
 
+## Steering and queued prompts
+
+While a fullscreen terminal turn is running, plain text prompts steer the current turn.
+Use `/steer <prompt>` to do this explicitly, or `/queue <prompt>` to wait
+until the current turn finishes. Bare `/queue` lists waiting prompts.
+When idle, either prompt command starts a new turn.
+
 ## Supported LLM Providers
 
 - OpenAI (Subscription)
