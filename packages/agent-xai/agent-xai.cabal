@@ -101,3 +101,5 @@ test-suite agent-xai-test
                     , safe-exceptions
                     , wai
                     , warp
+                    , network
+                    , websockets
