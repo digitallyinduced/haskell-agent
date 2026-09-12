@@ -80,6 +80,27 @@ spec = describe "Agent.CLI.Review" do
                 git repo ["init"]
                 listReviewCommits repo 20 `shouldReturn` Right []
 
+        it "returns no branches when only the current branch exists" $
+            withTempGitRepo \repo ->
+                listReviewBranches repo `shouldReturn` Right []
+
+        it "clamps a non-positive commit limit to one" $
+            withTempGitRepo \repo -> do
+                commits <- expectRight =<< listReviewCommits repo 0
+                map (.reviewCommitSubject) commits
+                    `shouldBe` ["initial subject"]
+
+        it "propagates Git launch failures rather than returning an empty list" $
+            withTempDir "agent-review-missing-" \dir -> do
+                let missing = dir </> fromText "missing"
+                branches <- listReviewBranches missing
+                commits <- listReviewCommits missing 20
+                branches `shouldSatisfy` isFailure
+                commits `shouldSatisfy` isFailure
+  where
+    isFailure (Left err) = not (Text.null err)
+    isFailure (Right _) = False
+
 expectRight :: Either Text a -> IO a
 expectRight = \case
     Right value -> pure value
