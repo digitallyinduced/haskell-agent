@@ -28,9 +28,17 @@ spec = describe "ignored worktree paths" $ do
                 writeFile (repository </> "example.cabal") "cabal-version: 3.0\nname: example\nversion: 0.1\nbuild-type: Simple\nexecutable example\n  main-is: Main.hs\n  build-depends: base\n  default-language: Haskell2010\n"
                 writeFile (repository </> "cabal.project") "packages: .\nactive-repositories: :none\n"
                 writeFile (repository </> "Main.hs") "main = putStrLn \"rebuilt\"\n"
+                -- Nix tests have an unwritable HOME. Keep Cabal configuration
+                -- and caches inside the fixture, independent of user state.
+                let cabalConfig = repository </> "cabal-test.config"
+                writeFile cabalConfig $ unlines
+                    [ "store-dir: " <> repository </> "cabal-store"
+                    , "remote-repo-cache: " <> repository </> "cabal-repositories"
+                    , "logs-dir: " <> repository </> "cabal-logs"
+                    ]
                 let cabal arguments = do
                         (code, output, errors) <- readCreateProcessWithExitCode
-                            ((proc "cabal" arguments) { cwd = Just repository }) ""
+                            ((proc "cabal" (["--config-file=" <> cabalConfig] <> arguments)) { cwd = Just repository }) ""
                         unless (code == ExitSuccess) (fail (output <> errors))
                         pure output
                 _ <- cabal ["build", "--offline", "exe:example"]
