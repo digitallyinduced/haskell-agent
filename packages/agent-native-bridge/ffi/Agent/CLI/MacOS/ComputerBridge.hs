@@ -28,24 +28,21 @@ module Agent.CLI.MacOS.ComputerBridge
 import Agent.ComputerUse.Accessibility
     ( AccessibilityDeltaState
     , AccessibilityObservation(..)
-    , advanceAccessibilityObservation
-    , decodeAccessibilitySnapshot
     , initialAccessibilityDeltaState
-    , unavailableAccessibilityObservation
+    )
+import Agent.ComputerUse.Semantic
+    ( SemanticComputerResponse(..)
+    , SemanticComputerResult(..)
+    , validateSemanticComputerResponse
     )
 import Agent.ComputerUse.Protocol
-    ( ComputerUseEffect(..)
-    , ComputerUseVerdict(..)
-    , SemanticComputerOperation(..)
+    ( SemanticComputerOperation(..)
     , SemanticComputerRequest(..)
-    , computerUseVerdictField
     , encodeSemanticComputerRequest
-    , suspectedNoopComputerUseVerdict
     , semanticComputerRequestDecoder
     , semanticComputerRequestOperation
     , semanticComputerRequestSchema
     , semanticComputerRequestWantsScreenshot
-    , unverifiedComputerUseVerdict
     )
 import Agent.ToolDispatch
     ( ToolHandlerResult(..)
@@ -59,26 +56,12 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
     )
-import Codec.Picture
-    ( DynamicImage
-    , dynamicMap
-    , imageHeight
-    , imageWidth
-    , pixelAt
-    )
-import Codec.Picture.Jpg (decodeJpeg)
-import Codec.Picture.Png (decodePng)
 import qualified Control.Concurrent.MVar as MVar
-import Control.Exception (evaluate)
 import qualified Control.Exception.Safe as Exception
 import Control.Exception.Safe (finally, mask_, onException, tryAny)
-import Control.Monad (guard, when)
+import Control.Monad (when)
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
-import Data.Bits ((.&.), complement, shiftR, xor)
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import qualified Data.Map.Strict as Map
@@ -378,8 +361,6 @@ invokeComputerSessionRequest session request =
                 Right (Right response) -> do
                     validated <- validateResponse
                         request
-                        operation
-                        includeScreenshot
                         accessibilityState
                         response
                     case validated of
@@ -402,170 +383,27 @@ data RawComputerResponse = RawComputerResponse
 
 validateResponse
     :: SemanticComputerRequest
-    -> CInt
-    -> Bool
     -> AccessibilityDeltaState
     -> RawComputerResponse
     -> IO (Either Text (NativeComputerResult, AccessibilityDeltaState))
-validateResponse request operation includeScreenshot accessibilityState response =
-    case validateMetadata of
-        Left err -> pure (Left err)
-        Right (object, accessibility, successorAccessibility) -> do
-            decodedImage <- decodeImage
-                includeScreenshot
-                response.rawImageFormat
-                response.rawImage
-            pure do
-                image <- decodedImage
-                let resultWithAccessibility = maybe object
-                        (\observation ->
-                            KeyMap.insert
-                                "accessibility_state"
-                                (Aeson.toJSON observation)
-                                object)
-                        accessibility
-                    freshEvidence =
-                        maybe False accessibilityIsFresh accessibility
-                            || maybe False (const True) image
-                resultObject <-
-                    insertDefaultVerdict
-                        request
-                        freshEvidence
-                        resultWithAccessibility
-                pure
-                    ( NativeComputerResult
-                        { nativeComputerResultValue = Aeson.Object resultObject
-                        , nativeComputerAccessibility = accessibility
-                        , nativeComputerImage = image
-                        }
-                    , successorAccessibility
-                    )
-  where
-    validateMetadata = do
-        when (response.rawSessionToken /= 0) $
-            Left "The native computer host changed a live session token."
-        value <- case Aeson.eitherDecodeStrict' response.rawResult of
-            Left err -> Left
-                ("The native computer host returned invalid result JSON: "
-                    <> Text.pack err)
-            Right decoded -> Right decoded
-        object <- case value of
-            Aeson.Object fields -> Right fields
-            _ -> Left "The native computer host result must be a JSON object."
-        when (containsDataImage value) $
-            Left "The native computer host embedded screenshot data in result JSON."
-        when (operation == operationList
-                && not (BS.null response.rawAccessibility)) $
-            Left "The native computer host returned accessibility data for list_targets."
-        let (observation, newAccessibilityState) =
-                decodeAccessibility response.rawAccessibility accessibilityState
-            (accessibility, successorAccessibility)
-                | operation == operationList =
-                    (Nothing, accessibilityState)
-                | otherwise =
-                    (Just observation, newAccessibilityState)
-        pure (object, accessibility, successorAccessibility)
-
-    accessibilityIsFresh = \case
-        AccessibilityFull{} -> True
-        AccessibilityDelta{} -> True
-        AccessibilityUnavailable{} -> False
-
-insertDefaultVerdict
-    :: SemanticComputerRequest
-    -> Bool
-    -> Aeson.Object
-    -> Either Text Aeson.Object
-insertDefaultVerdict request freshEvidence object
-    | Just value <- KeyMap.lookup verdictKey object =
-        case
-            (Aeson.fromJSON value :: Aeson.Result ComputerUseVerdict)
-        of
-            Aeson.Success hostVerdict -> do
-                validateHostVerdict request freshEvidence hostVerdict
-                Right object
-            Aeson.Error err ->
-                Left
-                    ( "The native computer host returned an invalid verdict: "
-                    <> Text.pack err
-                    )
-    | not (isAct request) = Right object
-    | otherwise =
-        Right (KeyMap.insert verdictKey (Aeson.toJSON verdict) object)
-  where
-    verdictKey = Key.fromText computerUseVerdictField
-    verdict :: ComputerUseVerdict
-    verdict =
-        case KeyMap.lookup "ok" object of
-            Just (Aeson.Bool False) ->
-                suspectedNoopComputerUseVerdict freshEvidence
-            _ -> unverifiedComputerUseVerdict freshEvidence
-    isAct = \case
-        ActOnComputerTarget{} -> True
-        _ -> False
-
-validateHostVerdict
-    :: SemanticComputerRequest
-    -> Bool
-    -> ComputerUseVerdict
-    -> Either Text ()
-validateHostVerdict request freshEvidence verdict
-    | verdict.computerUseVerdictFreshObservation
-    , not freshEvidence =
-        Left
-            ( "The native computer host verdict claims a fresh observation "
-            <> "without returning fresh accessibility or image evidence."
-            )
-    | ActOnComputerTarget{} <- request
-    , ComputerUseObservation <- verdict.computerUseVerdictEffect =
-        Left
-            ( "The native computer host verdict cannot classify an input "
-            <> "request as an observation."
-            )
-    | otherwise = Right ()
-
-decodeAccessibility
-    :: BS.ByteString
-    -> AccessibilityDeltaState
-    -> (AccessibilityObservation, AccessibilityDeltaState)
-decodeAccessibility bytes state
-    | BS.null bytes =
-        unavailableAccessibilityObservation
-            "Native accessibility snapshot unavailable."
-            state
-    | otherwise =
-        case decodeAccessibilitySnapshot bytes of
-            Left err ->
-                unavailableAccessibilityObservation
-                    ( "The native computer host returned invalid accessibility JSON: "
-                        <> err
-                    )
-                    state
-            Right snapshot ->
-                advanceAccessibilityObservation state snapshot
-
-decodeImage
-    :: Bool
-    -> CInt
-    -> BS.ByteString
-    -> IO (Either Text (Maybe ToolResultImage))
-decodeImage includeScreenshot imageFormat bytes
-    | BS.null bytes && imageFormat == imageNone = pure (Right Nothing)
-    | not includeScreenshot =
-        pure (Left "The native computer host returned an unrequested screenshot.")
-    | BS.null bytes =
-        pure (Left "The native computer host returned an empty screenshot.")
+validateResponse request accessibilityState response
+    | response.rawSessionToken /= 0 =
+        pure (Left "The native computer host changed a live session token.")
     | otherwise = do
-        decodedMime <- imageMime imageFormat bytes
+        validated <- validateSemanticComputerResponse request accessibilityState
+            SemanticComputerResponse
+                { semanticResultBytes = response.rawResult
+                , semanticAccessibilityBytes = response.rawAccessibility
+                , semanticImageBytes = response.rawImage
+                , semanticImageFormat = fromIntegral response.rawImageFormat
+                }
         pure do
-            mime <- decodedMime
-            pure (Just (ToolResultImage
-                ( "data:"
-                    <> mime
-                    <> ";base64,"
-                    <> TextEncoding.decodeUtf8 (Base64.encode bytes)
-                )
-                Nothing))
+            (result, successor) <- validated
+            pure (NativeComputerResult
+                { nativeComputerResultValue = result.semanticResultValue
+                , nativeComputerAccessibility = result.semanticAccessibility
+                , nativeComputerImage = result.semanticImage
+                }, successor)
 
 acquireCurrentGeneration
     :: ComputerHost
@@ -736,204 +574,6 @@ closeInvalidOpen registration token =
         _ <- tryAny
             (invokeComputerRaw registration operationClose token False BS.empty)
         pure ()
-
-imageMime :: CInt -> BS.ByteString -> IO (Either Text Text)
-imageMime imageFormat bytes = case imageFormat of
-    1 -> validateDecodedImage
-        "image/png"
-        "The native computer host returned malformed PNG data."
-        (validPng bytes)
-    2 -> validateDecodedImage
-        "image/jpeg"
-        "The native computer host returned malformed JPEG data."
-        (validJpeg bytes)
-    _ -> pure
-        (Left "The native computer host returned an unsupported image format.")
-
-validateDecodedImage :: Text -> Text -> Bool -> IO (Either Text Text)
-validateDecodedImage mime malformed valid = do
-    attempted <- tryAny (evaluate valid)
-    pure case attempted of
-        Right True -> Right mime
-        Right False -> Left malformed
-        Left _ -> Left malformed
-
-containsDataImage :: Aeson.Value -> Bool
-containsDataImage = \case
-    Aeson.Object object -> any containsDataImage object
-    Aeson.Array values -> any containsDataImage values
-    Aeson.String value ->
-        "data:image/" `Text.isPrefixOf` Text.toLower value
-    _ -> False
-
-validPng :: BS.ByteString -> Bool
-validPng bytes =
-    case pngEnvelope bytes of
-        Nothing -> False
-        Just dimensions ->
-            decodedImageMatches dimensions (decodePng bytes)
-
-pngEnvelope :: BS.ByteString -> Maybe (Int, Int)
-pngEnvelope bytes = do
-    guard (BS.length bytes >= 45)
-    guard (BS.take 8 bytes == pngSignature)
-    validChunks True False Nothing (BS.drop 8 bytes)
-  where
-    pngSignature = BS.pack [137, 80, 78, 71, 13, 10, 26, 10]
-    validChunks firstChunk sawImageData dimensions remaining = do
-        guard (BS.length remaining >= 12)
-        guard (chunkLength <= BS.length remaining - 12)
-        guard (chunkChecksum == crc32 checksumInput)
-        if firstChunk
-            then do
-                guard (chunkType == "IHDR")
-                guard (chunkLength == 13)
-                headerDimensions <- validHeader chunkData
-                validChunks False False (Just headerDimensions) rest
-            else case chunkType of
-                "IHDR" -> Nothing
-                "IDAT" ->
-                    validChunks False True dimensions rest
-                "IEND" -> do
-                    guard (chunkLength == 0)
-                    guard sawImageData
-                    guard (BS.null rest)
-                    dimensions
-                _ ->
-                    validChunks False sawImageData dimensions rest
-      where
-        chunkLength = word32At remaining 0
-        chunkType = BS.take 4 (BS.drop 4 remaining)
-        chunkData = BS.take chunkLength (BS.drop 8 remaining)
-        checksumInput =
-            BS.take (4 + chunkLength) (BS.drop 4 remaining)
-        chunkChecksum =
-            fromIntegral (word32At remaining (8 + chunkLength))
-        rest = BS.drop (12 + chunkLength) remaining
-    validHeader header = do
-        guard (BS.length header == 13)
-        let width = word32At header 0
-            height = word32At header 4
-        guard (dimensionsSafeToDecode (width, height))
-        guard (BS.index header 10 == 0)
-        guard (BS.index header 11 == 0)
-        guard (BS.index header 12 <= 1)
-        pure (width, height)
-
-validJpeg :: BS.ByteString -> Bool
-validJpeg bytes =
-    case jpegDimensions bytes of
-        Nothing -> False
-        Just dimensions ->
-            decodedImageMatches dimensions (decodeJpeg bytes)
-
-jpegDimensions :: BS.ByteString -> Maybe (Int, Int)
-jpegDimensions bytes = do
-    guard (BS.length bytes >= 14)
-    guard (BS.take 2 bytes == BS.pack [255, 216])
-    guard (BS.drop (BS.length bytes - 2) bytes == BS.pack [255, 217])
-    validSegments Nothing (BS.drop 2 bytes)
-  where
-    validSegments dimensions remaining =
-        case nextMarker remaining of
-            Nothing -> Nothing
-            Just (marker, afterMarker)
-                | marker == 0xd9 -> Nothing
-                | standaloneMarker marker ->
-                    validSegments dimensions afterMarker
-                | BS.length afterMarker < 2 -> Nothing
-                | segmentLength < 2
-                    || segmentLength > BS.length afterMarker -> Nothing
-                | marker == 0xda -> dimensions
-                | startOfFrame marker -> do
-                    guard (segmentLength >= 8)
-                    let height = word16At afterMarker 3
-                        width = word16At afterMarker 5
-                    guard (dimensionsSafeToDecode (width, height))
-                    validSegments
-                        (Just (width, height))
-                        (BS.drop segmentLength afterMarker)
-                | otherwise ->
-                    validSegments dimensions
-                        (BS.drop segmentLength afterMarker)
-              where
-                segmentLength = word16At afterMarker 0
-    nextMarker remaining =
-        case BS.elemIndex 255 remaining of
-            Nothing -> Nothing
-            Just markerStart ->
-                let markerBytes = BS.drop markerStart remaining
-                    afterFill = BS.dropWhile (== 255) markerBytes
-                in case BS.uncons afterFill of
-                    Nothing -> Nothing
-                    Just (0, rest) -> nextMarker rest
-                    Just (marker, rest) -> Just (marker, rest)
-    standaloneMarker marker =
-        marker == 0x01
-            || marker == 0xd8
-            || (marker >= 0xd0 && marker <= 0xd7)
-    startOfFrame marker =
-        marker >= 0xc0
-            && marker <= 0xcf
-            && marker `notElem` [0xc4, 0xc8, 0xcc]
-
-decodedImageMatches
-    :: (Int, Int)
-    -> Either String DynamicImage
-    -> Bool
-decodedImageMatches expectedDimensions = \case
-    Left _ -> False
-    Right image ->
-        dynamicMap
-            (\raster ->
-                let width = imageWidth raster
-                    height = imageHeight raster
-                in
-                    (width, height) == expectedDimensions
-                        && (pixelAt raster (width - 1) (height - 1)
-                            `seq` True))
-            image
-
-dimensionsSafeToDecode :: (Int, Int) -> Bool
-dimensionsSafeToDecode (width, height) =
-    width > 0
-        && height > 0
-        && width <= maximumDecodedImageSide
-        && height <= maximumDecodedImageSide
-        && toInteger width * toInteger height <= maximumDecodedImagePixels
-
-maximumDecodedImageSide :: Int
-maximumDecodedImageSide = 8192
-
-maximumDecodedImagePixels :: Integer
-maximumDecodedImagePixels = 25000000
-
-crc32 :: BS.ByteString -> Word32
-crc32 = complement . BS.foldl' update maxBound
-  where
-    update :: Word32 -> Word8 -> Word32
-    update checksum byte =
-        advance 8 (checksum `xor` fromIntegral byte)
-
-    advance :: Int -> Word32 -> Word32
-    advance 0 value = value
-    advance count value =
-        advance (count - 1)
-            (if value .&. 1 == 1
-                then (value `shiftR` 1) `xor` 0xedb88320
-                else value `shiftR` 1)
-
-word16At :: BS.ByteString -> Int -> Int
-word16At bytes offset =
-    fromIntegral (BS.index bytes offset) * 256
-        + fromIntegral (BS.index bytes (offset + 1))
-
-word32At :: BS.ByteString -> Int -> Int
-word32At bytes offset =
-    fromIntegral (BS.index bytes offset) * 16777216
-        + fromIntegral (BS.index bytes (offset + 1)) * 65536
-        + fromIntegral (BS.index bytes (offset + 2)) * 256
-        + fromIntegral (BS.index bytes (offset + 3))
 
 computerFailureMessage :: CInt -> BS.ByteString -> Text
 computerFailureMessage status bytes =
