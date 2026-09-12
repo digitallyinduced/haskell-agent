@@ -31,6 +31,7 @@ import Control.Concurrent.MVar (withMVar)
 import Control.Concurrent.STM
 import Control.Exception.Safe (finally)
 import Control.Monad (filterM, void)
+import Control.Monad.Extra (concatMapM)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -203,7 +204,7 @@ abortRootTurn registry rootTurnId =
         records <- atomically do
             modifyTVar' registry.registryAbortedRootTurns (Set.insert rootTurnId)
             agents <- Map.elems <$> readTVar registry.registryAgents
-            fmap concat $ mapM selectOwned agents
+            concatMapM selectOwned agents
         settled <- mapConcurrentlyBounded 8
             (interruptRecordForTurn registry rootTurnId)
             records
@@ -623,7 +624,7 @@ listAgents
 listAgents registry pathPrefix = atomically do
     agents <- readTVar registry.registryAgents
     let prefix = maybe "" Text.strip pathPrefix
-    fmap concat $ mapM
+    concatMapM
         (\record -> do
             status <- phaseStatus <$> readTVar record.recordPhase
             let pathText = taskPathText record.recordTaskPath
@@ -763,7 +764,7 @@ takeAgentUpdatesSTM registry caller = do
     cursors <- readTVar registry.registryWaitCursors
     let cursor = Map.findWithDefault 0 caller cursors
     agents <- readTVar registry.registryAgents
-    updates <- fmap concat $ mapM (recordUpdateAfter caller cursor) (Map.elems agents)
+    updates <- concatMapM (recordUpdateAfter caller cursor) (Map.elems agents)
     case updates of
         [] -> retry
         _ -> do
