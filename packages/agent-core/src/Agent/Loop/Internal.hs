@@ -155,6 +155,10 @@ data LoopConfig = LoopConfig
     { loopBackend :: !Backend
     , loopBackendState :: !BackendStateStore
     , loopTools :: !ToolRegistry
+    -- | Refresh the request's tool exposure before submission. The returned
+    -- registry is retained for every call admitted from that response; changes
+    -- made by discovery tools take effect only on the next request.
+    , loopReadTools :: !(Maybe (IO ToolRegistry))
     , loopDispatch :: !ToolDispatchConfig
     , loopMaxTurns :: !Int
     , loopOnEvent :: !(LoopEvent -> IO ())
@@ -458,7 +462,10 @@ runLoopState runtime = do
                     (Left (LoopCancelled []))
                 else do
                     config.loopOnEvent TurnStarted
-                    submission <- submitLoopTurn runtime state
+                    tools <- maybe (pure config.loopTools) id config.loopReadTools
+                    let requestRuntime = runtime
+                            { loopRuntimeConfig = config { loopTools = tools } }
+                    submission <- submitLoopTurn requestRuntime state
                     case submission of
                         SubmissionCancelled ->
                             finishLoopExecution runtime
@@ -470,7 +477,7 @@ runLoopState runtime = do
                                 finishLoopExecution runtime
                                     (Left LoopNoResponseId)
                         SubmissionReturned BackendResult{backendOutput} ->
-                            continueCommittedLoop runtime backendOutput
+                            continueCommittedLoop requestRuntime backendOutput
 
 submitLoopTurn
     :: LoopRuntime
@@ -585,6 +592,7 @@ submitLoopTurn runtime state = do
                                 RecoveryClosed -> pure ()
                                 RecoveryOpen{} ->
                                     admitAsyncToolCall
+                                        config.loopTools
                                         (asyncToolManager runtime)
                                         call
                         , onRecoveryCheckpoint = checkpoint
@@ -705,7 +713,7 @@ completeLoopTurn runtime turn = do
     clearSteeringAcknowledgement runtime
     race
         (waitCancel config.loopCancel)
-        (runManagedToolCalls (asyncToolManager runtime) turn.toolCalls)
+        (runManagedToolCalls config.loopTools (asyncToolManager runtime) turn.toolCalls)
         >>= \case
             Left () ->
                 -- Leaving the enclosing manager scope cancels and joins
@@ -967,6 +975,7 @@ data AsyncToolManager = AsyncToolManager
 
 data ManagedToolCall = ManagedToolCall
     { managedCall :: !ToolCall
+    , managedTools :: !ToolRegistry
     , managedResult :: !(TMVar (Maybe ToolCallResult))
     -- Recorded by the worker before event delivery; unlike managedResult,
     -- this does not release scheduling barriers or normal result waiters.
@@ -996,29 +1005,31 @@ newAsyncToolManager =
 asyncToolManager :: LoopRuntime -> AsyncToolManager
 asyncToolManager runtime = runtime.loopRuntimeAsyncToolManager
 
-admitAsyncToolCall :: AsyncToolManager -> ToolCall -> IO ()
-admitAsyncToolCall manager call
+admitAsyncToolCall :: ToolRegistry -> AsyncToolManager -> ToolCall -> IO ()
+admitAsyncToolCall tools manager call
     | toolCallMode call /= AsyncToolCall =
         atomically $
             throwSTM $
                 AsyncToolCallConflict
                     ("Backend announced a non-async tool call: " <> call.callId)
     | otherwise = do
-        _ <- atomically (admitManagedToolCall manager call)
+        _ <- atomically (admitManagedToolCall tools manager call)
         pure ()
 
 admitBlockingToolCall
-    :: AsyncToolManager
+    :: ToolRegistry
+    -> AsyncToolManager
     -> ToolCall
     -> IO (TMVar (Maybe ToolCallResult))
-admitBlockingToolCall manager call =
-    atomically (admitManagedToolCall manager call)
+admitBlockingToolCall tools manager call =
+    atomically (admitManagedToolCall tools manager call)
 
 admitManagedToolCall
-    :: AsyncToolManager
+    :: ToolRegistry
+    -> AsyncToolManager
     -> ToolCall
     -> STM (TMVar (Maybe ToolCallResult))
-admitManagedToolCall manager call = do
+admitManagedToolCall tools manager call = do
     calls <- readTVar manager.asyncToolCalls
     case Map.lookup call.callId calls of
         Just existing
@@ -1035,6 +1046,7 @@ admitManagedToolCall manager call = do
             -- recovery, so its size is also the next admission sequence.
             let record = ManagedToolCall
                     { managedCall = call
+                    , managedTools = tools
                     , managedResult = result
                     , managedTrustedResult = trustedResult
                     , managedAdmissionSequence = Map.size calls
@@ -1048,10 +1060,11 @@ admitManagedToolCall manager call = do
             pure result
 
 runManagedToolCalls
-    :: AsyncToolManager
+    :: ToolRegistry
+    -> AsyncToolManager
     -> [ToolCall]
     -> IO [ToolCallResult]
-runManagedToolCalls manager calls = do
+runManagedToolCalls tools manager calls = do
     blocking <- catMaybes <$> traverse admit calls
     blockingResults <-
         catMaybes <$> traverse (atomically . readTMVar) blocking
@@ -1079,9 +1092,9 @@ runManagedToolCalls manager calls = do
     admit call =
         case toolCallMode call of
             AsyncToolCall ->
-                admitAsyncToolCall manager call >> pure Nothing
+                admitAsyncToolCall tools manager call >> pure Nothing
             BlockingToolCall ->
-                Just <$> admitBlockingToolCall manager call
+                Just <$> admitBlockingToolCall tools manager call
 
 takeAsyncToolCompletions
     :: AsyncToolManager
@@ -1108,6 +1121,7 @@ drainTQueue queue =
 runAsyncToolManager :: LoopConfig -> AsyncToolManager -> IO ()
 runAsyncToolManager config manager = do
     request <- atomically (readTQueue manager.asyncToolRequests)
+    let requestConfig = config { loopTools = request.managedTools }
     cancelledBefore <- isCancelled config.loopCancel
     if cancelledBefore
         then completeCancelledRequest request
@@ -1117,9 +1131,9 @@ runAsyncToolManager config manager = do
                 (do
                     prepared <-
                         prepareManagedToolCall
-                            config
+                            requestConfig
                             request.managedCall
-                    plan <- schedulingPlanForPrepared config prepared
+                    plan <- schedulingPlanForPrepared requestConfig prepared
                     pure (prepared, plan))
                 >>= \case
                     Left () ->
@@ -1137,7 +1151,7 @@ runAsyncToolManager config manager = do
                                             plan)
                                 withAsync
                                     (runManagedToolWorker
-                                        config
+                                        requestConfig
                                         manager
                                         request
                                         prepared

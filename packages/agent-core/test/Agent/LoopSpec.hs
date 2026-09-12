@@ -89,6 +89,55 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "runLoop" do
+    describe "request tool discovery" do
+        it "exposes discovered handlers only on the following request" do
+            discovered <- newIORef False
+            invocations <- newIORef (0 :: Int)
+            refreshes <- newIORef (0 :: Int)
+            submissions <- newIORef []
+            let search = noArgsAppTool "tool_search" do
+                    writeIORef discovered True
+                    pure (Right "discovered")
+                target = noArgsAppTool "deferred" do
+                    modifyIORef' invocations (+ 1)
+                    pure (Right "called")
+                refresh = do
+                    modifyIORef' refreshes (+ 1)
+                    visible <- readIORef discovered
+                    pure (registryFromTools (search : [target | visible]))
+            backend <- scriptedBackend submissions
+                [ Right (emptyTurnOutput "first"
+                    [ functionToolCall "search" "tool_search" "{}"
+                    , functionToolCall "too-early" "deferred" "{}"
+                    ] Nothing)
+                , Right (emptyTurnOutput "second"
+                    [functionToolCall "available" "deferred" "{}"] Nothing)
+                , Right (emptyTurnOutput "done" [] (Just "done"))
+                ]
+            config <- testConfig backend
+            result <- runLoop config { loopReadTools = Just refresh } Nothing "go"
+            fmap (.finalText) result `shouldBe` Right (Just "done")
+            readIORef invocations `shouldReturn` 1
+            readIORef refreshes `shouldReturn` 3
+            history <- readIORef submissions
+            let outputs = [(r.callId, r.output) | (_, inputs) <- history, CompletedTool r <- inputs]
+            lookup "too-early" outputs `shouldSatisfy`
+                maybe False (Text.isInfixOf "Unknown tool")
+            lookup "available" outputs `shouldBe` Just "called"
+
+        it "fails closed when refreshing request exposure fails" do
+            submissions <- newIORef []
+            backend <- scriptedBackend submissions
+                [Right (emptyTurnOutput "unexpected" [] (Just "done"))]
+            config <- testConfig backend
+            result <- runLoop config
+                { loopReadTools = Just (Exception.throwIO (userError "invalid catalog")) }
+                Nothing "go"
+            result `shouldSatisfy` \case
+                Left (LoopUnexpected message) -> "invalid catalog" `Text.isInfixOf` message
+                _ -> False
+            readIORef submissions `shouldReturn` []
+
     describe "completed output recovery" do
         it "retains completed items on an exception and ignores late callbacks" do
             escaped <- newEmptyMVar

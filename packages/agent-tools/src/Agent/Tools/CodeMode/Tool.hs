@@ -51,6 +51,7 @@ import Agent.Tools.CodeMode.Host
     , ImageDetailVisibility(..)
     , checkCodeModeAvailability
     , closeCodeModeHost
+    , codeModeHostWithToolHandler
     , defaultCodeModeConfig
     , execCodeCellWithTools
     , newCodeModeHost
@@ -102,7 +103,8 @@ data ToolMode
 -- authorization, and dispatch. 'Left' rejects the nested JavaScript promise
 -- with the given message; 'Right' resolves it with the tool output and any
 -- supplemental media.
-type CodeModeNestedInvoke = ToolCall -> IO (Either Text ToolCallResult)
+-- | Dispatch the captured capability, not a fresh lookup by its runtime name.
+type CodeModeNestedInvoke = AppTool -> ToolCall -> IO (Either Text ToolCallResult)
 
 -- | A namespaced nested-tool group, mirroring provider tool namespaces such
 -- as @collaboration@.
@@ -121,12 +123,14 @@ data CodeModeToolSet = CodeModeToolSet
     { codeModeTools :: ![AppTool]
       -- ^ The @exec@ and @wait@ tools, ready for registry and wire schemas.
     , codeModeNestedToolNames :: ![Text]
+    , codeModeRefreshToolSet :: !([CodeModeNestedSpec] -> IO (Either Text [AppTool]))
     , codeModeReadBackgroundTasks :: !(IO [BackgroundTaskStatus])
     , closeCodeModeToolSet :: !(IO ())
     }
 
 data NestedTool = NestedTool
-    { nestedRuntimeName :: !Text
+    { nestedAppTool :: !AppTool
+    , nestedRuntimeName :: !Text
     , nestedCallKind :: !ToolCallKind
     , nestedDescription :: !Text
     , nestedNamespace :: !(Maybe CodeModeNamespace)
@@ -162,28 +166,34 @@ newCodeModeToolSet mode detailVisibility workerPath invoke specs =
                         Left err -> pure (Left err)
                         Right () -> do
                             host <- newCodeModeHost config
-                            let metadata =
+                            let surface current =
+                                    [ execTool
+                                        (codeModeHostWithToolHandler host
+                                            (runNestedTool invoke nextInvocation current))
+                                        (metadataFor current)
+                                        (execDescription
+                                            (mode == CodeOnlyToolMode)
+                                            detailVisibility
+                                            (Map.toAscList current))
+                                    , waitTool host
+                                    ]
+                                metadataFor :: Map Text NestedTool -> [CodeModeToolMetadata]
+                                metadataFor current =
                                     [ CodeModeToolMetadata
                                         { toolMetadataName = name
                                         , toolMetadataDescription =
                                             definition.nestedDescription
                                         }
                                     | (name, definition) <-
-                                        Map.toAscList nested
+                                        Map.toAscList current
                                     ]
+                                metadata = metadataFor nested
                                 names = map (.toolMetadataName) metadata
-                                description =
-                                    execDescription
-                                        (mode == CodeOnlyToolMode)
-                                        detailVisibility
-                                        (Map.toAscList nested)
-                                tools =
-                                    [ execTool host metadata description
-                                    , waitTool host
-                                    ]
                             pure $ Right CodeModeToolSet
-                                { codeModeTools = tools
+                                { codeModeTools = surface nested
                                 , codeModeNestedToolNames = names
+                                , codeModeRefreshToolSet =
+                                    pure . fmap surface . buildRefreshedNestedTools
                                 , codeModeReadBackgroundTasks = do
                                     cells <- readRunningCodeCells host
                                     pure
@@ -221,6 +231,25 @@ probeCodeModeConfig config = do
                 "code-mode worker readiness probe failed: "
                     <> renderCodeModeError err
 
+-- | Startup retains its legacy first-wins projection. Refresh fails closed
+-- rather than allowing discovery to introduce an alias for another tool.
+buildRefreshedNestedTools
+    :: [CodeModeNestedSpec]
+    -> Either Text (Map Text NestedTool)
+buildRefreshedNestedTools specs = do
+    projected <- traverse (buildNestedTools . pure) specs
+    foldM check Map.empty (concatMap Map.toList projected)
+  where
+    check :: Map Text NestedTool -> (Text, NestedTool) -> Either Text (Map Text NestedTool)
+    check current (name, tool) =
+        case Map.lookup name current of
+            Nothing -> Right (Map.insert name tool current)
+            Just previous
+                | previous.nestedRuntimeName == tool.nestedRuntimeName ->
+                    Right current
+                | otherwise ->
+                    Left ("code-mode tool identifier collision: " <> name)
+
 buildNestedTools
     :: [CodeModeNestedSpec]
     -> Either Text (Map Text NestedTool)
@@ -238,7 +267,8 @@ buildNestedTools =
         | otherwise =
             Right $ Map.insert codeName
                 NestedTool
-                    { nestedRuntimeName = tool.appToolName
+                    { nestedAppTool = tool
+                    , nestedRuntimeName = tool.appToolName
                     , nestedCallKind = case tool.appToolSchema of
                         FreeformApplyPatchSchema -> CustomCallKind
                         FreeformGrammarSchema _ _ -> CustomCallKind
@@ -314,7 +344,7 @@ runNestedTool invoke nextInvocation nested codeName arguments =
             \current ->
                 let next = current + 1
                 in (next, next)
-        result <- invoke ToolCall
+        result <- invoke tool.nestedAppTool ToolCall
             { callId =
                 "code-mode:"
                     <> Text.pack (show invocation)

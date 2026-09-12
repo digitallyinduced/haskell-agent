@@ -1383,6 +1383,7 @@ spec = do
                                             { Loop.loopBackend = recoveringBackend
                                             , Loop.loopBackendState = store
                                             , Loop.loopTools = tools
+                                            , Loop.loopReadTools = Nothing
                                             , Loop.loopDispatch = Loop.defaultLoopDispatch
                                             , Loop.loopMaxTurns = 2
                                             , Loop.loopOnEvent = \_ -> pure ()

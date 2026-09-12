@@ -239,6 +239,7 @@ configFor initial backend = do
             , commitBackendState = \snapshot -> writeIORef state snapshot >> pure snapshot
             }
         , loopTools = tools
+        , loopReadTools = Nothing
         , loopDispatch = defaultLoopDispatch
         , loopMaxTurns = 3
         , loopOnEvent = const (pure ())

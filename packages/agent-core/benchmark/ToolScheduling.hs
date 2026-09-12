@@ -160,6 +160,7 @@ runWorkload workload callCount delayMicros = do
                     pure snapshot
                 }
             , loopTools = registry
+            , loopReadTools = Nothing
             , loopDispatch = defaultLoopDispatch
             , loopMaxTurns = defaultLoopMaxTurns
             , loopOnEvent = \_ -> pure ()

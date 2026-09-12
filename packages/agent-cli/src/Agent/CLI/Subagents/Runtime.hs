@@ -1402,6 +1402,7 @@ runPreparedChild runtime env session toolEnv toolRegistry backend onEvent runChi
                             in (committed, committed)
                 }
             , loopTools = toolRegistry
+            , loopReadTools = Nothing
             , loopDispatch =
                 defaultLoopDispatch
                     { toolDispatchFinalizeOutput =

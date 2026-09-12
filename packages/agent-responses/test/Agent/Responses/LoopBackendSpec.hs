@@ -1344,6 +1344,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                         writeIORef state snapshot >> pure snapshot
                     }
                 , loopTools = registry
+                , loopReadTools = Nothing
                 , loopDispatch = Loop.defaultLoopDispatch
                 , loopMaxTurns = Loop.defaultLoopMaxTurns
                 , loopOnEvent = \case

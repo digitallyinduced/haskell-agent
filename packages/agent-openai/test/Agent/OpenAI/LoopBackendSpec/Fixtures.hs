@@ -76,6 +76,7 @@ loopConfig backend = do
                 pure snapshot
             }
         , loopTools = emptyRegistry
+        , loopReadTools = Nothing
         , loopDispatch = defaultLoopDispatch
         , loopMaxTurns = defaultLoopMaxTurns
         , loopOnEvent = const (pure ())

@@ -109,12 +109,19 @@ spec = do
             formatMcpModelNotice
                 [mcpStatus "fast" McpReady 2, mcpStatus "bad" (McpFailed "boom") 0]
                 `shouldBe`
-                    "<system-reminder>MCP status changed. Ready: fast. Unavailable: bad. Use mcp_search to discover currently available MCP tools and mcp_call to invoke one by its server__tool name.</system-reminder>"
+                    "<system-reminder>MCP status changed. Ready: fast. Unavailable: bad. Use tool_search to discover currently available MCP tools. Matching tools become available for direct invocation on the next model request.</system-reminder>"
             formatMcpModelNoticeFor
                 GrokBuildDialect
                 [mcpStatus "fast" McpReady 2]
                 `shouldBe`
                     "<system-reminder>MCP status changed. Ready: fast. Use search_tool to discover currently available MCP tools and use_tool to invoke one by its server__tool name.</system-reminder>"
+
+        it "preserves generic discovery guidance for other dialects" do
+            formatMcpModelNoticeFor
+                GenericResponsesDialect
+                [mcpStatus "fast" McpReady 2]
+                `shouldBe`
+                    "<system-reminder>MCP status changed. Ready: fast. Use mcp_search to discover currently available MCP tools and mcp_call to invoke one by its server__tool name.</system-reminder>"
 
     describe "accountSwitchTarget" do
         it "uses the destination provider default when changing provider" do
