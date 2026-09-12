@@ -63,7 +63,7 @@ import Agent.CLI.Models
       ModelTarget(ModelTarget, targetWireModelId, targetConnectionId, targetProvider,
                   targetModelId, targetDialect) )
 import Agent.CLI.Options
-    ( CliOptions(optModel, optProvider, optSkills, optYolo) )
+    ( CliOptions(optModel, optProvider, optSkills, optYolo), Override(..) )
 import Agent.CLI.Project
     ( inheritProjectLastModel,
       loadProjectSettings,
@@ -638,7 +638,7 @@ loadInitializedAuth request targets =
         (Nothing, Nothing) -> do
             (startupAuth, accountUsage) <- loadPreparedOrStartupAuth
                 request.initializedPreparedAuth
-                (options.optYolo
+                (options.optYolo == Explicit True
                     && targets.initializedCheckStartupUsageInBackground)
                 startup
                 request.initializedTransition
