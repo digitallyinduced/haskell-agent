@@ -42,8 +42,8 @@ import System.Timeout (timeout)
 
 data GitCommandOutput = GitCommandOutput
     { gitCommandExitCode :: !ExitCode
-    , gitCommandStdout :: !String
-    , gitCommandStderr :: !String
+    , gitCommandStdout :: !Text
+    , gitCommandStderr :: !Text
     }
     deriving (Eq, Show)
 
@@ -113,11 +113,11 @@ executableFilterOverrides cwd = do
         , (driver <> ".required", "false")
         ]
 
-configuredFilterDrivers :: String -> [Text]
+configuredFilterDrivers :: Text -> [Text]
 configuredFilterDrivers raw =
     deduplicate . sort $
         foldMap driverForKey
-            (filter (not . Text.null) (Text.splitOn "\0" (Text.pack raw)))
+            (filter (not . Text.null) (Text.splitOn "\0" raw))
   where
     driverForKey key =
         case Text.stripSuffix ".clean" key of
@@ -131,7 +131,7 @@ configuredFilterDrivers raw =
 runUntrackedDiff
     :: OsPath
     -> [(Text, Text)]
-    -> String
+    -> FilePath
     -> ExceptT Text IO Text
 runUntrackedDiff cwd overrides path =
     runDiff cwd overrides
@@ -281,26 +281,19 @@ untrackedListArguments =
     , "-z"
     ]
 
-nulSeparatedPaths :: String -> [String]
+nulSeparatedPaths :: Text -> [FilePath]
 nulSeparatedPaths =
-    filter (not . null) . splitOnNul
-  where
-    splitOnNul [] = []
-    splitOnNul value =
-        let (path, rest) = break (== '\0') value
-        in path : case rest of
-            [] -> []
-            _ : remaining -> splitOnNul remaining
+    map Text.unpack . filter (not . Text.null) . Text.splitOn "\0"
 
 gitOutputText :: GitCommandOutput -> Text
-gitOutputText = Text.pack . (.gitCommandStdout)
+gitOutputText = (.gitCommandStdout)
 
 gitFailure :: Text -> GitCommandOutput -> Text
 gitFailure command output =
     displayTerminalText command
         <> " failed with "
         <> Text.pack (show output.gitCommandExitCode)
-        <> case Text.strip (Text.pack output.gitCommandStderr) of
+        <> case Text.strip output.gitCommandStderr of
             "" -> ""
             stderr -> ": " <> displayTerminalText stderr
 
@@ -333,9 +326,7 @@ gitCommandTimeoutMicros = 30 * 1_000_000
 processCleanupTimeoutMicros :: Int
 processCleanupTimeoutMicros = 2 * 1_000_000
 
-readHandleStrict :: Handle -> IO String
+readHandleStrict :: Handle -> IO Text
 readHandleStrict handle = do
     contents <- ByteString.hGetContents handle
-    pure
-        (Text.unpack
-            (Text.decodeUtf8With lenientDecode contents))
+    pure (Text.decodeUtf8With lenientDecode contents)
