@@ -85,7 +85,9 @@ import Agent.Tools.Scheduling
     , ToolResourceClaim(..)
     , ToolSchedulingPlan(..)
     )
-import Control.Concurrent.STM (STM, atomically, check, orElse, readTVar, registerDelay, retry)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (race_)
+import Control.Concurrent.STM (STM, atomically, retry)
 import Control.Exception.Safe (bracket_, tryAny)
 import Control.Monad (foldM)
 import Data.Aeson (Value)
@@ -332,8 +334,7 @@ setToolSteeringWait env = writeIORef env.toolSteeringWait
 waitForToolYield :: ToolEnv -> Int -> IO ()
 waitForToolYield env microseconds = do
     steering <- readIORef env.toolSteeringWait
-    elapsed <- registerDelay (max 1 microseconds)
-    atomically $ steering `orElse` (readTVar elapsed >>= check)
+    race_ (atomically steering) (threadDelay (max 1 microseconds))
 
 -- | Install the session-local callback used to request access to an
 -- additional filesystem root. The callback should perform any human-facing
