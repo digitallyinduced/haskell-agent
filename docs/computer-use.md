@@ -79,7 +79,7 @@ After binding a window, use `query` when only matching controls are needed:
 }
 ```
 
-Queries are read-only, remain inside the bound window, and do not activate it
+Queries remain inside the bound window and do not activate it
 or synthesize input. They retain the normal computer-tool approval policy.
 `role` is an exact case-sensitive Accessibility role. `text` is a literal
 case-insensitive substring of the node's title, description, identifier, or
