@@ -108,6 +108,7 @@ import Agent.Runtime.ModelConfig
     ( catalogSupportsAsyncToolCallsForTransport
     )
 import Agent.Runtime.Error
+import Agent.Runtime.Database.Store (loadDatabaseMemoryContext)
 import Agent.Runtime.Tools.Dialects
 import Agent.CLI.Dictation (dictationTargetForSession)
 import Agent.CLI.TUI.App
@@ -605,6 +606,21 @@ buildSkillContextRuntime
         loadApplicableLearnedSkillsForStore
             startup.startupDatabaseStore
             databaseScopes
+    installDatabaseMemory context = do
+        loaded <- loadDatabaseMemoryContext
+            startup.startupDatabaseStore databaseScopes
+        case loaded of
+            Left err -> do
+                reportLearnedSkillWarning
+                    ("structured memory catalog unavailable: " <> err)
+                queueDatabaseMemory context
+                    "<structured-memory>\n## Available structured memory\nThe current catalog could not be loaded. Earlier table listings may be stale; use database_schema to discover current tables before querying or creating memory.\n</structured-memory>"
+            Right catalog -> queueDatabaseMemory context catalog
+    queueDatabaseMemory context catalog =
+        atomicModifyIORef' context \current ->
+            ( Just $ maybe catalog (\existing -> existing <> "\n\n" <> catalog) current
+            , ()
+            )
     installLearnedSkills context maximum queueContext =
         loadLearnedSkills
             >>= installLearnedSkillResult context maximum queueContext
@@ -655,6 +671,7 @@ buildSkillContextRuntime
             freshAgents
             defaultLearnedSkillContextMaxChars
             True
+        installDatabaseMemory freshAgents
         fresh <- readIORef freshAgents
         writeIORef startupContext fresh
     sessionReset = do
@@ -781,6 +798,9 @@ buildSkillContextRuntime
                         queueInitialContext
                         loaded
                 else pure []
+        -- Unlike a persisted instruction snapshot, the memory catalog must
+        -- reflect tables created by other sessions before this resume.
+        installDatabaseMemory startupContext
         callbacks.runnerFinishStartup startup
         pure learnedSkills
 
