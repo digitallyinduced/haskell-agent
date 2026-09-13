@@ -2809,6 +2809,20 @@ spec = do
             summarizeComputerToolCall call `shouldBe`
                 Just "Computer: bind accessible target \"target-42\""
 
+        it "describes bounded AX queries and explicit screenshots" do
+            let call = ToolCall
+                    { callId = "call-query"
+                    , name = "computer"
+                    , arguments =
+                        "{\"operation\":\"query\",\"target_id\":null,\"actions\":null,\
+                        \\"include_screenshot\":true,\
+                        \\"query\":{\"role\":\"AXButton\",\"text\":\"Save\",\"max_results\":20}}"
+                    , argumentsEncrypted = False
+                    , callKind = ComputerFunctionCallKind
+                    }
+            summarizeComputerToolCall call `shouldBe`
+                Just "Computer: query the bound accessible window with role \"AXButton\" containing \"Save\" (up to 20 matches) and capture a screenshot"
+
         it "describes semantic AX actions without exposing entered text" do
             let call = ToolCall
                     { callId = "call-ax"

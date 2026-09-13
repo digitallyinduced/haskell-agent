@@ -13,6 +13,7 @@ module Agent.ComputerUse.Protocol
     , unverifiedComputerUseVerdict
     , SemanticComputerAction(..)
     , SemanticComputerOperation(..)
+    , SemanticComputerQuery(..)
     , SemanticComputerRequest(..)
     , SemanticComputerScalar(..)
     , decodeSemanticComputerRequest
@@ -176,8 +177,15 @@ data SemanticComputerRequest
     = ListComputerTargets
     | BindComputerTarget !Text !Bool
     | ObserveComputerTarget !Bool
+    | QueryComputerTarget !SemanticComputerQuery !Bool
     | ActOnComputerTarget !(NonEmpty SemanticComputerAction) !Bool
     deriving (Eq, Show)
+
+data SemanticComputerQuery = SemanticComputerQuery
+    { queryRole :: !(Maybe Text)
+    , queryText :: !(Maybe Text)
+    , queryMaxResults :: !Int
+    } deriving (Eq, Show)
 
 data SemanticComputerAction
     = PerformComputerAction !Text !Text
@@ -207,6 +215,7 @@ semanticComputerRequestOperation = \case
     ListComputerTargets -> ListComputerTargetsOperation
     BindComputerTarget{} -> BindComputerTargetOperation
     ObserveComputerTarget{} -> ObserveOrActOnComputerTargetOperation
+    QueryComputerTarget{} -> ObserveOrActOnComputerTargetOperation
     ActOnComputerTarget{} -> ObserveOrActOnComputerTargetOperation
 
 semanticComputerRequestWantsScreenshot :: SemanticComputerRequest -> Bool
@@ -214,6 +223,7 @@ semanticComputerRequestWantsScreenshot = \case
     ListComputerTargets -> False
     BindComputerTarget _ includeScreenshot -> includeScreenshot
     ObserveComputerTarget includeScreenshot -> includeScreenshot
+    QueryComputerTarget _ includeScreenshot -> includeScreenshot
     ActOnComputerTarget _ includeScreenshot -> includeScreenshot
 
 -- | Strict decoder for the model-facing function arguments.
@@ -244,6 +254,15 @@ encodeSemanticComputerRequest =
     LBS.toStrict . Aeson.encode . semanticComputerRequestWireValue
 
 semanticComputerRequestWireValue :: SemanticComputerRequest -> Aeson.Value
+semanticComputerRequestWireValue (QueryComputerTarget query includeScreenshot) =
+    Aeson.object
+        [ "protocol_version" Aeson..= (2 :: Int)
+        , "operation" Aeson..= ("query" :: Text)
+        , "target_id" Aeson..= Aeson.Null
+        , "actions" Aeson..= Aeson.Null
+        , "include_screenshot" Aeson..= includeScreenshot
+        , "query" Aeson..= semanticQueryValue query
+        ]
 semanticComputerRequestWireValue request =
     requestValue operation target actions includeScreenshot
   where
@@ -277,6 +296,7 @@ data RequestFields = RequestFields
     , requestTarget :: !(RequiredField (Maybe Text))
     , requestActions :: !(RequiredField (Maybe [SemanticComputerAction]))
     , requestScreenshot :: !(RequiredField Bool)
+    , requestQuery :: !(RequiredField (Maybe SemanticComputerQuery))
     }
 
 emptyRequestFields :: RequestFields
@@ -286,6 +306,7 @@ emptyRequestFields = RequestFields
     , requestTarget = MissingField
     , requestActions = MissingField
     , requestScreenshot = MissingField
+    , requestQuery = MissingField
     }
 
 requestDecoder :: Envelope -> Json.Decoder SemanticComputerRequest
@@ -319,6 +340,9 @@ decodeRequestField envelope key fields =
         "include_screenshot" ->
             decodeRequired key fields.requestScreenshot Json.bool
                 \field -> fields { requestScreenshot = field }
+        "query" ->
+            decodeRequired key fields.requestQuery (Json.nullable semanticQueryDecoder)
+                \field -> fields { requestQuery = field }
         _ -> fail ("unexpected computer argument field: " <> Text.unpack key)
 
 validateRequest
@@ -326,13 +350,21 @@ validateRequest
     -> RequestFields
     -> Json.Decoder SemanticComputerRequest
 validateRequest envelope fields = do
+    operation <- requireField "operation" fields.requestOperation
     case envelope of
         ModelArguments -> pure ()
         NativeWire -> do
             version <- requireField "protocol_version" fields.requestVersion
-            unless (version == semanticComputerProtocolVersion) $
+            unless (version == if operation == "query" then 2 else semanticComputerProtocolVersion) $
                 fail "unsupported computer protocol version"
-    operation <- requireField "operation" fields.requestOperation
+            when (version == semanticComputerProtocolVersion) $
+                case fields.requestQuery of
+                    MissingField -> pure ()
+                    PresentField _ -> fail "query is not allowed in protocol version 1"
+    when (operation /= "query") $
+        case fields.requestQuery of
+            MissingField -> pure ()
+            PresentField query -> requireNothing "query" query
     target <- requireField "target_id" fields.requestTarget
     actions <- requireField "actions" fields.requestActions
     includeScreenshot <-
@@ -353,6 +385,12 @@ validateRequest envelope fields = do
             requireNothing "target_id" target
             requireNothing "actions" actions
             pure (ObserveComputerTarget includeScreenshot)
+        "query" -> do
+            requireNothing "target_id" target
+            requireNothing "actions" actions
+            query <- requireField "query" fields.requestQuery
+                >>= requireJust "query"
+            pure (QueryComputerTarget query includeScreenshot)
         "act" -> do
             requireNothing "target_id" target
             rawActions <- requireJust "actions" actions
@@ -371,6 +409,45 @@ validateRequest envelope fields = do
             > semanticComputerRequestCapacity) $
         fail "computer request exceeds the native protocol capacity"
     pure request
+
+data QueryFields = QueryFields
+    { queryRoleField :: !(RequiredField (Maybe Text))
+    , queryTextField :: !(RequiredField (Maybe Text))
+    , queryMaxResultsField :: !(RequiredField Int)
+    }
+
+semanticQueryDecoder :: Json.Decoder SemanticComputerQuery
+semanticQueryDecoder = do
+    fields <- Json.objectFold
+        (QueryFields MissingField MissingField MissingField)
+        \key fields -> case key of
+            "role" ->
+                decodeRequired key fields.queryRoleField (Json.nullable Json.text)
+                    \field -> fields { queryRoleField = field }
+            "text" ->
+                decodeRequired key fields.queryTextField (Json.nullable Json.text)
+                    \field -> fields { queryTextField = field }
+            "max_results" ->
+                decodeRequired key fields.queryMaxResultsField Json.int
+                    \field -> fields { queryMaxResultsField = field }
+            _ -> fail ("unexpected computer query field: " <> Text.unpack key)
+    role <- requireField "role" fields.queryRoleField
+    text <- requireField "text" fields.queryTextField
+    maximumResults <- requireField "max_results" fields.queryMaxResultsField
+    when (role == Nothing && text == Nothing) $
+        fail "query requires role or text"
+    mapM_ (validateText "query.role" False 1024) role
+    mapM_ (validateText "query.text" False 1024) text
+    unless (maximumResults >= 1 && maximumResults <= 100) $
+        fail "query.max_results must be between 1 and 100"
+    pure (SemanticComputerQuery role text maximumResults)
+
+semanticQueryValue :: SemanticComputerQuery -> Aeson.Value
+semanticQueryValue query = Aeson.object
+    [ "role" Aeson..= query.queryRole
+    , "text" Aeson..= query.queryText
+    , "max_results" Aeson..= query.queryMaxResults
+    ]
 
 data ActionFields = ActionFields
     { actionType :: !(RequiredField Text)
@@ -571,11 +648,13 @@ semanticComputerRequestSchema = strictObject
     [ ("operation", Aeson.object
         [ "type" Aeson..= ("string" :: Text)
         , "enum" Aeson..=
-            (["list_targets", "bind", "observe", "act"] :: [Text])
+            (["list_targets", "bind", "observe", "query", "act"] :: [Text])
         , "description" Aeson..=
             ( "Use list_targets, bind one returned target_id, observe the "
-            <> "bound target, then act on element_id values from the fresh "
-            <> "accessibility state."
+            <> "bound target or query matching elements, then act on element_id values from the fresh "
+            <> "accessibility state. Observe and query send no input and do not activate "
+            <> "the app, but may enable app-wide Electron AXEnhancedUserInterface "
+            <> "to expose accessibility content."
             :: Text
             )
         ])
@@ -595,8 +674,32 @@ semanticComputerRequestSchema = strictObject
             )
         ])
     , ("include_screenshot", screenshotParameter)
+    , ("query", Aeson.object
+        [ "anyOf" Aeson..=
+            [ semanticQueryParameters
+            , Aeson.object ["type" Aeson..= ("null" :: Text)]
+            ]
+        , "description" Aeson..=
+            ("Required only for query; otherwise null. Searches the bound window without input or activation." :: Text)
+        ])
     ]
-    ["operation", "target_id", "actions", "include_screenshot"]
+    ["operation", "target_id", "actions", "include_screenshot", "query"]
+
+semanticQueryParameters :: Aeson.Value
+semanticQueryParameters = strictObject
+    [ ("role", describeParameter
+        "Exact case-sensitive Accessibility role, or null. Nonempty, at most 1024 UTF-8 bytes."
+        (nullableStringParameter 1024))
+    , ("text", describeParameter
+        "Literal case-insensitive substring of title, description, identifier, or string value; not a regular expression. Nonempty, at most 1024 UTF-8 bytes. At least role or text must be supplied; filters combine with AND. Secure or indeterminate nodes are excluded."
+        (nullableStringParameter 1024))
+    , ("max_results", Aeson.object
+        [ "type" Aeson..= ("integer" :: Text)
+        , "minimum" Aeson..= (1 :: Int)
+        , "maximum" Aeson..= (100 :: Int)
+        ])
+    ]
+    ["role", "text", "max_results"]
 
 semanticActionParameters :: Aeson.Value
 semanticActionParameters = strictObject

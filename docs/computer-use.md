@@ -61,6 +61,58 @@ element IDs. Screenshots are optional there. An action result still represents
 delivery rather than semantic proof: inspect its fresh AX state or requested
 screenshot before retrying.
 
+### Native compact Accessibility queries
+
+Observing or querying sends no input and does not activate the app, but may
+enable app-wide Electron `AXEnhancedUserInterface` to expose accessibility
+content.
+
+After binding a window, use `query` when only matching controls are needed:
+
+```json
+{
+  "operation": "query",
+  "target_id": null,
+  "actions": null,
+  "include_screenshot": false,
+  "query": {"role": "AXButton", "text": "Save", "max_results": 20}
+}
+```
+
+Queries are read-only, remain inside the bound window, and do not activate it
+or synthesize input. They retain the normal computer-tool approval policy.
+`role` is an exact case-sensitive Accessibility role. `text` is a literal
+case-insensitive substring of the node's title, description, identifier, or
+string value, not a regular expression or a search of serialized descendants.
+When both filters are present they combine with AND. At least one must be
+non-null; each non-null filter must be nonempty and at most 1024 UTF-8 bytes.
+All three query properties are required and `max_results` must be an integer
+from 1 through 100. Secure nodes and nodes whose security classification
+cannot be established are excluded.
+
+The host returns a revisioned Accessibility snapshot with `schema_version: 2`,
+the bound-window `scope`, and `contents` containing only `matches` (flat node
+objects) and `truncated` (boolean), not the whole tree. A true truncation flag
+means the bounded traversal or output cannot establish a complete result.
+Zero matches do not prove that no control exists outside the inspected bounds.
+Use returned element IDs only with the current bound target and inspect fresh
+state before acting or retrying. A screenshot is returned only when explicitly
+requested.
+
+The public runtime encodes query requests in a canonical version-2 native
+envelope with all six fields: `protocol_version`, `operation`, `target_id`,
+`actions`, `include_screenshot`, and `query`. Version 2 accepts only `query`.
+Existing list/bind/observe/act wire requests retain their unchanged version-1
+five-field envelope; version 1 rejects the `query` field even when null.
+The strict model-facing schema includes nullable `query` for every operation:
+use null outside query. The model decoder also accepts legacy non-query
+arguments that omit it, and the runtime strips it from canonical version-1
+wire requests. Unknown or duplicate fields are rejected.
+Shared canonical fixtures are in
+`packages/agent-core/data/computer-use/protocol-v1.json` and `protocol-v2.json`.
+The existing native callback ABI and bound-session OBSERVE_OR_ACT operation
+code are unchanged.
+
 Both paths tell the model to treat screen and accessibility text as untrusted
 data rather than instructions. They must not enter secrets or approve
 authentication, permission, payment, or destructive interfaces without an
