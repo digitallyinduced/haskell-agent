@@ -54,6 +54,7 @@ import Agent.Tools.IO
 import Agent.Tools.Types
     ( BackgroundTaskNotice(..)
     , ToolEnv(..)
+    , waitForToolYield
     )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (mapConcurrently_, race, withAsync)
@@ -269,7 +270,7 @@ waitForInitialYield session commandId task yieldMs onSnapshot =
         stopped <- race
             (waitCancel session.sessionEnv.toolCancel)
             (race
-                (threadDelay (max 1 yieldMs * 1000))
+                (waitForToolYield session.sessionEnv (max 1 yieldMs * 1000))
                 (readMVar task.managedRunning.runningResult))
         case stopped of
             Left () -> do
@@ -304,7 +305,7 @@ waitForContinuation session commandId task yieldMs = do
     stopped <- race
         (waitCancel session.sessionEnv.toolCancel)
         (race
-            (threadDelay (max 1 yieldMs * 1000))
+            (waitForToolYield session.sessionEnv (max 1 yieldMs * 1000))
             (readMVar task.managedRunning.runningResult))
     case stopped of
         Left () ->
