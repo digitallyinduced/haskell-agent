@@ -12,6 +12,7 @@ copyright:          (c) 2026 digitally induced GmbH
 category:           System
 build-type:         Simple
 extra-source-files: include/HaskellAgentBridge.h
+                    include/HaskellAgentBridge.exports
 
 common common-options
     build-depends:    http-client, http-client-tls, http-types, websockets, wuss
@@ -129,7 +130,12 @@ foreign-library haskell-agent-bridge
     include-dirs:     include
     includes:         HaskellAgentBridge.h
     install-includes: HaskellAgentBridge.h
+    -- Keep the public C ABI, not the statically linked Haskell/RTS symbols.
+    -- Suppress local linker symbols without stripping the native-shared file.
     ghc-options:      -threaded
+                      -optl-Wl,-dead_strip
+                      -optl-Wl,-exported_symbols_list,include/HaskellAgentBridge.exports
+                      -optl-Wl,-x
     build-depends:    agent-native-bridge
                     , agent-computer-use >= 0.1 && < 0.2
                     , agent-accounts >= 0.1 && < 0.2
