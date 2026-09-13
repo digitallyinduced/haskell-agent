@@ -1596,6 +1596,12 @@
                         haskellPackages.agent-external-session;
                     agent-repository = haskellPackages.agent-repository;
                     agent-native-bridge = agentNativeBridgeCheckPackage;
+                    ${if pkgs.stdenv.hostPlatform.isDarwin
+                    then "agent-native-cli-entrypoint" else null} =
+                        import ./nix/tests/native-cli.nix {
+                            inherit pkgs;
+                            bridge = agentNativeBridgePackage;
+                        };
                     agent-integration-api = haskellPackages.agent-integration-api;
                     agent-cli = haskellPackages.agent-cli;
                     package-boundaries = pkgs.runCommand

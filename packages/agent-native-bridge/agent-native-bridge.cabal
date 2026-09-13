@@ -69,6 +69,7 @@ foreign-library haskell-agent-bridge
     options:          standalone
     hs-source-dirs:   ffi
     other-modules:    Agent.CLI.MacOS.Bridge
+                   , Agent.CLI.MacOS.CliEntrypoint
                    , Agent.CLI.MacOS.BundledIntegrations
                    , Agent.CLI.MacOS.AgentSnapshot
                    , Agent.CLI.MacOS.EngineCallbacks
@@ -217,6 +218,7 @@ test-suite agent-native-bridge-test
         frameworks:   Security, CoreFoundation
         include-dirs: include
         other-modules: Agent.CLI.MacOS.Bridge
+                     , Agent.CLI.MacOS.CliEntrypoint
                      , Agent.CLI.MacOS.InstalledSkillsSpec
                      , Agent.CLI.MacOS.InstalledSkills
                      , Agent.CLI.MacOS.BundledIntegrations
