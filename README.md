@@ -76,6 +76,12 @@ have to be.
   scoped learned guidance, resume or search past work, compact long histories,
   and switch supported providers without losing the pending turn or durable
   session state.
+- **Discoverable structured memory:** sessions receive a catalog of existing
+  user, repository, and checkout tables with their PostgreSQL comments, without
+  loading records. The catalog is limited to 8,000 characters across all scopes,
+  prioritizes names over descriptions, and reports omitted tables with guidance
+  to inspect the complete catalog. It refreshes on resume, after compaction, and after
+  table-name or description changes; schema and records remain available on demand.
 - **Efficient long-running agents:** page persisted history on demand and
   virtualize TUI scrolling to bound memory and rendering work as conversations
   grow.
