@@ -1718,7 +1718,30 @@ typedef void (*ha_interaction_callback)(
     const ha_interaction_option *options, size_t option_count
 );
 
-/* Runtime calls are process-global and reference counted. */
+/*
+ * Run the CLI in a dedicated process, normally directly from C main.
+ * Call once, on the initial process thread, before any runtime or engine call.
+ * This is not an embedded command API: it owns runtime initialization, signal
+ * handlers, standard streams, and process termination. It must not be called
+ * from Swift/AppKit or a process that has initialized another Haskell runtime.
+ *
+ * argc includes argv[0] and must be positive. argv points to argc non-null,
+ * NUL-terminated UTF-8 strings followed by a null pointer; its storage remains
+ * caller-owned and must be writable and valid throughout this call. RTS
+ * argument processing may modify the pointer array. argv[0] is retained as the
+ * CLI program identity; pass the actual executable name, not the GUI name.
+ * Configure relocated resources and external-tool environment before calling.
+ *
+ * Uses the standalone CLI's default RTS options (-N4 -M8G), with GHCRTS and
+ * +RTS command-line overrides enabled. Successful initialization does not
+ * return: the process exits with the CLI's ordinary status, including argument
+ * errors and Haskell exceptions. Returns 64 for malformed arguments or 70 if
+ * this bridge's runtime was already initialized; neither starts CLI execution.
+ */
+int32_t ha_cli_main(int argc, char **argv);
+
+/* Runtime calls are process-global and reference counted. Initialization
+ * returns -1 if the process-owning CLI entrypoint has claimed the runtime. */
 int32_t ha_runtime_init(void);
 void ha_runtime_exit(void);
 
