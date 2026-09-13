@@ -1011,6 +1011,15 @@
                 prepareAgentCli = package:
                     package.overrideAttrs
                         (old: {
+                            # The standalone executable has no exported-symbol
+                            # ABI. Hide its exports so Darwin can discard unused
+                            # statically linked Haskell code. Keep this out of
+                            # the shared package set and native bridge.
+                            configureFlags = (old.configureFlags or [ ])
+                                ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+                                    "--ghc-option=-optl-Wl,-dead_strip"
+                                    "--ghc-option=-optl-Wl,-no_exported_symbols"
+                                ];
                             nativeBuildInputs =
                                 (old.nativeBuildInputs or [ ])
                                 ++ pkgs.lib.optionals
@@ -1587,6 +1596,12 @@
                         haskellPackages.agent-external-session;
                     agent-repository = haskellPackages.agent-repository;
                     agent-native-bridge = agentNativeBridgeCheckPackage;
+                    ${if pkgs.stdenv.hostPlatform.isDarwin
+                    then "agent-native-cli-entrypoint" else null} =
+                        import ./nix/tests/native-cli.nix {
+                            inherit pkgs;
+                            bridge = agentNativeBridgePackage;
+                        };
                     agent-integration-api = haskellPackages.agent-integration-api;
                     agent-cli = haskellPackages.agent-cli;
                     package-boundaries = pkgs.runCommand

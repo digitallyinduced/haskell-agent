@@ -35,6 +35,7 @@ module Agent.CLI.MacOS.Bridge
 
 import Agent.CLI.MacOS.AccountBridge ()
 import Agent.CLI.MacOS.BrowserBridge
+import Agent.CLI.MacOS.CliEntrypoint ()
 import Agent.CLI.MacOS.DatabaseBrowseBridge ()
 import Agent.CLI.MacOS.EngineHandle ()
 import Agent.CLI.MacOS.EngineHostRegistration ()
