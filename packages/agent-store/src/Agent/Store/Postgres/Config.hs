@@ -70,7 +70,7 @@ defaultManagedPostgresConfig stateDirectory binDirectory =
         , postgresPort = 55432
         , postgresDatabase = "haskell_agent"
         , postgresOwnerRole = "ha_owner"
-        , postgresMaxConnections = 32
+        , postgresMaxConnections = 1024
         }
   where
     root = stateDirectory </> "postgres"

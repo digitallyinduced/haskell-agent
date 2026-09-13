@@ -810,6 +810,176 @@ refreshServerTools fleet client expectedRevision =
 
 -- * Meta-tools
 
+-- | Discovery belongs to a conversation, not to the shared connection fleet.
+-- Retain fingerprints rather than clients so discovery does not keep obsolete
+-- transports alive and a changed schema requires another search.
+newtype McpToolDiscovery =
+    McpToolDiscovery (TVar (Map.Map Text CatalogToolFingerprint))
+
+newMcpToolDiscovery :: IO McpToolDiscovery
+newMcpToolDiscovery = McpToolDiscovery <$> newTVarIO Map.empty
+
+-- | Rebuild this list before each model request. Only tools explicitly found
+-- by this conversation's searches are exposed with their direct schemas.
+mcpFleetCodexToolsForArtifactDirectory
+    :: Maybe FilePath
+    -> McpFleet
+    -> McpToolDiscovery
+    -> IO [AppTool]
+mcpFleetCodexToolsForArtifactDirectory artifactDirectory fleet discovery@(McpToolDiscovery selected) =
+    atomically do
+        entries <- readTVar fleet.mcpFleetCatalog
+        fingerprints <- readTVar selected
+        let exposed =
+                [ (name, entry)
+                | (name, entry) <- Map.toAscList entries
+                , Map.lookup name fingerprints == Just (catalogToolFingerprint entry)
+                ]
+        pure $
+            codexMcpSearchTool fleet discovery
+                : [ deferredCatalogTool artifactDirectory fleet name entry
+                  | (name, entry) <- exposed
+                  ]
+
+codexMcpSearchTool :: McpFleet -> McpToolDiscovery -> AppTool
+codexMcpSearchTool fleet (McpToolDiscovery selected) = AppTool
+    { appToolName = "tool_search"
+    , appToolDescription =
+        "# Tool discovery\n\n\
+        \Searches over deferred MCP tool metadata with BM25 and exposes matching \
+        \tools for the next model call. Some tools have not been provided upfront; \
+        \use tool_search to find the required tools. Invoke discovered tools directly \
+        \using their newly exposed declarations, not a generic MCP dispatcher. \
+        \For MCP tool discovery, use tool_search instead of resource listing tools. \
+        \Servers may still be connecting."
+    , appToolSchema = RawJsonFunctionSchema $ object
+        [ "type" .= ("object" :: Text)
+        , "properties" .= object
+            [ "query" .= object
+                [ "type" .= ("string" :: Text)
+                , "description" .= ("Search query for deferred tools." :: Text)
+                ]
+            , "limit" .= object
+                [ "type" .= ("number" :: Text)
+                , "description" .=
+                    ("Maximum number of tools to return. Defaults to 8." :: Text)
+                ]
+            ]
+        , "required" .= (["query"] :: [Text])
+        , "additionalProperties" .= False
+        ]
+    , appToolHandler = typedTool "tool_search" codexSearchArgumentsDecoder
+        \(query, limit) -> do
+            found <- atomically do
+                entries <- readTVar fleet.mcpFleetCatalog
+                let documents =
+                        [ (name, name <> " " <>
+                            describeToolFor entry.catalogClient.clientConfig entry.catalogTool)
+                        | (name, entry) <- Map.toAscList entries
+                        ]
+                    matches =
+                        [ (name, entry)
+                        | name <- take limit (rankMcpSearchDocuments query documents)
+                        , Just entry <- [Map.lookup name entries]
+                        ]
+                modifyTVar' selected $
+                    Map.union (Map.fromList
+                        [ (name, catalogToolFingerprint entry)
+                        | (name, entry) <- matches
+                        ])
+                pure matches
+            statuses <- mcpFleetStatuses fleet
+            pure . Right $
+                renderMcpServerStatuses statuses
+                    <> "\n\n"
+                    <> if null found
+                        then "No matching tools found."
+                        else "Exposed for the next model call:\n"
+                            <> Text.intercalate "\n" (map fst found)
+    , appToolApproval = AlwaysReadOnly
+    , appToolExecution = ParallelSafe
+    , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
+    }
+
+-- | A direct call retains the same approval-time catalog binding and safe
+-- reconnect checks as the generic dispatcher. Also reject a stale declaration:
+-- an approval must not authorize a schema the model has never discovered.
+deferredCatalogTool
+    :: Maybe FilePath -> McpFleet -> Text -> McpCatalogEntry -> AppTool
+deferredCatalogTool artifactDirectory fleet name advertised = AppTool
+    { appToolName = name
+    , appToolDescription =
+        describeToolFor advertised.catalogClient.clientConfig advertised.catalogTool
+    , appToolSchema = RawJsonFunctionSchema
+        (Aeson.toJSON advertised.catalogTool.discoveredInputSchema)
+    , appToolHandler = typedToolWithCall name rawObjectDecoder \call arguments -> do
+        current <- Map.lookup name <$> readTVarIO fleet.mcpFleetCatalog
+        case current of
+            Just entry | sameCatalogTool advertised entry ->
+                callApprovedCatalogTool artifactDirectory fleet call name arguments
+            _ -> pure (Left "MCP tool changed since discovery; run tool_search again")
+    , appToolApproval = ClassifyApproval
+        (catalogCallApproval fleet ((\arguments -> (name, arguments)) <$> rawObjectDecoder))
+    , appToolExecution = TurnSequential
+    , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
+    }
+
+codexSearchArgumentsDecoder :: Json.Decoder (Text, Int)
+codexSearchArgumentsDecoder = Json.object do
+    query <- Text.strip <$> Json.atKey "query" Json.text
+    when (Text.null query) $ fail "query must not be empty"
+    rawLimit <- Json.optionalKey "limit" rawJsonDecoder
+    limit <- case rawLimit of
+        Nothing -> pure 8
+        Just value ->
+            -- The upstream schema says number. Accept whole-number floating
+            -- representations too, rather than using Hermes' integer decoder.
+            case Aeson.eitherDecodeStrict' (rawJsonBytes value) of
+                Right parsed -> pure parsed
+                Left _ -> fail "limit must be a positive integer"
+    when (limit <= 0) $ fail "limit must be greater than zero"
+    pure (query, limit)
+
+-- | BM25 over normalized metadata tokens, with deterministic name ordering
+-- for equal scores. Schemas deliberately do not participate in discovery.
+-- Tokenization is local; it does not reproduce the upstream English stemmer.
+rankMcpSearchDocuments :: Text -> [(Text, Text)] -> [Text]
+rankMcpSearchDocuments query documents =
+    [ name
+    | (name, score) <- sortOn (\(name, score) -> (Down score, name)) scores
+    , score > 0
+    ]
+  where
+    frequencies :: [(Text, Map.Map Text Double)]
+    frequencies =
+        [ (name, Map.fromListWith (+) [(token, 1) | token <- searchTokens content])
+        | (name, content) <- documents
+        ]
+    documentCount = fromIntegral (length frequencies)
+    averageLength =
+        max 1 (sum [sum counts | (_, counts) <- frequencies] / max 1 documentCount)
+    documentFrequencies =
+        Map.fromListWith (+)
+            [ (token, 1 :: Double)
+            | (_, counts) <- frequencies
+            , token <- Map.keys counts
+            ]
+    queryTerms = Map.keys (Map.fromList [(token, ()) | token <- searchTokens query])
+    scores =
+        [ (name, sum
+            [ let frequency = Map.findWithDefault 0 token counts
+                  containing = Map.findWithDefault 0 token documentFrequencies
+                  inverseFrequency =
+                      log (1 + (documentCount - containing + 0.5) / (containing + 0.5))
+              in inverseFrequency * frequency * 2.2
+                    / (frequency + 1.2 * (0.25 + 0.75 * sum counts / averageLength))
+            | token <- queryTerms
+            ])
+        | (name, counts) <- frequencies
+        ]
+
 -- | Stable concise MCP tools backed by the fleet's background-populated
 -- catalog. These schemas do not change as servers become ready.
 mcpFleetMetaTools :: McpFleet -> [AppTool]

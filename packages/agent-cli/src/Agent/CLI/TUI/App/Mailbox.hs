@@ -10,6 +10,7 @@ import Agent.CLI.Dictation ( DictationControl(..)
     )
 import Agent.CLI.Secret (sanitizeSecretPromptText)
 import Agent.CLI.Artifact (fencedCodeBlock)
+import Agent.TUI.Markdown.Stream (markdownStreamRetainedBytes)
 import Agent.CLI.Input ( ReplLine(..)
     , readReplHistory
     , terminalTextWidth
@@ -868,6 +869,9 @@ uiStateLogicalBytes ui =
             0
             ui.uiBlocks
         , logicalTextBytes ui.uiDraft
+        , maybe 0
+            (fromInteger . min (toInteger (maxBound :: Int)) . markdownStreamRetainedBytes . snd)
+            ui.uiStreamingMarkdown
         , logicalTextsBytes ui.uiQueuedInputs
         , logicalTextBytes ui.uiActivity
         , promptStateLogicalBytes ui.uiPrompt

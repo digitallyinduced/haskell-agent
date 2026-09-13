@@ -11,6 +11,12 @@ import Agent.Store.Postgres.Config
 spec :: Spec
 spec = do
     describe "defaultManagedPostgresConfig" do
+        it "allows 1024 connections in the generated server configuration" do
+            let config = defaultManagedPostgresConfig "/agent-state" ""
+            config.postgresMaxConnections `shouldBe` 1024
+            Text.lines (postgresqlConf config)
+                `shouldContain` ["max_connections = 1024"]
+
         it "keeps all cluster state below the agent state directory" do
             let config = defaultManagedPostgresConfig "/tmp/agent" "/pg/bin"
             config.postgresPaths.postgresDataDirectory

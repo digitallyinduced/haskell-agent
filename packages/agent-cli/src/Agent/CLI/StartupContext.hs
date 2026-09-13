@@ -8,8 +8,9 @@ module Agent.CLI.StartupContext
 
 import Agent.Runtime.Tools.Dialects
     ( formatAgentsMdForDialect
-    , globalAgentsHomeDir
     )
+import Agent.Runtime.Startup.Context (agentsDiscoverOptions)
+import qualified Agent.Runtime.Startup.Context as Context
 import Agent.CLI.Options (CliOptions(..))
 import Agent.CLI.Render (putTextLn)
 import Agent.CLI.Style
@@ -26,10 +27,8 @@ import Agent.CLI.TUI.App
 import Agent.Dialect (Dialect)
 import Agent.OsPath (toText)
 import Agent.ProjectInstructions
-    ( DiscoverOptions(..)
-    , InstructionWarning(..)
+    ( InstructionWarning(..)
     , LoadedAgentsMd
-    , defaultDiscoverOptions
     , discoverProjectInstructions
     , loadedInstructionFiles
     , loadedInstructionWarnings
@@ -96,12 +95,7 @@ preloadAgentsContext
     -> OsPath
     -> OsPath
     -> IO (Maybe LoadedAgentsMd)
-preloadAgentsContext options dialect home cwd
-    | not options.optAgentsMd = pure Nothing
-    | otherwise =
-        Just <$> discoverProjectInstructions
-            (agentsDiscoverOptions dialect home)
-            cwd
+preloadAgentsContext options = Context.preloadAgentsContext options.optAgentsMd
 
 -- | Finalize generated context from an optional startup preload. A preload
 -- that becomes unnecessary because persisted history is reusable is discarded
@@ -153,14 +147,6 @@ loadAgentsContextWithPreload
                                 emitUiEvent runtime (UiSystemMessage message)
                 newIORef
                     (Just (text <> maybe "" ("\n\n" <>) extraContext))
-
-agentsDiscoverOptions :: Dialect -> OsPath -> DiscoverOptions
-agentsDiscoverOptions dialect home =
-    DiscoverOptions
-        { discoverMaxBytes = defaultDiscoverOptions.discoverMaxBytes
-        , discoverGlobalDir = Just (globalAgentsHomeDir dialect home)
-        , discoverRootMarkers = defaultDiscoverOptions.discoverRootMarkers
-        }
 
 reportInstructionWarning
     :: Handle

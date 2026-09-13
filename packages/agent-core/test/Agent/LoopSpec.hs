@@ -89,6 +89,95 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "runLoop" do
+    describe "request tool discovery" do
+        it "exposes discovered handlers only on the following request" do
+            discovered <- newIORef False
+            invocations <- newIORef (0 :: Int)
+            refreshes <- newIORef (0 :: Int)
+            submissions <- newIORef []
+            let search = noArgsAppTool "tool_search" do
+                    writeIORef discovered True
+                    pure (Right "discovered")
+                target = noArgsAppTool "deferred" do
+                    modifyIORef' invocations (+ 1)
+                    pure (Right "called")
+                refresh = do
+                    modifyIORef' refreshes (+ 1)
+                    visible <- readIORef discovered
+                    pure (registryFromTools (search : [target | visible]))
+            backend <- scriptedBackend submissions
+                [ Right (emptyTurnOutput "first"
+                    [ functionToolCall "search" "tool_search" "{}"
+                    , functionToolCall "too-early" "deferred" "{}"
+                    ] Nothing)
+                , Right (emptyTurnOutput "second"
+                    [functionToolCall "available" "deferred" "{}"] Nothing)
+                , Right (emptyTurnOutput "done" [] (Just "done"))
+                ]
+            config <- testConfig backend
+            result <- runLoop config { loopReadTools = Just refresh } Nothing "go"
+            fmap (.finalText) result `shouldBe` Right (Just "done")
+            readIORef invocations `shouldReturn` 1
+            readIORef refreshes `shouldReturn` 3
+            history <- readIORef submissions
+            let outputs = [(r.callId, r.output) | (_, inputs) <- history, CompletedTool r <- inputs]
+            lookup "too-early" outputs `shouldSatisfy`
+                maybe False (Text.isInfixOf "Unknown tool")
+            lookup "available" outputs `shouldBe` Just "called"
+
+        it "uses the refreshed registry for streamed async admission and deduplication" do
+            invocations <- newIORef (0 :: Int)
+            handlerStarted <- newEmptyMVar
+            step <- newIORef (0 :: Int)
+            let call = asyncFunctionToolCall "refreshed" "deferred" "{}"
+                tool = asyncNoArgsTool "deferred" do
+                    modifyIORef' invocations (+ 1)
+                    putMVar handlerStarted ()
+                    pure (Right "called")
+                backend = backendWithCallbacks \state _ inputs callbacks -> do
+                    current <- atomicModifyIORef' step \value ->
+                        (value + 1, value + 1)
+                    if current == 1
+                        then do
+                            callbacks.onAsyncToolCall call
+                            started <- timeout concurrencyProbeMicros (readMVar handlerStarted)
+                            case started of
+                                Nothing -> Exception.throwIO $
+                                    userError "refreshed async handler did not start"
+                                Just () -> pure ()
+                            pure $ Right BackendResult
+                                { backendOutput = emptyTurnOutput "first" [call] Nothing
+                                , backendState = appendStateMarker state
+                                }
+                        else do
+                            [result.output | CompletedTool result <- inputs]
+                                `shouldBe` ["called"]
+                            pure $ Right BackendResult
+                                { backendOutput = emptyTurnOutput "done" [] (Just "done")
+                                , backendState = appendStateMarker state
+                                }
+            config <- testConfig backend
+            result <- runLoop config
+                { loopTools = registryFromTools []
+                , loopReadTools = Just (pure (registryFromTools [tool]))
+                }
+                Nothing "go"
+            fmap (.finalText) result `shouldBe` Right (Just "done")
+            readIORef invocations `shouldReturn` 1
+
+        it "fails closed when refreshing request exposure fails" do
+            submissions <- newIORef []
+            backend <- scriptedBackend submissions
+                [Right (emptyTurnOutput "unexpected" [] (Just "done"))]
+            config <- testConfig backend
+            result <- runLoop config
+                { loopReadTools = Just (Exception.throwIO (userError "invalid catalog")) }
+                Nothing "go"
+            result `shouldSatisfy` \case
+                Left (LoopUnexpected message) -> "invalid catalog" `Text.isInfixOf` message
+                _ -> False
+            readIORef submissions `shouldReturn` []
+
     describe "completed output recovery" do
         it "retains completed items on an exception and ignores late callbacks" do
             escaped <- newEmptyMVar
@@ -879,14 +968,14 @@ spec = describe "runLoop" do
             , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
             ]
         config0 <- testConfig backend
-        let approve :: ToolCall -> IO (Either Text Bool)
+        let approve :: ToolCall -> IO ToolApproval
             approve call
                 | call.name == "a" = do
                     putMVar firstApprovalStarted ()
                     takeMVar releaseFirstApproval
-                    pure (Right True)
+                    pure ToolApprovalGranted
                 | otherwise =
-                    putMVar secondApprovalStarted () >> pure (Right True)
+                    putMVar secondApprovalStarted () >> pure ToolApprovalGranted
             handlers =
                 [ noArgsTool "a" (pure (Right "a"))
                 , noArgsTool "b" (pure (Right "b"))
@@ -1169,7 +1258,7 @@ spec = describe "runLoop" do
                     modifyIORef' approvalOrder (<> [call.name])
                     when (call.name == "independent") $
                         putMVar approvalsFinished ()
-                    pure (Right True)
+                    pure ToolApprovalGranted
                 }
         withAsync (runLoop config Nothing "go") \running -> do
             timeout concurrencyProbeMicros (takeMVar firstStarted)
@@ -1206,7 +1295,7 @@ spec = describe "runLoop" do
                         (noArgsTool "guarded" (pure (Right "unexpected"))))
             config = config0
                 { loopTools = registryFromTools [tool]
-                , loopApprove = \_ -> pure (Right False)
+                , loopApprove = \_ -> pure ToolApprovalRejected
                 }
         result <- runLoop config Nothing "go"
         result `shouldSatisfy` either (const False) (const True)
@@ -1331,6 +1420,59 @@ spec = describe "runLoop" do
                 , tokenUsage = emptyTokenUsage
                 })
         readIORef invocations `shouldReturn` ["first", "second", "third"]
+
+    it "deduplicates a blocking call replayed by a later response" do
+        invocations <- newIORef (0 :: Int)
+        approvals <- newIORef (0 :: Int)
+        submissions <- newIORef []
+        let call = functionToolCall "replayed" "once" "{}"
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1" [call] Nothing
+            , Right $ emptyTurnOutput "resp-2" [call] Nothing
+            , Right $ emptyTurnOutput "resp-3" [] (Just "done")
+            ]
+        config <- testConfig backend
+        result <- runLoop config
+            { loopTools = registryFromHandlers
+                [noArgsTool "once" do
+                    modifyIORef' invocations (+ 1)
+                    pure (Right "ran once")]
+            , loopApprove = \_ -> do
+                modifyIORef' approvals (+ 1)
+                pure ToolApprovalGranted
+            } Nothing "go"
+        result `shouldSatisfy` \case
+            Right output -> output.finalText == Just "done"
+            _ -> False
+        readIORef invocations `shouldReturn` 1
+        readIORef approvals `shouldReturn` 1
+        seen <- readIORef submissions
+        case seen of
+            [_, (_, [CompletedTool first]), (_, [CompletedTool replayed])] ->
+                replayed `shouldBe` first
+            other -> expectationFailure ("unexpected submissions: " <> show other)
+
+    it "rejects a conflicting blocking call without approving it" do
+        approvals <- newIORef ([] :: [Text])
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "duplicate" "first" "{}"
+                , functionToolCall "duplicate" "second" "{}"
+                ] Nothing
+            ]
+        config <- testConfig backend
+        result <- runLoop config
+            { loopApprove = \call -> do
+                modifyIORef' approvals (call.name :)
+                pure ToolApprovalGranted
+            } Nothing "go"
+        result `shouldSatisfy` \case
+            Left (LoopUnexpected message) ->
+                "Conflicting tool calls reused call_id duplicate"
+                    `Text.isInfixOf` message
+            _ -> False
+        readIORef approvals >>= (`shouldSatisfy` all (/= "second"))
 
     it "fails closed when an async call_id is reused for a different call" do
         firstInvocations <- newIORef (0 :: Int)
@@ -1536,7 +1678,7 @@ spec = describe "runLoop" do
                 , loopApprove = \_ -> do
                     putMVar approvalStarted ()
                     takeMVar releaseApproval
-                    pure (Right True)
+                    pure ToolApprovalGranted
                 , loopCancel = cancelFlag
                 }
         withAsync (runLoop config Nothing "go") \running -> do
@@ -1580,7 +1722,7 @@ spec = describe "runLoop" do
             , Right $ emptyTurnOutput "resp-2" [] (Just "understood")
             ]
         config0 <- testConfig backend
-        let config = config0 { loopApprove = \_ -> pure (Right False) }
+        let config = config0 { loopApprove = \_ -> pure ToolApprovalRejected }
         result <- runLoop config Nothing "please"
         result `shouldBe` Right LoopResult
             { finalResponseId = "resp-2"
@@ -1592,6 +1734,32 @@ spec = describe "runLoop" do
         case seen of
             [_, (Just "resp-1", [CompletedTool denied])] -> do
                 denied.output `shouldBe` "Tool call rejected by user."
+                toolCallResultOutcome denied `shouldBe` Just ToolDenied
+            other -> expectationFailure ("unexpected submissions: " <> show other)
+
+    it "preserves an explicit approval denial without invoking the tool" do
+        submissions <- newIORef []
+        invocations <- newIORef (0 :: Int)
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "blocked" "{}"] Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "understood")
+            ]
+        config0 <- testConfig backend
+        let tool = noArgsTool "blocked" do
+                modifyIORef' invocations (+ 1)
+                pure (Right "should not run")
+            config = config0
+                { loopTools = registryFromHandlers [tool]
+                , loopApprove = \_ -> pure (ToolApprovalDenied "Blocked by policy.")
+                }
+        result <- runLoop config Nothing "please"
+        fmap (.finalText) result `shouldBe` Right (Just "understood")
+        readIORef invocations `shouldReturn` 0
+        seen <- readIORef submissions
+        case seen of
+            [_, (Just "resp-1", [CompletedTool denied])] -> do
+                denied.output `shouldBe` "Blocked by policy."
                 toolCallResultOutcome denied `shouldBe` Just ToolDenied
             other -> expectationFailure ("unexpected submissions: " <> show other)
 
@@ -2196,7 +2364,7 @@ spec = describe "runLoop" do
             config = config0
                 { loopApprove = \_ -> do
                     requestCancel cancel
-                    pure (Right False)
+                    pure ToolApprovalRejected
                 , loopOnEvent = \event -> modifyIORef' events (event :)
                 }
         result <- runLoop config Nothing "go"
@@ -2226,7 +2394,7 @@ spec = describe "runLoop" do
                 { loopApprove = \call -> do
                     modifyIORef' approvals (<> [call.callId])
                     requestCancel cancel
-                    pure (Right False)
+                    pure ToolApprovalRejected
                 }
         result <- runLoop config Nothing "go"
         result `shouldBe` Left (LoopCancelled [])

@@ -147,7 +147,7 @@ import Agent.CLI.Session.Runtime.Types
                      gatewayModelsRef, modelInfo,
                      connectionId, gatewayIdentity,
                      options, provider, dialect, commitAttributionModel,
-                     commitAttributionEffort, policyRef, allTools, refreshTools,
+                     commitAttributionEffort, policyRef, allTools, refreshTools, deferredTools,
                      claudeRuntimeSlot, claudeBridgeTools,
                      recordImageGenerationInputs, clearImageGenerationHistory,
                      suspendGhci, resetToolSessionTemp, grokRuntime,
@@ -209,7 +209,7 @@ import Agent.Claude
 import Agent.Claude.Control
     ( ClaudeCodeHostHandlers(..), ClaudeCodeMcpRequest(..), defaultClaudeCodeHostHandlers )
 import Agent.CLI.ClaudeGatewayProxy (withClaudeGatewayProxy)
-import Agent.Dialect (Dialect, dialectId, dialectForId)
+import Agent.Dialect (Dialect, DialectId (CodexDialect), dialectId, dialectForId)
 import Agent.Error (ApiError)
 import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.Loop
@@ -270,6 +270,7 @@ import System.Environment ( getProgName )
 import System.IO (Handle, stderr)
 import System.Mem ( performMajorGC )
 import System.OsPath (OsPath)
+import Agent.OsPath (unsafeToFilePath)
 import qualified Agent.MCP as MCP
 import qualified Data.Text.IO as Text ( hPutStr )
 
@@ -281,6 +282,7 @@ data AgentSessionRequest windowTitleResult = AgentSessionRequest
     , activeAccountRef :: ActiveAccountRef
     , agentTypesRef :: GrokSubagentSpecs
     , allTools :: [AppTool]
+    , deferredTools :: Maybe (IO [AppTool])
     , recordImageGenerationInputs :: [ImageAttachment] -> IO ()
     , clearImageGenerationHistory :: IO ()
     , bashEnabledRef :: IORef Bool
@@ -727,6 +729,9 @@ buildSessionSubagentRuntime
     -> SubagentRuntime
 buildSessionSubagentRuntime AgentSessionRequest
     { options
+    , dialect
+    , mcpFleet
+    , sessionTmp
     , startup
     , ghciEnabledRef
     , bashEnabledRef
@@ -760,7 +765,14 @@ buildSessionSubagentRuntime AgentSessionRequest
         , subagentToolResourceArbiter = toolEnv.toolResourceArbiter
         , subagentRootAccessRequest = toolEnv.toolRootAccessRequest
         , subagentParams = promptRuntime.sessionParamsRef
-        , subagentMcpTools = mcpTools
+        -- Child loops retain their static tool surface. Do not share the
+        -- parent's deferred search state without a child refresh hook.
+        , subagentMcpTools =
+            if dialectId dialect == CodexDialect && not (null mcpTools)
+                then MCP.mcpFleetMetaToolsForArtifactDirectory
+                    (Just (unsafeToFilePath sessionTmp)) mcpFleet
+                    <> MCP.mcpFleetResourceTools mcpFleet
+                else mcpTools
         , subagentRegistry = registry
         , subagentSessions = subagentSessions
         , subagentStoreRoot = subagentStoreRoot
@@ -1007,6 +1019,7 @@ buildProviderSessionRequest
                 promptRuntime.sessionCodeRuntime.sessionRegistryTools
             , refreshTools =
                 promptRuntime.sessionCodeRuntime.sessionRefreshTools
+            , deferredTools = request.deferredTools
             , recordImageGenerationInputs =
                 request.recordImageGenerationInputs
             , clearImageGenerationHistory =

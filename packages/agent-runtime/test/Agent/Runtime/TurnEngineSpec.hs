@@ -163,10 +163,11 @@ safeConfig backend = do
                 pure snapshot
             }
         , loopTools = tools
+        , loopReadTools = Nothing
         , loopDispatch = defaultLoopDispatch
         , loopMaxTurns = 2
         , loopOnEvent = const (pure ())
-        , loopApprove = const (pure (Right False))
+        , loopApprove = const (pure ToolApprovalRejected)
         , loopReadSteering = pure []
         , loopCommitSteering = const (pure ())
         , loopInterrupt = pure ()

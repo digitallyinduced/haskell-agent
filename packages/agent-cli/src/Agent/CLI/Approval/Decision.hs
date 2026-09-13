@@ -23,6 +23,7 @@ import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.CLI.Style (glyphOk, glyphWarn)
 import Agent.JsonText (jsonTextFieldDefault)
 import Agent.OsPath (fromText)
+import Agent.Tools.Types (ToolApproval(..))
 import Agent.ToolDispatch
     ( ToolCall(..)
     , canonicalToolName
@@ -66,7 +67,7 @@ data ApprovalAction
 -- 6. remembered tool approval
 -- 7. session policy or user prompt
 data ApprovalPlan
-    = CompleteApproval !(Either Text Bool) ![ApprovalAction]
+    = CompleteApproval !ToolApproval ![ApprovalAction]
     | NeedReadOnlyClassification
     | NeedSessionAllowance
     | NeedPermissionPrompt
@@ -95,7 +96,7 @@ planApproval facts =
     of
         Just message ->
             CompleteApproval
-                (Left message)
+                (ToolApprovalDenied message)
                 [ReportApprovalNotice
                     (ApprovalWarning (glyphWarn <> message))]
         Nothing -> case facts.readOnly of
@@ -106,12 +107,12 @@ planApproval facts =
                         let message =
                                 planModeBlockedEditMessage facts.planPath
                         in CompleteApproval
-                            (Left message)
+                            (ToolApprovalDenied message)
                             [ReportApprovalNotice
                                 (ApprovalWarning message)]
                 | facts.requiresExplicitApproval ->
                     case facts.policy of
-                        DenyMutating -> CompleteApproval (Right False) []
+                        DenyMutating -> CompleteApproval ToolApprovalRejected []
                         PromptMutating -> NeedPermissionPrompt
                         ApproveAll -> NeedPermissionPrompt
                 | isPlanFileWrite
@@ -130,7 +131,7 @@ planApproval facts =
                     Just False -> policyPlan facts.policy readOnly
   where
     toolName = canonicalToolName facts.call.name
-    approved = CompleteApproval (Right True) []
+    approved = CompleteApproval ToolApprovalGranted []
 
 resolveApprovalPrompt :: ToolCall -> Maybe PermissionChoice -> ApprovalPlan
 resolveApprovalPrompt = resolveApprovalPromptWith False
@@ -147,12 +148,12 @@ resolveApprovalPromptWith requiresExplicitApproval call choice
     | requiresExplicitApproval =
         case choice of
             Nothing -> CompleteApproval
-                (Left "Fresh approval was not obtained: the approval prompt was unavailable or closed without a decision. The tool was not run.")
+                (ToolApprovalDenied "Fresh approval was not obtained: the approval prompt was unavailable or closed without a decision. The tool was not run.")
                 []
             Just PermissionDeny -> denied
             Just PermissionAllowOnce -> approved
             Just _ -> CompleteApproval
-                (Left "This tool requires fresh approval for this invocation; a remembered or blanket approval cannot authorize it. The tool was not run.")
+                (ToolApprovalDenied "This tool requires fresh approval for this invocation; a remembered or blanket approval cannot authorize it. The tool was not run.")
                 []
     | isComputerToolCallKind call.callKind =
         case choice of
@@ -160,7 +161,7 @@ resolveApprovalPromptWith requiresExplicitApproval call choice
             Just PermissionDeny -> denied
             Just PermissionAllowAll ->
                 CompleteApproval
-                    (Right True)
+                    ToolApprovalGranted
                     [ SetApprovalPolicy ApproveAll
                     , PersistProjectAutoApprove
                     , RememberToolForSession
@@ -173,7 +174,7 @@ resolveApprovalPromptWith requiresExplicitApproval call choice
             Just PermissionAllowOnce -> approved
             Just PermissionAllowTool ->
                 CompleteApproval
-                    (Right True)
+                    ToolApprovalGranted
                     [ RememberToolForSession
                         (canonicalToolName call.name)
                     , computerWorkflowNotice
@@ -186,7 +187,7 @@ resolveApprovalPromptWith requiresExplicitApproval call choice
         Just PermissionAllowOnce -> approved
         Just PermissionAllowAll ->
             CompleteApproval
-                (Right True)
+                ToolApprovalGranted
                 [ SetApprovalPolicy ApproveAll
                 , PersistProjectAutoApprove
                 , ReportApprovalNotice
@@ -195,7 +196,7 @@ resolveApprovalPromptWith requiresExplicitApproval call choice
                 ]
         Just PermissionAllowTool ->
             CompleteApproval
-                (Right True)
+                ToolApprovalGranted
                 [ RememberToolForSession (canonicalToolName call.name)
                 , ReportApprovalNotice
                     (ApprovalSuccess
@@ -204,8 +205,8 @@ resolveApprovalPromptWith requiresExplicitApproval call choice
                             <> call.name
                             <> " this session"))
                 ]
-    approved = CompleteApproval (Right True) []
-    denied = CompleteApproval (Right False) []
+    approved = CompleteApproval ToolApprovalGranted []
+    denied = CompleteApproval ToolApprovalRejected []
     computerWorkflowNotice =
         ReportApprovalNotice
             (ApprovalSuccess
@@ -213,10 +214,11 @@ resolveApprovalPromptWith requiresExplicitApproval call choice
 
 policyPlan :: ApprovalPolicy -> Bool -> ApprovalPlan
 policyPlan policy readOnly = case policy of
-    ApproveAll -> CompleteApproval (Right True) []
-    DenyMutating -> CompleteApproval (Right readOnly) []
+    ApproveAll -> CompleteApproval ToolApprovalGranted []
+    DenyMutating -> CompleteApproval
+        (if readOnly then ToolApprovalGranted else ToolApprovalRejected) []
     PromptMutating
-        | readOnly -> CompleteApproval (Right True) []
+        | readOnly -> CompleteApproval ToolApprovalGranted []
         | otherwise -> NeedPermissionPrompt
 
 planModeBlocksCall :: Bool -> OsPath -> Bool -> ToolCall -> Bool

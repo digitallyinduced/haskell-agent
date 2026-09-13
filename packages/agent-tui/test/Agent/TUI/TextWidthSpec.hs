@@ -1,18 +1,64 @@
+{-# LANGUAGE MagicHash #-}
 module Agent.TUI.TextWidthSpec (spec) where
 
 import Agent.TUI.TextWidth
 import qualified Data.Text as Text
+import Data.Array.Byte (ByteArray (..))
+import GHC.Exts (Int (I#), sizeofByteArray#)
+import qualified Data.Text.Internal as TextInternal
 import qualified Graphics.Vty as V
 import Test.Hspec
 import Test.QuickCheck (elements, forAll, listOf, property)
 
+sizeofByteArray :: ByteArray -> Int
+sizeofByteArray (ByteArray array) = I# (sizeofByteArray# array)
+
 spec :: Spec
 spec = describe "terminal character width" do
+    it "preserves empty text and the complete printable ASCII range" do
+        displayTerminalText "" `shouldBe` ""
+        let printableAscii = Text.pack [' ' .. '~']
+        displayTerminalText printableAscii `shouldBe` printableAscii
+
+    it "detaches printable ASCII slices from a larger source buffer" do
+        let source = Text.replicate 4096 "x" <> "visible" <> Text.replicate 4096 "y"
+            slice = Text.take 7 (Text.drop 4096 source)
+            TextInternal.Text sourceArray sourceOffset _ = slice
+            rendered@(TextInternal.Text renderedArray renderedOffset renderedLength) =
+                displayTerminalText slice
+        -- Check the fixture really is a nonzero-offset slice, then inspect
+        -- ownership directly instead of relying on nondeterministic GC timing.
+        sourceOffset `shouldSatisfy` (> 0)
+        sizeofByteArray sourceArray `shouldSatisfy` (> 7)
+        rendered `shouldBe` "visible"
+        renderedOffset `shouldBe` 0
+        renderedLength `shouldBe` 7
+        sizeofByteArray renderedArray `shouldBe` renderedLength
+
     it "preserves arbitrary printable ASCII and structural newlines" $
         property $
             forAll (listOf (elements ('\n' : [' ' .. '~']))) \characters ->
                 let text = Text.pack characters
                 in displayTerminalText text == text
+
+    it "sanitizes controls before and after printable ASCII" do
+        let printableAscii = Text.pack [' ' .. '~']
+        displayTerminalText ("\ESC\t\r\DEL" <> printableAscii)
+            `shouldBe` ("␛⇥↵␡" <> printableAscii)
+        displayTerminalText (printableAscii <> "\ESC\t\r\DEL")
+            `shouldBe` (printableAscii <> "␛⇥↵␡")
+
+    it "preserves grapheme handling between printable ASCII runs" do
+        let womanTechnologist =
+                Text.pack ['\x1f469', '\x200d', '\x1f4bb']
+        displayTerminalText "prefix e\x0301 suffix"
+            `shouldBe` "prefix e\x0301 suffix"
+        displayTerminalText "prefix 1\xfe0f\x20e3 suffix"
+            `shouldBe` "prefix １ suffix"
+        displayTerminalText ("prefix " <> womanTechnologist <> " suffix")
+            `shouldBe` ("prefix " <> womanTechnologist <> " suffix")
+        displayTerminalText "prefix \x200d suffix"
+            `shouldBe` "prefix � suffix"
 
     it "does not bypass sanitization after a long ASCII prefix" do
         let prefix = Text.replicate 1000 "source code "

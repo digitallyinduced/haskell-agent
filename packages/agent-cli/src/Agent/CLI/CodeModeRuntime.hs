@@ -69,6 +69,7 @@ import Agent.Tools.CodeMode.Host
     )
 import Agent.Tools.CodeMode.Tool
     ( CodeModeNamespace(..)
+    , CodeModeNestedInvoke
     , CodeModeNestedSpec(..)
     , CodeModeToolSet(..)
     , ToolMode(..)
@@ -96,27 +97,28 @@ import System.OsPath (OsPath)
 -- | Late-bound nested dispatcher for code-mode tool calls.
 newtype CodeModeNestedSlot =
     CodeModeNestedSlot
-        (IORef (ToolCall -> IO (Either Text ToolCallResult)))
+        (IORef CodeModeNestedInvoke)
 
 newCodeModeNestedSlot :: IO CodeModeNestedSlot
 newCodeModeNestedSlot =
     CodeModeNestedSlot
-        <$> newIORef \_call ->
+        <$> newIORef \_tool _call ->
             pure (Left "code mode is still starting; retry this call")
 
 setCodeModeNestedInvoke
     :: CodeModeNestedSlot
-    -> (ToolCall -> IO (Either Text ToolCallResult))
+    -> CodeModeNestedInvoke
     -> IO ()
 setCodeModeNestedInvoke (CodeModeNestedSlot ref) = writeIORef ref
 
 invokeThroughSlot
     :: CodeModeNestedSlot
+    -> AppTool
     -> ToolCall
     -> IO (Either Text ToolCallResult)
-invokeThroughSlot (CodeModeNestedSlot ref) call = do
+invokeThroughSlot (CodeModeNestedSlot ref) tool call = do
     invoke <- readIORef ref
-    invoke call
+    invoke tool call
 
 -- | Session-scoped catalog-instruction context: how to rebuild instructions
 -- for a changed tool surface, and the generated environment-context block
@@ -166,6 +168,9 @@ data CodeModeSessionRuntime = CodeModeSessionRuntime
       -- enabled or disabled during the session.
     , codeModeNestedSlot :: !CodeModeNestedSlot
     , codeModeNestedToolNames :: ![Text]
+    , codeModeRefreshTools :: !([AppTool] -> IO (Either Text [AppTool]))
+      -- ^ Rebuild wire declarations and immutable per-cell dispatch snapshots
+      -- without restarting the session host or invalidating running cells.
     , codeModeReadBackgroundTasks :: !(IO [BackgroundTaskStatus])
     , codeModeClose :: !(IO ())
     }
@@ -390,6 +395,10 @@ buildRuntime imageDetail mode strategy projection = do
             , codeModeProjectionStrategy = strategy
             , codeModeNestedSlot = slot
             , codeModeNestedToolNames = toolSet.codeModeNestedToolNames
+            , codeModeRefreshTools = \tools ->
+                toolSet.codeModeRefreshToolSet
+                    (map nestedSpecFor
+                        (projectCodeModeToolsFor strategy tools).nestedCodeModeTools)
             , codeModeReadBackgroundTasks = toolSet.codeModeReadBackgroundTasks
             , codeModeClose = toolSet.closeCodeModeToolSet
             }

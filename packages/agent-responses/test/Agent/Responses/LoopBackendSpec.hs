@@ -1344,12 +1344,13 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                         writeIORef state snapshot >> pure snapshot
                     }
                 , loopTools = registry
+                , loopReadTools = Nothing
                 , loopDispatch = Loop.defaultLoopDispatch
                 , loopMaxTurns = Loop.defaultLoopMaxTurns
                 , loopOnEvent = \case
                     ToolFinished _ -> putMVar finished ()
                     _ -> pure ()
-                , loopApprove = const (pure (Right True))
+                , loopApprove = const (pure Loop.ToolApprovalGranted)
                 , loopReadSteering = pure []
                 , loopCommitSteering = const (pure ())
                 , loopInterrupt = pure ()

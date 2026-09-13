@@ -133,6 +133,7 @@ data SessionRequest = SessionRequest
       -- | Full toggleable tool surface, minus tools unavailable at startup.
       -- Unlike allTools, this list governs provider availability and refreshes.
     , refreshTools :: ![AppTool]
+    , deferredTools :: !(Maybe (IO [AppTool]))
     , recordImageGenerationInputs :: !([ImageAttachment] -> IO ())
     , clearImageGenerationHistory :: !(IO ())
     , suspendGhci :: !(IO ())

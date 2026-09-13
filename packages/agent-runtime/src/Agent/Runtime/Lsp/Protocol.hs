@@ -1,4 +1,4 @@
-module Agent.CLI.Lsp.Protocol
+module Agent.Runtime.Lsp.Protocol
     ( IncomingMessage(..)
     , encodeLspFrame
     , readMessage

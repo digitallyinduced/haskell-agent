@@ -416,7 +416,8 @@ hasDisplayAssistant =
 completeProjectedStreams :: UiState -> UiState
 completeProjectedStreams state =
     state
-        { uiBlocks =
+        { uiStreamingMarkdown = Nothing
+        , uiBlocks =
             fmap
                 (\block ->
                     if block.blockState == BlockStreaming

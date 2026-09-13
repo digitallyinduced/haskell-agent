@@ -1,4 +1,4 @@
-module Agent.CLI.Lsp.Path
+module Agent.Runtime.Lsp.Path
     ( exceptionText
     , pathWithin
     , quote

@@ -78,10 +78,6 @@ library
                     , Agent.CLI.Login.Internal.Manager
                     , Agent.CLI.Login.Internal.ProviderConnection
                     , Agent.CLI.Login.Types
-                    , Agent.CLI.Lsp.Capabilities
-                    , Agent.CLI.Lsp.Formatting
-                    , Agent.CLI.Lsp.Path
-                    , Agent.CLI.Lsp.Protocol
                     , Agent.CLI.PromptHooks
                     , Agent.CLI.Provider.Switch
                     , Agent.CLI.Runtime
@@ -354,7 +350,6 @@ library
                     , resourcet
                     , scientific
                     , stm
-                    , tagsoup
                     , text >= 2.0 && < 2.2
                     , time
                     , tls
@@ -657,7 +652,6 @@ test-suite agent-cli-test
                     , Agent.CLI.TUITranscriptSpec
                     , Agent.CLI.TUIMeasuredViewportSpec
                     , Agent.CLI.UsageSpec
-                    , Agent.CLI.WebLspSpec
                     , Agent.CLI.WorktreeSpec
                     , Agent.CLI.WorktreeCleanSpec
                     , Agent.CLI.WorktreeIgnoredSpec

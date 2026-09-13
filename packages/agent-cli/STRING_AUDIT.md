@@ -19,6 +19,15 @@ whitespace, and the existing closing-backtick run rule are unchanged. See
 `../agent-tui/benchmark/MarkdownTable.md` for measurements and validation.
 This targets temporary parsing allocation, not retained conversation size.
 
+Partial JSON string previews now scan strict Text for quotes and backslash
+parity rather than constructing character lists. JSON decoding and incomplete
+escape handling are unchanged. At 1,024 decoded characters, complete streaming
+preview benchmarks allocate 57–64% less and take 24–43% less elapsed time across
+ASCII, Unicode and escape-heavy inputs. Tiny-input timing is inconclusive, with
+no consistent regression in repeated runs. See
+`../agent-responses/benchmark/JsonPreview.md`. These are temporary allocation
+savings, not measurements of idle or retained conversation memory.
+
 ## Prioritized follow-up
 
 | Priority | Module | Finding and acceptance criteria |

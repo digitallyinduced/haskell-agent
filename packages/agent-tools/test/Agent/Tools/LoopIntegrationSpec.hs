@@ -74,10 +74,11 @@ spec = describe "loop concrete command integration" do
                         pure snapshot
                     }
                 , loopTools = either (error . Text.unpack) id (mkToolRegistry [tool])
+                , loopReadTools = Nothing
                 , loopDispatch = defaultLoopDispatch
                 , loopMaxTurns = defaultLoopMaxTurns
                 , loopOnEvent = \_ -> pure ()
-                , loopApprove = \_ -> pure (Right True)
+                , loopApprove = \_ -> pure ToolApprovalGranted
                 , loopReadSteering = pure []
                 , loopCommitSteering = \_ -> pure ()
                 , loopInterrupt = pure ()

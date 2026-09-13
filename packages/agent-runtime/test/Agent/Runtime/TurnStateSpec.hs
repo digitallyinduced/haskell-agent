@@ -256,10 +256,11 @@ recoveryConfig backend tools items = do
             , commitBackendState = \snapshot -> writeIORef state snapshot >> pure snapshot
             }
         , loopTools = registry
+        , loopReadTools = Nothing
         , loopDispatch = defaultLoopDispatch
         , loopMaxTurns = defaultLoopMaxTurns
         , loopOnEvent = const (pure ())
-        , loopApprove = const (pure (Right True))
+        , loopApprove = const (pure ToolApprovalGranted)
         , loopReadSteering = pure []
         , loopCommitSteering = const (pure ())
         , loopInterrupt = pure ()

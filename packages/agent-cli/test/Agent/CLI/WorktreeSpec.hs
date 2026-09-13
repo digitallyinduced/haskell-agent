@@ -1148,9 +1148,7 @@ withTempGitRepo :: (OsPath -> IO a) -> IO a
 withTempGitRepo action =
     withTempDir "agent-git-" \dir -> do
         _ <- git dir ["init"]
-        _ <- git dir ["config", "user.email", "test@example.com"]
-        _ <- git dir ["config", "user.name", "Test"]
-        _ <- git dir ["config", "commit.gpgsign", "false"]
+        configureGit dir
         writeFile (toFilePath (dir </> fromFilePath "README")) "hello\n"
         _ <- git dir ["add", "README"]
         _ <- git dir ["commit", "-m", "init"]
@@ -1188,6 +1186,11 @@ withTempRemoteRepo action =
 
 configureGit :: OsPath -> IO ()
 configureGit repo = do
+    -- Background maintenance can remove lock files while the fixture's
+    -- recursive cleanup is traversing them. These short-lived repositories
+    -- do not need automatic maintenance or garbage collection.
+    _ <- git repo ["config", "maintenance.auto", "false"]
+    _ <- git repo ["config", "gc.auto", "0"]
     _ <- git repo ["config", "user.email", "test@example.com"]
     _ <- git repo ["config", "user.name", "Test"]
     _ <- git repo ["config", "commit.gpgsign", "false"]

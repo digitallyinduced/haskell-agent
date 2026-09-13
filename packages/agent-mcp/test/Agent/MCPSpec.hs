@@ -4,6 +4,8 @@ import Agent.Loop (defaultLoopDispatch)
 import Agent.MCP
 import Agent.MCP.Fleet
     ( mcpFleetWaitForSkillRegistrations
+    , codexSearchArgumentsDecoder
+    , rankMcpSearchDocuments
     , renderMcpSearch
     , renderMcpResourceServer
     , renderGrokSearch
@@ -92,6 +94,7 @@ import Agent.ToolDispatch
     )
 import Agent.Tools.Types
     ( AppTool(..)
+    , ToolSchema(..)
     , ApprovalRequirement(..)
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
@@ -109,7 +112,7 @@ import Control.Concurrent
     , tryPutMVar
     )
 import Control.Concurrent.Async (async, cancel, poll, wait, waitCatch, withAsync)
-import Control.Monad (forM, void)
+import Control.Monad (forM, forM_, void)
 import Data.Maybe (isNothing)
 import Data.Aeson (object, (.=))
 import qualified Data.Aeson
@@ -987,6 +990,149 @@ spec = describe "Agent.MCP" do
                 called.output `shouldBe` "delayed response"
                 updates <- readIORef progress
                 updates `shouldSatisfy` (not . null)
+
+    describe "Codex deferred MCP discovery" do
+        it "decodes the upstream query and limit shape, including whole-number floats" do
+            Json.decodeEither codexSearchArgumentsDecoder "{\"query\":\"  read  \"}"
+                `shouldBe` Right ("read", 8)
+            Json.decodeEither codexSearchArgumentsDecoder "{\"query\":\"read\",\"limit\":2.0}"
+                `shouldBe` Right ("read", 2)
+            Json.decodeEither codexSearchArgumentsDecoder "{\"query\":\"read\",\"limit\":null}"
+                `shouldBe` Right ("read", 8)
+            forM_ ["0", "-1", "1.5", "\"2\""] \limit ->
+                Json.decodeEither codexSearchArgumentsDecoder
+                    ("{\"query\":\"read\",\"limit\":" <> limit <> "}")
+                    `shouldSatisfy` isLeft
+            Json.decodeEither codexSearchArgumentsDecoder "{\"query\":\"  \"}"
+                `shouldSatisfy` isLeft
+
+        it "ranks metadata with BM25 and resolves ties deterministically" do
+            rankMcpSearchDocuments "CREATE_ISSUE"
+                [ ("unrelated", "list calendar appointments")
+                , ("partial", "create calendar appointments")
+                , ("exact", "create issue")
+                ]
+                `shouldBe` ["exact", "partial"]
+            rankMcpSearchDocuments "read"
+                [("second", "read"), ("first", "read")]
+                `shouldBe` ["first", "second"]
+            rankMcpSearchDocuments "missing" [("read", "read")]
+                `shouldBe` []
+            rankMcpSearchDocuments "read" [] `shouldBe` []
+
+        it "exposes only discovered direct schemas and isolates conversations" $
+            withDelayedFakeServer \script ->
+                bracket
+                    (startMcpFleetProgressive (const (pure ()))
+                        [progressiveConfig script "0.02" "codex"])
+                    closeMcpFleet \fleet -> do
+                        discovery <- newMcpToolDiscovery
+                        otherDiscovery <- newMcpToolDiscovery
+                        let snapshot = mcpFleetCodexToolsForArtifactDirectory Nothing fleet
+                        initial <- snapshot discovery
+                        map (.appToolName) initial `shouldBe` ["tool_search"]
+                        waitForServerReady fleet "codex"
+                        result <- dispatchApprovedTool initial
+                            (functionToolCall "discover" "tool_search"
+                                "{\"query\":\"delayed\",\"limit\":1}")
+                        result.output `shouldSatisfy`
+                            Text.isInfixOf "codex__delayed_read"
+                        result.output `shouldSatisfy`
+                            (not . Text.isInfixOf "Input schema")
+                        exposed <- snapshot discovery
+                        map (.appToolName) exposed
+                            `shouldBe` ["tool_search", "codex__delayed_read"]
+                        map (.appToolName) <$> snapshot otherDiscovery
+                            `shouldReturn` ["tool_search"]
+                        Just direct <- pure $
+                            find ((== "codex__delayed_read") . (.appToolName)) exposed
+                        direct.appToolSchema `shouldBe`
+                            RawJsonFunctionSchema (object ["type" .= ("object" :: Text.Text)])
+                        called <- dispatchApprovedTool exposed
+                            (functionToolCall "direct" "codex__delayed_read" "{}")
+                        called.output `shouldBe` "delayed response"
+
+        it "preserves mutation and fresh approval requirements" $
+            withFakeServer \script ->
+                bracket (startMcpFleet [baseConfig "fake" script])
+                    closeMcpFleet \fleet -> do
+                        discovery <- newMcpToolDiscovery
+                        initial <- mcpFleetCodexToolsForArtifactDirectory Nothing fleet discovery
+                        _ <- dispatchApprovedTool initial
+                            (functionToolCall "discover-all" "tool_search"
+                                "{\"query\":\"fake\",\"limit\":50}")
+                        exposed <- mcpFleetCodexToolsForArtifactDirectory Nothing fleet discovery
+                        forM_
+                            [ ("fake__echo_read", ApprovalNotRequired)
+                            , ("fake__mutate", ApprovalPromptRequired)
+                            , ("fake__draft", FreshApprovalRequired)
+                            ] \(name, expected) -> do
+                                Just direct <- pure $
+                                    find ((== name) . (.appToolName)) exposed
+                                toolApprovalRequirement direct
+                                    (functionToolCall name name "{}")
+                                    `shouldReturn` expected
+
+        it "limits default discovery to eight tools without exposing other schemas" $
+            withFakeServer \script ->
+                bracket (startMcpFleet [baseConfig "fake" script])
+                    closeMcpFleet \fleet -> do
+                        Just entry <-
+                            Map.lookup "fake__echo_read" <$> readTVarIO fleet.mcpFleetCatalog
+                        atomically $
+                            writeTVar fleet.mcpFleetCatalog $ Map.fromList
+                                [ ("catalog__read_" <> Text.pack (show index), entry)
+                                | index <- [1 .. 20 :: Int]
+                                ]
+                        discovery <- newMcpToolDiscovery
+                        initial <- mcpFleetCodexToolsForArtifactDirectory Nothing fleet discovery
+                        _ <- dispatchApprovedTool initial
+                            (functionToolCall "bounded-discovery" "tool_search"
+                                "{\"query\":\"read\"}")
+                        exposed <- mcpFleetCodexToolsForArtifactDirectory Nothing fleet discovery
+                        length exposed `shouldBe` 9
+                        _ <- dispatchApprovedTool initial
+                            (functionToolCall "no-match-discovery" "tool_search"
+                                "{\"query\":\"unrelated\"}")
+                        length <$> mcpFleetCodexToolsForArtifactDirectory Nothing fleet discovery
+                            `shouldReturn` 9
+
+        it "withdraws changed declarations and rejects previously exposed handlers" $
+            withCountingServer policyCallServer \script callLog ->
+                bracket
+                    (startMcpFleetProgressive (const (pure ()))
+                        [(baseConfig "policy" script) { mcpServerArgs = [callLog] }])
+                    closeMcpFleet \fleet -> do
+                        waitForServerReady fleet "policy"
+                        discovery <- newMcpToolDiscovery
+                        let snapshot = mcpFleetCodexToolsForArtifactDirectory Nothing fleet discovery
+                        initial <- snapshot
+                        _ <- dispatchApprovedTool initial
+                            (functionToolCall "discover-policy" "tool_search"
+                                "{\"query\":\"read\"}")
+                        exposed <- snapshot
+                        Just direct <- pure $
+                            find ((== "policy__read") . (.appToolName)) exposed
+                        let call = functionToolCall "stale-direct" "policy__read" "{}"
+                        toolApprovalRequirement direct call `shouldReturn` ApprovalNotRequired
+                        atomically $ modifyTVar' fleet.mcpFleetCatalog $
+                            Map.adjust
+                                (\entry -> entry
+                                    { catalogTool = entry.catalogTool
+                                        { discoveredReadOnly = False }
+                                    })
+                                "policy__read"
+                        map (.appToolName) <$> snapshot `shouldReturn` ["tool_search"]
+                        result <- dispatchToolCall defaultLoopDispatch
+                            (appToolHandlers [direct]) call
+                        result.output `shouldSatisfy`
+                            Text.isInfixOf "changed since discovery"
+                        countLogEntries callLog "call" `shouldReturn` 0
+                        _ <- dispatchApprovedTool initial
+                            (functionToolCall "rediscover-policy" "tool_search"
+                                "{\"query\":\"read\"}")
+                        map (.appToolName) <$> snapshot
+                            `shouldReturn` ["tool_search", "policy__read"]
 
     it "classifies progressive MCP calls using the selected tool annotation" $
         withFakeServer \script -> do

@@ -53,10 +53,11 @@ import Agent.Runtime.Session
     , loadSessionMeta
     , loadSessionResumeStats
     )
-import Agent.Runtime.Session.History (foldSessionItems)
+import Agent.Runtime.Startup.Context
+    ( SessionInitialContext(..), resolveSessionInitialContext
+    , resumeNeedsGeneratedContext )
 import Agent.Runtime.Session.Types (TranscriptEffect(..))
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
-import Agent.OpenAI.Compaction (hasReloadedGeneratedContextItems)
 import Agent.CLI.TextLayout
     ( SplitPaneFrame(..)
     , clampSelectionIndex
@@ -72,7 +73,7 @@ import Control.Monad.Trans.Except (ExceptT(..), runExceptT)
 import Data.Char (isAlphaNum)
 import Data.Containers.ListUtils (nubOrd)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -87,46 +88,6 @@ data ResumeSourceFilter
     = ResumeAll
     | ResumeProvider !Text
     deriving (Eq, Show)
-
--- | Transcript-derived context requirements that can be resolved before
--- provider prompt construction. Keeping this decision pure allows startup
--- context reads to overlap independent tool acquisition without changing
--- resume semantics.
-data SessionInitialContext = SessionInitialContext
-    { initialContextItems :: [ResponseItem]
-    , initialContextResumeNeedsFresh :: Bool
-    , initialContextPrevious :: Maybe Text
-    , initialContextNeeded :: Bool
-    , initialContextMayRestoreSnapshot :: Bool
-    }
-    deriving (Eq, Show)
-
-resolveSessionInitialContext
-    :: Bool
-    -> Bool
-    -> Maybe (SessionMeta, [SessionTurn])
-    -> SessionInitialContext
-resolveSessionInitialContext hasTransition resumeTargetChanged resumed =
-    SessionInitialContext{..}
-  where
-    initialTurns = maybe [] snd resumed
-    initialContextItems = maybe [] (foldSessionItems . snd) resumed
-    initialContextResumeNeedsFresh =
-        resumeNeedsGeneratedContext initialTurns
-    initialContextPrevious
-        | hasTransition || resumeTargetChanged = Nothing
-        | otherwise =
-            resumed >>= \(meta, _) -> meta.metaLastResponseId
-    initialContextNeeded =
-        initialContextResumeNeedsFresh
-            || (null initialTurns && initialContextPrevious == Nothing)
-    initialContextMayRestoreSnapshot =
-        case resumed of
-            Just (meta, turns) ->
-                null turns
-                    && initialContextPrevious == Nothing
-                    && isJust meta.metaPromptSnapshot
-            Nothing -> False
 
 data ResumeEntry = ResumeEntry
     { resumeId :: !Text
@@ -170,24 +131,6 @@ data ResumeState = ResumeState
     , resumeIndex :: !Int
     }
     deriving (Eq, Show)
-
--- | Reinstall generated project and skill context after the newest durable
--- transcript-replacement boundary until a later persisted turn proves that
--- the regenerated context was consumed. This also repairs sessions compacted
--- by older clients that did not reload generated context.
-resumeNeedsGeneratedContext :: [SessionTurn] -> Bool
-resumeNeedsGeneratedContext turns =
-    case break isContextBoundary (reverse turns) of
-        (_, []) -> False
-        (newerTurns, _boundary : _) ->
-            null newerTurns
-                || not
-                    (any
-                        (hasReloadedGeneratedContextItems . (.turnItems))
-                        newerTurns)
-  where
-    isContextBoundary turn =
-        turn.turnEffect /= TranscriptAppend
 
 -- | Build picker entries from already loaded sessions.
 resumeEntriesFrom :: [(SessionMeta, [SessionTurn])] -> [ResumeEntry]
