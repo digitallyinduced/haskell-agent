@@ -153,17 +153,23 @@ runNativeTurn
             , nativeStartupPolicy = hostNativeStartupPolicy
             }
         args = nativeTurnArguments start
+            { turnStartComputerUse = start.turnStartComputerUse
+                || turnOptions.nativeTurnPromptContext.attachedWindowToken /= 0
+            }
+        contextDescription = promptContextDescription turnOptions.nativeTurnPromptContext
+        submittedPrompt = start.turnStartPrompt
+            <> (if Text.null contextDescription then "" else "\n\n" <> contextDescription)
     result <- tryAny $ flip finally
         (modifyMVar_ interactions.interactionModeSetters $
             pure . Map.delete control.turnControlId) $
-        withTurnImages start.turnStartPrompt images \managedFile ->
+        withTurnImages submittedPrompt images \managedFile ->
             withFile "/dev/null" WriteMode \output ->
                 runNativeAgent
                     processRuntime
                     output
                     (unsafeEncodeUtf start.turnStartCwd)
                     hooks
-                    (args <> maybe ["--prompt", Text.unpack start.turnStartPrompt]
+                    (args <> maybe ["--prompt", Text.unpack submittedPrompt]
                         (\path -> ["--managed-turn-file", path])
                         managedFile)
     completed <- readIORef completedRef

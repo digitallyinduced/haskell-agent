@@ -139,6 +139,7 @@ foreign-library haskell-agent-bridge
                     , agent-json >= 0.1 && < 0.2
                     , agent-runtime-daemon >= 0.1 && < 0.2
                     , agent-core >= 0.1 && < 0.2
+                    , agent-tools >= 0.1 && < 0.2
                     , agent-responses-types >= 0.1 && < 0.2
                     , agent-store >= 0.1 && < 0.2
                     , agent-openai >= 0.1 && < 0.2

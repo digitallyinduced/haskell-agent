@@ -1,8 +1,8 @@
 { mkDerivation, aeson, agent-core, agent-json, agent-process
 , agent-responses-types, async, base, base64-bytestring, bytestring
-, containers, directory, extra, filepath, hspec, JuicyPixels, lib, process
-, QuickCheck, safe-exceptions, scientific, stm, template-haskell
-, text, time, transformers, unix, vector
+, containers, directory, extra, filepath, hspec, JuicyPixels, lib
+, process, QuickCheck, safe-exceptions, scientific, stm
+, template-haskell, text, time, transformers, unix, vector
 }:
 mkDerivation {
   pname = "agent-tools";

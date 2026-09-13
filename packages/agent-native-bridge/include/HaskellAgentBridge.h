@@ -41,6 +41,44 @@ typedef void (*ha_event_callback)(
     size_t length
 );
 
+typedef struct ha_integration_attachment {
+    const uint8_t *connection_id;
+    size_t connection_id_length;
+    const uint8_t *server_name;
+    size_t server_name_length;
+    const uint8_t *display_name;
+    size_t display_name_length;
+} ha_integration_attachment;
+
+/* Stage explicit context after stage_turn_options and before turn.start.
+ * The turn ID is the same 1..1024-byte UTF-8 identifier used for other staging.
+ * Atomically replaces context for that staged turn only. Context is consumed
+ * together with options at turn admission, and discarded by discard_turn_staging.
+ * No callback is made. May run on any host thread; callers must serialize staging
+ * with turn.start for the same ID. All buffers are copied before return.
+ * Each text field is valid UTF-8, contains no NUL, and is at most 4096 bytes.
+ * At most 32 integrations, with all three fields nonempty. Null pointers are
+ * accepted only with zero lengths/counts. Do not supply credentials.
+ * window_host_token=0 means no window; both window text fields must be empty.
+ * A nonzero token requires a nonempty application name, is scoped to this turn,
+ * and must remain resolvable by the computer host until the turn terminates.
+ * It is never persisted or disclosed to the model. The token is passed through
+ * HA_COMPUTER_OPEN_ATTACHED; failure never falls back to an unrestricted host.
+ * Window context enables computer use for this turn only, without changing
+ * engine registration or approval policy. Missing host support fails the turn.
+ * Return: 0 success, 1 null engine, 2 invalid ID length/pointer, 3 exception,
+ * 4 invalid context/UTF-8, 5 turn has no staged options (already admitted or
+ * discarded). Existing staged context is unchanged on failure.
+ */
+int32_t ha_engine_stage_turn_context(
+    void *engine,
+    const uint8_t *turn_id, size_t turn_id_length,
+    uint64_t window_host_token,
+    const uint8_t *application_name, size_t application_name_length,
+    const uint8_t *window_title, size_t window_title_length,
+    const ha_integration_attachment *integrations, size_t integration_count
+);
+
 /*
  * Account status: 0 = profile, 1 = disconnected/unsupported, -1 = error.
  * Icon is PNG bytes, or length 0 if absent. All buffers are callback-scoped;
@@ -452,7 +490,15 @@ enum {
     HA_COMPUTER_LIST = 2,
     HA_COMPUTER_BIND = 3,
     HA_COMPUTER_OBSERVE_OR_ACT = 4,
-    HA_COMPUTER_CLOSE = 5
+    HA_COMPUTER_CLOSE = 5,
+    /* Optional v3 operation. session_token is the nonzero host-owned attachment
+     * token staged for this turn, not an existing computer-session token.
+     * All request buffers are empty, as for OPEN. Resolve and validate the
+     * selected window and return a new session token scoped to that window.
+     * Unsupported or expired tokens must fail; never fall back to OPEN.
+     * LIST/BIND/OBSERVE_OR_ACT on the resulting session must remain restricted
+     * to the attached window. Usual callback threading/ownership rules apply. */
+    HA_COMPUTER_OPEN_ATTACHED = 6
 };
 
 enum {
