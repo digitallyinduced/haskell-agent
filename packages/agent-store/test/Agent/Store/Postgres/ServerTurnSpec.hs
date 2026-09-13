@@ -573,7 +573,14 @@ exerciseTurnStoreWithOwners pool ownerOne ownerTwo = do
     withServerTurnOwnerActionFence pool instanceOne \_ -> do
         reserveServerSessionMutation pool protectedMutation
             `shouldReturn` Right ServerSessionMutationReserved
+        timeout 100000 (waitForServerTurnOwnerDisconnect pool instanceOne)
+            `shouldReturn` Nothing
         abandonServerTurnOwnerLease ownerOne
+        -- Closing the client socket does not acknowledge PostgreSQL backend
+        -- teardown. Wait for its liveness lock to disappear before asserting
+        -- admission rejection; the separate action fence remains held.
+        timeout 5000000 (waitForServerTurnOwnerDisconnect pool instanceOne)
+            `shouldReturn` Just (Right ())
         reserveServerTurn pool interruptedRequest
             `shouldReturn` Right ServerTurnOwnerUnavailable
         reserveServerSessionMutation pool mutation
@@ -720,6 +727,25 @@ exerciseTurnStoreWithOwners pool ownerOne ownerTwo = do
     listed `shouldSatisfy` \case
         Right turns -> length turns == 3
         Left _ -> False
+
+waitForServerTurnOwnerDisconnect :: StorePool -> Text -> IO (Either StoreError ())
+waitForServerTurnOwnerDisconnect pool instanceId =
+    withSession pool (Session.statement instanceId ownerDisconnectedStatement)
+        >>= \case
+            Left err -> pure (Left err)
+            Right True -> pure (Right ())
+            Right False -> do
+                threadDelay 10000
+                waitForServerTurnOwnerDisconnect pool instanceId
+  where
+    -- This standalone statement releases the probe lock at transaction end.
+    ownerDisconnectedStatement :: Statement Text Bool
+    ownerDisconnectedStatement =
+        Statement.preparable
+            "SELECT pg_try_advisory_xact_lock(hashtextextended(\
+            \ 'haskell-agent:server-turn-owner:' || $1::text, 0))"
+            (Encoders.param (Encoders.nonNullable Encoders.text))
+            (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.bool)))
 
 waitForInterruptedTurn ::
     StorePool ->

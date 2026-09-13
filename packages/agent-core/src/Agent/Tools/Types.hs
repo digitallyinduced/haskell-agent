@@ -7,9 +7,11 @@ module Agent.Tools.Types
     , hostToolsFromGroups
     , BackgroundTaskHooks(..)
     , BackgroundTaskNotice(..)
+    , BackgroundTaskStatus(..)
     , ToolSchema(..)
     , ApprovalRule(..)
     , ApprovalRequirement(..)
+    , ToolApproval(..)
     , ToolExecutionPolicy(..)
     , ToolRegistry
     , ToolEnv(..)
@@ -21,6 +23,8 @@ module Agent.Tools.Types
     , addToolAllowedRoot
     , defaultToolEnv
     , setToolHumanInputWaitHooks
+    , setToolSteeringWait
+    , waitForToolYield
     , setToolRootAccessRequest
     , setToolSkillRoots
     , setToolSessionTmp
@@ -81,6 +85,9 @@ import Agent.Tools.Scheduling
     , ToolResourceClaim(..)
     , ToolSchedulingPlan(..)
     )
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (race_)
+import Control.Concurrent.STM (STM, atomically, retry)
 import Control.Exception.Safe (bracket_, tryAny)
 import Control.Monad (foldM)
 import Data.Aeson (Value)
@@ -93,6 +100,7 @@ import Data.IORef
     )
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
+import Data.Time.Clock (UTCTime)
 import qualified Data.Text as Text
 import System.OsPath
     ( OsPath
@@ -124,6 +132,14 @@ data ToolSchema
 data ToolAsyncCapability
     = BlockingOnly
     | AsyncCapable
+    deriving (Eq, Show)
+
+-- | The outcome of checking or requesting permission for one tool call.
+-- Rejection uses the standard user-rejection message; denial supplies its own.
+data ToolApproval
+    = ToolApprovalGranted
+    | ToolApprovalRejected
+    | ToolApprovalDenied !Text
     deriving (Eq, Show)
 
 -- | Approval needed for one concrete tool invocation.
@@ -214,6 +230,17 @@ data BackgroundTaskNotice = BackgroundTaskNotice
     , noticeBody :: !Text
     } deriving (Eq, Show)
 
+-- | Live managed work, independent of retained output and completion notices.
+-- Auto-resume denotes a worker with a completion delivery callback; the UI
+-- must also account for whether the session has installed delivery hooks and
+-- can accept an automatic turn.
+data BackgroundTaskStatus = BackgroundTaskStatus
+    { taskKey :: !Text
+    , taskLabel :: !Text
+    , taskStartedAt :: !UTCTime
+    , taskAutoResume :: !Bool
+    } deriving (Eq, Show)
+
 data BackgroundTaskHooks = BackgroundTaskHooks
     { backgroundTaskCompleted :: !(BackgroundTaskNotice -> IO Bool)
     , backgroundTaskDismissed :: !(Text -> IO ())
@@ -255,6 +282,10 @@ data ToolEnv = ToolEnv
       -- Stored behind an IORef because the CLI runner is installed after the
       -- provider-native tool runtimes are constructed.
     , toolBackgroundTaskHooks :: !(IORef BackgroundTaskHooks)
+    , toolBackgroundTasks :: !(IORef (Map.Map Text BackgroundTaskStatus))
+      -- | Non-consuming notification of pending guidance. Managed background
+      -- waits may yield early, but must not cancel the underlying work.
+    , toolSteeringWait :: !(IORef (STM ()))
       -- | Soft-cancel latch for the active turn. Shell tools race against it.
     , toolCancel :: !CancelFlag
     }
@@ -270,6 +301,8 @@ defaultToolEnv cwd = do
     sessionTmp <- newIORef Nothing
     outputMemory <- newOutputArtifactMemoryStore
     backgroundTaskHooks <- newIORef noBackgroundTaskHooks
+    backgroundTasks <- newIORef Map.empty
+    steeringWait <- newIORef retry
     pure ToolEnv
         { toolCwd = dropTrailingPathSeparator cwd
         , toolResourceArbiter = arbiter
@@ -285,8 +318,23 @@ defaultToolEnv cwd = do
         , toolOutputMemoryCap = 16 * 1024 * 1024
         , toolStdoutCap = 16 * 1024
         , toolBackgroundTaskHooks = backgroundTaskHooks
+        , toolBackgroundTasks = backgroundTasks
+        , toolSteeringWait = steeringWait
         , toolCancel = cancel
         }
+
+-- | Install the session's non-consuming guidance notification. The default
+-- blocks indefinitely so hosts without steering retain ordinary yield timing.
+setToolSteeringWait :: ToolEnv -> STM () -> IO ()
+setToolSteeringWait env = writeIORef env.toolSteeringWait
+
+-- | Wait up to the supplied number of microseconds, returning early when
+-- guidance is pending. This is only for yielding managed background work:
+-- it does not cancel a command or acknowledge any queued input.
+waitForToolYield :: ToolEnv -> Int -> IO ()
+waitForToolYield env microseconds = do
+    steering <- readIORef env.toolSteeringWait
+    race_ (atomically steering) (threadDelay (max 1 microseconds))
 
 -- | Install the session-local callback used to request access to an
 -- additional filesystem root. The callback should perform any human-facing

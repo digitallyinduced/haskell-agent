@@ -21,6 +21,7 @@ module Agent.CLI.TUI.Composer
     , draftCursorLocation
     , draftWindowStart
     , drawComposer
+    , drawBackgroundTaskStatus
     , drawQueuedInputs
     , drawSlashMenu
     , fullscreenInputByteLimit
@@ -79,6 +80,7 @@ import Agent.CLI.TUI.Composer.Buffer
 import Agent.CLI.TUI.Composer.Edit
 import Agent.CLI.TUI.Composer.Logic
 import Agent.CLI.TUI.Composer.Render
+import Agent.CLI.TUI.Composer.Undo (popUndoSnapshot, pushUndoSnapshot)
 import Agent.CLI.TUI.ImagePreview
     ( prepareNativeTuiImagePreview
     , prepareTuiImagePreview
@@ -421,6 +423,9 @@ steeringPrompt ui pasted text
         case parseReplLine text of
             ReplPrompt prompt -> Just (pasted, prompt)
             ReplExpandedPrompt _ prompt -> Just (pasted, prompt)
+            -- Keep explicit queued prompts on the normal input channel;
+            -- it is consumed only after the active turn returns.
+            ReplQueuedPrompt _ -> Nothing
             _ -> Nothing
 
 -- | Handle one composer key. The host supplies Ctrl-C policy and conversation
@@ -1047,9 +1052,9 @@ killLineStart applyUiEvent = do
 undoEdit :: ApplyLocalUiEvent -> EventM Name AppState ()
 undoEdit applyUiEvent = do
     state <- get
-    case state.appUndo of
-        [] -> pure ()
-        (text, cursor) : rest ->
+    case popUndoSnapshot state.appUndo of
+        Nothing -> pure ()
+        Just ((text, cursor), rest) ->
             applyUiEvent (UiSetDraft text cursor) \current ->
                 current
                     { appUndo = rest
@@ -1138,9 +1143,8 @@ pushUndo old uiEvent state =
             | text /= old.appUi.uiDraft ->
                 state
                     { appUndo =
-                        take undoLimit
-                            ((old.appUi.uiDraft, old.appUi.uiCursor)
-                                : state.appUndo)
+                        pushUndoSnapshot undoLimit
+                            old.appUi.uiDraft old.appUi.uiCursor state.appUndo
                     }
         _ -> state
 

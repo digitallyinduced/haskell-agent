@@ -31,6 +31,10 @@ spec = do
             decodePickerKey "\ESC[1;1:3A" `shouldBe` Nothing
             decodePickerKey "\ESC[106;1:3u" `shouldBe` Nothing
 
+        it "ignores empty and truncated CSI sequences" do
+            map decodePickerKey ["", "\ESC[", "\ESC[1;", "\ESC[97;"]
+                `shouldBe` replicate 4 Nothing
+
     describe "decodeMouseEvent" do
         it "decodes SGR clicks, releases, and wheel events" do
             decodeMouseEvent "\ESC[<0;12;7M"
@@ -45,6 +49,18 @@ spec = do
         it "ignores unsupported buttons and malformed reports" do
             decodeMouseEvent "\ESC[<2;12;7M" `shouldBe` Nothing
             decodeMouseEvent "\ESC[<0;x;7M" `shouldBe` Nothing
+
+        it "requires the exact SGR prefix and a complete row and terminator" do
+            map decodeMouseEvent
+                [ ""
+                , "[<0;12;7M"
+                , " \ESC[<0;12;7M"
+                , "\ESC[<0;12;"
+                , "\ESC[<0;12;M"
+                , "\ESC[<0;12;7"
+                , "\ESC[<0;12;7Mx"
+                ]
+                `shouldBe` replicate 7 Nothing
 
     describe "mouseKeysForFrame" do
         let frame = "title\n› first\n  second\n  third\nfooter"

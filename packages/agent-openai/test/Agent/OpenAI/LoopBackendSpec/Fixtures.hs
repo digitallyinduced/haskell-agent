@@ -76,10 +76,11 @@ loopConfig backend = do
                 pure snapshot
             }
         , loopTools = emptyRegistry
+        , loopReadTools = Nothing
         , loopDispatch = defaultLoopDispatch
         , loopMaxTurns = defaultLoopMaxTurns
         , loopOnEvent = const (pure ())
-        , loopApprove = const (pure (Right True))
+        , loopApprove = const (pure ToolApprovalGranted)
         , loopReadSteering = pure []
         , loopCommitSteering = const (pure ())
         , loopInterrupt = pure ()

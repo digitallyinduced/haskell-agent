@@ -1,7 +1,7 @@
 -- | Snapshot the currently running agent tree without changing turn ownership.
 module Agent.CLI.MacOS.AgentSnapshot (activeAgentSnapshot) where
 
-import qualified Agent.CLI.AgentViewport as Viewport
+import qualified Agent.Runtime.AgentSnapshot as Viewport
 import Agent.CLI.MacOS.EngineEvents (failureEvent, successEvent)
 import Agent.CLI.MacOS.NativeRequest (BridgeRequest(..))
 import Agent.CLI.MacOS.TurnState (TurnControl(..))
@@ -20,7 +20,7 @@ activeAgentSnapshot control request = do
         Right agents -> pure $
             successEvent request.requestId (map agentEntryJSON agents)
 
-agentEntryJSON :: Viewport.AgentEntry -> Aeson.Value
+agentEntryJSON :: Viewport.AgentSnapshot -> Aeson.Value
 agentEntryJSON entry =
     Aeson.object
         [ "path" Aeson..= entry.agentPath

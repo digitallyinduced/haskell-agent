@@ -22,7 +22,7 @@ import Control.Exception.Safe
     , finally
     , tryAny
     )
-import Control.Monad (void)
+import Control.Monad (join, void)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Maybe (catMaybes)
@@ -275,7 +275,7 @@ optionalBool key =
         Json.withType \case
             Json.VBoolean -> Just <$> Json.bool
             _ -> pure Nothing)
-        >>= pure . (>>= id)
+        >>= pure . join
 
 optionalNonEmptyText :: Text -> Json.FieldsDecoder (Maybe Text)
 optionalNonEmptyText key = do
@@ -283,7 +283,7 @@ optionalNonEmptyText key = do
         Json.withType \case
             Json.VString -> Just <$> Json.text
             _ -> pure Nothing
-    pure (value >>= id >>= nonEmptyText)
+    pure (join value >>= nonEmptyText)
 
 nonEmptyText :: Text -> Maybe Text
 nonEmptyText value =

@@ -8,7 +8,7 @@ module Agent.Server.Runtime
     , requestFreshToolApproval
     ) where
 
-import Agent.CLI.GatewayBoundary
+import Agent.Runtime.GatewayBoundary
     ( GatewayBoundaryError(..)
     , GatewayBoundarySnapshot(..)
     , loadGatewayBoundarySnapshotAt
@@ -21,11 +21,11 @@ import Agent.CLI.GatewayBoundary
 import Agent.Tools.Types (appToolsFromGroups)
 import Agent.CLI.GatewayModels
     ( loadGatewayModelOptionsWithCredentialAt )
-import Agent.CLI.ModelConfig
+import Agent.Runtime.ModelConfig
     ( ModelCatalog
     , organizationGatewayConnectionId
     )
-import Agent.CLI.Models
+import Agent.Runtime.Models
     ( ModelOption(..)
     , ModelTarget(..)
     , defaultModelOptionFor
@@ -52,9 +52,9 @@ import Agent.Runtime.Request
 import Agent.Runtime.StartupPolicy
     ( hostNativeStartupPolicy, restrictedNativeStartupPolicy )
 import Agent.CLI.Project (defaultProjectSettings)
-import Agent.CLI.Permission.Types (PermissionChoice(..))
-import Agent.CLI.Runtime.Options (defaultEffortFor)
-import Agent.CLI.Session
+import Agent.Runtime.Permission.Types (PermissionChoice(..))
+import Agent.Runtime.Options (defaultEffortFor)
+import Agent.Runtime.Session
     ( SessionCreate(..)
     , SessionHandle(..)
     , SessionMeta(..)
@@ -70,7 +70,7 @@ import Agent.CLI.Session
     , sessionsRoot
     , setSessionArchived
     )
-import Agent.CLI.Session.Codec (fromStoredMetadata)
+import Agent.Runtime.Session.Codec (fromStoredMetadata)
 import Agent.Dialect (DialectId)
 import Agent.Loop qualified as Loop
 import Agent.OsPath (unsafeToFilePath)

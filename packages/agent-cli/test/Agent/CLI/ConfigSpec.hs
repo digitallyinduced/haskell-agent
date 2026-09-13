@@ -1,6 +1,6 @@
 module Agent.CLI.ConfigSpec (spec) where
 
-import Agent.CLI.Config
+import Agent.Runtime.Config
 import Control.Concurrent.Async (mapConcurrently)
 import Control.Exception.Safe (bracket)
 import Agent.MCP (McpLogLevel(..), McpProtocolPreference(..))
@@ -30,7 +30,7 @@ import System.Posix.Files
 import Test.Hspec
 
 spec :: Spec
-spec = describe "Agent.CLI.Config" do
+spec = describe "Agent.Runtime.Config" do
     it "preserves the credential-store default for existing managed identities" do
         mcpUsesConnectionCredentials httpMcpServer
             { mcpConnectionId = Just "existing" } `shouldBe` True
@@ -112,6 +112,25 @@ spec = describe "Agent.CLI.Config" do
         withTempDir "agent-config-" \home -> do
             writeConfig home " \n\t"
             loadHarnessConfig home `shouldReturn` Right defaultHarnessConfig
+
+    it "persists migrated identities and returns the revision of the migrated bytes" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home "{\"mcpServers\":{\"remote\":{\"url\":\"https://example.test/mcp\"}}}"
+            Right (revision, config) <- loadHarnessConfigSnapshot home
+            let server = config.configMcpServers Map.! "remote"
+            server.mcpConnectionId `shouldSatisfy` isJust
+            bytes <- LBS.readFile (filePath (harnessConfigPath home))
+            LBS.length bytes `shouldSatisfy` (> 0)
+            loadHarnessConfigSnapshot home `shouldReturn` Right (revision, config)
+            LBS.readFile (filePath (harnessConfigPath home)) `shouldReturn` bytes
+
+    it "does not rewrite valid configuration bytes when no migration is needed" $
+        withTempDir "agent-config-" \home -> do
+            let bytes = "{ \"maxConcurrentAgents\" : 3 }\n"
+            writeConfig home bytes
+            Right snapshot <- loadHarnessConfigSnapshot home
+            loadHarnessConfigSnapshot home `shouldReturn` Right snapshot
+            LBS.readFile (filePath (harnessConfigPath home)) `shouldReturn` bytes
 
     it "updates typed configuration without discarding unrelated fields" $
         withTempDir "agent-config-" \home -> do
@@ -500,6 +519,38 @@ spec = describe "Agent.CLI.Config" do
             replaceConfig home broken
                 `shouldReturn`
                     Left "MCP server 'broken' must configure exactly one of url or command"
+
+    describe "modifyHarnessConfigEffect" do
+        it "redacts load errors and skips the callback" $
+            withTempDir "agent-config-" \home -> do
+                writeConfig home "{invalid-json"
+                result <- modifyHarnessConfigEffect home \_ config -> do
+                    expectationFailure "callback ran after a load failure"
+                    pure (Right (config, ()))
+                result `shouldBe` Left "Unable to read the machine configuration"
+
+        it "propagates callback errors without changing the file" $
+            withTempDir "agent-config-" \home -> do
+                let bytes = "{\"maxConcurrentAgents\":2}"
+                writeConfig home bytes
+                result <- modifyHarnessConfigEffect home \_ _ ->
+                    pure (Left "callback rejected the change" :: Either Text.Text (HarnessConfig, ()))
+                result `shouldBe` Left "callback rejected the change"
+                LBS.readFile (filePath (harnessConfigPath home)) `shouldReturn` bytes
+
+        it "passes the snapshot revision and returns the persisted config and callback value" $
+            withTempDir "agent-config-" \home -> do
+                writeConfig home "{\"maxConcurrentAgents\":2}"
+                Right (revision, initial) <- loadHarnessConfigSnapshot home
+                Right (nextRevision, updated, value) <-
+                    modifyHarnessConfigEffect home \seenRevision config -> do
+                        seenRevision `shouldBe` revision
+                        config `shouldBe` initial
+                        pure (Right (config { configMaxConcurrentAgents = Just 7 }, "done" :: Text.Text))
+                value `shouldBe` "done"
+                updated.configMaxConcurrentAgents `shouldBe` Just 7
+                nextRevision `shouldNotBe` revision
+                loadHarnessConfigSnapshot home `shouldReturn` Right (nextRevision, updated)
 
     it "serializes concurrent read-modify-write transactions without loss" $
         withTempDir "agent-config-" \home -> do

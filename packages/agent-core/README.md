@@ -16,13 +16,13 @@ Provider-neutral infrastructure shared by the harness transports:
 - `Agent.ToolArgs` parses model-supplied JSON tool arguments.
 - `Agent.ToolDSL` owns JSON Schema fragments for function-tool parameters.
 - `Agent.ToolDispatch` decodes and runs provider-neutral application tools.
-- `Agent.Tools.Types`, `Agent.Tools.IO`, `Agent.Tools.Ghci`, and related
-  modules provide dialect-neutral execution primitives. Concrete tool names,
-  schemas, prompts, and resource composition belong to dialect packages.
-- `Agent.Tools.Secret` provides scoped, owner-only temporary secret files for
-  trusted host prompts. It keeps secret values out of model-visible tool
-  arguments and results, but does not sandbox same-user processes from the
-  returned path.
+- `Agent.Tools.Types`, `Agent.Tools.Scheduling`,
+  `Agent.Tools.ResourceArbiter`, and `Agent.Tools.OutputArtifact.Memory`
+  provide the generic execution contracts and resource accounting needed by
+  the loop. Concrete filesystem, shell, GHCi, planning, artifact, and other
+  tool implementations live in `agent-tools`, which depends on core.
+  Model-facing names, schemas, prompts, and composition belong to dialect
+  packages.
 - `Agent.Transport.WebSocket` owns reusable WebSocket sessions, ping/pong
   handling, STM-scoped request ownership, serialized writes, bounded receive
   buffering, and provider-neutral failure classification. Interrupted or

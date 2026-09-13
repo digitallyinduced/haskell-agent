@@ -30,20 +30,17 @@ import Agent.OpenAI.Models.Cache
 import Agent.OpenAI.Models.Client
     ( ModelsEndpointClient(..)
     , ModelsEndpointResponse(..)
-    , ModelsFetchCondition(..)
     , packageClientVersion
     )
 import Agent.OpenAI.Models.Types
     ( ModelInfo(..)
     , ModelPreset
-    , ModelVisibility(..)
     , ModelsResponse(..)
     , availableModelPresets
     , defaultModelSlug
-    , mergeModelCatalogs
     , modelInfoForSlug
     )
-import Control.Applicative ((<|>))
+import Agent.OpenAI.Models.Manager.State
 import Control.Concurrent.MVar
 import Data.Text (Text)
 import Data.Time.Clock
@@ -82,12 +79,6 @@ defaultModelsManagerOptions = ModelsManagerOptions
     , remoteCatalogAuthoritative = True
     }
 
-data ModelsManagerState = ModelsManagerState
-    { catalog :: !ModelsResponse
-    , etag :: !(Maybe Text)
-    , cacheKey :: !(Maybe ModelsCacheKey)
-    }
-
 data ModelsManager = ModelsManager
     { bundledCatalog :: !ModelsResponse
     , options :: !ModelsManagerOptions
@@ -105,11 +96,7 @@ newModelsManagerWithBundled
     -> ModelsManagerOptions
     -> IO ModelsManager
 newModelsManagerWithBundled bundledCatalog options = do
-    state <- newMVar ModelsManagerState
-        { catalog = bundledCatalog
-        , etag = Nothing
-        , cacheKey = Nothing
-        }
+    state <- newMVar (initialState bundledCatalog)
     refreshLock <- newMVar ()
     pure ModelsManager { .. }
 
@@ -204,16 +191,9 @@ tryLoadCache manager =
                 Left _ -> pure Nothing
                 Right Nothing -> pure Nothing
                 Right (Just entry) -> do
-                    let catalog = applyRemoteCatalog manager ModelsResponse
-                            { models = entry.models
-                            , catalogGeneration = entry.catalogGeneration
-                            }
-                    modifyMVar_ manager.state \_ -> pure ModelsManagerState
-                        { catalog
-                        , etag = entry.etag
-                        , cacheKey = entry.cacheKey
-                        }
-                    pure (Just catalog)
+                    let next = cachedState (authoritativeCatalog manager) manager.bundledCatalog entry
+                    modifyMVar_ manager.state \_ -> pure next
+                    pure (Just next.catalog)
 
 fetchRemote
     :: ModelsManager
@@ -226,45 +206,34 @@ fetchRemote manager =
                 Right <$> currentModelCatalog manager
         Just endpoint -> do
             current <- readMVar manager.state
-            let condition = ModelsFetchCondition
-                    <$> current.etag
-                    <*> current.cacheKey
+            let condition = fetchCondition current
+                previousEtag = current.etag
             endpoint.fetchModels condition >>= \case
                 Left err -> pure (Left err)
-                Right ModelsNotModified{etag, cacheKey} -> do
-                    let nextEtag = etag <|> current.etag
+                Right response@ModelsNotModified{etag, cacheKey} -> do
                     modifyMVar_ manager.state \current@ModelsManagerState{} ->
-                        pure ModelsManagerState
-                            { catalog = current.catalog
-                            , etag = nextEtag
-                            , cacheKey = Just cacheKey
-                            }
-                    touchCache manager
+                        pure (notModifiedState previousEtag etag cacheKey current)
+                    runCacheAction manager (responseCacheAction response)
                     Right <$> currentModelCatalog manager
-                Right ModelsFetched
+                Right response@ModelsFetched
                         { catalog = remote
                         , etag
                         , cacheKey
                         } -> do
-                    let catalog = applyRemoteCatalog manager remote
-                    modifyMVar_ manager.state \_ -> pure ModelsManagerState
-                        { catalog
-                        , etag
-                        , cacheKey = Just cacheKey
-                        }
-                    storeCache manager cacheKey remote etag
-                    pure (Right catalog)
+                    let next = fetchedState (authoritativeCatalog manager) manager.bundledCatalog remote etag cacheKey
+                    modifyMVar_ manager.state \_ -> pure next
+                    runCacheAction manager (responseCacheAction response)
+                    pure (Right next.catalog)
 
-applyRemoteCatalog :: ModelsManager -> ModelsResponse -> ModelsResponse
-applyRemoteCatalog manager remote
-    | manager.options.remoteCatalogAuthoritative
-        && maybe False (.usesChatGptAuth) manager.options.endpointClient
-        && any ((== ModelVisibilityList) . (.visibility)) remote.models =
-            remote
-    | otherwise =
-        mergeModelCatalogs
-            manager.bundledCatalog
-            remote
+authoritativeCatalog :: ModelsManager -> Bool
+authoritativeCatalog manager =
+    manager.options.remoteCatalogAuthoritative && managerUsesChatGptAuth manager
+
+-- Deliberately outside the state MVar and after its commit, but still inside
+-- refreshLock. Cache exceptions must not roll back a fetched catalog.
+runCacheAction :: ModelsManager -> CacheAction -> IO ()
+runCacheAction manager TouchCache = touchCache manager
+runCacheAction manager (StoreCache key remote etag) = storeCache manager key remote etag
 
 storeCache
     :: ModelsManager

@@ -9,9 +9,9 @@ import Agent.CLI.MacOS.EngineState (SessionMutation(..))
 import Agent.CLI.MacOS.EngineStore
 import Agent.CLI.MacOS.Marshalling (withText)
 import Agent.CLI.MacOS.NativeGatewayBoundary
-import Agent.CLI.GatewayClient (withGatewayCredentialLease)
-import Agent.CLI.ModelConfig (organizationGatewayConnectionId)
-import Agent.CLI.Session (renameSession, deleteSession, setSessionArchived)
+import Agent.Runtime.GatewayClient (withGatewayCredentialLease)
+import Agent.Runtime.ModelConfig (organizationGatewayConnectionId)
+import Agent.Runtime.Session (renameSession, deleteSession, setSessionArchived)
 import Agent.Store.Postgres (ManagedPostgresConfig, Store, trustedPool)
 import Agent.Store.Postgres.Session
     ( NativeConversationSearchResult(..), searchNativeConversationsForBoundary )

@@ -3,7 +3,7 @@ module Agent.CLI.Runtime.Orchestration.Session
     , runAgentSession
     ) where
 
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( SessionRequestState
     , newSessionRequestState
     , readSessionRequestParams
@@ -17,7 +17,7 @@ import Agent.CLI.ActiveAccount
     )
 import Agent.CLI.CancelWatch (StdinControl)
 import Agent.CLI.McpSampling (mcpSamplingHandler)
-import Agent.CLI.Auth
+import Agent.Accounts.Auth
     ( LoadedAuth(loadedTokenProvider, loadedOpenAiPool)
     , isGatewayLoadedAuth
     , gatewayLoadedAuthForProvider
@@ -41,16 +41,16 @@ import Agent.CLI.CodeModeRuntime
 import Agent.Tools.CodeMode.Tool
     ( ToolMode(CodeOnlyToolMode, ConventionalToolMode)
     )
-import Agent.CLI.Compaction
+import Agent.Runtime.Compaction.Provider
     ( AutomaticCompactionBoundary
     , CompactOutcome
     , CompactionInstall(CompactionNotInstalled)
     , OccupancySnapshot
     )
-import Agent.CLI.Database.Store (DatabaseScopes)
-import Agent.CLI.Dialects (CodingTools(..))
-import Agent.CLI.Error (formatApiErrorAt)
-import Agent.CLI.GatewayClient
+import Agent.Runtime.Database.Store (DatabaseScopes)
+import Agent.Runtime.Tools.Dialects (CodingTools(..))
+import Agent.Runtime.Error (formatApiErrorAt)
+import Agent.Runtime.GatewayClient
     ( GatewayCredential(gatewayBaseUrl)
     , GatewayModelAccess
     , gatewayCredentialIdentity
@@ -61,14 +61,14 @@ import Agent.CLI.Interrupt
     , retryUserInterruptOnce
     , withCtrlCHandler
     )
-import Agent.CLI.ManagedTurn ( ManagedTurnRequest(..) )
-import Agent.CLI.ModelConfig
+import Agent.Runtime.ManagedTurn ( ManagedTurnRequest(..) )
+import Agent.Runtime.ModelConfig
     ( ModelCatalog
     , catalogContextWindowForTransport
     , catalogSupportsAsyncToolCallsForTransport
     , organizationGatewayConnectionId
     )
-import Agent.CLI.Models (ModelTarget(targetConnectionId))
+import Agent.Runtime.Models (ModelTarget(targetConnectionId))
 import Agent.CLI.Options
     ( ApprovalPolicy
     , CodeModeOption(..)
@@ -89,7 +89,7 @@ import Agent.CLI.ProviderFallback ( isProviderUnavailable )
 import Agent.CLI.ProviderTransition
     ( PendingTurn, ProviderTransition(transitionCause), TransitionCause(AutomaticFallback) )
 import Agent.CLI.Render ( putTextLn )
-import Agent.CLI.Request
+import Agent.Runtime.ProviderRequest
     ( requestParams
     , setRequestInstructionsAndTools
     , setRequestPromptCacheKey
@@ -97,9 +97,9 @@ import Agent.CLI.Request
 import Agent.CLI.Resume
     ( SessionInitialContext(..)
     )
-import Agent.CLI.Runtime.Orchestration.Providers
+import Agent.Runtime.Providers
     ( withProviderRuntime )
-import Agent.CLI.Runtime.Orchestration.Providers.Types
+import Agent.Runtime.Providers.Types
     ( ProviderConfig(..), OpenAiConfig(..), OpenAiAccounts(..)
     , OpenRouterConfig(..), ClaudeConfig(..), ProviderHost(..)
     , ProviderCompaction(..), ProviderRuntime(..)
@@ -118,7 +118,7 @@ import Agent.CLI.Runtime.Repl
     ( finishTurn, preparePromptSkillInputsWithPaste, repl, replWithDraft, runPendingTurn )
 import qualified Agent.CLI.Session.Runner as SessionRunner
 import Agent.CLI.Runtime.Types ( RunResult(RunQuit, RunProviderStartFailed, RunSwitchProvider) )
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( addSessionUsage,
       ensureSession,
       ensurePersistenceSessionId,
@@ -133,7 +133,7 @@ import Agent.CLI.Session
       SessionMeta(metaId, metaPromptSnapshot, metaTitle),
       SessionTurn,
       SessionPromptSnapshot(..) )
-import Agent.CLI.Session.History
+import Agent.Runtime.Session.History
     ( LiveConversation
     , currentLiveTranscriptGeneration,
       durableTranscriptCheckpoint,
@@ -147,7 +147,7 @@ import Agent.CLI.Session.Runtime.Types
                      gatewayModelsRef, modelInfo,
                      connectionId, gatewayIdentity,
                      options, provider, dialect, commitAttributionModel,
-                     commitAttributionEffort, policyRef, allTools, refreshTools,
+                     commitAttributionEffort, policyRef, allTools, refreshTools, deferredTools,
                      claudeRuntimeSlot, claudeBridgeTools,
                      recordImageGenerationInputs, clearImageGenerationHistory,
                      suspendGhci, resetToolSessionTemp, grokRuntime,
@@ -209,7 +209,7 @@ import Agent.Claude
 import Agent.Claude.Control
     ( ClaudeCodeHostHandlers(..), ClaudeCodeMcpRequest(..), defaultClaudeCodeHostHandlers )
 import Agent.CLI.ClaudeGatewayProxy (withClaudeGatewayProxy)
-import Agent.Dialect (Dialect, dialectId, dialectForId)
+import Agent.Dialect (Dialect, DialectId (CodexDialect), dialectId, dialectForId)
 import Agent.Error (ApiError)
 import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.Loop
@@ -270,6 +270,7 @@ import System.Environment ( getProgName )
 import System.IO (Handle, stderr)
 import System.Mem ( performMajorGC )
 import System.OsPath (OsPath)
+import Agent.OsPath (unsafeToFilePath)
 import qualified Agent.MCP as MCP
 import qualified Data.Text.IO as Text ( hPutStr )
 
@@ -281,6 +282,7 @@ data AgentSessionRequest windowTitleResult = AgentSessionRequest
     , activeAccountRef :: ActiveAccountRef
     , agentTypesRef :: GrokSubagentSpecs
     , allTools :: [AppTool]
+    , deferredTools :: Maybe (IO [AppTool])
     , recordImageGenerationInputs :: [ImageAttachment] -> IO ()
     , clearImageGenerationHistory :: IO ()
     , bashEnabledRef :: IORef Bool
@@ -727,6 +729,9 @@ buildSessionSubagentRuntime
     -> SubagentRuntime
 buildSessionSubagentRuntime AgentSessionRequest
     { options
+    , dialect
+    , mcpFleet
+    , sessionTmp
     , startup
     , ghciEnabledRef
     , bashEnabledRef
@@ -760,7 +765,14 @@ buildSessionSubagentRuntime AgentSessionRequest
         , subagentToolResourceArbiter = toolEnv.toolResourceArbiter
         , subagentRootAccessRequest = toolEnv.toolRootAccessRequest
         , subagentParams = promptRuntime.sessionParamsRef
-        , subagentMcpTools = mcpTools
+        -- Child loops retain their static tool surface. Do not share the
+        -- parent's deferred search state without a child refresh hook.
+        , subagentMcpTools =
+            if dialectId dialect == CodexDialect && not (null mcpTools)
+                then MCP.mcpFleetMetaToolsForArtifactDirectory
+                    (Just (unsafeToFilePath sessionTmp)) mcpFleet
+                    <> MCP.mcpFleetResourceTools mcpFleet
+                else mcpTools
         , subagentRegistry = registry
         , subagentSessions = subagentSessions
         , subagentStoreRoot = subagentStoreRoot
@@ -1007,6 +1019,7 @@ buildProviderSessionRequest
                 promptRuntime.sessionCodeRuntime.sessionRegistryTools
             , refreshTools =
                 promptRuntime.sessionCodeRuntime.sessionRefreshTools
+            , deferredTools = request.deferredTools
             , recordImageGenerationInputs =
                 request.recordImageGenerationInputs
             , clearImageGenerationHistory =

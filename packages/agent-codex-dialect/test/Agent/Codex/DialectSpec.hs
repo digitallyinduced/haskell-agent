@@ -22,7 +22,8 @@ import Agent.Codex.Dialect.Shell
     )
 import Agent.Codex.Dialect.Tools (shellCommandIsReadOnly)
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
-import Agent.Tools.Background (setBackgroundTaskHooks)
+import Agent.Tools.Background
+    ( BackgroundTaskStatus(..), readBackgroundTasks, setBackgroundTaskHooks )
 import Agent.Tools.IO (CommandResult(..))
 import Agent.ToolDispatch
     ( ToolOutcome(..)
@@ -54,10 +55,13 @@ import Agent.Tools.Types
     , dispatchApprovedRegisteredToolCall
     , mkToolRegistry
     , setToolSessionTmp
+    , setToolSteeringWait
     , toolSchedulingPlanFor
     , toolApprovalRequirement
     )
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (withAsync, wait, poll)
+import Control.Concurrent.STM (atomically, check, newTVarIO, readTVar, writeTVar)
 import Control.Concurrent.MVar
     ( MVar
     , modifyMVar_
@@ -82,6 +86,7 @@ import System.IO.Error (isPermissionError)
 import System.OsPath (unsafeEncodeUtf)
 import System.Posix.Temp (mkdtemp)
 import System.Process (readProcessWithExitCode)
+import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
@@ -479,6 +484,7 @@ spec = describe "Codex dialect" do
                         Right _ ->
                             expectationFailure "stale command remained available"
                     readMVar notices `shouldReturn` Nothing
+                    readBackgroundTasks env `shouldReturn` []
 
     it "formats project instructions as a contextual user fragment" do
         let loaded = LoadedAgentsMd
@@ -712,6 +718,57 @@ spec = describe "Codex dialect" do
                         Text.isPrefixOf "Exit code: 0\n"
                     continued.output `shouldSatisfy` Text.isInfixOf "done"
 
+    it "yields an initial managed command promptly for pending guidance" do
+        requireProcessSandbox
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            setToolSteeringWait env (pure ())
+            bracket (newCodexShellSession env) closeCodexShellSession \session -> do
+                started <- timeout 2000000 $
+                    startCodexShellCommand session env.toolCwd
+                        "read value; printf '%s' \"$value\"" 300000
+                        (\_ _ -> pure ())
+                case started of
+                    Just (Right CodexShellRunning{}) -> pure ()
+                    _ -> expectationFailure "expected guidance to yield the running command"
+                active <- readBackgroundTasks env
+                length active `shouldBe` 1
+
+    it "wakes an active continuation wait for guidance without stopping its command" do
+        requireProcessSandbox
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            pending <- newTVarIO False
+            setToolSteeringWait env (readTVar pending >>= check)
+            bracket (newCodexShellSession env) closeCodexShellSession \session -> do
+                started <- startCodexShellCommand session env.toolCwd
+                    "read value; printf '%s' \"$value\"" 1 (\_ _ -> pure ())
+                commandId <- case started of
+                    Right CodexShellRunning { codexShellSessionId = identifier } ->
+                        pure identifier
+                    _ -> expectationFailure "expected a retained command" >> pure 0
+                withAsync (continueCodexShellCommand session commandId "" 300000) \waiting -> do
+                    threadDelay 50000
+                    poll waiting >>= \case
+                        Nothing -> pure ()
+                        Just _ -> expectationFailure "wait returned without guidance"
+                    atomically $ writeTVar pending True
+                    resumed <- timeout 2000000 (wait waiting)
+                    case resumed of
+                        Just (Right CodexShellRunning { codexShellSessionId = identifier }) ->
+                            identifier `shouldBe` commandId
+                        _ -> expectationFailure "expected guidance to yield the existing command"
+                -- The wake is a notification, not a cancellation or an
+                -- acknowledgement. Once consumed by the host, the same
+                -- process still accepts input and returns its final output.
+                atomically $ writeTVar pending False
+                completed <- continueCodexShellCommand session commandId "preserved\n" 2000
+                case completed of
+                    Right (CodexShellFinished result) -> do
+                        result.commandExitCode `shouldBe` Just 0
+                        result.commandStdout `shouldBe` "preserved"
+                    _ -> expectationFailure "expected the original command to finish normally"
+
     it "reports an unobserved retained command without polling" do
         requireProcessSandbox
         withTempDir \dir -> do
@@ -741,6 +798,26 @@ spec = describe "Codex dialect" do
                         Text.isInfixOf "completion-output"
                     notice.noticeBody `shouldSatisfy`
                         Text.isInfixOf "do not call write_stdin"
+                    readBackgroundTasks env `shouldReturn` []
+
+    it "tracks retained commands without consuming output and clears status on reset" do
+        requireProcessSandbox
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket (newCodexShellSession env) closeCodexShellSession \session -> do
+                started <- startCodexShellCommand session env.toolCwd
+                    "read value; printf '%s' \"$value\"" 1 (\_ _ -> pure ())
+                commandId <- case started of
+                    Right CodexShellRunning { codexShellSessionId = identifier } ->
+                        pure identifier
+                    _ -> expectationFailure "expected a retained command" >> pure 0
+                active <- readBackgroundTasks env
+                map (.taskKey) active `shouldBe`
+                    ["codex-shell:" <> Text.pack (show commandId)]
+                map (.taskAutoResume) active `shouldBe` [True]
+                readBackgroundTasks env `shouldReturn` active
+                resetCodexShellSession session
+                readBackgroundTasks env `shouldReturn` []
 
     it "does not publish a notice when the initial wait returns the result" do
         requireProcessSandbox

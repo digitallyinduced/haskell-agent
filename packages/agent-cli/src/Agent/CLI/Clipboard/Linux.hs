@@ -4,7 +4,8 @@ module Agent.CLI.Clipboard.Linux
     , readLinuxClipboardText
     ) where
 
-import Agent.CLI.Error (formatException)
+import Agent.CLI.Clipboard.Process (readClipboardProcessText)
+import Agent.Runtime.Error (formatException)
 import Agent.Loop (ImageAttachment(..))
 import Control.Exception.Safe (bracket, finally, tryAny)
 import Control.Monad (void)
@@ -100,12 +101,12 @@ linuxClipboardUnavailableError =
 
 runTextCmd :: FilePath -> [String] -> IO (Either Text Text)
 runTextCmd cmd args = do
-    result <- tryAny (readProcessWithExitCode cmd args "")
+    result <- tryAny (readClipboardProcessText cmd args)
     pure $ case result of
         Left ex -> Left (formatException ex)
-        Right (ExitSuccess, out, _) -> Right (Text.pack out)
+        Right (ExitSuccess, out, _) -> Right out
         Right (ExitFailure _, _, err) ->
-            Left (Text.strip (Text.pack err))
+            Left (Text.strip err)
 
 runBytesCmd :: FilePath -> [String] -> IO (Either Text ByteString)
 runBytesCmd cmd args = do

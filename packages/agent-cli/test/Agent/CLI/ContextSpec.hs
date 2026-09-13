@@ -1,6 +1,6 @@
 module Agent.CLI.ContextSpec (spec) where
 
-import Agent.CLI.Compaction
+import Agent.Runtime.Compaction.Provider
     ( estimatedOccupancy
     , reportedOccupancy
     , occupancyOnTurnFinished
@@ -9,7 +9,7 @@ import Agent.CLI.Compaction
     , projectRequestTokens
     )
 import Agent.CLI.Context (contextUsageTokens, formatContextReport)
-import Agent.CLI.Request (requestParams)
+import Agent.Runtime.ProviderRequest (requestParams)
 import Agent.CLI.Session.ConversationStore
     ( commitConversationBackendState
     , newConversationStore

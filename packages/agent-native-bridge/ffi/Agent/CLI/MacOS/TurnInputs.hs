@@ -5,7 +5,7 @@ module Agent.CLI.MacOS.TurnInputs
     ) where
 
 import Agent.CLI.MacOS.NativeRequest (TurnStart(..))
-import Agent.CLI.ManagedTurn
+import Agent.Runtime.ManagedTurn
     ( ManagedTurnMedia(..)
     , managedTurnRequestWithImages
     , renderManagedTurnPrompt

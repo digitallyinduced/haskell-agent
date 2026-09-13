@@ -21,7 +21,7 @@ module Agent.CLI.McpManager
     , suggestMcpName
     ) where
 
-import Agent.CLI.Config
+import Agent.Runtime.Config
     ( HarnessConfig(..)
     , McpServerConfig(..)
     , loadHarnessConfigSnapshot
@@ -35,11 +35,11 @@ import Agent.CLI.McpAdd
     , suggestMcpName
     , suggestMcpTargetName
     )
-import Agent.CLI.McpOAuth
+import Agent.Runtime.McpOAuth
     ( defaultLoginOptions
     , loginMcpWithResult
     )
-import Agent.CLI.McpOAuthStore (mcpOAuthStorePath)
+import Agent.Runtime.McpOAuthStore (mcpOAuthStorePath)
 import Agent.CLI.Picker
     ( PickerKey(..)
     , decodePickerKey

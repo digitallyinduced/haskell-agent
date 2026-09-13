@@ -21,6 +21,7 @@ import Agent.Provider.Options
     , lookupNonEmptyEnv
     , parseModelOverrides
     )
+import Data.List (dropWhileEnd)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import qualified Data.Maybe as Maybe
@@ -142,7 +143,7 @@ defaultClientOptions = ClientOptions
 gatewayClientOptions :: String -> ClientOptions
 gatewayClientOptions gatewayBaseUrl =
     defaultClientOptions
-        { baseUrl = reverse (dropWhile (== '/') (reverse gatewayBaseUrl)) <> "/v1"
+        { baseUrl = dropWhileEnd (== '/') gatewayBaseUrl <> "/v1"
         , preserveModelNames = True
         , requestRedirectCount = 0
         }

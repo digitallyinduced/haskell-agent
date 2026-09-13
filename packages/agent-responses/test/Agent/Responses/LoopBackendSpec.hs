@@ -157,6 +157,8 @@ accountReplaySpec = describe "stateless Responses account replay boundary" $
                     BackendCallbacks
                         { onLoopEvent = \value -> modifyIORef' events (<> [value])
                         , onRecoveryCheckpoint = const (pure ())
+                        , onCompletedResponseItem = \_ _ -> pure ()
+                        , onCancellationMode = const (pure ())
                         , onAsyncToolCall = \_ -> modifyIORef' admissions (+ 1)
                         }
                 result `shouldBe` Left rejected
@@ -1278,6 +1280,8 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
             BackendCallbacks
                 { onLoopEvent = const (pure ())
                 , onRecoveryCheckpoint = const (pure ())
+                , onCompletedResponseItem = \_ _ -> pure ()
+                , onCancellationMode = const (pure ())
                 , onAsyncToolCall =
                     \call -> modifyIORef' announced (<> [call])
                 }
@@ -1340,12 +1344,13 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                         writeIORef state snapshot >> pure snapshot
                     }
                 , loopTools = registry
+                , loopReadTools = Nothing
                 , loopDispatch = Loop.defaultLoopDispatch
                 , loopMaxTurns = Loop.defaultLoopMaxTurns
                 , loopOnEvent = \case
                     ToolFinished _ -> putMVar finished ()
                     _ -> pure ()
-                , loopApprove = const (pure (Right True))
+                , loopApprove = const (pure Loop.ToolApprovalGranted)
                 , loopReadSteering = pure []
                 , loopCommitSteering = const (pure ())
                 , loopInterrupt = pure ()

@@ -2,7 +2,7 @@
 -- without starting, migrating, or importing the database.
 module Agent.CLI.WorktreeAdmin (runWorktreeAdmin, renderWorktreeCleanupReport) where
 
-import Agent.CLI.Config (HarnessConfig(..), WorktreeConfig(..), loadHarnessConfig)
+import Agent.Runtime.Config (HarnessConfig(..), WorktreeConfig(..), loadHarnessConfig)
 import Agent.CLI.Options (WorktreeCommand(..))
 import Agent.CLI.Worktree.Provenance (WorktreeActivity, loadWorktreeActivity)
 import Agent.CLI.Worktree

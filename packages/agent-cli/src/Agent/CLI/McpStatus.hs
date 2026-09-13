@@ -95,11 +95,14 @@ formatMcpModelNoticeFor activeDialect statuses =
         <> statusPart "Connecting" connecting
         <> statusPart "Ready" ready
         <> statusPart "Unavailable" failed
-        <> if activeDialect == GrokBuildDialect
-            then
+        <> case activeDialect of
+            CodexDialect ->
+                "Use tool_search to discover currently available MCP tools. "
+                    <> "Matching tools become available for direct invocation on the next model request.</system-reminder>"
+            GrokBuildDialect ->
                 "Use search_tool to discover currently available MCP tools and "
                     <> "use_tool to invoke one by its server__tool name.</system-reminder>"
-            else
+            _ ->
                 "Use mcp_search to discover currently available MCP tools and "
                     <> "mcp_call to invoke one by its server__tool name.</system-reminder>"
   where

@@ -19,7 +19,7 @@ module Agent.CLI.McpAdmin
     , mutateEffect
     ) where
 
-import Agent.CLI.Config
+import Agent.Runtime.Config
     ( HarnessConfig(..)
     , McpServerConfig(..)
     , mcpUsesConnectionCredentials

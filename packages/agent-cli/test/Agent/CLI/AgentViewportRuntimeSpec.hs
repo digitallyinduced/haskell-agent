@@ -4,8 +4,10 @@ import Agent.CLI.AgentViewport
     ( AgentEntry(..)
     , AgentTarget(..)
     , AgentViewportEnv(..)
+    , agentStepsForStatusRelative
     )
 import Agent.CLI.AgentViewport.Runtime
+import Agent.Responses.Types
 import Agent.Loop
     ( LoopEvent(..)
     , NativeAgentStatus(..)
@@ -22,11 +24,48 @@ import Data.IORef
     )
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Test.Hspec
 
 spec :: Spec
 spec = do
     describe "agent viewport runtime" do
+        it "preserves cached Unicode previews and refreshes changed transcripts" do
+            let child = SubagentId "preview"
+                message body = MessageItem ResponseMessage
+                    { messageId = Nothing
+                    , role = RoleAssistant
+                    , status = Just ItemCompleted
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    , content = MessageContentText body
+                    }
+                original = [message ("完了🙂\nCafé\n" <> Text.replicate 65536 "x")]
+                changed = [message "Updated\nSecond line"]
+                status_ = Completed Nothing
+                expected = agentStepsForStatusRelative "/workspace" 2 status_
+            transcript <- newIORef original
+            runtime <- newAgentViewportRuntime AgentViewportRuntimeConfig
+                { viewportConfigShowRawReasoning = False
+                , viewportConfigWorkspace = "/workspace"
+                , viewportConfigReadRootTranscript = pure []
+                , viewportConfigListChildren = pure
+                    [AgentChildListing "/root/preview" child status_]
+                , viewportConfigReadChildSources = pure (Map.singleton child
+                    (AgentChildSource "model" (readIORef transcript)))
+                , viewportConfigSelectChild = const (pure ())
+                , viewportConfigReleaseChild = const (pure ())
+                }
+            let previews = do
+                    (_, entries) <- loadAgentSnapshot runtime False
+                    pure (entries !! 1).agentSteps
+            previews `shouldReturn` expected original
+            previews `shouldReturn` expected original
+            writeIORef transcript changed
+            previews `shouldReturn` expected changed
+            resetAgentViewport runtime
+            previews `shouldReturn` expected changed
+
         it "owns child selection and release transitions" do
             let alpha = SubagentId "alpha"
                 beta = SubagentId "beta"

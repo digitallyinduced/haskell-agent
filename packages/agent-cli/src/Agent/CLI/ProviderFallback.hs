@@ -9,19 +9,55 @@ module Agent.CLI.ProviderFallback
     , ProviderRecoveryPreference(..)
     , providerRecoveryPreference
     , rankedModels
+    , selectAutomaticProviderCandidateWith
     ) where
 
-import Agent.CLI.ModelConfig (ModelCatalog)
-import Agent.CLI.Models (ModelOption(..), ModelTarget(..), modelCatalog)
+import Agent.Runtime.ModelConfig (ModelCatalog)
+import Agent.Runtime.Models (ModelOption(..), ModelTarget(..), modelCatalog)
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Provider (BillingMode(..), Provider(..))
 import Data.Containers.ListUtils (nubOrdOn)
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.List (sortOn)
+import Data.List (find, sortOn)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime)
+
+-- | Select a validated fallback and its account without committing a transition.
+-- Callers supply dialect resolution, target/account validation, and reporting;
+-- startup and per-turn messaging and pending-turn policy remain outside the loop.
+selectAutomaticProviderCandidateWith
+    :: (ModelOption -> IO ModelOption)
+    -> (ModelOption -> IO (Either Text account))
+    -> (Provider -> Text -> IO ())
+    -> Provider
+    -> Set Provider
+    -> [ModelOption]
+    -> IO (Maybe (ModelOption, account, Set Provider))
+selectAutomaticProviderCandidateWith resolve validate reportSkipped current =
+    tryCandidates
+  where
+    tryCandidates unavailable = \case
+        [] -> pure Nothing
+        rawChoice : rest -> do
+            choice <- resolve rawChoice
+            validate choice >>= \case
+                Left err -> do
+                    let failedProvider = choice.modelTarget.targetProvider
+                        unavailable' = Set.insert failedProvider unavailable
+                        remaining =
+                            filter
+                                ((/= failedProvider) . (.modelTarget.targetProvider))
+                                rest
+                    reportSkipped failedProvider err
+                    tryCandidates unavailable' remaining
+                Right selected -> do
+                    let unavailable' =
+                            if choice.modelTarget.targetProvider == current
+                                then unavailable
+                                else Set.insert current unavailable
+                    pure (Just (choice, selected, unavailable'))
 
 -- | Keep brief provider cooldowns invisible to the user. Longer waits are
 -- eligible for cross-provider fallback instead of making the CLI appear hung.
@@ -129,12 +165,12 @@ fallbackCandidates catalog unavailable current currentModel err
                         ranked
         | otherwise = []
     currentPriority =
-        (.modelFallbackPriority) =<< safeHead
-            (filter
+        (.modelFallbackPriority) =<<
+            find
                 (\option ->
                     option.modelTarget.targetProvider == current
                         && option.modelTarget.targetModelId == currentModel)
-                ranked)
+                ranked
     otherProviderFallbacks =
         filter
             (\option ->
@@ -144,10 +180,6 @@ fallbackCandidates catalog unavailable current currentModel err
                     && option.modelTarget.targetProvider
                         `Set.notMember` unavailable)
             (nubOrdOn (.modelTarget.targetProvider) ranked)
-
-    safeHead = \case
-        [] -> Nothing
-        value : _ -> Just value
 
 -- | A structured provider response that says the selected model or feature is
 -- unavailable. Unlike a bare HTTP 403, this is safe to recover from by trying

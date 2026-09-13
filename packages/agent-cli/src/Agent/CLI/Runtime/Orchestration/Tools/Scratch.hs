@@ -6,11 +6,11 @@ module Agent.CLI.Runtime.Orchestration.Tools.Scratch
     , startStaleResourceCleanup
     ) where
 
-import Agent.CLI.Error (formatException)
-import Agent.CLI.Config (HarnessConfig(..), WorktreeConfig(..))
+import Agent.Runtime.Error (formatException)
+import Agent.Runtime.Config (HarnessConfig(..), WorktreeConfig(..))
 import Agent.CLI.ExternalSession (defaultExternalSessionEnv, externalSessionTool)
-import Agent.CLI.ManagedTurn (ManagedTurnRequest(..))
-import Agent.CLI.Models (ModelTarget(..))
+import Agent.Runtime.ManagedTurn (ManagedTurnRequest(..))
+import Agent.Runtime.Models (ModelTarget(..))
 import Agent.CLI.Options (CliOptions(..))
 import Agent.CLI.Runtime.HistorySource (emptyFullscreenHistoryPage, loadFullscreenHistoryPage)
 import Agent.CLI.Runtime.Orchestration.Startup (reportStartupWarning)
@@ -18,14 +18,14 @@ import Agent.CLI.Runtime.Orchestration.Tools.Collaboration
 import Agent.CLI.Runtime.Orchestration.Tools.Model
 import Agent.CLI.Runtime.Orchestration.Tools.Request
 import Agent.CLI.Runtime.Orchestration.Types (AgentProcessRuntime(..), NativeRunCapabilities(..))
-import Agent.CLI.Runtime.Persistence (preparePersistence)
-import Agent.CLI.Session
+import Agent.CLI.Runtime.Persistence (persistenceRequest, announceResumedSession)
+import Agent.Runtime.Session
     ( Persistence, SessionTempCleanupReport(..)
-    , acquireSessionTempLease, allocateSessionTemp, cleanupPendingPersistence
     , cleanupStaleSessionTemps, defaultSessionTempKeepCount
-    , loadCurrentTaskPlan, persistenceTempDir, releaseSessionTempLease
-    , removeSessionTemp, taskPlanHooksForPersistence )
-import Agent.CLI.Session.History (foldSessionItems)
+    )
+import Agent.Runtime.Session.Resources
+    ( SessionResourcesRequest(..), SessionResourceHooks(..)
+    , SessionResources(..), SessionResourceError(..), prepareSessionResources )
 import Agent.CLI.Session.Runtime.Types (StartupRuntime(..))
 import Agent.CLI.Session.Selection (loadPrompt, reservedSessionId)
 import Agent.CLI.Startup.Auth (startupDie)
@@ -35,16 +35,13 @@ import Agent.CLI.Worktree
     ( WorktreeCleanupReport(..), acquireWorktreeLease, gcWorktreesWithActivity
     , releaseWorktreeLease, worktreeRoot )
 import Agent.CLI.Worktree.Provenance (loadWorktreeActivity)
-import Agent.OpenAI.ImageGeneration
-    ( ImageGenerationHistory, newImageGenerationHistory, recordImageGenerationResponseItems )
+import Agent.OpenAI.ImageGeneration (ImageGenerationHistory)
 import Agent.OsPath (unsafeToFilePath)
-import Agent.ResourceScope (allocateResource, closeResourceScope, newResourceScope)
 import Agent.Store.Postgres (trustedPool)
-import Agent.Tools.TaskPlan (TaskPlanEnv, newTaskPlanEnv)
-import Agent.Tools.Types
-    ( AppTool, ToolEnv(toolOutputMemoryStore), setToolSessionTmp, clearMemoryOutputArtifacts )
+import Agent.Tools.TaskPlan (TaskPlanEnv)
+import Agent.Tools.Types (AppTool)
 import Control.Concurrent.Async (concurrently)
-import Control.Exception.Safe (SomeException, bracketOnError, try)
+import Control.Exception.Safe (SomeException, catch, try)
 import Control.Monad (forM_)
 import Data.IORef (writeIORef)
 import Data.Maybe (isNothing)
@@ -86,93 +83,53 @@ prepareScratchRuntime AgentToolsRequest
     , toolEffortText = effortText
     } CollaborationRuntime
     { collaborationPersistSlotRef = persistSlotRef
-    } = bracketOnError newResourceScope closeResourceScope \scratchScope -> do
+    } = do
     scratchPromptRequest <- loadPrompt options
     let promptText =
             fmap (\request -> request.managedTurnText) scratchPromptRequest
-    (_, scratchPersistence) <-
-        allocateResource scratchScope
-            (preparePersistence
+        request = SessionResourcesRequest
+            { resourcePersistenceRequest = persistenceRequest
                 (trustedPool startup.startupDatabaseStore)
-                startup
-                options
-                root
-                inferredTarget { targetDialect = dialectId }
-                gatewayIdentity
-                (isNothing transition)
-                cwd
-                effortText
-                promptText
-                resumed)
-            cleanupPendingPersistence
-    writeIORef persistSlotRef scratchPersistence
-    initialTaskPlan <-
-        loadCurrentTaskPlan scratchPersistence >>= \case
-            Left err ->
-                startupDie startup
-                    ("Failed to load current task plan: " <> err)
-            Right plan -> pure plan
-    scratchTaskPlan <-
-        newTaskPlanEnv
-            initialTaskPlan
-            (taskPlanHooksForPersistence scratchPersistence)
-    forM_ fullscreen \runtime ->
-        reservedSessionId scratchPersistence >>= \case
-            Nothing ->
-                clearFullscreenHistorySource runtime
-            Just sessionId ->
-                setFullscreenHistorySource
-                    runtime
-                    sessionId
-                    (loadFullscreenHistoryPage
-                        (trustedPool startup.startupDatabaseStore)
-                        root
-                        sessionId)
-                    (emptyFullscreenHistoryPage
-                        (HistoryGeneration 0))
-    scratchSessionTmp <-
-        persistenceTempDir scratchPersistence >>= \case
-            Just tempDir -> pure tempDir
-            Nothing -> do
-                (_, (_, tempDir)) <-
-                    allocateResource scratchScope
-                        (allocateSessionTemp root)
-                        (\(sessionId, _) -> do
-                            _ <- removeSessionTemp root sessionId
-                            pure ())
-                pure tempDir
-    setToolSessionTmp baseToolEnv (Just scratchSessionTmp)
-    _ <- allocateResource scratchScope
-        (pure ())
-        (\() -> clearMemoryOutputArtifacts baseToolEnv.toolOutputMemoryStore)
-    scratchImageGenerationHistory <- newImageGenerationHistory
-    forM_ resumed \(_, turns) ->
-        recordImageGenerationResponseItems
-            scratchImageGenerationHistory
-            (foldSessionItems turns)
-    scratchExternalSessionTools <-
-        if options.optSkills
-            && nativeCapabilities.nativeHostExtensions
-            then do
-                env <-
-                    defaultExternalSessionEnv
-                        baseToolEnv
-                        (unsafeToFilePath cwd)
-                        (unsafeToFilePath scratchSessionTmp)
-                        (unsafeToFilePath home)
-                pure [externalSessionTool env]
-            else pure []
-    _ <- allocateResource scratchScope
-        (acquireWorktreeLease (worktreeRoot home) cwd >>= \case
-            Left err -> startupDie startup err
-            Right lease -> pure lease)
-        (mapM_ releaseWorktreeLease)
-    _ <- allocateResource scratchScope
-        (acquireSessionTempLease root scratchSessionTmp >>= \case
-            Left err -> startupDie startup err
-            Right lease -> pure lease)
-        (mapM_ releaseSessionTempLease)
-    let scratchCleanup = closeResourceScope scratchScope
+                options root inferredTarget { targetDialect = dialectId }
+                gatewayIdentity (isNothing transition) cwd effortText promptText resumed
+            , resourceToolEnv = baseToolEnv
+            , resourceResumedTurns = maybe [] snd resumed
+            }
+        hooks = SessionResourceHooks
+            { resourcePersistenceReady = \persistence -> do
+                forM_ resumed \(meta, _) -> announceResumedSession startup meta
+                writeIORef persistSlotRef persistence
+            , resourceTaskPlanReady = \persistence ->
+                forM_ fullscreen \runtime ->
+                    reservedSessionId persistence >>= \case
+                        Nothing -> clearFullscreenHistorySource runtime
+                        Just sessionId ->
+                            setFullscreenHistorySource runtime sessionId
+                                (loadFullscreenHistoryPage
+                                    (trustedPool startup.startupDatabaseStore) root sessionId)
+                                (emptyFullscreenHistoryPage (HistoryGeneration 0))
+            , resourcePrepareHost = \sessionTmp ->
+                if options.optSkills && nativeCapabilities.nativeHostExtensions
+                    then do
+                        env <- defaultExternalSessionEnv baseToolEnv
+                            (unsafeToFilePath cwd)
+                            (unsafeToFilePath sessionTmp)
+                            (unsafeToFilePath home)
+                        pure [externalSessionTool env]
+                    else pure []
+            , resourceAcquireWorktreeLease =
+                acquireWorktreeLease (worktreeRoot home) cwd >>= \case
+                    Left err -> startupDie startup err
+                    Right lease -> pure (mapM_ releaseWorktreeLease lease)
+            }
+    resources <- prepareSessionResources request hooks
+        `catch` \(SessionResourceError err) -> startupDie startup err
+    let scratchPersistence = resources.resourcePersistence
+        scratchTaskPlan = resources.resourceTaskPlan
+        scratchSessionTmp = resources.resourceSessionTmp
+        scratchImageGenerationHistory = resources.resourceImageGenerationHistory
+        scratchExternalSessionTools = resources.resourceHost
+        scratchCleanup = resources.resourceCleanup
     pure ScratchRuntime{..}
 
 startStaleResourceCleanup

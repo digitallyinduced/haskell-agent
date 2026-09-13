@@ -1,10 +1,50 @@
 module Agent.TUI.FencedCodeSpec (spec) where
 
 import Agent.TUI.FencedCode
+import Control.Monad (forM_)
+import Data.Text (Text)
+import qualified Data.Text as Text
 import Test.Hspec
+import Test.Hspec.QuickCheck (prop)
+import Test.QuickCheck (elements, forAll, listOf, withMaxSuccess)
 
 spec :: Spec
 spec = describe "fencedBlocks" do
+    prop "preserves full-parser sections across generated fragment sequences" $
+        withMaxSuccess 1000 $ forAll
+            (listOf (elements
+                [ "text", "\n", "\n\n", " ", "    ", "- item\n", "  - inner\n"
+                , "```", "~~~", "`", "~", "hs", " trailing", "\r\n", "\r"
+                , "| x |", "中", "  continuation\n", "1. item\n"
+                ])) \fragments ->
+                let prefixes = scanl (<>) "" fragments
+                    states = scanl feedFenceStream emptyFenceStreamState fragments
+                in map fenceStreamSections states == map referenceSections prefixes
+
+    it "matches full parsing at every character boundary and arbitrary feed split" do
+        let documents =
+                [ "\n\n\n\nfirst **strong**\n\nsecond\n\n\n"
+                , "before\n```hs\none\n```\nbetween\n~~~sh\ntwo\n"
+                , "- outer\n  - inner\n\n    ```hs\n    x\n    ```\n\n  ~~~\n  y\n  ~~~\n"
+                , "````hs\n```\na\n````` trailing\n`````\n"
+                , "    ```ignored\nx\n   ~~~ diff\n-old\n+new\n  ~~~   \n"
+                , "| a | b |\n|---|---|\n| 中 | é |\n\nend"
+                , "```hs\r\nx\r\n```\r\n\r\nend"
+                , "- list\n  continuation\n\n    ```\n    body\n    ```\n"
+                ]
+        forM_ documents \document -> do
+            let fragments = map Text.singleton (Text.unpack document)
+                states = scanl feedFenceStream emptyFenceStreamState fragments
+                prefixes = scanl (<>) "" fragments
+            forM_ (zip prefixes states) \(prefix, state) ->
+                fenceStreamSections state `shouldBe` referenceSections prefix
+            forM_ [0 .. Text.length document] \offset ->
+                fenceStreamSections
+                    (feedFenceStream
+                        (feedFenceStream emptyFenceStreamState (Text.take offset document))
+                        (Text.drop offset document))
+                    `shouldBe` referenceSections document
+
     it "returns prose and fences in source order for rendering" do
         let chunks =
                 fenceChunks
@@ -110,3 +150,17 @@ spec = describe "fencedBlocks" do
 
     it "rejects backticks in a backtick fence info string" do
         fenceOpener "```lang`bad" `shouldBe` Nothing
+
+referenceSections :: Text -> [FenceSection]
+referenceSections = concatMap splitChunk . zip [1 ..] . fenceChunks
+  where
+    splitChunk (index, FenceBlock block) = [FenceCodeSection index block]
+    splitChunk (index, FenceText prose) = splitProse index 1 prose
+    splitProse index section prose
+        | Text.null prose = []
+        | otherwise = case Text.breakOn "\n\n" prose of
+            (_, suffix) | Text.null suffix ->
+                [FenceProseSection index section False prose]
+            (prefix, suffix) ->
+                FenceProseSection index section True (prefix <> "\n\n")
+                    : splitProse index (section + 1) (Text.drop 2 suffix)

@@ -37,6 +37,7 @@ module Agent.CLI.TUI.Types
     , ResumeActions(..)
     , ResumeOverlay(..)
     , choiceOverlay
+    , dismissPendingChoice
     , resumeOverlay
     , textOverlay
     , SyntaxHighlighterState(..)
@@ -54,6 +55,7 @@ import Agent.CLI.Command
     , parseReplLineWithCatalog
     )
 import Agent.CLI.Dictation (DictationTarget)
+import Agent.CLI.TUI.Composer.Undo (UndoEntry)
 import Agent.CLI.Input.Types (ReplLine)
 import Agent.CLI.Interrupt (CtrlCDecision)
 import Agent.CLI.Permission (PermissionChoice)
@@ -102,6 +104,9 @@ data Name
     | PlanningPanel
     | PlanningSubmit
     | ConversationBlock !AgentTarget !BlockId
+    | ConversationMessage !AgentTarget !BlockId
+    | ConversationLatest
+    | ConversationNewerGap
     | ConversationChunkCache
         !AgentTarget
         !BlockId
@@ -498,6 +503,14 @@ data ResumeActions = ResumeActions
 choiceOverlay :: AppState -> Maybe ChoiceOverlay
 choiceOverlay state = (.dialogOverlay) <$> state.appChoice
 
+-- | A replaced dialog must release its caller, never silently abandon an
+-- approval or question. Replacement has the same fail-closed result as Esc.
+dismissPendingChoice :: AppState -> IO ()
+dismissPendingChoice state =
+    case state.appChoice of
+        Nothing -> pure ()
+        Just pending -> pending.dialogReply Nothing
+
 resumeOverlay :: AppState -> Maybe ResumeOverlay
 resumeOverlay state = (.dialogOverlay) <$> state.appResume
 
@@ -527,8 +540,8 @@ data AppState = AppState
       -- | True while the previous composer key was a kill command, so a
       -- consecutive kill accumulates into the kill buffer readline-style.
     , appKillChain :: !Bool
-      -- | Editor undo log of (draft, cursor) states, most recent first.
-    , appUndo :: ![(Text, Int)]
+      -- | Compact editor undo snapshots, most recent first.
+    , appUndo :: ![UndoEntry]
     , appDictation :: !(Maybe DictationSession)
     , appSlashCatalog :: !SlashCatalog
     , appImagePreviews :: ![TuiImagePreview]

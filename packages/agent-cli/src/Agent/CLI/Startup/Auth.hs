@@ -9,7 +9,7 @@ module Agent.CLI.Startup.Auth
     , startupDie
     ) where
 
-import Agent.CLI.Auth
+import Agent.Accounts.Auth
     ( LoadedAuth(..)
     , authErrorNeedsOnboarding
     , geminiStartupAuthNeedsReconnect
@@ -18,7 +18,7 @@ import Agent.CLI.Auth
     , probeLoadedAuth
     )
 import Agent.CLI.Login (connectProviderAccount)
-import Agent.CLI.Models (ModelTarget(..))
+import Agent.Runtime.Models (ModelTarget(..))
 import Agent.CLI.Provider.Switch (loadSelectedAccountAuth)
 import Agent.CLI.ProviderTransition (ProviderTransition(..))
 import Agent.CLI.Runtime.Types

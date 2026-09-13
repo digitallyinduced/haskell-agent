@@ -2,6 +2,7 @@ module Main (main) where
 
 import Agent.CLI (run)
 import Control.Monad (when)
+import HeapDiagnostics (withHeapDiagnostics)
 import System.Directory (canonicalizePath, doesFileExist)
 import System.Environment (getExecutablePath, lookupEnv, setEnv)
 import System.FilePath ((</>), searchPathSeparator, takeDirectory)
@@ -10,7 +11,7 @@ import System.IO.Error (catchIOError)
 main :: IO ()
 main = do
     configurePortableBundle
-    run
+    withHeapDiagnostics run
 
 -- | Configure resources shipped next to the standalone macOS executable.
 --
@@ -33,7 +34,8 @@ configurePortableBundle = do
     portable <- doesFileExist marker
     when portable do
         setDefault "agent_cli_datadir" (share </> "agent-cli")
-        setDefault "agent_cli_runtime_datadir" (share </> "agent-cli-runtime")
+        setDefault "agent_runtime_datadir" (share </> "agent-runtime")
+        setDefault "agent_tools_datadir" (share </> "agent-tools")
         setDefault "agent_core_datadir" (share </> "agent-core")
         setDefault "AGENT_SYNTAX_DIR" (share </> "skylighting" </> "xml")
         setDefault "AGENT_POSTGRES_BIN" postgresBin

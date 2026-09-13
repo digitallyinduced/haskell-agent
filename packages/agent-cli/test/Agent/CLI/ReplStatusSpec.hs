@@ -26,9 +26,12 @@ import Agent.CLI
     )
 import Agent.CLI.Command (setModel, setReasoningEffort)
 import Agent.CLI.Input (terminalTextWidth)
-import Agent.CLI.Models (ModelOption(..), ModelTarget(..))
-import Agent.CLI.Status (formatContextUsage, formatTokenUsageOrZero)
-import Agent.CLI.ModelConfig
+import Agent.Runtime.Models (ModelOption(..), ModelTarget(..))
+import Agent.CLI.Status (formatContextUsage, formatTokenUsageOrZero, formatBackgroundTaskStatus)
+import Agent.Tools.Background (BackgroundTaskStatus(..))
+import Data.Time.Clock (UTCTime(..), addUTCTime)
+import Data.Time.Calendar (fromGregorian)
+import Agent.Runtime.ModelConfig
     ( ModelCatalog
     , decodeModelConfig
     , packagedModelCatalogPath
@@ -106,12 +109,19 @@ spec = do
             formatMcpModelNotice
                 [mcpStatus "fast" McpReady 2, mcpStatus "bad" (McpFailed "boom") 0]
                 `shouldBe`
-                    "<system-reminder>MCP status changed. Ready: fast. Unavailable: bad. Use mcp_search to discover currently available MCP tools and mcp_call to invoke one by its server__tool name.</system-reminder>"
+                    "<system-reminder>MCP status changed. Ready: fast. Unavailable: bad. Use tool_search to discover currently available MCP tools. Matching tools become available for direct invocation on the next model request.</system-reminder>"
             formatMcpModelNoticeFor
                 GrokBuildDialect
                 [mcpStatus "fast" McpReady 2]
                 `shouldBe`
                     "<system-reminder>MCP status changed. Ready: fast. Use search_tool to discover currently available MCP tools and use_tool to invoke one by its server__tool name.</system-reminder>"
+
+        it "preserves generic discovery guidance for other dialects" do
+            formatMcpModelNoticeFor
+                GenericResponsesDialect
+                [mcpStatus "fast" McpReady 2]
+                `shouldBe`
+                    "<system-reminder>MCP status changed. Ready: fast. Use mcp_search to discover currently available MCP tools and mcp_call to invoke one by its server__tool name.</system-reminder>"
 
     describe "accountSwitchTarget" do
         it "uses the destination provider default when changing provider" do
@@ -270,6 +280,48 @@ spec = do
                 withRestoredCurrentDirectory failAfterChangingDirectory
                     `shouldThrow` anyIOException
                 getCurrentDirectory `shouldReturn` original
+
+    describe "formatBackgroundTaskStatus" do
+        let started = UTCTime (fromGregorian 2026 9 12) 0
+            task = BackgroundTaskStatus "shell:1" "Release build" started True
+        it "hides the status when no managed work remains" do
+            formatBackgroundTaskStatus started True [] `shouldBe` []
+        it "shows the task count, elapsed time, and registered continuation" do
+            formatBackgroundTaskStatus (addUTCTime 272 started) True [task]
+                `shouldBe`
+                    [ "◌ 1 background task · 4m 32s · Release build"
+                    , "  Agent will resume when a shell task finishes."
+                    ]
+        it "does not promise continuation when retry is required" do
+            formatBackgroundTaskStatus started False [task]
+                `shouldBe` ["◌ 1 background task · 0s · Release build"]
+        it "does not promise continuation for unregistered tasks" do
+            formatBackgroundTaskStatus started True [task { taskAutoResume = False }]
+                `shouldBe` ["◌ 1 background task · 0s · Release build"]
+        it "counts multiple tasks and normalizes multiline command labels" do
+            let multiline = task { taskLabel = "release\n  build\tvalidation" }
+            formatBackgroundTaskStatus started False [multiline, task]
+                `shouldBe` ["◌ 2 background tasks · 0s · release build validation"]
+        it "clamps clock adjustments to zero elapsed time" do
+            formatBackgroundTaskStatus (addUTCTime (-1) started) False [task]
+                `shouldBe` ["◌ 1 background task · 0s · Release build"]
+        it "does not expose terminal controls from command labels" do
+            let unsafeTask = task { taskLabel = "\ESC[2Jbuild\BEL\DEL" }
+                rows = formatBackgroundTaskStatus started False [unsafeTask]
+            Text.concat rows `shouldSatisfy`
+                (not . Text.any (`elem` ['\ESC', '\BEL', '\DEL']))
+        it "bounds long command labels" do
+            let longTask = task { taskLabel = Text.replicate 200 "x" }
+            formatBackgroundTaskStatus started False [longTask]
+                `shouldBe`
+                    ["◌ 1 background task · 0s · " <> Text.replicate 99 "x" <> "…"]
+        it "limits continuation wording to shell tasks in a mixed snapshot" do
+            let cell = task { taskKey = "cell:1", taskLabel = "JavaScript cell", taskAutoResume = False }
+            formatBackgroundTaskStatus started True [cell, task]
+                `shouldBe`
+                    [ "◌ 2 background tasks · 0s · JavaScript cell"
+                    , "  Agent will resume when a shell task finishes."
+                    ]
 
     describe "formatReplStatusLine" do
         it "shows model, effort, interaction mode, and active account" do

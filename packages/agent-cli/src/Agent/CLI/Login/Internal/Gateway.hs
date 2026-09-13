@@ -6,8 +6,8 @@ module Agent.CLI.Login.Internal.Gateway
     ) where
 
 import Agent.CLI.Terminal (isSshSession, remoteLinkInstructions)
-import Agent.CLI.Error (formatException)
-import Agent.CLI.GatewayClient
+import Agent.Runtime.Error (formatException)
+import Agent.Runtime.GatewayClient
     ( GatewayAuthorization(..)
     , GatewayCredential(..)
     , GatewayDeviceAuthorization(..)
@@ -20,7 +20,7 @@ import Agent.CLI.GatewayClient
     , startGatewayAuthorization
     )
 import Agent.CLI.Input (readApprovalLine)
-import Agent.CLI.Login.Internal.Browser (openBrowser)
+import Agent.Runtime.Browser (openBrowser)
 import Agent.CLI.Login.Internal.Dashboard
     ( LoginNotice(..)
     , withLoginProgress

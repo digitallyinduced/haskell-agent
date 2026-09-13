@@ -1,6 +1,7 @@
 module Agent.TUI.ModelSpec (spec) where
 
 import Agent.TUI.Model
+import Agent.TUI.Markdown.Stream (emptyMarkdownStreamState, feedMarkdownStream, markdownStreamSnapshot)
 import Agent.TUI.Presentation
     ( TodoDisplayLine(..)
     , TodoDisplayStatus(..)
@@ -28,6 +29,63 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "fullscreen UI reducer" do
+    it "retains incremental assistant parsing across deltas and releases it at completion" do
+        let fragments = ["First paragraph.\n", "\n```haskell\n", "value = 1\n", "```\n"]
+            streaming = foldl' (flip (reduceUi . UiLoop . TextDelta)) initialUiState fragments
+            expected = feedMarkdownStream emptyMarkdownStreamState (Text.concat fragments)
+        fmap (markdownStreamSnapshot . snd) streaming.uiStreamingMarkdown
+            `shouldBe` Just (markdownStreamSnapshot expected)
+        fmap fst streaming.uiStreamingMarkdown `shouldBe` streaming.uiSelectedBlock
+        let completed = reduceUi (UiLoop (TurnFinished (emptyTurnOutput "r1" [] Nothing))) streaming
+        completed.uiStreamingMarkdown `shouldBe` Nothing
+
+    it "discards streaming parsing on cancellation, restart, clear, and non-assistant blocks" do
+        let streaming = reduceUi (UiLoop (TextDelta "paragraph\n\n```\npartial")) initialUiState
+        map (\event -> (reduceUi event streaming).uiStreamingMarkdown)
+            [ UiTurnEnded BlockCancelled
+            , UiTurnEnded BlockFailed
+            , UiTurnRestarted
+            , UiConversationCleared
+            , UiUserSubmitted "next question"
+            ] `shouldBe` replicate 5 Nothing
+
+    it "reconstructs missing assistant parser state before extending an existing block" do
+        let first = reduceUi (UiLoop (TextDelta "paragraph\n\n```\n")) initialUiState
+            recovered = reduceUi (UiLoop (TextDelta "body\n```")) first{uiStreamingMarkdown = Nothing}
+            expected = feedMarkdownStream emptyMarkdownStreamState "paragraph\n\n```\nbody\n```"
+        fmap (markdownStreamSnapshot . snd) recovered.uiStreamingMarkdown
+            `shouldBe` Just (markdownStreamSnapshot expected)
+
+    it "retains the same syntax at every reducer prefix, including empty deltas" do
+        let fragments = ["A **", "bold", "** [label](https://example.com", ")\n", "", "| A | B |\n", "| -", "-- | --- |\n", "| λ | `x|y` |"]
+            states = tail (scanl (flip (reduceUi . UiLoop . TextDelta)) initialUiState fragments)
+            sources = tail (scanl (<>) "" fragments)
+        map (fmap (markdownStreamSnapshot . snd) . (.uiStreamingMarkdown)) states
+            `shouldBe` map (Just . markdownStreamSnapshot . feedMarkdownStream emptyMarkdownStreamState) sources
+
+    it "does not reuse parser state belonging to another assistant block" do
+        let old = reduceUi (UiLoop (TextDelta "Unrelated **syntax")) initialUiState
+            submitted = reduceUi (UiUserSubmitted "next") old
+            current = reduceUi (UiLoop (TextDelta "Current `code")) submitted
+            stale = current{uiStreamingMarkdown = old.uiStreamingMarkdown}
+            recovered = reduceUi (UiLoop (TextDelta "` text")) stale
+            expected = feedMarkdownStream emptyMarkdownStreamState "Current `code` text"
+        fmap (markdownStreamSnapshot . snd) recovered.uiStreamingMarkdown
+            `shouldBe` Just (markdownStreamSnapshot expected)
+
+    it "updates background work without changing the draft or adding transcript blocks" do
+        let draft = reduceUi (UiSetDraft "follow-up message" 4) initialUiState
+            active = reduceUi (UiSetBackgroundTaskStatus ["1 background task"]) draft
+            completed = reduceUi (UiSetBackgroundTaskStatus []) active
+        active.uiBackgroundTaskStatus `shouldBe` ["1 background task"]
+        active.uiDraft `shouldBe` draft.uiDraft
+        active.uiCursor `shouldBe` draft.uiCursor
+        active.uiBlocks `shouldBe` draft.uiBlocks
+        completed.uiBackgroundTaskStatus `shouldBe` []
+    it "does not restore stale background work when the conversation is cleared" do
+        let active = reduceUi (UiSetBackgroundTaskStatus ["1 background task"]) initialUiState
+        (reduceUi UiConversationCleared active).uiBackgroundTaskStatus `shouldBe` []
+
     it "cycles across all four permission choices" do
         let shown = reduceUi (UiPermissionShown "write a file") initialUiState
             moved count = iterate (reduceUi (UiPermissionMoved 1)) shown !! count
@@ -405,6 +463,47 @@ spec = describe "fullscreen UI reducer" do
         map (.blockBody) (Foldable.toList state.uiBlocks)
             `shouldBe` ["failed partial", "complete retry"]
 
+    it "ignores unknown tool completions without reviving an idle turn" do
+        let result = ToolCallResult
+                { toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , callId = "late-nested-call"
+                , output = "done"
+                , callKind = FunctionCallKind
+                }
+            finished = apply
+                [ UiLoop TurnStarted
+                , UiLoop (TurnFinished (emptyTurnOutput "r1" [] (Just "done")))
+                ]
+            idle = reduceUi (UiSetAwaitingInput True) finished
+            writing = apply [UiLoop TurnStarted, UiLoop (TextDelta "next answer")]
+        mapM_ (\state -> reduceUi (UiLoop (ToolFinished result)) state
+            `shouldBe` state) [finished, idle, writing]
+
+    it "updates a late tracked tool result without reviving an idle turn" do
+        let call = functionToolCall "c1" "read_file" "{}"
+            result = ToolCallResult
+                { toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , callId = "c1"
+                , output = "contents"
+                , callKind = FunctionCallKind
+                }
+            idle = apply
+                [ UiLoop TurnStarted
+                , UiLoop (ToolStarted call)
+                , UiSetAwaitingInput True
+                ]
+            completed = reduceUi (UiLoop (ToolFinished result)) idle
+        completed.uiRunning `shouldBe` False
+        completed.uiAwaitingInput `shouldBe` True
+        completed.uiActivity `shouldBe` idle.uiActivity
+        completed.uiToolCalls `shouldBe` mempty
+        map (.blockState) (Foldable.toList completed.uiBlocks)
+            `shouldBe` [BlockComplete]
+
     it "matches tool completion by call id" do
         let call = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"git status\"}"
             result = ToolCallResult
@@ -711,6 +810,17 @@ spec = describe "fullscreen UI reducer" do
         polled.uiShellProcesses `shouldBe` mempty
         polled.uiShellPolls `shouldBe` mempty
 
+        let idle = reduceUi (UiSetAwaitingInput True) waiting
+            late = reduceUi
+                (UiLoop (ToolFinished (finished { callId = "poll-1" }))) idle
+        late.uiRunning `shouldBe` False
+        late.uiAwaitingInput `shouldBe` True
+        late.uiActivity `shouldBe` idle.uiActivity
+        late.uiShellPolls `shouldBe` mempty
+        late.uiShellProcesses `shouldBe` mempty
+        map (.blockState) (Foldable.toList late.uiBlocks)
+            `shouldBe` [BlockComplete]
+
     it "keeps the command tracked when an empty poll itself is cancelled" do
         let command =
                 functionToolCall
@@ -909,10 +1019,96 @@ spec = describe "fullscreen UI reducer" do
         case Foldable.toList state.uiBlocks of
             [block] -> do
                 block.blockKind `shouldBe` BlockShell
-                block.blockTitle `shouldBe` "$ exec"
+                block.blockTitle `shouldBe` "JavaScript execution"
                 block.blockDetail `shouldBe` source
                 blockCodeLanguage block `shouldBe` Just "javascript"
+                blockCodeLanguage block{blockTitle = "$ exec"}
+                    `shouldBe` Just "javascript"
+                block.blockExpanded `shouldBe` False
+                state.uiActivity `shouldBe` "JavaScript execution"
             _ -> expectationFailure "expected one running exec block"
+
+    it "keeps streaming exec source collapsed and retains it for expansion" do
+        let source = "const answer = await tools.read_file({target_file: \"A.hs\"});"
+            partialCall = customToolCall "c1" "exec" ""
+            call = customToolCall "c1" "exec" source
+            started = apply [UiLoop TurnStarted, UiLoop (ToolStarted partialCall)]
+            updated = reduceUi (UiLoop (ToolArgumentsUpdated call)) started
+            running = reduceUi (UiLoop (ToolStarted call)) updated
+            completed = reduceUi (UiLoop (ToolFinished
+                ToolCallResult
+                    { toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
+                    , callId = "c1"
+                    , output = "done"
+                    , callKind = CustomCallKind
+                    })) running
+            expanded = reduceUi UiToggleSelected completed
+        map (.blockExpanded) (Foldable.toList started.uiBlocks) `shouldBe` [False]
+        map (.blockExpanded) (Foldable.toList running.uiBlocks) `shouldBe` [False]
+        map (.blockExpanded) (Foldable.toList expanded.uiBlocks) `shouldBe` [True]
+        map (.blockDetail) (Foldable.toList expanded.uiBlocks) `shouldBe` [source]
+        running.uiActivity `shouldBe` "JavaScript execution"
+
+    it "retains independent parallel nested operations beside collapsed exec" do
+        let source = "await Promise.all([tools.inspect_configuration(), tools.inspect_dependencies()]);"
+            execution = customToolCall "c1" "exec" source
+            configurationCall = functionToolCall
+                "code-mode:1:inspect_configuration" "inspect_configuration" "{}"
+            dependenciesCall = functionToolCall
+                "code-mode:2:inspect_dependencies" "inspect_dependencies" "{}"
+            running = apply
+                [ UiLoop TurnStarted
+                , UiLoop (ToolStarted execution)
+                , UiLoop (ToolStarted configurationCall)
+                , UiLoop (ToolStarted dependenciesCall)
+                ]
+            dependenciesFinished = reduceUi (UiLoop (ToolFinished
+                ToolCallResult
+                    { toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
+                    , callId = "code-mode:2:inspect_dependencies"
+                    , output = "done"
+                    , callKind = FunctionCallKind
+                    })) running
+            configurationFailed = reduceUi (UiLoop (ToolFinished
+                ToolCallResult
+                    { toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
+                    , callId = "code-mode:1:inspect_configuration"
+                    , output = "Error: denied"
+                    , callKind = FunctionCallKind
+                    })) dependenciesFinished
+            executionFailed = reduceUi (UiLoop (ToolFinished
+                ToolCallResult
+                    { toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
+                    , callId = "c1"
+                    , output = "Error: nested operation failed"
+                    , callKind = CustomCallKind
+                    })) configurationFailed
+            blocks = Foldable.toList executionFailed.uiBlocks
+        map (.blockState) (Foldable.toList dependenciesFinished.uiBlocks)
+            `shouldBe` [BlockRunning, BlockRunning, BlockComplete]
+        map (.blockState) blocks `shouldBe` [BlockFailed, BlockFailed, BlockComplete]
+        map (.blockTitle) blocks
+            `shouldBe` ["JavaScript execution", "inspect_configuration", "inspect_dependencies"]
+        map (.blockBody) blocks
+            `shouldBe` ["Error: nested operation failed", "Error: denied", "done"]
+        Map.null executionFailed.uiToolCalls `shouldBe` True
+        case blocks of
+            block : _ -> do
+                block.blockExpanded `shouldBe` False
+                block.blockDetail `shouldBe` source
+                let expanded = reduceUi (UiActivateBlock block.blockId) executionFailed
+                fmap (.blockExpanded) (Foldable.find
+                    ((== block.blockId) . (.blockId)) expanded.uiBlocks)
+                    `shouldBe` Just True
+            _ -> expectationFailure "expected retained execution and nested operations"
 
     it "renders the public Grok terminal alias as a shell block" do
         let call = functionToolCall
@@ -2091,7 +2287,7 @@ spec = describe "fullscreen UI reducer" do
         map (.blockBody) (Foldable.toList state.uiBlocks)
             `shouldBe` ["keep the schema"]
         (.noticeText) <$> state.uiNotice
-            `shouldBe` Just "Steering the current turn…"
+            `shouldBe` Just "Guidance queued…"
 
     it "promotes a send-now draft ahead of existing queued inputs" do
         let state =

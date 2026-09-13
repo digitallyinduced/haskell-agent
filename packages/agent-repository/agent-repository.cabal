@@ -47,7 +47,7 @@ library
     exposed-modules:  Agent.CLI.RepositoryDelivery
                     , Agent.CLI.RepositoryDelivery.ConfirmationStore
                     , Agent.CLI.RepositoryReview
-    build-depends:    agent-cli-runtime >= 0.1 && < 0.2
+    build-depends:    agent-runtime >= 0.1 && < 0.2
                     , aeson >= 2.0
                     , async
                     , base >= 4.17 && < 5

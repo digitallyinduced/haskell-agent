@@ -12,10 +12,29 @@ module Agent.CLI.TUI.Scroll
     , reconcileConversationFollow
     , reflowConversationAnchor
     , startConversationAnchor
+    , conversationMessagesBelow
+    , conversationMessagesBelowLabel
     ) where
 
 import Agent.TUI.Model (BlockId)
 import Data.Text (Text)
+import qualified Data.Text as Text
+
+-- | Count message extents whose final rendered row is below the viewport.
+-- A partially visible message still has content to read. Zero-height hidden
+-- messages and padding outside message extents do not contribute.
+conversationMessagesBelow :: Int -> [(Int, Int)] -> Int
+conversationMessagesBelow bottom =
+    length . filter (\(top, height) -> height > 0 && top + height > bottom)
+
+conversationMessagesBelowLabel :: Bool -> Int -> Maybe Text
+conversationMessagesBelowLabel hasNewer count
+    | count <= 0 && not hasNewer = Nothing
+    | otherwise = Just $
+        "↓ " <> Text.pack (show (max 0 count))
+            <> (if hasNewer then "+" else "")
+            <> (if count == 1 && not hasNewer then " Message" else " Messages")
+            <> " · Click to resume"
 
 data ConversationPhase
     = ConversationFillingPage

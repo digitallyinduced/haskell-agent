@@ -5,8 +5,8 @@ module Agent.CLI.Session.Runner.Execution
     , runSession
     , applyNativeInteractionMode
     ) where
-import qualified Agent.CLI.Session.Activity as Activity
-import Agent.CLI.Session.Request
+import qualified Agent.Runtime.Session.Activity as Activity
+import Agent.Runtime.Session.Request
     ( readSessionRequestParams
     , readSessionRequestModel
     , modifySessionRequestOptions
@@ -16,27 +16,28 @@ import Agent.CLI.Claude
     ( ClaudeSessionRuntime(..)
     , installClaudeSessionRuntime
     )
-import Agent.CLI.Compaction
+import Agent.Runtime.Compaction.Provider
     ( AutomaticCompactionBoundary(..)
     , CompactOutcome(..)
     , CompactionInstall(CompactionInstalled)
     )
-import Agent.CLI.Compaction.Projection (occupancyOnTurnFinished)
+import Agent.Runtime.Compaction.Projection (occupancyOnTurnFinished)
 import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
 import Agent.CLI.Context (contextUsageTokens, formatContextReport)
 import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types (ResponseCreateParams(model))
-import Agent.CLI.ComputerUse (computerToolName)
+import Agent.ComputerUse (computerToolName)
 import Agent.CLI.Session.Runner.Types
     ( SessionRunnerContinuation(..) )
-import Agent.CLI.AgentViewport (AgentViewportEnv)
+import Agent.CLI.AgentViewport (AgentViewportEnv, agentSnapshot)
 import Agent.CLI.AgentViewport.Runtime
 import Agent.Tools.OutputArtifact
 import Agent.Tools.Background
-    ( setBackgroundTaskHooks )
+    ( setBackgroundTaskHooks, readBackgroundTasks, BackgroundTaskStatus(..) )
+import Data.List (sortOn)
 import Agent.CLI.SessionTitle
-import Agent.CLI.ManagedTurn
-import Agent.CLI.GatewayBridge
+import Agent.Runtime.ManagedTurn
+import Agent.Runtime.GatewayBridge
 import Agent.CLI.Notification
     ( AttentionRequest(PermissionRequested)
     , notifyAttention
@@ -77,11 +78,11 @@ import Agent.CLI.Project
 import Agent.CLI.Prompt
 import Agent.CLI.SessionState
 import Agent.CLI.Render
-import Agent.CLI.Session
-import Agent.CLI.Session.History
+import Agent.Runtime.Session
+import Agent.Runtime.Session.History
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
-import qualified Agent.CLI.Session.Observation as Observation
-import Agent.CLI.Session.Inbox
+import qualified Agent.Runtime.Session.Observation as Observation
+import Agent.Runtime.Session.Inbox
     ( newSessionInbox
     , releaseInboxPending
     , takeInboxMessage
@@ -89,7 +90,7 @@ import Agent.CLI.Session.Inbox
     )
 import Agent.CLI.SessionEnv
 import Agent.Runtime.SessionState qualified as RuntimeState
-import Agent.CLI.SessionLock
+import Agent.Runtime.SessionLock
     ( acquireSessionActivityLock
     , releaseSessionLock
     )
@@ -101,13 +102,14 @@ import Agent.CLI.Startup.Auth
 import Agent.CLI.Subagents.Runtime
 import Agent.CLI.Style
 import Agent.CLI.Terminal
-import Agent.CLI.Request
+import Agent.Runtime.ProviderRequest
 import Agent.CLI.Tools
-import Agent.CLI.ModelConfig
+import Agent.Runtime.ModelConfig
     ( catalogSupportsAsyncToolCallsForTransport
     )
-import Agent.CLI.Error
-import Agent.CLI.Dialects
+import Agent.Runtime.Error
+import Agent.Runtime.Database.Store (loadDatabaseMemoryContext)
+import Agent.Runtime.Tools.Dialects
 import Agent.CLI.Dictation (dictationTargetForSession)
 import Agent.CLI.TUI.App
 import Agent.CLI.TUI.Composer (appendFullscreenInput)
@@ -412,6 +414,7 @@ withSessionTitleRuntime host SessionRequest{..} SessionBackend{..} =
 -- viewport. Allocation and viewport registration form one startup phase.
 data SessionControlRuntime = SessionControlRuntime
     { controlToolRegistry :: !ToolRegistry
+    , controlCurrentToolRegistry :: !(IORef ToolRegistry)
     , controlSteeringInputs :: !SteeringInputs
     , controlSpinnerRef :: !(IORef (Maybe (Async ())))
     , controlRenderStateRef :: !(IORef RenderState)
@@ -429,6 +432,7 @@ data SessionControlRuntime = SessionControlRuntime
 
 installBackgroundTaskSteering :: ToolEnv -> SteeringInputs -> IO ()
 installBackgroundTaskSteering toolEnv steeringInputs = do
+    setToolSteeringWait toolEnv (awaitUserSteering steeringInputs)
     enqueueCompletion <- prepareBackgroundCompletion steeringInputs
     setBackgroundTaskHooks toolEnv BackgroundTaskHooks
         { backgroundTaskCompleted = \notice ->
@@ -449,6 +453,7 @@ newSessionControlRuntime
     -> IO SessionControlRuntime
 newSessionControlRuntime host SessionRequest{..} = do
     toolRegistry <- requireToolRegistry allTools
+    currentToolRegistry <- newIORef toolRegistry
     steeringInputs <- newSteeringInputs
     installBackgroundTaskSteering toolEnv steeringInputs
     spinnerRef <- newIORef Nothing
@@ -537,11 +542,12 @@ newSessionControlRuntime host SessionRequest{..} = do
         (loadAgentSnapshot agentViewportRuntime False)
     forM_ startup.startupNativeHooks \hooks ->
         hooks.nativeRegisterAgentSnapshot
-            (snd <$> loadAgentSnapshot agentViewportRuntime False)
+            (map agentSnapshot . snd <$> loadAgentSnapshot agentViewportRuntime False)
     writeIORef startup.startupAgentSelect
         (selectAgentViewport agentViewportRuntime)
     pure SessionControlRuntime
         { controlToolRegistry = toolRegistry
+        , controlCurrentToolRegistry = currentToolRegistry
         , controlSteeringInputs = steeringInputs
         , controlSpinnerRef = spinnerRef
         , controlRenderStateRef = renderStateRef
@@ -601,6 +607,21 @@ buildSkillContextRuntime
         loadApplicableLearnedSkillsForStore
             startup.startupDatabaseStore
             databaseScopes
+    installDatabaseMemory context = do
+        loaded <- loadDatabaseMemoryContext
+            startup.startupDatabaseStore databaseScopes
+        case loaded of
+            Left err -> do
+                reportLearnedSkillWarning
+                    ("structured memory catalog unavailable: " <> err)
+                queueDatabaseMemory context
+                    "<structured-memory>\n## Available structured memory\nThe current catalog could not be loaded. Earlier table listings may be stale; use database_schema to discover current tables before querying or creating memory.\n</structured-memory>"
+            Right catalog -> queueDatabaseMemory context catalog
+    queueDatabaseMemory context catalog =
+        atomicModifyIORef' context \current ->
+            ( Just $ maybe catalog (\existing -> existing <> "\n\n" <> catalog) current
+            , ()
+            )
     installLearnedSkills context maximum queueContext =
         loadLearnedSkills
             >>= installLearnedSkillResult context maximum queueContext
@@ -651,6 +672,7 @@ buildSkillContextRuntime
             freshAgents
             defaultLearnedSkillContextMaxChars
             True
+        installDatabaseMemory freshAgents
         fresh <- readIORef freshAgents
         writeIORef startupContext fresh
     sessionReset = do
@@ -777,6 +799,9 @@ buildSkillContextRuntime
                         queueInitialContext
                         loaded
                 else pure []
+        -- Unlike a persisted instruction snapshot, the memory catalog must
+        -- reflect tables created by other sessions before this resume.
+        installDatabaseMemory startupContext
         callbacks.runnerFinishStartup startup
         pure learnedSkills
 
@@ -927,9 +952,11 @@ buildSessionLoopEventRuntime
 
 data SessionApprovalRuntime = SessionApprovalRuntime
     { approvalApproveClassified
-        :: !(Maybe Bool -> ToolCall -> IO (Either Text.Text Bool))
+        :: !(Maybe Bool -> ToolCall -> IO ToolApproval)
     , approvalApproveRegistered
-        :: !(ToolCall -> IO (Either Text.Text Bool))
+        :: !(ToolCall -> IO ToolApproval)
+    , approvalApproveSnapshot
+        :: !(ToolRegistry -> ToolCall -> IO ToolApproval)
     }
 
 buildSessionApprovalRuntime
@@ -941,9 +968,13 @@ buildSessionApprovalRuntime host controls SessionRequest{..} =
     SessionApprovalRuntime
         { approvalApproveClassified = approveToolWithClassification
         , approvalApproveRegistered = approveRegisteredTool
+        , approvalApproveSnapshot = \registry ->
+            approveToolWithRegistry (pure registry) Nothing
         }
   where
-    approveToolWithClassification classifiedReadOnly call =
+    approveToolWithClassification =
+        approveToolWithRegistry (readIORef controls.controlCurrentToolRegistry)
+    approveToolWithRegistry readRegistry classifiedReadOnly call =
         withMVar host.hostApprovalLock \_ ->
             chooseApproval
       where
@@ -989,7 +1020,8 @@ buildSessionApprovalRuntime host controls SessionRequest{..} =
                                                         message))))
                                 (saveProjectAutoApprove workspace.projectRoot True)
         classify = const (pure classifiedReadOnly)
-        approve request report persist =
+        approve request report persist = do
+            registry <- readRegistry
             approveToolDecisionWithReporterAndPersistenceClassifiedWithPrompt
                 classify
                 (\requiresExplicit requested ->
@@ -1004,7 +1036,7 @@ buildSessionApprovalRuntime host controls SessionRequest{..} =
                 persist
                 policyRef
                 controls.controlAllowedToolsRef
-                controls.controlToolRegistry
+                registry
                 planMode
                 call
         -- Existing managed protocols do not carry once-only
@@ -1082,15 +1114,15 @@ buildSessionShellRuntime host controls SessionRequest{..} =
                     ("Tool " <> call.name
                         <> " is disabled by the current /shell setting.")
             else Nothing
-    activeSessionTools ghciEnabled bashEnabled computerUseEnabled =
+    activeSessionTools available ghciEnabled bashEnabled computerUseEnabled =
         filterComputerUseTools computerUseEnabled $
             filterGhciTools ghciEnabled
-                (filterBashTools bashEnabled sessionTools)
-    providerVisibleTools enabledTools =
+                (filterBashTools bashEnabled available)
+    providerVisibleTools wireTools enabledTools =
         case codeModeRuntime of
             Nothing -> enabledTools
             Just runtime ->
-                runtime.codeModeWireTools
+                wireTools
                     <> (projectCodeModeToolsFor
                             runtime.codeModeProjectionStrategy
                             enabledTools
@@ -1111,8 +1143,10 @@ buildSessionShellRuntime host controls SessionRequest{..} =
         ghciEnabled <- readIORef ghciEnabledRef
         bashEnabled <- readIORef bashEnabledRef
         computerUseEnabled <- readIORef computerUseEnabledRef
+        discovered <- maybe (pure []) id deferredTools
         let active =
                 activeSessionTools
+                    (sessionTools <> discovered)
                     ghciEnabled
                     bashEnabled
                     computerUseEnabled
@@ -1156,11 +1190,29 @@ buildSessionShellRuntime host controls SessionRequest{..} =
         sessionTmp <- readIORef toolEnv.toolSessionTmp
         effectiveModel <- readSessionRequestModel paramsRef
         today <- utctDay <$> getCurrentTime
+        discovered <- maybe (pure []) id deferredTools
         let enabledTools =
                 activeSessionTools
+                    (sessionTools <> discovered)
                     ghciEnabled
                     bashEnabled
                     computerUseEnabled
+        wireTools <- case codeModeRuntime of
+            Nothing -> pure []
+            Just runtime ->
+                case deferredTools of
+                    Nothing -> pure runtime.codeModeWireTools
+                    Just _ ->
+                        runtime.codeModeRefreshTools enabledTools >>=
+                            either (fail . Text.unpack) pure
+        case deferredTools of
+            Nothing -> pure ()
+            Just _ -> do
+                registry <- requireToolRegistry $
+                    sessionDirectTools allTools codeModeRuntime
+                        <> discovered <> wireTools
+                writeIORef controls.controlCurrentToolRegistry registry
+        let
             enabledNames = map (.appToolName) enabledTools
             instructionText =
                 appendMcpInstructions mcpInstructions case codexCatalogSession of
@@ -1191,7 +1243,7 @@ buildSessionShellRuntime host controls SessionRequest{..} =
                             nativeCapabilities.nativeProviderHostedTools
                             modelSupportsAsync
                             dialect
-                            (providerVisibleTools enabledTools)
+                            (providerVisibleTools wireTools enabledTools)
                     Nothing ->
                         schemasFromAppToolsWithHostedSearchAndAsyncCapability
                             nativeCapabilities.nativeProviderHostedTools
@@ -1314,6 +1366,12 @@ buildSessionLoopConfig
                 commitLiveBackendState conversationRef
             }
         , loopTools = controls.controlToolRegistry
+        , loopReadTools =
+            case deferredTools of
+                Nothing -> Nothing
+                Just _ -> Just do
+                    shellRuntime.shellRefreshRequestParams
+                    readIORef controls.controlCurrentToolRegistry
         , loopDispatch =
             defaultLoopDispatch
                 { toolDispatchFinalizeOutput = \call output ->
@@ -1325,7 +1383,7 @@ buildSessionLoopConfig
         , loopOnEvent = eventRuntime.loopEventEmit
         , loopApprove = \call ->
             shellRuntime.shellToolDisabledReason call >>= \case
-                Just reason -> pure (Left reason)
+                Just reason -> pure (ToolApprovalDenied reason)
                 Nothing -> approvalRuntime.approvalApproveRegistered call
         , loopReadSteering =
             readSteeringInputs controls.controlSteeringInputs
@@ -1345,7 +1403,7 @@ installSessionToolRuntimes
     -> LoopConfig
     -> IO ()
 installSessionToolRuntimes
-        host controls SessionRequest{..}
+        host _controls SessionRequest{..}
         eventRuntime shellRuntime approvalRuntime config = do
     installClaudeSessionRuntime claudeRuntimeSlot ClaudeSessionRuntime
         { approveNativeTool = \call readOnly ->
@@ -1357,19 +1415,20 @@ installSessionToolRuntimes
             host.hostNativeCapabilities.nativeProviderNativeTools
         }
     forM_ ((.codeModeNestedSlot) <$> codeModeRuntime) \slot ->
-        setCodeModeNestedInvoke slot \call -> do
+        setCodeModeNestedInvoke slot \tool call -> do
+            registry <- requireToolRegistry [tool]
             shellRuntime.shellToolDisabledReason call >>= \case
                 Just reason -> pure (Left reason)
                 Nothing ->
-                    approvalRuntime.approvalApproveRegistered call >>= \case
-                        Left denial -> pure (Left denial)
-                        Right False ->
+                    approvalRuntime.approvalApproveSnapshot registry call >>= \case
+                        ToolApprovalDenied denial -> pure (Left denial)
+                        ToolApprovalRejected ->
                             pure (Left "Tool call rejected by user.")
-                        Right True -> do
+                        ToolApprovalGranted -> do
                             eventRuntime.loopEventEmit (ToolStarted call)
                             result <- dispatchApprovedRegisteredToolCall
                                 config.loopDispatch
-                                controls.controlToolRegistry
+                                registry
                                 call
                             eventRuntime.loopEventEmit (ToolFinished result)
                             pure (Right result)
@@ -1589,6 +1648,11 @@ buildSessionEnv
     SessionEnv
         { sessionLoop = loopRuntime.loopRuntimeConfig
         , sessionSteeringInputs = controls.controlSteeringInputs
+        , sessionReadBackgroundTasks = do
+            shellTasks <- readBackgroundTasks toolEnv
+            codeCells <- maybe (pure []) (.codeModeReadBackgroundTasks) codeModeRuntime
+            pure $ sortOn (\task -> (task.taskStartedAt, task.taskKey))
+                (shellTasks <> codeCells)
         , sessionModelInfo = modelInfo
         , sessionBtwBackend = btwBackend
         , sessionQueueRecap = writeChan recapRequests

@@ -1,11 +1,12 @@
 module Agent.CLI.ProviderFallbackSpec (spec) where
 
-import Agent.CLI.ModelConfig
+import Agent.Runtime.ModelConfig
     ( ModelCatalog
     , decodeModelConfig
     , packagedModelCatalogPath
     )
-import Agent.CLI.Models (ModelOption(..), ModelTarget(..))
+import Agent.CLI.AccountSelection (SelectedAccount(..))
+import Agent.Runtime.Models (ModelOption(..), ModelTarget(..), rawModelOption)
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
     , automaticCooldownRetryDelay
@@ -14,7 +15,9 @@ import Agent.CLI.ProviderFallback
     , ProviderRecoveryPreference(..)
     , providerRecoveryPreference
     , rankedModels
+    , selectAutomaticProviderCandidateWith
     )
+import Agent.Dialect (DialectId(..))
 import Agent.Error
     ( ApiError(..)
     , ErrorType(..)
@@ -22,6 +25,7 @@ import Agent.Error
     )
 import Agent.Provider (BillingMode(..), Provider(..))
 import qualified Data.ByteString.Lazy as LBS
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import qualified Data.Set as Set
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
@@ -31,6 +35,86 @@ import Test.Hspec
 spec :: Spec
 spec = do
     catalog <- runIO readPackagedCatalog
+    describe "selectAutomaticProviderCandidateWith" do
+        let openai = rawModelOption OpenAIProvider "gpt-6-astra"
+            grok = rawModelOption XAIProvider "grok-4.6"
+            gemini = rawModelOption GeminiProvider "gemini-3.7-flash"
+            ignoreSkipped _ _ = pure ()
+
+        it "does no resolution, validation, or reporting for no candidates" do
+            let unexpected = fail "unexpected candidate effect"
+            selectAutomaticProviderCandidateWith
+                (const unexpected) (const (unexpected :: IO (Either Text.Text ())))
+                (\_ _ -> unexpected) OpenAIProvider Set.empty []
+                `shouldReturn` Nothing
+
+        it "resolves before validating and returns the selected account unchanged" do
+            events <- newIORef ([] :: [Text.Text])
+            let resolved = openai
+                    { modelTarget = openai.modelTarget { targetDialect = GrokBuildDialect } }
+                account = SelectedAccount OpenAIProvider "selection-id"
+                    "account-id" SubscriptionBilled "selected account"
+                resolve choice = do
+                    choice `shouldBe` openai
+                    modifyIORef' events (<> ["resolve"])
+                    pure resolved
+                validate choice = do
+                    choice `shouldBe` resolved
+                    modifyIORef' events (<> ["validate"])
+                    pure (Right (Just account))
+                unavailable = Set.singleton GeminiProvider
+            selectAutomaticProviderCandidateWith resolve validate
+                (\_ _ -> expectationFailure "successful candidate was skipped")
+                OpenAIProvider unavailable [openai, grok]
+                `shouldReturn` Just (resolved, Just account, unavailable)
+            readIORef events `shouldReturn` ["resolve", "validate"]
+
+        it "filters every remaining model of a rejected provider and retains prior failures" do
+            events <- newIORef ([] :: [Text.Text])
+            let resolve choice = do
+                    modifyIORef' events (<> ["resolve " <> choice.modelTarget.targetModelId])
+                    pure choice
+                validate choice = do
+                    modifyIORef' events (<> ["validate " <> choice.modelTarget.targetModelId])
+                    pure $ if choice.modelTarget.targetProvider == XAIProvider
+                        then Left "no usable account"
+                        else Right (Nothing :: Maybe SelectedAccount)
+                skipped provider err = do
+                    provider `shouldBe` XAIProvider
+                    err `shouldBe` "no usable account"
+                    modifyIORef' events (<> ["skip"])
+            selectAutomaticProviderCandidateWith resolve validate skipped
+                OpenAIProvider (Set.singleton OpenRouterProvider)
+                [grok, rawModelOption XAIProvider "another-grok", gemini, openai]
+                `shouldReturn` Just
+                    ( gemini, Nothing
+                    , Set.fromList [OpenRouterProvider, XAIProvider, OpenAIProvider]
+                    )
+            readIORef events `shouldReturn`
+                [ "resolve grok-4.6", "validate grok-4.6", "skip"
+                , "resolve gemini-3.7-flash", "validate gemini-3.7-flash"
+                ]
+
+        it "keeps the current provider available after an earlier rejection" do
+            let validate choice = pure $
+                    if choice.modelTarget.targetProvider == XAIProvider
+                        then Left "unavailable"
+                        else Right ()
+            selectAutomaticProviderCandidateWith pure validate ignoreSkipped
+                OpenAIProvider Set.empty [grok, openai]
+                `shouldReturn` Just (openai, (), Set.singleton XAIProvider)
+
+        it "returns no selection after exhausting providers and reports each once" do
+            skipped <- newIORef []
+            selectAutomaticProviderCandidateWith pure
+                (const (pure (Left "unavailable" :: Either Text.Text ())))
+                (\provider err -> modifyIORef' skipped (<> [(provider, err)]))
+                OpenAIProvider Set.empty
+                [grok, gemini, rawModelOption XAIProvider "another-grok"]
+                `shouldReturn` Nothing
+            readIORef skipped `shouldReturn`
+                [(XAIProvider, "unavailable"), (GeminiProvider, "unavailable")]
+
     describe "allowsAutomaticBillingFallback" do
         it "blocks subscription-to-API-credit fallback" do
             allowsAutomaticBillingFallback

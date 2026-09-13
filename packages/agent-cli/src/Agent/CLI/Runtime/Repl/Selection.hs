@@ -6,7 +6,7 @@ module Agent.CLI.Runtime.Repl.Selection
     , selectRequestedAccount
     ) where
 
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( readSessionRequestParams
     , modifySessionRequestOptions
     )
@@ -21,21 +21,21 @@ import Agent.CLI.AccountPicker
       accountPickerRow,
       loadAllAccountPickerOptions,
       loadAllAccountPickerOptionsCached )
-import Agent.CLI.Auth ( geminiAuthErrorNeedsReconnect )
+import Agent.Accounts.Auth ( geminiAuthErrorNeedsReconnect )
 import Agent.CLI.Command
     ( currentEffort,
       currentModel,
       SelectionAction(ReplSetModel, ReplShowEffort, ReplSetEffort, ReplToggleFast,
                  ReplShowModel, ReplShowTheme, ReplSetTheme) )
-import Agent.CLI.Config
+import Agent.Runtime.Config
     ( HarnessConfig(configTheme)
     , updateHarnessConfig
     )
-import Agent.CLI.Error ( formatApiErrorInlineAt )
-import Agent.CLI.GatewayClient ( refreshGatewayModels )
+import Agent.Runtime.Error ( formatApiErrorInlineAt )
+import Agent.Runtime.GatewayClient ( refreshGatewayModels )
 import Agent.CLI.GatewayModels (modelOptionsForGatewayModels)
 import Agent.CLI.Login ( connectProviderAccount )
-import Agent.CLI.Models
+import Agent.Runtime.Models
     ( gatewayModelOptions,
       modelTargetRequiresRebuild,
       rawModelOption,

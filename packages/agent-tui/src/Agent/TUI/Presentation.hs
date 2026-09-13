@@ -66,7 +66,7 @@ import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Char (isDigit, isSpace)
 import qualified Data.Foldable as Foldable
 import Data.List (sortOn)
-import Data.Maybe (fromMaybe, mapMaybe, maybeToList)
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -77,6 +77,8 @@ summarizeToolCall = summarizeToolCallRelative ""
 -- | Like 'summarizeToolCall', but filesystem paths inside the workspace are
 -- shown relative to that workspace.
 summarizeToolCallRelative :: Text -> ToolCall -> Text
+summarizeToolCallRelative _ call
+    | canonicalToolName call.name == "exec" = "JavaScript execution"
 summarizeToolCallRelative workspace call =
     let verb = case canonicalToolName call.name of
             "mcp_call" -> mcpCallDisplayName call.arguments
@@ -135,7 +137,7 @@ toolCallTitle = toolCallTitleRelative ""
 toolCallTitleRelative :: Text -> ToolCall -> Text
 toolCallTitleRelative workspace call
     | canonicalToolName call.name == "run_ghci" = "$ ghci"
-    | canonicalToolName call.name == "exec" = "$ exec"
+    | canonicalToolName call.name == "exec" = "JavaScript execution"
     | otherwise = summarizeToolCallRelative workspace call
 
 -- | Separate a filesystem action from its path so renderers can style the
@@ -1282,7 +1284,3 @@ askUserQuestionDetail arguments =
 decodeMaybe :: Hermes.Decoder a -> Text -> Maybe a
 decodeMaybe decoder input =
     either (const Nothing) Just (Hermes.decodeText decoder input)
-
-listToMaybe :: [a] -> Maybe a
-listToMaybe [] = Nothing
-listToMaybe (x : _) = Just x

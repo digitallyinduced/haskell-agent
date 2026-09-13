@@ -26,6 +26,7 @@ module Agent.Gemini.Auth
     , pkceChallenge
     ) where
 
+import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
     ( newEmptyMVar
@@ -55,7 +56,7 @@ import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
 import Data.Bifunctor (first)
 import Data.Char (isDigit, toLower)
-import Data.List (find)
+import Data.List (dropWhileEnd, find)
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -232,7 +233,7 @@ codeAssistOptionsFromEnv = do
         defaultCodeAssistOptions.baseUrl
     googleCloudProject <- nonEmptyEnv "GOOGLE_CLOUD_PROJECT"
     googleCloudProjectId <- nonEmptyEnv "GOOGLE_CLOUD_PROJECT_ID"
-    let configuredProject = googleCloudProject `orElse` googleCloudProjectId
+    let configuredProject = googleCloudProject <|> googleCloudProjectId
     pure defaultCodeAssistOptions { baseUrl, configuredProject }
 
 data CodeAssistUser = CodeAssistUser
@@ -352,7 +353,7 @@ refreshAccessToken options oldRefreshToken = do
         (\(tokens :: OAuthTokens) -> OAuthTokens
             { accessToken = tokens.accessToken
             , refreshToken =
-                tokens.refreshToken `orElse` Just oldRefreshToken
+                tokens.refreshToken <|> Just oldRefreshToken
             , expiresInSeconds = tokens.expiresInSeconds
             , tokenType = tokens.tokenType
             , scope = tokens.scope
@@ -404,8 +405,8 @@ setupCodeAssistWithValidation options bearerToken validationPresenter =
                 { projectId = project
                 , userTier =
                     fromMaybe "standard-tier"
-                        (paidTierId `orElse` tier.tierId)
-                , userTierName = paidTierName `orElse` tier.name
+                        (paidTierId <|> tier.tierId)
+                , userTierName = paidTierName <|> tier.name
                 }
         Nothing -> do
             let tier = fromMaybe legacyTier
@@ -727,7 +728,7 @@ renderOperationError operationError =
 
 requireProject :: LoadResponse -> Maybe Text -> IO Text
 requireProject response configured = case
-    response.cloudaicompanionProject `orElse` configured of
+    response.cloudaicompanionProject <|> configured of
         Just project | not (Text.null (Text.strip project)) -> pure project
         _ -> fail
             "This Google account requires GOOGLE_CLOUD_PROJECT or GOOGLE_CLOUD_PROJECT_ID"
@@ -904,11 +905,7 @@ randomUrlText bytes =
     TextEncoding.decodeUtf8 . Base64Url.encodeUnpadded <$> getEntropy bytes
 
 trimSlash :: String -> String
-trimSlash = reverse . dropWhile (== '/') . reverse
-
-orElse :: Maybe value -> Maybe value -> Maybe value
-orElse (Just value) _ = Just value
-orElse Nothing right = right
+trimSlash = dropWhileEnd (== '/')
 
 nonEmptyEnv :: String -> IO (Maybe Text)
 nonEmptyEnv key = lookupEnv key >>= \case

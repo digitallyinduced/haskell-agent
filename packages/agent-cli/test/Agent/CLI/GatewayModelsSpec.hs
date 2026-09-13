@@ -1,7 +1,7 @@
 module Agent.CLI.GatewayModelsSpec (spec) where
 
 import Agent.CLI.GatewayModels
-import Agent.CLI.GatewayClient
+import Agent.Runtime.GatewayClient
     ( GatewayModel(..)
     , GatewayModelProtocol(..)
     , GatewayModelProvider(..)
@@ -14,11 +14,11 @@ import Agent.CLI.GatewayClient
     )
 import Agent.CLI.AgentViewport (AgentTarget(AgentRoot))
 import Agent.CLI.Interrupt (CtrlCDecision(WarnExit))
-import Agent.CLI.ModelConfig
+import Agent.Runtime.ModelConfig
 import Agent.CLI.ModelPicker
     ( ModelPickerSelection(..), ModelPickerState(..), initialModelPickerState
     , refreshModelPickerState, applyModelPickerEvent )
-import Agent.CLI.Models
+import Agent.Runtime.Models
     ( ModelOption(..), ModelTarget(..), PickerState(..), PickerEvent(..)
     , initialPickerStateForOptions, selectedOption )
 import Agent.CLI.Session.Choices (modelChoiceWithEffort)

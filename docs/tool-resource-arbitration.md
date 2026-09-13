@@ -81,14 +81,14 @@ Development checks use GHCi:
 ```sh
 cabal repl agent-core:lib:agent-core \
   agent-codex-dialect:lib:agent-codex-dialect \
-  agent-cli-runtime:lib:agent-cli-runtime agent-cli:lib:agent-cli
+  agent-runtime:lib:agent-runtime agent-cli:lib:agent-cli
 cabal repl agent-core:test:agent-core-test
 # :main --match "shared tool resource arbiter"
 # :main --match grepTool
 # hspec (ReadFileSpec.spec >> ListDirSpec.spec >> ShowImageSpec.spec >> ViewImageSpec.spec)
 cabal repl agent-codex-dialect:test:agent-codex-dialect-test
 # :main
-cabal repl agent-cli-runtime:test:agent-cli-runtime-test
+cabal repl agent-runtime:test:agent-runtime-test
 # :main --match "shared native process resources"
 ```
 

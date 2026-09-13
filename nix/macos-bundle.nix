@@ -2,7 +2,8 @@
     pkgs,
     agentCli,
     agentCliSource,
-    agentCliRuntimeSource,
+    agentRuntimeSource,
+    agentToolsSource,
     agentCoreSource,
     skylightingSyntaxes,
     bun,
@@ -88,7 +89,8 @@ let
                 "$postgresRoot/lib" \
                 "$postgresRoot/share" \
                 "$out/share/agent-cli" \
-                "$out/share/agent-cli-runtime" \
+                "$out/share/agent-runtime" \
+                "$out/share/agent-tools" \
                 "$out/share/agent-core" \
                 "$out/share/haskell-agent" \
                 "$out/share/skylighting" \
@@ -116,8 +118,9 @@ let
 
             cp -R ${agentCliSource}/data "$out/share/agent-cli/"
             cp -R ${agentCliSource}/skills "$out/share/agent-cli/"
-            cp -R ${agentCliRuntimeSource}/config \
-                "$out/share/agent-cli-runtime/"
+            cp -R ${agentRuntimeSource}/config \
+                "$out/share/agent-runtime/"
+            cp -R ${agentToolsSource}/data "$out/share/agent-tools/"
             cp -R ${agentCoreSource}/data "$out/share/agent-core/"
             cp -R ${skylightingSyntaxes}/share/skylighting/xml \
                 "$out/share/skylighting/"
@@ -276,8 +279,8 @@ let
                 --encoding=UTF8 \
                 --auth=trust
 
-            test -f "$out/share/agent-cli-runtime/config/models.default.json"
-            test -f "$out/share/agent-core/data/code-mode/worker.mjs"
+            test -f "$out/share/agent-runtime/config/models.default.json"
+            test -f "$out/share/agent-tools/data/code-mode/worker.mjs"
             test -f "$out/share/haskell-agent/portable"
 
             is_macho() {

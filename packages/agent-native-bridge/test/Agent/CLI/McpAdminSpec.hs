@@ -1,6 +1,6 @@
 module Agent.CLI.McpAdminSpec (spec) where
 
-import Agent.CLI.Config
+import Agent.Runtime.Config
     ( HarnessConfig(..)
     , McpServerConfig(..)
     , defaultHarnessConfig

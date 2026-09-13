@@ -35,6 +35,7 @@ import Agent.Tools.PlanMode
     , writePlanMarkdown
     )
 import Agent.Tools.ShellReadOnly (shellCommandIsReadOnly)
+import Agent.Tools.Types (ToolApproval(..))
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Functor ((<&>))
@@ -51,9 +52,9 @@ import qualified Data.Text.Encoding as TextEncoding
 
 data ClaudeSessionRuntime = ClaudeSessionRuntime
     { approveNativeTool
-        :: !(ToolCall -> Maybe Bool -> IO (Either Text Bool))
+        :: !(ToolCall -> Maybe Bool -> IO ToolApproval)
     , approveRegisteredTool
-        :: !(ToolCall -> IO (Either Text Bool))
+        :: !(ToolCall -> IO ToolApproval)
     , planMode :: !PlanModeEnv
     , providerNativeToolsEnabled :: !Bool
     }
@@ -75,10 +76,10 @@ installClaudeSessionRuntime (ClaudeSessionRuntimeSlot ref) =
 approveClaudeRegisteredTool
     :: ClaudeSessionRuntimeSlot
     -> ToolCall
-    -> IO (Either Text Bool)
+    -> IO ToolApproval
 approveClaudeRegisteredTool (ClaudeSessionRuntimeSlot ref) call =
     readIORef ref >>= \case
-        Nothing -> pure (Left "The host approval pipeline is not ready.")
+        Nothing -> pure (ToolApprovalDenied "The host approval pipeline is not ready.")
         Just runtime -> runtime.approveRegisteredTool call
 
 handleClaudePermissionRequest
@@ -141,11 +142,11 @@ approveNative runtime request = do
                 (encodeValue request.input)
         readOnly = nativeClaudeToolReadOnly call
     runtime.approveNativeTool call (Just readOnly) >>= \case
-        Left message ->
+        ToolApprovalDenied message ->
             pure (deny message)
-        Right False ->
+        ToolApprovalRejected ->
             pure (deny "Tool call rejected by user.")
-        Right True ->
+        ToolApprovalGranted ->
             pure ClaudeCodePermissionAllow
                 { updatedInput = Nothing
                 , updatedPermissions = []

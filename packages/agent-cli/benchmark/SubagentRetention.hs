@@ -1,7 +1,7 @@
 module Main (main) where
 
 import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
-import Agent.CLI.Compaction (OccupancySnapshot(..), estimatedOccupancy)
+import Agent.Runtime.Compaction.Provider (OccupancySnapshot(..), estimatedOccupancy)
 import Agent.CLI.NativeAgents
 import Agent.CLI.Subagents.Runtime (SubagentResidency(..), SubagentSession(..))
 import Agent.Dialect (DialectId(..))

@@ -23,6 +23,7 @@ import Agent.Json.Decode
     )
 import Control.Applicative ((<|>))
 import Control.Monad (join)
+import Data.Foldable (asum)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -49,7 +50,7 @@ mkOpenAIError errorType message code retryAfter =
     ProviderError
         (classifyErrorType errorType message code)
         (appendErrorCode code message)
-        (retryAfter `orElse` retryAfterFromMessage message)
+        (retryAfter <|> retryAfterFromMessage message)
 
 classifyErrorType :: ErrorType -> Text -> Maybe Text -> ErrorType
 classifyErrorType errorType message code
@@ -139,9 +140,9 @@ providerErrorPayloadDecoder = object do
     payloadType <- join <$> atKeyOptional "type" (nullable text)
     code <- join <$> atKeyOptional "code" (nullable text)
     errorCode <- join <$> atKeyOptional "error_code" (nullable text)
-    message <- firstPresent
+    message <- asum
         <$> traverseOptionalText ["message", "detail", "msg", "description"]
-    retryAfter <- firstPresent <$> sequence
+    retryAfter <- asum <$> sequence
         [ join <$> atKeyOptional "resets_in_seconds" (nullable int)
         , join <$> atKeyOptional "retry_after" (nullable int)
         ]
@@ -178,9 +179,6 @@ errorValueDecoder =
 traverseOptionalText :: [Text] -> FieldsDecoder [Maybe Text]
 traverseOptionalText =
     traverse \key -> join <$> atKeyOptional key (nullable text)
-
-firstPresent :: [Maybe value] -> Maybe value
-firstPresent = firstJust
 
 errorTypeFromStatus :: Int -> ErrorType
 errorTypeFromStatus = \case
@@ -222,11 +220,6 @@ retryAfterFromMessage message = do
         character == '.' || character >= '0' && character <= '9'
     isAsciiLetter character =
         character >= 'a' && character <= 'z'
-
-firstJust :: [Maybe a] -> Maybe a
-firstJust [] = Nothing
-firstJust (Just value : _) = Just value
-firstJust (Nothing : rest) = firstJust rest
 
 isPreviousResponseIdError :: ApiError -> Bool
 isPreviousResponseIdError = \case
@@ -286,7 +279,3 @@ mentionsMissingFunctionCallOutput :: Text -> Bool
 mentionsMissingFunctionCallOutput =
     Text.isInfixOf "no tool output found for function call"
         . Text.toLower
-
-orElse :: Maybe a -> Maybe a -> Maybe a
-orElse (Just value) _ = Just value
-orElse Nothing fallback = fallback

@@ -15,7 +15,7 @@ module Agent.CLI.Provider.Switch
     , requestStartupProviderFallback
     ) where
 
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( SessionRequestState
     , readSessionRequestParams
     , setSessionRequestModel
@@ -25,29 +25,29 @@ import Agent.CLI.AccountSelection
     , providerSupportsUsageAccountSelection
     , selectProviderAccount
     )
-import Agent.CLI.Session.History
+import Agent.Runtime.Session.History
     ( LiveConversation
     , readLivePreviousResponseId
     , writeLivePreviousResponseId
     )
-import Agent.CLI.Auth
+import Agent.Accounts.Auth
     ( LoadedAuth(..)
     , gatewayAuthSelectionId
     , loadAuth
     , loadAuthForAccount
     )
-import Agent.CLI.Error
+import Agent.Runtime.Error
     ( formatApiErrorAt
     , formatApiErrorInlineAt
     , formatApiErrorRetryCountdownParts
     )
-import Agent.CLI.ModelConfig
+import Agent.Runtime.ModelConfig
     ( ModelCatalog
     , builtinConnectionId
     , connectionSupportsDialect
     , loadModelCatalogAt
     )
-import Agent.CLI.Models
+import Agent.Runtime.Models
     ( ModelOption(..)
     , ModelTarget(..)
     , defaultModelOptionFor
@@ -69,6 +69,7 @@ import Agent.CLI.ProviderAvailability
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
     , fallbackCandidates
+    , selectAutomaticProviderCandidateWith
     )
 import Agent.CLI.ProviderTransition
     ( PendingTurn
@@ -84,7 +85,7 @@ import Agent.CLI.Render
 import Agent.CLI.Runtime.Types
     ( RunResult(..)
     )
-import Agent.CLI.Session
+import Agent.Runtime.Session
 import Agent.CLI.SessionEnv (SessionEnv(..))
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.Style
@@ -576,48 +577,15 @@ chooseAutomaticProviderTransition
     fallbackEnabled catalog cwd stderrHandle fullscreen
         sourceBilling current currentModel unavailable0 sessionId pending apiError
     | not fallbackEnabled = pure Nothing
-    | otherwise = tryCandidates unavailable0 candidates
-  where
-    candidates =
-        fallbackCandidates
-            catalog unavailable0 current currentModel apiError
-
-    tryCandidates unavailable = \case
-        [] -> pure Nothing
-        rawChoice : rest -> do
-            choice <- resolveModelOptionDialect rawChoice
-            validateAutomaticProviderTarget
-                cwd
-                sourceBilling
-                choice >>= \case
-                Left err -> do
-                    let failedProvider =
-                            choice.modelTarget.targetProvider
-                        unavailable' =
-                            markUnavailable failedProvider unavailable
-                        remaining =
-                            filter
-                                ((/= failedProvider)
-                                    . (.modelTarget.targetProvider))
-                                rest
-                        message =
-                            "skipping "
-                            <> providerSlug failedProvider
-                            <> ": "
-                            <> err
-                    case fullscreen of
-                        Nothing -> do
-                            color <- resolveColor stderrHandle
-                            putTextLn stderrHandle (roleMuted color message)
-                        Just runtime ->
-                            emitUiEvent runtime (UiSystemMessage message)
-                    tryCandidates unavailable' remaining
-                Right selected -> do
+    | otherwise =
+        selectAutomaticProviderCandidateWith
+            resolveModelOptionDialect
+            (validateAutomaticProviderTarget cwd sourceBilling)
+            reportSkipped
+            current unavailable0 candidates >>= \case
+                Nothing -> pure Nothing
+                Just (choice, selected, unavailable) -> do
                     let nextProvider = choice.modelTarget.targetProvider
-                        unavailable' =
-                            if nextProvider == current
-                                then unavailable
-                                else markUnavailable current unavailable
                         message
                             | nextProvider == current =
                                 currentModel
@@ -645,9 +613,22 @@ chooseAutomaticProviderTransition
                             (.selectedAccountId) <$> selected
                         , transitionSessionId = sessionId
                         , transitionPendingTurn = Just pending
-                        , transitionUnavailableProviders = unavailable'
+                        , transitionUnavailableProviders = unavailable
                         , transitionCause = AutomaticFallback sourceBilling
                         }
+  where
+    candidates =
+        fallbackCandidates
+            catalog unavailable0 current currentModel apiError
+
+    reportSkipped failedProvider err = do
+        let message = "skipping " <> providerSlug failedProvider <> ": " <> err
+        case fullscreen of
+            Nothing -> do
+                color <- resolveColor stderrHandle
+                putTextLn stderrHandle (roleMuted color message)
+            Just runtime ->
+                emitUiEvent runtime (UiSystemMessage message)
 
 chooseStartupProviderTransition
     :: Bool
@@ -665,44 +646,15 @@ chooseStartupProviderTransition
     fallbackEnabled catalog cwd fullscreen sourceBilling current currentModel
         unavailable0 sessionId apiError
     | not fallbackEnabled = pure Nothing
-    | otherwise = tryCandidates unavailable0 candidates
-  where
-    candidates =
-        fallbackCandidates
-            catalog unavailable0 current currentModel apiError
-
-    tryCandidates unavailable = \case
-        [] -> pure Nothing
-        rawChoice : rest -> do
-            choice <- resolveModelOptionDialect rawChoice
-            validateAutomaticProviderTarget
-                cwd
-                sourceBilling
-                choice >>= \case
-                Left err -> do
-                    let failedProvider =
-                            choice.modelTarget.targetProvider
-                        unavailable' =
-                            markUnavailable failedProvider unavailable
-                        remaining =
-                            filter
-                                ((/= failedProvider)
-                                    . (.modelTarget.targetProvider))
-                                rest
-                        message =
-                            "skipping "
-                            <> providerSlug failedProvider
-                            <> ": "
-                            <> err
-                    forM_ fullscreen \runtime ->
-                        emitUiEvent runtime (UiSystemMessage message)
-                    tryCandidates unavailable' remaining
-                Right selected -> do
+    | otherwise =
+        selectAutomaticProviderCandidateWith
+            resolveModelOptionDialect
+            (validateAutomaticProviderTarget cwd sourceBilling)
+            reportSkipped
+            current unavailable0 candidates >>= \case
+                Nothing -> pure Nothing
+                Just (choice, selected, unavailable) -> do
                     let nextProvider = choice.modelTarget.targetProvider
-                        unavailable' =
-                            if nextProvider == current
-                                then unavailable
-                                else markUnavailable current unavailable
                         message
                             | nextProvider == current =
                                 currentModel
@@ -725,9 +677,18 @@ chooseStartupProviderTransition
                             (.selectedAccountId) <$> selected
                         , transitionSessionId = sessionId
                         , transitionPendingTurn = Nothing
-                        , transitionUnavailableProviders = unavailable'
+                        , transitionUnavailableProviders = unavailable
                         , transitionCause = AutomaticFallback sourceBilling
                         }
+  where
+    candidates =
+        fallbackCandidates
+            catalog unavailable0 current currentModel apiError
+
+    reportSkipped failedProvider err =
+        forM_ fullscreen \runtime ->
+            emitUiEvent runtime (UiSystemMessage
+                ("skipping " <> providerSlug failedProvider <> ": " <> err))
 
 prepareProviderTransition
     :: TransitionCause
@@ -961,9 +922,6 @@ commitBackendOnSuccess
                         scope home projectRoot (Just transition) persist
             Left _ -> pure ()
         pure result
-
-markUnavailable :: Provider -> Set Provider -> Set Provider
-markUnavailable = Set.insert
 
 reloadAuth :: Provider -> Maybe TokenProvider -> IO (Either Text Text)
 reloadAuth ClaudeCodeProvider _ =

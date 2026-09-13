@@ -1,6 +1,6 @@
 module Agent.CLI.McpCatalogSpec (spec) where
 
-import Agent.CLI.Config
+import Agent.Runtime.Config
     ( HarnessConfig(..)
     , McpOAuthConfig(..)
     , McpServerConfig(..)
@@ -9,7 +9,7 @@ import Agent.CLI.Config
     , saveHarnessConfig
     )
 import Agent.CLI.McpCatalog
-import Agent.CLI.McpOAuth (lookupServerOAuthConfig, registerAuthorizedMcpServer)
+import Agent.Runtime.McpOAuth (lookupServerOAuthConfig, registerAuthorizedMcpServer)
 import Agent.CLI.Options (McpAddCommand(..), McpAddTransport(..))
 import Agent.MCP (McpProtocolPreference(..))
 import Control.Exception.Safe (bracket)

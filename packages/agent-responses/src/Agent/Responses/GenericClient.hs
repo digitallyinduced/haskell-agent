@@ -43,6 +43,7 @@ import Agent.Responses.StreamAssembly
     , failedStreamResponseMessage
     )
 import Agent.Responses.Types
+import Control.Applicative ((<|>))
 import Control.Retry
     ( RetryPolicyM
     , exponentialBackoff
@@ -223,8 +224,5 @@ nonEmptyText _ = Nothing
 addRetryAfter :: Maybe Int -> ApiError -> ApiError
 addRetryAfter fallback = \case
     ProviderError errorType message retryAfter ->
-        ProviderError errorType message (retryAfter `orElse` fallback)
+        ProviderError errorType message (retryAfter <|> fallback)
     errorValue -> errorValue
-
-Just value `orElse` _ = Just value
-Nothing `orElse` fallback = fallback

@@ -8,6 +8,7 @@ import Agent.Loop
     , BackendResult(..)
     , BackendStateStore(..)
     , LoopConfig(..)
+    , ToolApproval(..)
     , LoopError(..)
     , LoopEvent(..)
     , LoopExecution(..)
@@ -204,10 +205,11 @@ runWorkload workload eventCount sinkDelayMicros = do
                 StreamingFailureEvents -> emptyRegistry
                 ParallelToolEvents -> streamingRegistry
                 QueuedEvents -> emptyRegistry
+            , loopReadTools = Nothing
             , loopDispatch = defaultLoopDispatch
             , loopMaxTurns = defaultLoopMaxTurns
             , loopOnEvent = sink
-            , loopApprove = \_ -> pure (Right True)
+            , loopApprove = \_ -> pure ToolApprovalGranted
             , loopReadSteering = pure []
             , loopCommitSteering = \_ -> pure ()
             , loopInterrupt = pure ()

@@ -28,7 +28,7 @@ import Agent.CLI.Clipboard.MacOS
     , readMacClipboardPaths
     , readMacClipboardText
     )
-import Agent.CLI.Error (formatException)
+import Agent.Runtime.Error (formatException)
 import Agent.Loop (ImageAttachment(..))
 import Control.Exception.Safe (tryAny)
 import Control.Monad (filterM)

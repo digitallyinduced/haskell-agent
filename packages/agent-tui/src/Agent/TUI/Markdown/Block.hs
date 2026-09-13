@@ -130,74 +130,74 @@ splitTableRow raw =
     let stripped = Text.strip raw
         content = fromMaybe stripped (Text.stripPrefix "|" stripped)
         (cells, delimiterCount) =
-            scan Nothing [] [] 0 False (Text.unpack content)
+            scan Nothing [] [] 0 False content
     in if delimiterCount >= 1 then Just cells else Nothing
   where
     scan
         :: Maybe Int
-        -> String
+        -> [Text]
         -> [Text]
         -> Int
         -> Bool
-        -> String
+        -> Text
         -> ([Text], Int)
-    scan _ current cells delimiterCount trailingDelimiter [] =
-        let allCells = reverse (finishCell current : cells)
-            withoutOuterBorder
-                | trailingDelimiter = dropLast allCells
-                | otherwise = allCells
-        in (withoutOuterBorder, delimiterCount)
-    scan codeRun current cells delimiterCount _ ('\\' : rest) =
-        let (slashes, afterSlashes) = span (== '\\') rest
-            slashCount = 1 + length slashes
-            literalSlashes =
-                replicate
-                    (if startsWithPipe afterSlashes
-                        then slashCount `div` 2
-                        else slashCount)
-                    '\\'
-            current' = literalSlashes <> current
-        in case afterSlashes of
-            '|' : afterPipe
-                | odd slashCount ->
-                    scan codeRun ('|' : current') cells
-                        delimiterCount False afterPipe
+    scan codeRun current cells delimiterCount trailingDelimiter remaining =
+        case Text.uncons remaining of
+            Nothing ->
+                let allCells
+                        | trailingDelimiter = cells
+                        | otherwise = finishCell current : cells
+                in (reverse allCells, delimiterCount)
+            Just ('\\', _) ->
+                let (slashes, afterSlashes) = Text.span (== '\\') remaining
+                    slashCount = Text.length slashes
+                    literalSlashes
+                        | startsWith (== '|') afterSlashes =
+                            Text.take (slashCount `div` 2) slashes
+                        | otherwise = slashes
+                    current' = literalSlashes : current
+                in case Text.uncons afterSlashes of
+                    Just ('|', afterPipe)
+                        | odd slashCount ->
+                            scan codeRun ("|" : current') cells
+                                delimiterCount False afterPipe
+                        | codeRun == Nothing ->
+                            splitCell codeRun current' cells delimiterCount afterPipe
+                    _ ->
+                        scan codeRun current' cells
+                            delimiterCount False afterSlashes
+            Just ('`', _) ->
+                let (ticks, afterTicks) = Text.span (== '`') remaining
+                    tickCount = Text.length ticks
+                    nextCodeRun = case codeRun of
+                        Just openCount
+                            | tickCount >= openCount -> Nothing
+                        Just openCount -> Just openCount
+                        Nothing
+                            | hasClosingRun tickCount afterTicks -> Just tickCount
+                        Nothing -> Nothing
+                in scan nextCodeRun (ticks : current) cells
+                    delimiterCount False afterTicks
+            Just ('|', rest)
                 | codeRun == Nothing ->
-                    splitCell codeRun current' cells delimiterCount afterPipe
+                    splitCell codeRun current cells delimiterCount rest
+                | otherwise ->
+                    scan codeRun ("|" : current) cells delimiterCount False rest
             _ ->
-                scan codeRun current' cells
-                    delimiterCount False afterSlashes
-    scan codeRun current cells delimiterCount _ ('`' : rest) =
-        let (ticks, afterTicks) = span (== '`') rest
-            tickCount = 1 + length ticks
-            marker = replicate tickCount '`'
-            nextCodeRun = case codeRun of
-                Just openCount
-                    | tickCount >= openCount -> Nothing
-                Just openCount -> Just openCount
-                Nothing
-                    | hasClosingRun tickCount afterTicks -> Just tickCount
-                Nothing -> Nothing
-        in scan nextCodeRun (marker <> current) cells
-            delimiterCount False afterTicks
-    scan Nothing current cells delimiterCount _ ('|' : rest) =
-        splitCell Nothing current cells delimiterCount rest
-    scan codeRun current cells delimiterCount _ (character : rest) =
-        scan codeRun (character : current) cells
-            delimiterCount False rest
+                let (plain, rest) = Text.break isSpecial remaining
+                in scan codeRun (plain : current) cells delimiterCount False rest
 
     splitCell codeRun current cells delimiterCount rest =
         scan codeRun [] (finishCell current : cells)
             (delimiterCount + 1) True rest
 
-    finishCell = Text.strip . Text.pack . reverse
-    startsWithPipe ('|' : _) = True
-    startsWithPipe _ = False
+    -- Accumulate slices, not characters or repeated strict Text appends. Copy
+    -- the finished cell so a small retained cell cannot retain the whole row.
+    finishCell = Text.copy . Text.strip . Text.concat . reverse
+    isSpecial character =
+        character == '\\' || character == '`' || character == '|'
     hasClosingRun count =
-        Text.isInfixOf (Text.replicate count "`") . Text.pack
-    dropLast values = case reverse values of
-        _ : rest -> reverse rest
-        [] -> []
+        Text.isInfixOf (Text.replicate count "`")
 
 startsWith :: (Char -> Bool) -> Text -> Bool
 startsWith predicate text = case Text.uncons text of

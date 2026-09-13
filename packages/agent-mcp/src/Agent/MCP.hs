@@ -86,6 +86,9 @@ module Agent.MCP
     , mcpFleetRegistrationsForArtifactDirectory
     , mcpFleetMetaTools
     , mcpFleetMetaToolsForArtifactDirectory
+    , McpToolDiscovery
+    , newMcpToolDiscovery
+    , mcpFleetCodexToolsForArtifactDirectory
     , mcpFleetGrokMetaTools
     , mcpFleetGrokMetaToolsForArtifactDirectory
     , mcpFleetResourceTools
@@ -132,7 +135,10 @@ import Agent.MCP.InProcess
     , inProcessMcpToolNames
     )
 import Agent.MCP.Fleet
-    ( startMcpFleetWithInMemory
+    ( McpToolDiscovery
+    , newMcpToolDiscovery
+    , mcpFleetCodexToolsForArtifactDirectory
+    , startMcpFleetWithInMemory
     , startMcpFleetProgressiveWithInMemoryHooks
     , closeMcpFleet
     , mcpFleetComplete

@@ -7,7 +7,7 @@ module Agent.CLI.Runtime.HistorySource
     , restoreFullscreenPullRequest
     ) where
 
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( SessionHandle(..)
     , SessionMeta(..)
     , SessionTurnPage(..)

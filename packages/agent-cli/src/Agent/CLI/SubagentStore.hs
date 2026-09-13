@@ -27,7 +27,7 @@ import Agent.Dialect
     , parseDialect
     )
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
-import Agent.CLI.Json (decodeLazy)
+import Agent.Runtime.Json (decodeLazy)
 import Agent.Json.Decode (optionalKey)
 import Agent.Json.Decode qualified as Hermes
 import Agent.OsPath (toText, unsafeToFilePath)

@@ -11,7 +11,7 @@ module Agent.CLI.MacOS.SessionObservationBridge
     ) where
 
 import Agent.CLI.MacOS.Marshalling (decodeUtf8Input, withText)
-import qualified Agent.CLI.Session.Observation as Observation
+import qualified Agent.Runtime.Session.Observation as Observation
 import Control.Concurrent (MVar, newEmptyMVar, putMVar, readMVar, tryPutMVar)
 import Control.Concurrent.Async (Async, asyncWithUnmask, cancel, race, waitCatch)
 import Control.Exception.Safe (mask, onException, tryAny)

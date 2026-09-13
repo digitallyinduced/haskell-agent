@@ -5,12 +5,12 @@ import Agent.CLI.AccountPicker
     ( AccountPickerOption(..)
     , accountPickerMatchesRequest
     )
-import Agent.CLI.Auth
+import Agent.Accounts.Auth
     ( LoadedAuth(..)
     , gatewayAuthSelectionId
     , staticCredentialProvider
     )
-import Agent.CLI.CredentialStore (ManagedAuthKind(..))
+import Agent.Accounts.CredentialStore (ManagedAuthKind(..))
 import Agent.CLI.Login
     ( AccountBilling(..)
     , AccountUsage(..)

@@ -1,7 +1,6 @@
 -- | Notices and modal overlay rendering for the fullscreen UI.
 module Agent.CLI.TUI.Render.Overlays
     ( drawNotice
-    , drawFollowStatus
     , drawFooter
     , drawPermission
     , drawResume
@@ -92,7 +91,7 @@ import Agent.TUI.Model
       PermissionOverlay(permissionIndex, permissionSummary),
       UiNotice(noticeKind, noticeText),
       UiState(uiNotice, uiFocus, uiPermission, uiRunning,
-              uiAwaitingInput, uiFollow) )
+              uiAwaitingInput) )
 import Agent.TUI.Motion
     ( foregroundIndicator, waitingIndicator, MotionMode(MotionOff) )
 import Agent.TUI.Presentation ()
@@ -239,14 +238,6 @@ noticePresentation state = \case
             <> " "
         )
     NoticeError -> (Theme.errorAttr, "✗ ")
-
-drawFollowStatus :: UiState -> Widget Name
-drawFollowStatus state
-    | state.uiFollow = emptyWidget
-    | otherwise =
-        withAttr Theme.thinkingAttr $
-            padLeftRight 2 $
-                txt "↓ Live output paused · End to resume"
 
 drawFooter :: AppState -> Widget Name
 drawFooter state =

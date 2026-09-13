@@ -11,6 +11,33 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.MCP.OAuth" do
+    describe "oauthCallbackPage" do
+        it "preserves the receipt compatibility entry point" do
+            oauthCallbackPage OAuthCallbackReceived `shouldBe` oauthCallbackSuccessPage
+
+        mapM_ (\(presentation, heading) ->
+            it ("renders a branded, self-contained error page for " <> show presentation) do
+                let page = Encoding.decodeUtf8 (LBS.toStrict (oauthCallbackPage presentation))
+                page `shouldSatisfy` Text.isInfixOf heading
+                page `shouldSatisfy` Text.isInfixOf "class=\"status error\""
+                page `shouldSatisfy` Text.isInfixOf "aria-labelledby=\"confirmation-title\""
+                page `shouldSatisfy` Text.isInfixOf "@media(prefers-color-scheme:dark)"
+                page `shouldSatisfy` Text.isInfixOf "width=device-width, initial-scale=1"
+                mapM_ (\fragment -> page `shouldSatisfy` (not . Text.isInfixOf fragment))
+                    ["<script", "<link", "src=", "href=", "url(", "<form"]
+            )
+            [ (OAuthCallbackRejected, "Invalid authorization response")
+            , (OAuthCallbackNotFound, "Page not found")
+            , (OAuthCallbackMethodNotAllowed, "Request not supported")
+            , (OAuthCallbackFailed, "Haskell Agent could not connect")
+            ]
+
+        it "keeps rejected callback instructions distinct from completed failure" do
+            let page presentation = Encoding.decodeUtf8 (LBS.toStrict (oauthCallbackPage presentation))
+            page OAuthCallbackRejected `shouldSatisfy` Text.isInfixOf "Your sign-in is still waiting."
+            page OAuthCallbackRejected `shouldSatisfy` Text.isInfixOf "original sign-in tab"
+            page OAuthCallbackFailed `shouldSatisfy` Text.isInfixOf "see the error and try again."
+
     describe "oauthCallbackSuccessPage" do
         let page = Encoding.decodeUtf8 (LBS.toStrict oauthCallbackSuccessPage)
         it "acknowledges receipt without claiming the connection succeeded" do
