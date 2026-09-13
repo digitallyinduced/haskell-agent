@@ -111,6 +111,49 @@ spec = do
             context `shouldContainText` ("description=\"" <> Text.replicate 239 "x" <> "…\"")
             context `shouldContainText` "name=\"people\""
 
+        it "reserves space for every name before including descriptions" do
+            let objects =
+                    [memoryCatalogObject ("table_" <> Text.pack (show index))
+                        (Just (Text.replicate 240 "&"))
+                    | index <- [1 .. 100 :: Int]]
+                context = renderDatabaseMemoryContext [(DatabaseUserScope, objects)]
+            Text.length context `shouldSatisfy` (<= 8000)
+            Text.count "<table " context `shouldBe` 100
+            Text.count " description=\"" context `shouldSatisfy` (< 100)
+            context `shouldSatisfy` (not . Text.isInfixOf "additional tables omitted")
+
+        it "bounds oversized catalogs across scopes and reports exact omissions" do
+            let objects =
+                    [memoryCatalogObject ("table_" <> Text.pack (show index)) Nothing
+                    | index <- [1 .. 500 :: Int]]
+                scopes = [DatabaseUserScope, DatabaseRepositoryScope, DatabaseCheckoutScope]
+                context = renderDatabaseMemoryContext [(scope, objects) | scope <- scopes]
+                included = Text.count "<table " context
+            Text.length context `shouldSatisfy` (<= 8000)
+            included `shouldSatisfy` (> 0)
+            included `shouldSatisfy` (< 1500)
+            context `shouldContainText`
+                (Text.pack (show (1500 - included)) <> " additional tables omitted")
+            context `shouldContainText` "Use database_schema for the complete catalog."
+            context `shouldContainText` "unlisted tables or scopes may still contain memory"
+            Text.count "</structured-memory>" context `shouldBe` 1
+            renderDatabaseMemoryContext
+                [(scope, reverse objects) | scope <- reverse scopes]
+                `shouldBe` context
+
+        it "counts escaped names and omits an indivisible oversized entry" do
+            let context = renderDatabaseMemoryContext
+                    [(DatabaseUserScope,
+                        [ memoryCatalogObject (Text.replicate 2000 "&") Nothing
+                        , memoryCatalogObject "people" (Just "Contacts & relationships")
+                        ])]
+            Text.length context `shouldSatisfy` (<= 8000)
+            Text.count "<table " context `shouldBe` 1
+            context `shouldContainText` "name=\"people\""
+            context `shouldContainText` "description=\"Contacts &amp; relationships\""
+            context `shouldContainText` "1 additional tables omitted"
+            Text.count "</structured-memory>" context `shouldBe` 1
+
         it "omits sequences and explicitly represents an empty catalog" do
             let sequenceObject = (memoryCatalogObject "people_id_seq" Nothing)
                     { catalogObjectKind = "sequence" }
