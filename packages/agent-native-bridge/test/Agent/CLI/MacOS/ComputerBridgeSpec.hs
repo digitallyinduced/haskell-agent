@@ -4,6 +4,7 @@ module Agent.CLI.MacOS.ComputerBridgeSpec (spec) where
 
 import Agent.ComputerUse.Accessibility
     ( AccessibilityObservation(..)
+    , AccessibilitySnapshot(..)
     )
 import Agent.CLI.MacOS.ComputerBridge
     ( ComputerCallback
@@ -12,6 +13,7 @@ import Agent.CLI.MacOS.ComputerBridge
     , NativeComputerResult(..)
     , closeComputerSession
     , computerToolSessionWhenEnabled
+    , computerToolSessionForAttachment
     , invokeComputerSessionRequest
     , newComputerHost
     , newComputerSession
@@ -21,6 +23,7 @@ import Agent.CLI.MacOS.ComputerBridge
 import Agent.ComputerUse.Protocol
     ( ComputerUseVerdict
     , SemanticComputerAction(..)
+    , SemanticComputerQuery(..)
     , SemanticComputerRequest(..)
     , SemanticComputerScalar(..)
     , computerUseVerdictField
@@ -52,12 +55,13 @@ import Control.Concurrent.MVar
     , takeMVar
     )
 import Control.Exception.Safe (bracket)
+import Control.Monad (forM_)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
-import Data.Either (isRight)
+import Data.Either (isRight, isLeft)
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
@@ -222,6 +226,47 @@ spec = describe "native AX-first computer bridge" do
                         False
                     ]
 
+    it "opens an attached window with the host token and closes its scoped session" do
+        operations <- newIORef []
+        requests <- newIORef []
+        closes <- newIORef 0
+        let callback context abi operation token request requestLength
+                result resultCapacity resultLength ax axCapacity axLength
+                image imageCapacity imageLength err errCapacity errLength
+                outputToken outputFormat = do
+                    modifyIORef' operations (<> [(operation, token)])
+                    recordingCallback "attached" requests closes context abi
+                        (if operation == 6 then 1 else operation) token request requestLength
+                        result resultCapacity resultLength ax axCapacity axLength
+                        image imageCapacity imageLength err errCapacity errLength
+                        outputToken outputFormat
+        withHost callback \host -> do
+            Right (Just (_, _, close)) <- computerToolSessionForAttachment host 987654
+            close
+        readIORef operations `shouldReturn` [(6, 987654), (5, 73)]
+        readIORef closes `shouldReturn` 1
+
+    it "fails attached window admission when no computer host is registered" do
+        host <- newComputerHost
+        outcome <- computerToolSessionForAttachment host 123
+        isLeft outcome `shouldBe` True
+
+    it "does not retry an expired attachment as an unrestricted open" do
+        operations <- newIORef []
+        let callback _context _abi operation _token _request _requestLength
+                _result _resultCapacity resultLength _ax _axCapacity axLength
+                _image _imageCapacity imageLength _err _errCapacity errLength
+                outputToken outputFormat = do
+                    modifyIORef' operations (<> [operation])
+                    zeroLengths resultLength axLength imageLength errLength
+                    poke outputToken 0
+                    poke outputFormat 0
+                    pure 1
+        withHost callback \host -> do
+            outcome <- computerToolSessionForAttachment host 123
+            isLeft outcome `shouldBe` True
+        readIORef operations `shouldReturn` [6]
+
     it "returns an image only when explicitly requested" do
         requests <- newIORef []
         closes <- newIORef 0
@@ -239,6 +284,47 @@ spec = describe "native AX-first computer bridge" do
                 value -> expectationFailure
                     ("unexpected screenshot result: " <> show value)
             closeComputerSession session
+
+    it "routes compact queries through the bound-session callback without input verdicts" do
+        requests <- newIORef []
+        closes <- newIORef 0
+        operations <- newIORef []
+        let callback context abi operation token request requestLength
+                result resultCapacity resultLength accessibility accessibilityCapacity accessibilityLength
+                image imageCapacity imageLength err errorCapacity errorLength outputToken outputFormat = do
+                    modifyIORef' operations (<> [operation])
+                    recordingCallback "query" requests closes
+                        context abi operation token request requestLength
+                        result resultCapacity resultLength accessibility accessibilityCapacity accessibilityLength
+                        image imageCapacity imageLength err errorCapacity errorLength outputToken outputFormat
+            query = SemanticComputerQuery (Just "AXButton") (Just "Save") 20
+        withHost callback \host -> do
+            Right session <- newComputerSession host
+            forM_ [False, True] \includeScreenshot -> do
+                outcome <- invokeComputerSessionRequest session
+                    (QueryComputerTarget query includeScreenshot)
+                outcome `shouldSatisfy` isRight
+                resultVerdict outcome `shouldBe` Nothing
+                case outcome of
+                    Right result -> do
+                        maybe False (const True) result.nativeComputerImage
+                            `shouldBe` includeScreenshot
+                        case result.nativeComputerAccessibility of
+                            Just (AccessibilityFull _ snapshot) -> do
+                                snapshot.accessibilitySnapshotSchemaVersion `shouldBe` 2
+                                snapshot.accessibilitySnapshotContents `shouldBe`
+                                    Aeson.object
+                                        [ "matches" Aeson..= ([] :: [Aeson.Value])
+                                        , "truncated" Aeson..= False
+                                        ]
+                            Just AccessibilityDelta{} -> pure ()
+                            other -> expectationFailure ("unexpected query snapshot: " <> show other)
+                    Left _ -> pure ()
+            closeComputerSession session
+        readIORef operations `shouldReturn` [1, 4, 4, 5]
+        readIORef requests `shouldReturn`
+            map semanticComputerRequestWireValue
+                [QueryComputerTarget query False, QueryComputerTarget query True]
 
     it "adds honest action verdicts and validates host verdict context" do
         withHost
@@ -551,7 +637,8 @@ recordingCallback label requests closes _context abi operation _token
         accessibilityStatus <-
             if operation == 2
                 then poke accessibilityLength 0 >> pure 0
-                else writeBytes snapshotBytes accessibility
+                else writeBytes
+                    (if label == "query" then querySnapshotBytes else snapshotBytes) accessibility
                     accessibilityCapacity accessibilityLength
         let wantsImage =
                 maybe False requestIncludesScreenshot
@@ -788,16 +875,22 @@ snapshotBytes :: BS.ByteString
 snapshotBytes =
     "{\"schema_version\":1,\"scope\":{\"bundle_id\":\"test\"},\"contents\":{\"role\":\"AXWindow\"}}"
 
+querySnapshotBytes :: BS.ByteString
+querySnapshotBytes =
+    "{\"schema_version\":2,\"scope\":{\"bundle_id\":\"test\"},\"contents\":{\"matches\":[],\"truncated\":false}}"
+
 expectedComputerParameters :: Aeson.Value
 expectedComputerParameters = strictObjectSchema
     [ ("operation", Aeson.object
         [ "type" Aeson..= ("string" :: Text)
         , "enum" Aeson..=
-            (["list_targets", "bind", "observe", "act"] :: [Text])
+            (["list_targets", "bind", "observe", "query", "act"] :: [Text])
         , "description" Aeson..=
             ( "Use list_targets, bind one returned target_id, observe the "
-            <> "bound target, then act on element_id values from the fresh "
-            <> "accessibility state."
+            <> "bound target or query matching elements, then act on element_id values from the fresh "
+            <> "accessibility state. Observe and query send no input and do not activate "
+            <> "the app, but may enable app-wide Electron AXEnhancedUserInterface "
+            <> "to expose accessibility content."
             :: Text
             )
         ])
@@ -853,8 +946,29 @@ expectedComputerParameters = strictObjectSchema
             :: Text
             )
         ])
+    , ("query", Aeson.object
+        [ "anyOf" Aeson..=
+            [ strictObjectSchema
+                [ ("role", describedSchema
+                    "Exact case-sensitive Accessibility role, or null. Nonempty, at most 1024 UTF-8 bytes."
+                    (nullableStringSchema 1024))
+                , ("text", describedSchema
+                    "Literal case-insensitive substring of title, description, identifier, or string value; not a regular expression. Nonempty, at most 1024 UTF-8 bytes. At least role or text must be supplied; filters combine with AND. Secure or indeterminate nodes are excluded."
+                    (nullableStringSchema 1024))
+                , ("max_results", Aeson.object
+                    [ "type" Aeson..= ("integer" :: Text)
+                    , "minimum" Aeson..= (1 :: Int)
+                    , "maximum" Aeson..= (100 :: Int)
+                    ])
+                ]
+                ["role", "text", "max_results"]
+            , Aeson.object ["type" Aeson..= ("null" :: Text)]
+            ]
+        , "description" Aeson..=
+            ("Required only for query; otherwise null. Searches the bound window without input or activation." :: Text)
+        ])
     ]
-    ["operation", "target_id", "actions", "include_screenshot"]
+    ["operation", "target_id", "actions", "include_screenshot", "query"]
 
 strictObjectSchema :: [(Text, Aeson.Value)] -> [Text] -> Aeson.Value
 strictObjectSchema properties requiredFields = Aeson.object

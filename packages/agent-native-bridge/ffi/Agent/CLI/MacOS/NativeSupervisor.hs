@@ -16,7 +16,7 @@ module Agent.CLI.MacOS.NativeSupervisor
 import Agent.CLI.MacOS.AgentSnapshot (activeAgentSnapshot)
 import Agent.CLI.MacOS.BrowserBridge (BrowserHost, browserToolsWhenEnabled)
 import Agent.CLI.MacOS.ComputerBridge
-    ( ComputerHost, computerToolSessionWhenEnabled )
+    ( ComputerHost, computerToolSessionForAttachment )
 import Agent.CLI.MacOS.EngineCallbacks
     ( IntegrationResultCallback
     , invokeIntegrationResultCallback
@@ -527,7 +527,9 @@ supervisorLoop
         worker <- launchTrackedWorker start.turnStartId $
             bracket
                 (if start.turnStartComputerUse
-                    then computerToolSessionWhenEnabled computer
+                        || pending.pendingTurnOptions.nativeTurnPromptContext.attachedWindowToken /= 0
+                    then computerToolSessionForAttachment computer
+                        pending.pendingTurnOptions.nativeTurnPromptContext.attachedWindowToken
                     else pure (Right Nothing))
                 (\case
                     Right (Just (_, _, close)) -> close

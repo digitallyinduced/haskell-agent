@@ -902,6 +902,9 @@
                                                 then agentNativeBridgeCheckSource
                                                 else agentNativeBridgeProductionSource;
                                     }).overrideAttrs (old: {
+                                        preCheck = (old.preCheck or "") + ''
+                                            export AGENT_SYNTAX_DIR=${skylightingSyntaxDirectory}
+                                        '';
                                         # Keep revision volatility in this final
                                         # frontend instead of agent-core, where it
                                         # would invalidate every dependent package.
@@ -928,6 +931,7 @@
                                 [ final.agent-repository
                                   final.agent-runtime-daemon
                                   final.agent-integration-api
+                                  final.agent-syntax
                                 ]);
                         agent-telegram = localPackage (pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-telegram/package.nix { }) {
@@ -1055,6 +1059,15 @@
                 prepareAgentCli = package:
                     package.overrideAttrs
                         (old: {
+                            # The standalone executable has no exported-symbol
+                            # ABI. Hide its exports so Darwin can discard unused
+                            # statically linked Haskell code. Keep this out of
+                            # the shared package set and native bridge.
+                            configureFlags = (old.configureFlags or [ ])
+                                ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+                                    "--ghc-option=-optl-Wl,-dead_strip"
+                                    "--ghc-option=-optl-Wl,-no_exported_symbols"
+                                ];
                             nativeBuildInputs =
                                 (old.nativeBuildInputs or [ ])
                                 ++ pkgs.lib.optionals
@@ -1638,6 +1651,12 @@
                         haskellPackages.agent-external-session;
                     agent-repository = haskellPackages.agent-repository;
                     agent-native-bridge = agentNativeBridgeCheckPackage;
+                    ${if pkgs.stdenv.hostPlatform.isDarwin
+                    then "agent-native-cli-entrypoint" else null} =
+                        import ./nix/tests/native-cli.nix {
+                            inherit pkgs;
+                            bridge = agentNativeBridgePackage;
+                        };
                     agent-integration-api = haskellPackages.agent-integration-api;
                     agent-cli = haskellPackages.agent-cli;
                     package-boundaries = pkgs.runCommand

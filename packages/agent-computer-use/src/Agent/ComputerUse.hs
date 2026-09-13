@@ -57,6 +57,7 @@ import qualified Agent.ComputerUse.Linux as Linux
 import Agent.ComputerUse.Protocol
     ( ComputerUseVerdict
     , SemanticComputerAction(..)
+    , SemanticComputerQuery(..)
     , SemanticComputerRequest(..)
     , SemanticComputerScalar(..)
     , computerUseVerdictField
@@ -1476,6 +1477,12 @@ summarizeSemanticComputerCall arguments =
                     <> screenshotSuffix request
             ObserveComputerTarget _ ->
                 "inspect the bound accessible window"
+                    <> screenshotSuffix request
+            QueryComputerTarget query _ ->
+                "query the bound accessible window"
+                    <> maybe "" (\role -> " with role " <> safeQuoted 128 role) query.queryRole
+                    <> maybe "" (\text -> " containing " <> safeQuoted 128 text) query.queryText
+                    <> " (up to " <> Text.pack (show query.queryMaxResults) <> " matches)"
                     <> screenshotSuffix request
             ActOnComputerTarget actions _ ->
                 Text.intercalate

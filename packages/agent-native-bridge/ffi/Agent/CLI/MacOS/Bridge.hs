@@ -35,6 +35,7 @@ module Agent.CLI.MacOS.Bridge
 
 import Agent.CLI.MacOS.AccountBridge ()
 import Agent.CLI.MacOS.BrowserBridge
+import Agent.CLI.MacOS.CliEntrypoint ()
 import Agent.CLI.MacOS.DatabaseBrowseBridge ()
 import Agent.CLI.MacOS.EngineHandle ()
 import Agent.CLI.MacOS.EngineHostRegistration ()
@@ -57,6 +58,7 @@ import Agent.CLI.MacOS.ResourceAdmin ()
 import Agent.CLI.MacOS.InstalledSkills ()
 import Agent.CLI.MacOS.SessionTransferBridge ()
 import Agent.CLI.MacOS.SessionObservationBridge ()
+import Agent.CLI.MacOS.SyntaxBridge ()
 import Agent.CLI.MacOS.TurnExecution (composeNativeTools, nativeExceptionMessage)
 import Agent.CLI.MacOS.TurnInputs (nativeTurnArguments)
 import Agent.CLI.MacOS.TurnState (discardStagedTurn, discardStagedTurnById)

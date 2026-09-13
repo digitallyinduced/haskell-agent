@@ -8,6 +8,60 @@
 extern "C" {
 #endif
 
+enum {
+    HA_SYNTAX_NORMAL = 0,
+    HA_SYNTAX_KEYWORD = 1,
+    HA_SYNTAX_TYPE = 2,
+    HA_SYNTAX_FUNCTION = 3,
+    HA_SYNTAX_VARIABLE = 4,
+    HA_SYNTAX_STRING = 5,
+    HA_SYNTAX_NUMBER = 6,
+    HA_SYNTAX_COMMENT = 7,
+    HA_SYNTAX_OPERATOR = 8,
+    HA_SYNTAX_ANNOTATION = 9,
+    HA_SYNTAX_PREPROCESSOR = 10,
+    HA_SYNTAX_WARNING = 11,
+    HA_SYNTAX_ERROR = 12
+};
+
+typedef void (*ha_syntax_span_callback)(
+    void *context,
+    size_t byte_offset,
+    size_t byte_length,
+    int32_t syntax_class
+);
+
+/*
+ * Highlight one complete code block using the shared terminal tokenizer.
+ * Call after ha_runtime_init; no engine is required. Configure AGENT_SYNTAX_DIR
+ * before use. Definitions are loaded lazily and cached for the process lifetime.
+ * Concurrent calls are supported; callbacks run synchronously on the calling
+ * thread, in source order, before this function returns. The definition-cache
+ * lock is not held during callbacks. Callbacks must not throw across the ABI.
+ *
+ * language is a Markdown fence info string (for example "haskell" or "Main.hs").
+ * Both input buffers are borrowed, strict UTF-8, and need not be NUL terminated.
+ * NULL is permitted only with zero length. The callback is required; context
+ * is opaque, may be NULL, and is never retained. No output allocation transfers
+ * ownership. Callback values can be copied directly; no callback-scoped buffer
+ * is exposed. Spans are nonempty, nonoverlapping UTF-8 byte ranges in source,
+ * never split a Unicode scalar, and omit LF separators between lines.
+ *
+ * Returns 0 on success; 1 for plain-text fallback (unsupported language,
+ * unavailable definitions, tokenizer refusal, source exceeding 256 KiB or
+ * 5000 lines, or language exceeding 4096 bytes); 2 for invalid arguments or
+ * malformed UTF-8; 3 for internal failure. Discard any collected spans when
+ * status is nonzero. Input text is never modified.
+ */
+int32_t ha_syntax_highlight(
+    const uint8_t *language,
+    size_t language_length,
+    const uint8_t *source,
+    size_t source_length,
+    ha_syntax_span_callback callback,
+    void *context
+);
+
 typedef void (*ha_event_callback)(
     void *context,
     /*
@@ -39,6 +93,44 @@ typedef void (*ha_event_callback)(
      */
     const uint8_t *bytes,
     size_t length
+);
+
+typedef struct ha_integration_attachment {
+    const uint8_t *connection_id;
+    size_t connection_id_length;
+    const uint8_t *server_name;
+    size_t server_name_length;
+    const uint8_t *display_name;
+    size_t display_name_length;
+} ha_integration_attachment;
+
+/* Stage explicit context after stage_turn_options and before turn.start.
+ * The turn ID is the same 1..1024-byte UTF-8 identifier used for other staging.
+ * Atomically replaces context for that staged turn only. Context is consumed
+ * together with options at turn admission, and discarded by discard_turn_staging.
+ * No callback is made. May run on any host thread; callers must serialize staging
+ * with turn.start for the same ID. All buffers are copied before return.
+ * Each text field is valid UTF-8, contains no NUL, and is at most 4096 bytes.
+ * At most 32 integrations, with all three fields nonempty. Null pointers are
+ * accepted only with zero lengths/counts. Do not supply credentials.
+ * window_host_token=0 means no window; both window text fields must be empty.
+ * A nonzero token requires a nonempty application name, is scoped to this turn,
+ * and must remain resolvable by the computer host until the turn terminates.
+ * It is never persisted or disclosed to the model. The token is passed through
+ * HA_COMPUTER_OPEN_ATTACHED; failure never falls back to an unrestricted host.
+ * Window context enables computer use for this turn only, without changing
+ * engine registration or approval policy. Missing host support fails the turn.
+ * Return: 0 success, 1 null engine, 2 invalid ID length/pointer, 3 exception,
+ * 4 invalid context/UTF-8, 5 turn has no staged options (already admitted or
+ * discarded). Existing staged context is unchanged on failure.
+ */
+int32_t ha_engine_stage_turn_context(
+    void *engine,
+    const uint8_t *turn_id, size_t turn_id_length,
+    uint64_t window_host_token,
+    const uint8_t *application_name, size_t application_name_length,
+    const uint8_t *window_title, size_t window_title_length,
+    const ha_integration_attachment *integrations, size_t integration_count
 );
 
 /*
@@ -452,7 +544,15 @@ enum {
     HA_COMPUTER_LIST = 2,
     HA_COMPUTER_BIND = 3,
     HA_COMPUTER_OBSERVE_OR_ACT = 4,
-    HA_COMPUTER_CLOSE = 5
+    HA_COMPUTER_CLOSE = 5,
+    /* Optional v3 operation. session_token is the nonzero host-owned attachment
+     * token staged for this turn, not an existing computer-session token.
+     * All request buffers are empty, as for OPEN. Resolve and validate the
+     * selected window and return a new session token scoped to that window.
+     * Unsupported or expired tokens must fail; never fall back to OPEN.
+     * LIST/BIND/OBSERVE_OR_ACT on the resulting session must remain restricted
+     * to the attached window. Usual callback threading/ownership rules apply. */
+    HA_COMPUTER_OPEN_ATTACHED = 6
 };
 
 enum {
@@ -1618,7 +1718,30 @@ typedef void (*ha_interaction_callback)(
     const ha_interaction_option *options, size_t option_count
 );
 
-/* Runtime calls are process-global and reference counted. */
+/*
+ * Run the CLI in a dedicated process, normally directly from C main.
+ * Call once, on the initial process thread, before any runtime or engine call.
+ * This is not an embedded command API: it owns runtime initialization, signal
+ * handlers, standard streams, and process termination. It must not be called
+ * from Swift/AppKit or a process that has initialized another Haskell runtime.
+ *
+ * argc includes argv[0] and must be positive. argv points to argc non-null,
+ * NUL-terminated UTF-8 strings followed by a null pointer; its storage remains
+ * caller-owned and must be writable and valid throughout this call. RTS
+ * argument processing may modify the pointer array. argv[0] is retained as the
+ * CLI program identity; pass the actual executable name, not the GUI name.
+ * Configure relocated resources and external-tool environment before calling.
+ *
+ * Uses the standalone CLI's default RTS options (-N4 -M8G), with GHCRTS and
+ * +RTS command-line overrides enabled. Successful initialization does not
+ * return: the process exits with the CLI's ordinary status, including argument
+ * errors and Haskell exceptions. Returns 64 for malformed arguments or 70 if
+ * this bridge's runtime was already initialized; neither starts CLI execution.
+ */
+int32_t ha_cli_main(int argc, char **argv);
+
+/* Runtime calls are process-global and reference counted. Initialization
+ * returns -1 if the process-owning CLI entrypoint has claimed the runtime. */
 int32_t ha_runtime_init(void);
 void ha_runtime_exit(void);
 
