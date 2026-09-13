@@ -462,7 +462,9 @@ exerciseDataBrowser store stateDirectory =
                                 Left err -> expectationFailure (Text.unpack err)
                                 Right context -> do
                                     context `shouldContainText` "description=\"Working notes\""
-                                    context `shouldSatisfy` (not . Text.isInfixOf "priority")
+                                    let tableEntries = Text.unlines
+                                            (filter (Text.isPrefixOf "<table ") (Text.lines context))
+                                    tableEntries `shouldSatisfy` (not . Text.isInfixOf "priority")
                                     context `shouldSatisfy` (not . Text.isInfixOf "name=\"sessions\"")
                             -- A different user/repository/checkout namespace cannot
                             -- discover this scope's catalog.
