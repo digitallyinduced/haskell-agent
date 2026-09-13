@@ -929,6 +929,7 @@
                                 # cabal2nix does not include foreign-library
                                 # dependencies in libraryHaskellDepends.
                                 [ final.agent-repository
+                                  final.agent-cli
                                   final.agent-runtime-daemon
                                   final.agent-integration-api
                                   final.agent-syntax
@@ -1001,6 +1002,11 @@
                     productionHaskellPackages.agent-repository;
                 agentCliPackage = productionHaskellPackages.agent-cli;
                 agentNativeBridgeHaskellPackage =
+                    # The Darwin foreign-library embeds the CLI entry point.
+                    # Check the production graph even on Linux, where that
+                    # component is disabled and test dependencies can mask drift.
+                    assert builtins.elem agentCliPackage
+                        productionHaskellPackages.agent-native-bridge.propagatedBuildInputs;
                     productionHaskellPackages.agent-native-bridge;
                 agentTelegramPackage = productionHaskellPackages.agent-telegram;
                 agentServerPackage = productionHaskellPackages.agent-server;

@@ -133,6 +133,7 @@ foreign-library haskell-agent-bridge
     build-depends:    agent-native-bridge
                     , agent-computer-use >= 0.1 && < 0.2
                     , agent-accounts >= 0.1 && < 0.2
+                    , agent-tools >= 0.1 && < 0.2
                     , agent-repository >= 0.1 && < 0.2
                     , agent-cli >= 0.1 && < 0.2
                     , agent-mcp >= 0.1 && < 0.2
