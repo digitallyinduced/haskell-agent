@@ -2,6 +2,7 @@
 module Agent.CLI.SteeringInputs
     ( SteeringInputs
     , awaitSteeringInput
+    , awaitUserSteering
     , clearSteeringInputs
     , commitSteeringInputs
     , dismissBackgroundCompletion
@@ -204,6 +205,15 @@ awaitSteeringInput (SteeringInputs ref) = do
                 (\entry -> entry { steeringWake = False })
                 state.steeringQueue
         }
+
+-- | Wake passive tool waits without consuming guidance or its idle-wake edge.
+-- Every concurrent wait must observe the same pending input. Only provider
+-- acknowledgement removes it; background completions are not user guidance.
+awaitUserSteering :: SteeringInputs -> STM ()
+awaitUserSteering (SteeringInputs ref) = do
+    state <- readTVar ref
+    check $ any (\entry -> entry.steeringBackgroundKey == Nothing)
+        state.steeringQueue
 
 dismissBackgroundCompletion :: SteeringInputs -> Text -> IO ()
 dismissBackgroundCompletion (SteeringInputs ref) key =

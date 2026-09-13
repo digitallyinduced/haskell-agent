@@ -23,6 +23,8 @@ module Agent.Tools.Types
     , addToolAllowedRoot
     , defaultToolEnv
     , setToolHumanInputWaitHooks
+    , setToolSteeringWait
+    , waitForToolYield
     , setToolRootAccessRequest
     , setToolSkillRoots
     , setToolSessionTmp
@@ -83,6 +85,7 @@ import Agent.Tools.Scheduling
     , ToolResourceClaim(..)
     , ToolSchedulingPlan(..)
     )
+import Control.Concurrent.STM (STM, atomically, check, orElse, readTVar, registerDelay, retry)
 import Control.Exception.Safe (bracket_, tryAny)
 import Control.Monad (foldM)
 import Data.Aeson (Value)
@@ -278,6 +281,9 @@ data ToolEnv = ToolEnv
       -- provider-native tool runtimes are constructed.
     , toolBackgroundTaskHooks :: !(IORef BackgroundTaskHooks)
     , toolBackgroundTasks :: !(IORef (Map.Map Text BackgroundTaskStatus))
+      -- | Non-consuming notification of pending guidance. Managed background
+      -- waits may yield early, but must not cancel the underlying work.
+    , toolSteeringWait :: !(IORef (STM ()))
       -- | Soft-cancel latch for the active turn. Shell tools race against it.
     , toolCancel :: !CancelFlag
     }
@@ -294,6 +300,7 @@ defaultToolEnv cwd = do
     outputMemory <- newOutputArtifactMemoryStore
     backgroundTaskHooks <- newIORef noBackgroundTaskHooks
     backgroundTasks <- newIORef Map.empty
+    steeringWait <- newIORef retry
     pure ToolEnv
         { toolCwd = dropTrailingPathSeparator cwd
         , toolResourceArbiter = arbiter
@@ -310,8 +317,23 @@ defaultToolEnv cwd = do
         , toolStdoutCap = 16 * 1024
         , toolBackgroundTaskHooks = backgroundTaskHooks
         , toolBackgroundTasks = backgroundTasks
+        , toolSteeringWait = steeringWait
         , toolCancel = cancel
         }
+
+-- | Install the session's non-consuming guidance notification. The default
+-- blocks indefinitely so hosts without steering retain ordinary yield timing.
+setToolSteeringWait :: ToolEnv -> STM () -> IO ()
+setToolSteeringWait env = writeIORef env.toolSteeringWait
+
+-- | Wait up to the supplied number of microseconds, returning early when
+-- guidance is pending. This is only for yielding managed background work:
+-- it does not cancel a command or acknowledge any queued input.
+waitForToolYield :: ToolEnv -> Int -> IO ()
+waitForToolYield env microseconds = do
+    steering <- readIORef env.toolSteeringWait
+    elapsed <- registerDelay (max 1 microseconds)
+    atomically $ steering `orElse` (readTVar elapsed >>= check)
 
 -- | Install the session-local callback used to request access to an
 -- additional filesystem root. The callback should perform any human-facing

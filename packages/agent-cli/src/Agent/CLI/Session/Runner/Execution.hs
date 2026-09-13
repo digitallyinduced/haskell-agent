@@ -432,6 +432,7 @@ data SessionControlRuntime = SessionControlRuntime
 
 installBackgroundTaskSteering :: ToolEnv -> SteeringInputs -> IO ()
 installBackgroundTaskSteering toolEnv steeringInputs = do
+    setToolSteeringWait toolEnv (awaitUserSteering steeringInputs)
     enqueueCompletion <- prepareBackgroundCompletion steeringInputs
     setBackgroundTaskHooks toolEnv BackgroundTaskHooks
         { backgroundTaskCompleted = \notice ->

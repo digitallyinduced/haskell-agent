@@ -18,6 +18,7 @@ import Agent.CLI.PendingInputs
     )
 import Agent.CLI.SteeringInputs
     ( awaitSteeringInput
+    , awaitUserSteering
     , clearSteeringInputs
     , commitSteeringInputs
     , dismissBackgroundCompletion
@@ -58,7 +59,7 @@ import Control.Concurrent
     , takeMVar
     )
 import Control.Exception.Safe (tryAny)
-import Control.Concurrent.STM (atomically)
+import Control.Concurrent.STM (atomically, orElse)
 import Data.Either (isLeft)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.Text as Text
@@ -525,6 +526,37 @@ spec = do
             all (`notElem` [UserMessage "omitted one", UserMessage "omitted two"])
 
   describe "SteeringInputs" do
+    it "wakes passive waits without consuming guidance or its idle notification" do
+        steering <- newSteeringInputs
+        let ready = atomically $
+                (awaitUserSteering steering >> pure True) `orElse` pure False
+            guidance = [UserMessage "how long will it take?"]
+        ready `shouldReturn` False
+        enqueueBackgroundCompletion steering "build" (UserMessage "completed")
+            `shouldReturn` Right True
+        ready `shouldReturn` False
+        enqueueSteeringInputs steering guidance `shouldReturn` Right ()
+        ready `shouldReturn` True
+        ready `shouldReturn` True
+        hasSteeringInputWake steering `shouldReturn` True
+        readSteeringInputs steering `shouldReturn` (UserMessage "completed" : guidance)
+        atomically (awaitSteeringInput steering)
+        ready `shouldReturn` True
+        commitSteeringInputs steering 2
+        ready `shouldReturn` False
+
+    it "broadcasts arriving guidance to concurrent passive waits" do
+        steering <- newSteeringInputs
+        let completed (Just (Right ())) = True
+            completed _ = False
+        withAsync (atomically (awaitUserSteering steering)) \first ->
+            withAsync (atomically (awaitUserSteering steering)) \second -> do
+                enqueueSteeringInputs steering [UserMessage "status please"]
+                    `shouldReturn` Right ()
+                timeout 1000000 (waitCatch first) >>= (`shouldSatisfy` completed)
+                timeout 1000000 (waitCatch second) >>= (`shouldSatisfy` completed)
+                readSteeringInputs steering `shouldReturn` [UserMessage "status please"]
+
     it "snapshots idle guidance as turn text without consuming or duplicating inputs" do
         steering <- newSteeringInputs
         let guidance = [UserMessage "make a pr", UserMessage "include tests"]
