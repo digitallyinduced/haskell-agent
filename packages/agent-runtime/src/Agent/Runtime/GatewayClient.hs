@@ -15,6 +15,12 @@ module Agent.Runtime.GatewayClient
     , GatewayAuthorizationCodeResponse(..)
     , GatewayDeviceAuthorization(..)
     , GatewayPollResult(..)
+    , GatewayMcpServer(..)
+    , installGatewayMcpServers
+    , checkGatewayMcpServersInstallable
+    , reconcileGatewayMcpServers
+    , validateGatewayMcpServers
+    , saveGatewayCredentialAndMcpServers
     , gatewayCredentialIdentity
     , connectGatewayBrowser
     , connectGatewayBrowserWithCancel
@@ -80,8 +86,15 @@ import Agent.Runtime.Gateway.Account
 import Agent.Accounts.Gateway.Credentials
 import Agent.Runtime.Gateway.OAuth
 import Agent.Runtime.Gateway.OAuth.Protocol
+import Agent.Runtime.Gateway.McpDistribution
+    ( checkGatewayMcpServersInstallable, installGatewayMcpServers
+    , reconcileGatewayMcpServers
+    , removeGatewayMcpServers
+    , validateGatewayMcpServers
+    )
 import Agent.Accounts.Gateway.Origin (validateBaseUrl)
 import Agent.Runtime.Options (GatewayCommand(..))
+import Agent.Runtime.McpConnectionRuntime (invalidateMcpConnectionRuntimes)
 import Agent.Server.Client.GatewayIdentity
     ( GatewayCredential(..)
     , gatewayCredentialIdentity
@@ -102,9 +115,29 @@ connectGateway rawBaseUrl = do
     opened <- openGatewayAuthorizationPage authorization
     when (not opened) $
         putStrLn "Could not open a browser automatically."
-    credential <- pollUntilAuthorized manager authorization
-    saveGatewayCredential credential >>= either failText pure
+    (credential, mcpServers) <- pollUntilAuthorized manager authorization
+    saveGatewayCredentialAndMcpServers credential mcpServers
+        >>= either failText pure
     putStrLn "Gateway connection saved."
+
+saveGatewayCredentialAndMcpServers
+    :: GatewayCredential
+    -> [GatewayMcpServer]
+    -> IO (Either Text ())
+saveGatewayCredentialAndMcpServers credential servers =
+    case validateGatewayMcpServers credential.gatewayBaseUrl servers of
+        Left err -> pure (Left err)
+        Right validated -> do
+            installable <- checkGatewayMcpServersInstallable validated
+            case installable of
+                Left err -> pure (Left err)
+                Right () -> do
+                    saved <- saveGatewayCredentialWith credential
+                        (installGatewayMcpServers validated >>= either failText pure)
+                    case saved of
+                        Left err -> pure (Left err)
+                        Right () -> invalidateMcpConnectionRuntimes
+                            >> pure (Right ())
 
 showGatewayStatus :: IO ()
 showGatewayStatus =
@@ -117,7 +150,10 @@ showGatewayStatus =
 
 disconnectGateway :: IO ()
 disconnectGateway = do
-    removeGatewayCredential >>= either failText pure
+    removeGatewayCredentialWith
+        (removeGatewayMcpServers >>= either failText pure)
+        >>= either failText pure
+    invalidateMcpConnectionRuntimes
     putStrLn "Gateway connection removed."
 
 runGatewayCommand :: GatewayCommand -> IO ()

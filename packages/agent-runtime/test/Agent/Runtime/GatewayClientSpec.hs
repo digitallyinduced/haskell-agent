@@ -1,6 +1,15 @@
 module Agent.Runtime.GatewayClientSpec (spec) where
 
 import Agent.Runtime.GatewayClient
+import Agent.Runtime.Config
+    ( HarnessConfig(..), McpServerConfig(..), defaultHarnessConfig
+    , loadHarnessConfig, modifyHarnessConfig
+    )
+import Agent.MCP (McpCredentialProvider(McpCredentialProvider), McpProtocolPreference(..))
+import Agent.Runtime.Mcp.Startup
+    ( McpConfigurationRequest(..), resolveMcpConfiguration )
+import Agent.Runtime.McpConnectionCredentials (newCredentialRuntime)
+import Agent.Runtime.McpConnectionRuntime qualified as McpRuntime
 import Agent.Runtime.SessionSpec.Fixtures (withTempStore)
 import Agent.Store.Postgres (trustedPool)
 import Agent.Store.Postgres.ModelCatalogCache qualified as ModelStore
@@ -25,6 +34,7 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.Either (isLeft)
 import Data.IORef (atomicModifyIORef', newIORef, modifyIORef', readIORef)
 import Data.Maybe (isNothing)
+import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
 import Network.HTTP.Client qualified as HTTP
@@ -453,7 +463,7 @@ spec = describe "gateway device authorization" do
         Hermes.decodeEither gatewayPollDecoder
             "{\"access_token\":\"secret\",\"websocket_url\":\"wss://gateway/v1/responses\"}"
             `shouldBe` Right
-                (GatewayAuthorized "secret" "wss://gateway/v1/responses")
+                (GatewayAuthorized "secret" "wss://gateway/v1/responses" [])
 
     it "builds the registered loopback Authorization Code + PKCE request" do
         gatewayAuthorizationUrl
@@ -651,7 +661,15 @@ spec = describe "gateway device authorization" do
         let payload =
                 "{\"access_token\":\"hag_secret\",\"token_type\":\"Bearer\",\
                 \\"base_url\":\"https://platform.digitallyinduced.com\",\
-                \\"websocket_url\":\"wss://platform.digitallyinduced.com/v1/responses\"}"
+                \\"websocket_url\":\"wss://platform.digitallyinduced.com/v1/responses\",\
+                \\"mcp_servers\":[{\"name\":\"gateway\",\"url\":\"https://platform.digitallyinduced.com/mcp\",\
+                \\"transport\":\"streamable-http\",\"authentication\":\"connection-access-token\"}]}"
+            gatewayServer = GatewayMcpServer
+                { gatewayMcpName = "gateway"
+                , gatewayMcpUrl = "https://platform.digitallyinduced.com/mcp"
+                , gatewayMcpTransport = "streamable-http"
+                , gatewayMcpAuthentication = "connection-access-token"
+                }
             response =
                 GatewayAuthorizationCodeResponse
                     { authorizationAccessToken = "hag_secret"
@@ -660,6 +678,7 @@ spec = describe "gateway device authorization" do
                         "https://platform.digitallyinduced.com"
                     , authorizationWebSocketUrl =
                         "wss://platform.digitallyinduced.com/v1/responses"
+                    , authorizationMcpServers = [gatewayServer]
                     }
         Hermes.decodeEither
             gatewayAuthorizationCodeDecoder
@@ -676,6 +695,149 @@ spec = describe "gateway device authorization" do
                     , gatewayAccessToken = "hag_secret"
                     }
 
+        validateGatewayMcpServers defaultGatewayBaseUrl [gatewayServer]
+            `shouldBe` Right [gatewayServer]
+        validateGatewayMcpServers defaultGatewayBaseUrl
+            [gatewayServer { gatewayMcpUrl = "https://example.com/mcp" }]
+            `shouldBe` Left
+                "The gateway returned an MCP server URL for a different origin."
+
+    it "reconciles gateway-managed MCP entries without storing credentials" do
+        let server = GatewayMcpServer
+                { gatewayMcpName = "gateway"
+                , gatewayMcpUrl = "https://platform.digitallyinduced.com/mcp"
+                , gatewayMcpTransport = "streamable-http"
+                , gatewayMcpAuthentication = "connection-access-token"
+                }
+        reconciled <- case reconcileGatewayMcpServers [server] defaultHarnessConfig of
+            Left err -> expectationFailure (Text.unpack err) >> pure defaultHarnessConfig
+            Right config -> pure config
+        case Map.lookup "gateway" reconciled.configMcpServers of
+            Nothing -> expectationFailure "gateway MCP server was not installed"
+            Just configured -> do
+                configured.mcpEnabled `shouldBe` True
+                configured.mcpUrl `shouldBe`
+                    Just "https://platform.digitallyinduced.com/mcp"
+                configured.mcpConnectionId `shouldBe`
+                    Just "gateway-distributed-gateway"
+                configured.mcpConnectionCredentials `shouldBe` Just True
+                configured.mcpEnv `shouldBe` Map.empty
+
+    it "installs distributed MCP configuration with the gateway login" $
+        withTempHome \home ->
+            withHomeEnvironment home do
+                let credential = GatewayCredential
+                        "https://platform.digitallyinduced.com"
+                        "wss://platform.digitallyinduced.com/v1/responses"
+                        "gateway-secret"
+                    server = GatewayMcpServer
+                        "gateway"
+                        "https://platform.digitallyinduced.com/mcp"
+                        "streamable-http"
+                        "connection-access-token"
+                saveGatewayCredentialAndMcpServers credential [server]
+                    `shouldReturn` Right ()
+                loadGatewayCredentialAt home
+                    `shouldReturn` Right (Just credential)
+                loaded <- loadHarnessConfig home >>= either
+                    (\err -> expectationFailure (Text.unpack err)
+                        >> fail "failed to load MCP configuration")
+                    pure
+                fmap (.mcpConnectionId)
+                    (Map.lookup "gateway" loaded.configMcpServers)
+                    `shouldBe` Just (Just "gateway-distributed-gateway")
+                let (runtimeServers, _) = resolveMcpConfiguration
+                        McpConfigurationRequest
+                            { mcpConfigCwd = home
+                            , mcpConfigHome = home
+                            , mcpConfigHarness = loaded
+                            , mcpConfigToolsEnabled = True
+                            , mcpConfigHostExtensions = True
+                            , mcpConfigOneShot = False
+                            }
+                runtimeServer <- case runtimeServers of
+                    [serverConfig] -> pure serverConfig
+                    _ -> expectationFailure "expected one gateway MCP server"
+                        >> fail "missing gateway MCP server"
+                credentials <- newCredentialRuntime Nothing
+                provider <- McpRuntime.mcpConnectionCredentials
+                    credentials runtimeServer >>= maybe
+                        (expectationFailure "missing gateway credential provider"
+                            >> fail "missing gateway credential provider")
+                        pure
+                let McpCredentialProvider loadAccessToken _ = provider
+                loadAccessToken `shouldReturn` Right (Just "gateway-secret")
+
+    it "does not overwrite a user MCP entry with the distributed name" do
+        let userServer = McpServerConfig
+                { mcpEnabled = True
+                , mcpUrl = Just "https://user.example/mcp"
+                , mcpConnectionId = Nothing
+                , mcpConnectionCredentials = Nothing
+                , mcpConnectionGeneration = Nothing
+                , mcpDisplayName = Nothing
+                , mcpCommand = ""
+                , mcpArgs = []
+                , mcpCwd = Nothing
+                , mcpEnv = Map.empty
+                , mcpStartupTimeoutSeconds = 30
+                , mcpRequestTimeoutSeconds = 60
+                , mcpOAuth = Nothing
+                , mcpProtocol = McpProtocolAuto
+                , mcpRoots = False
+                , mcpSampling = False
+                , mcpLogLevel = Nothing
+                }
+            config = defaultHarnessConfig
+                { configMcpServers = Map.singleton "gateway" userServer }
+            server = GatewayMcpServer "gateway"
+                "https://platform.digitallyinduced.com/mcp"
+                "streamable-http" "connection-access-token"
+        reconcileGatewayMcpServers [server] config `shouldSatisfy` isLeft
+
+    it "rejects a distributed name collision before rotating the credential" $
+        withTempHome \home ->
+            withHomeEnvironment home do
+                let previous = GatewayCredential
+                        "https://platform.digitallyinduced.com"
+                        "wss://platform.digitallyinduced.com/v1/responses"
+                        "previous-secret"
+                    replacement = previous
+                        { gatewayAccessToken = "replacement-secret" }
+                    server = GatewayMcpServer "gateway"
+                        "https://platform.digitallyinduced.com/mcp"
+                        "streamable-http" "connection-access-token"
+                    userServer = McpServerConfig
+                        { mcpEnabled = True
+                        , mcpUrl = Just "https://user.example/mcp"
+                        , mcpConnectionId = Nothing
+                        , mcpConnectionCredentials = Nothing
+                        , mcpConnectionGeneration = Nothing
+                        , mcpDisplayName = Nothing
+                        , mcpCommand = ""
+                        , mcpArgs = []
+                        , mcpCwd = Nothing
+                        , mcpEnv = Map.empty
+                        , mcpStartupTimeoutSeconds = 30
+                        , mcpRequestTimeoutSeconds = 60
+                        , mcpOAuth = Nothing
+                        , mcpProtocol = McpProtocolAuto
+                        , mcpRoots = False
+                        , mcpSampling = False
+                        , mcpLogLevel = Nothing
+                        }
+                saveGatewayCredentialAt home previous `shouldReturn` Right ()
+                modified <- modifyHarnessConfig home \_ config -> Right
+                    ( config { configMcpServers =
+                        Map.singleton "gateway" userServer }
+                    , ()
+                    )
+                fmap (const ()) modified `shouldBe` Right ()
+                result <- saveGatewayCredentialAndMcpServers replacement [server]
+                result `shouldSatisfy` isLeft
+                loadGatewayCredentialAt home
+                    `shouldReturn` Right (Just previous)
+
     it "rejects OAuth responses with the wrong scheme or origin" do
         let response =
                 GatewayAuthorizationCodeResponse
@@ -685,6 +847,7 @@ spec = describe "gateway device authorization" do
                         "https://platform.digitallyinduced.com"
                     , authorizationWebSocketUrl =
                         "wss://platform.digitallyinduced.com/v1/responses"
+                    , authorizationMcpServers = []
                     }
             validate =
                 validateGatewayAuthorizationCodeResponse
@@ -714,7 +877,7 @@ spec = describe "gateway device authorization" do
         let credential =
                 GatewayCredential "https://gateway" "wss://gateway/v1/responses" "secret"
         show credential `shouldSatisfy` not . Text.isInfixOf "secret" . Text.pack
-        show (GatewayAuthorized "secret" "wss://gateway/v1/responses")
+        show (GatewayAuthorized "secret" "wss://gateway/v1/responses" [])
             `shouldSatisfy` not . Text.isInfixOf "secret" . Text.pack
         show (GatewayDeviceAuthorization
                 "device-secret"
@@ -730,6 +893,7 @@ spec = describe "gateway device authorization" do
                     "Bearer"
                     "https://gateway"
                     "wss://gateway/secret-websocket"
+                    []
             rendered = Text.pack (show browserResponse)
         rendered `shouldSatisfy` not . Text.isInfixOf "oauth-secret"
         rendered `shouldSatisfy` not . Text.isInfixOf "secret-websocket"

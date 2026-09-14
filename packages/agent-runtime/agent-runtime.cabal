@@ -53,6 +53,7 @@ library
                     , Agent.Runtime.Gateway.Dictation
                     , Agent.Runtime.Gateway.Http
                     , Agent.Runtime.Gateway.OAuth
+                    , Agent.Runtime.Gateway.McpDistribution
                     , Agent.Runtime.Gateway.OAuth.Protocol
                     , Agent.Runtime.Gateway.Usage
                     , Agent.Runtime.Session.Storage

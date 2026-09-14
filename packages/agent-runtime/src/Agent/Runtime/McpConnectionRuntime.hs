@@ -9,6 +9,10 @@ module Agent.Runtime.McpConnectionRuntime
 
 import Agent.Runtime.Config (HarnessConfig(..), McpServerConfig(..), withHarnessConfigSnapshot, harnessConfigPath, mcpUsesConnectionCredentials)
 import Agent.Runtime.McpConnectionCredentials (CredentialRuntime, mcpConnectionCredentialProviderWith, withMcpConnectionRefreshLock)
+import Agent.Runtime.Gateway.McpDistribution (gatewayMcpConnectionPrefix)
+import Agent.Accounts.Gateway.Credentials (loadGatewayCredential)
+import Agent.Accounts.Gateway.Origin (parseGatewayOrigin, parseGatewayResourceOrigin)
+import Agent.Server.Client.GatewayIdentity (GatewayCredential(..))
 import Agent.OsPath (fromText)
 import qualified Agent.MCP as MCP
 import qualified Data.Map.Strict as Map
@@ -72,7 +76,12 @@ mcpConnectionCredentials credentials runtime = case runtime.mcpServerConnection 
         let identifier = identity.mcpConnectionIdentifier
             valid = not (Text.null identifier) && Text.length identifier <= 128
                 && Text.all (\c -> isAsciiLower c || isAsciiUpper c || isDigit c || c == '-') identifier
-            provider = mcpConnectionCredentialProviderWith credentials identifier (gate identity)
+            provider
+                | gatewayMcpConnectionPrefix `Text.isPrefixOf` identifier =
+                    gatewayCredentialProvider identity runtime
+                | otherwise =
+                    mcpConnectionCredentialProviderWith credentials identifier
+                        (connectionGate runtime identity)
             lockPath = takeDirectory (harnessConfigPath home) </>
                 fromText ("mcp-refresh-" <> identifier <> ".lock")
         pure (Just (if valid then withMcpConnectionRefreshLock lockPath provider
@@ -80,16 +89,47 @@ mcpConnectionCredentials credentials runtime = case runtime.mcpServerConnection 
                 { MCP.mcpCredentialAccessToken = pure (Left "Invalid MCP connection identity")
                 , MCP.mcpCredentialRefreshAccessToken = pure (Left "Invalid MCP connection identity")
                 }))
+
+connectionGate
+    :: MCP.McpServerConfig
+    -> MCP.McpConnectionIdentity
+    -> IO (Either Text.Text value)
+    -> IO (Either Text.Text value)
+connectionGate runtime identity action = do
+    home <- getHomeDirectory
+    result <- withHarnessConfigSnapshot home \_ catalog ->
+        case Map.lookup runtime.mcpServerName catalog.configMcpServers of
+            Just config
+                | config.mcpConnectionId == Just identity.mcpConnectionIdentifier
+                , mcpUsesConnectionCredentials config
+                , config.mcpConnectionGeneration == identity.mcpConnectionGeneration
+                , config.mcpUrl == runtime.mcpServerUrl
+                , config.mcpEnabled -> action
+            _ -> pure (Left "MCP connection is disabled, removed, or has changed")
+    pure (result >>= id)
+
+gatewayCredentialProvider
+    :: MCP.McpConnectionIdentity
+    -> MCP.McpServerConfig
+    -> MCP.McpCredentialProvider
+gatewayCredentialProvider identity runtime = MCP.McpCredentialProvider
+    { MCP.mcpCredentialAccessToken = loadToken
+    , MCP.mcpCredentialRefreshAccessToken = loadToken >>= pure . (>>= maybe
+        (Left "Gateway authorization is required") Right)
+    }
   where
-    gate identity action = do
-        home <- getHomeDirectory
-        result <- withHarnessConfigSnapshot home \_ catalog ->
-            case Map.lookup runtime.mcpServerName catalog.configMcpServers of
-                Just config
-                    | config.mcpConnectionId == Just identity.mcpConnectionIdentifier
-                    , mcpUsesConnectionCredentials config
-                    , config.mcpConnectionGeneration == identity.mcpConnectionGeneration
-                    , config.mcpUrl == runtime.mcpServerUrl
-                    , config.mcpEnabled -> action
-                _ -> pure (Left "MCP connection is disabled, removed, or has changed")
-        pure (result >>= id)
+    loadToken = connectionGate runtime identity do
+        loadGatewayCredential >>= pure . (>>= \case
+                Nothing -> Right Nothing
+                Just credential -> do
+                    gatewayOrigin <- parseGatewayOrigin
+                        "Gateway credential contains an invalid base URL."
+                        credential.gatewayBaseUrl
+                    endpoint <- maybe
+                        (Left "Gateway MCP endpoint is missing") Right
+                        runtime.mcpServerUrl
+                    endpointOrigin <- parseGatewayResourceOrigin
+                        "Gateway MCP endpoint is invalid." endpoint
+                    if endpointOrigin /= gatewayOrigin
+                        then Left "Gateway MCP endpoint uses a different origin"
+                        else Right (Just credential.gatewayAccessToken))

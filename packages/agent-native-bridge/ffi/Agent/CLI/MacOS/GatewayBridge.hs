@@ -207,7 +207,7 @@ ha_gateway_connect_poll
                             (Text.pack (show exception))
                     Right (Left err) ->
                         invokeGatewayPollError callback context err
-                    Right (Right (GatewayAuthorized _ _)) -> pure ()
+                    Right (Right (GatewayAuthorized _ _ _)) -> pure ()
                     Right (Right result) ->
                         invokeGatewayPollResult callback context result
         pure 0
@@ -316,7 +316,7 @@ withGatewayDeviceStrings device action =
 invokeGatewayPollResult
     :: FunPtr GatewayPollCallback -> Ptr () -> GatewayPollResult -> IO ()
 invokeGatewayPollResult callback context = \case
-    GatewayAuthorized _ _ ->
+    GatewayAuthorized _ _ _ ->
         invokeGatewayPollCallback callback context 0 0 nullPtr 0
     GatewayAuthorizationPending retryInterval ->
         invokeGatewayPollCallback callback context 1
