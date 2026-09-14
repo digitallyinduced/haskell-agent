@@ -55,7 +55,6 @@ module Agent.Runtime.GatewayClient
     , loadGatewayCredentialAt
     , fetchGatewayModels
     , fetchGatewayUsage
-    , fetchGatewayUsageWithCredential
     , cachedGatewayUsage
     , newGatewayModelAccess
     , newGatewayModelAccessWithStore
@@ -78,7 +77,6 @@ module Agent.Runtime.GatewayClient
 
 import Agent.Runtime.Gateway.Catalog
 import Agent.Runtime.Gateway.Account
-import Agent.Runtime.Gateway.Usage (fetchGatewayUsageWithCredential)
 import Agent.Accounts.Gateway.Credentials
 import Agent.Runtime.Gateway.OAuth
 import Agent.Runtime.Gateway.OAuth.Protocol
