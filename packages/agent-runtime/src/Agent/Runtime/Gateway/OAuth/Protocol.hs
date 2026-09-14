@@ -4,6 +4,7 @@ module Agent.Runtime.Gateway.OAuth.Protocol
     , GatewayAuthorizationCodeResponse(..)
     , GatewayDeviceAuthorization(..)
     , GatewayPollResult(..)
+    , GatewayMcpServer(..)
     , defaultGatewayBaseUrl
     , gatewayBrowserClientId
     , gatewayBrowserRedirectPath
@@ -21,6 +22,8 @@ module Agent.Runtime.Gateway.OAuth.Protocol
     ) where
 
 import Agent.Accounts.Gateway.Credentials (validateGatewayCredential)
+import Agent.Runtime.Gateway.McpDistribution
+    ( GatewayMcpServer(..), gatewayMcpServerDecoder )
 import Agent.Accounts.Gateway.Origin
     ( parseGatewayOrigin
     , parseGatewayResourceOrigin
@@ -78,6 +81,7 @@ data GatewayAuthorizationCodeResponse = GatewayAuthorizationCodeResponse
     , authorizationTokenType :: !Text
     , authorizationResponseBaseUrl :: !Text
     , authorizationWebSocketUrl :: !Text
+    , authorizationMcpServers :: ![GatewayMcpServer]
     }
     deriving (Eq)
 
@@ -100,6 +104,8 @@ gatewayAuthorizationCodeDecoder =
             <*> Hermes.atKey "token_type" Hermes.text
             <*> Hermes.atKey "base_url" Hermes.text
             <*> Hermes.atKey "websocket_url" Hermes.text
+            <*> Hermes.defaultKey [] "mcp_servers"
+                (Hermes.list gatewayMcpServerDecoder)
 
 data GatewayDeviceAuthorization = GatewayDeviceAuthorization
     { deviceCode :: !Text
@@ -175,7 +181,7 @@ validateGatewayDeviceAuthorization rawBaseUrl authorization = do
     pure authorization
 
 data GatewayPollResult
-    = GatewayAuthorized !Text !Text
+    = GatewayAuthorized !Text !Text ![GatewayMcpServer]
     | GatewayAuthorizationPending !(Maybe Int)
     | GatewaySlowDown !(Maybe Int)
     | GatewayAccessDenied
@@ -185,7 +191,7 @@ data GatewayPollResult
 
 instance Show GatewayPollResult where
     show result = case result of
-        GatewayAuthorized _ websocketUrl ->
+        GatewayAuthorized _ websocketUrl _ ->
             "GatewayAuthorized <redacted> " <> show websocketUrl
         GatewayAuthorizationPending interval ->
             "GatewayAuthorizationPending " <> show interval
@@ -200,8 +206,8 @@ gatewayPollDecoder :: Hermes.Decoder GatewayPollResult
 gatewayPollDecoder =
     Hermes.withOwnedRawJson \raw ->
         case Hermes.decodeEither successDecoder raw of
-            Right (token, websocketUrl) ->
-                pure (GatewayAuthorized token websocketUrl)
+            Right (token, websocketUrl, mcpServers) ->
+                pure (GatewayAuthorized token websocketUrl mcpServers)
             Left _ -> case Hermes.decodeEither errorDecoder raw of
                 Right (code, interval) -> pure case code of
                     "authorization_pending" -> GatewayAuthorizationPending interval
@@ -213,9 +219,11 @@ gatewayPollDecoder =
   where
     successDecoder =
         Hermes.object $
-            (,)
+            (,,)
                 <$> Hermes.atKey "access_token" Hermes.text
                 <*> Hermes.atKey "websocket_url" Hermes.text
+                <*> Hermes.defaultKey [] "mcp_servers"
+                    (Hermes.list gatewayMcpServerDecoder)
     errorDecoder =
         Hermes.object $
             (,)

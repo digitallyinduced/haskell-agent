@@ -15,10 +15,13 @@ module Agent.Runtime.Gateway.OAuth
 
 import Agent.ClientIdentity (gatewayUserAgent)
 import Agent.Accounts.Gateway.Credentials
-    ( saveGatewayCredential
-    , saveGatewayCredentialWith
-    )
+    ( saveGatewayCredentialWith )
 import Agent.Runtime.Gateway.OAuth.Protocol
+import Agent.Runtime.Gateway.McpDistribution
+    ( checkGatewayMcpServersInstallable, installGatewayMcpServers
+    , validateGatewayMcpServers
+    )
+import Agent.Runtime.McpConnectionRuntime (invalidateMcpConnectionRuntimes)
 import Agent.Accounts.Gateway.Origin (validateBaseUrl)
 import Agent.Json.Decode qualified as Hermes
 import Agent.MCP.OAuth qualified as OAuth
@@ -237,9 +240,13 @@ connectGatewayBrowserWithCancel
                                                 validateGatewayAuthorizationCodeResponse
                                                     baseUrl response of
                                                 Left err -> pure (Left err)
-                                                Right credential ->
-                                                    saveGatewayCredential
-                                                        credential
+                                                Right credential -> do
+                                                    case validateGatewayMcpServers
+                                                        baseUrl response.authorizationMcpServers of
+                                                        Left err -> pure (Left err)
+                                                        Right servers ->
+                                                            saveAuthorizedCredential
+                                                                credential servers (pure ())
 
 gatewayBrowserTimeoutMicroseconds :: Int
 gatewayBrowserTimeoutMicroseconds = 5 * 60 * 1_000_000
@@ -247,7 +254,7 @@ gatewayBrowserTimeoutMicroseconds = 5 * 60 * 1_000_000
 pollUntilAuthorized
     :: HTTP.Manager
     -> GatewayAuthorization
-    -> IO GatewayCredential
+    -> IO (GatewayCredential, [GatewayMcpServer])
 pollUntilAuthorized manager authorization =
     go device.expiresInSeconds (max 1 device.pollIntervalSeconds)
   where
@@ -261,13 +268,17 @@ pollUntilAuthorized manager authorization =
                 pollGatewayAuthorizationWith manager authorization
                     >>= either failText pure
             case result of
-                GatewayAuthorized accessToken websocketUrl ->
+                GatewayAuthorized accessToken websocketUrl mcpServers -> do
+                    validated <- either failText pure
+                        (validateGatewayMcpServers baseUrl mcpServers)
                     pure
-                        GatewayCredential
+                        ( GatewayCredential
                             { gatewayBaseUrl = baseUrl
                             , gatewayWebSocketUrl = websocketUrl
                             , gatewayAccessToken = accessToken
                             }
+                        , validated
+                        )
                 GatewayAuthorizationPending serverInterval ->
                     let next = maybe interval (max 1) serverInterval
                      in go (remaining - next) next
@@ -339,20 +350,23 @@ pollNativeGatewayAuthorizationAndSaveWith
                                 Right
                                     authorized@(GatewayAuthorized
                                         accessToken
-                                        websocketUrl) -> do
-                                        saveGatewayCredentialWith
-                                            GatewayCredential
-                                                { gatewayBaseUrl = baseUrl
-                                                , gatewayWebSocketUrl =
-                                                    websocketUrl
-                                                , gatewayAccessToken =
-                                                    accessToken
-                                                }
-                                            (afterAuthorized authorized)
-                                            >>= \case
-                                                Left err -> pure (Left err)
-                                                Right () ->
-                                                    pure (Right authorized)
+                                        websocketUrl
+                                        mcpServers) ->
+                                        case validateGatewayMcpServers baseUrl mcpServers of
+                                            Left err -> pure (Left err)
+                                            Right servers -> do
+                                                saveAuthorizedCredential
+                                                    GatewayCredential
+                                                    { gatewayBaseUrl = baseUrl
+                                                    , gatewayWebSocketUrl =
+                                                        websocketUrl
+                                                    , gatewayAccessToken =
+                                                        accessToken
+                                                    }
+                                                    servers (afterAuthorized authorized)
+                                                    >>= \case
+                                                        Left err -> pure (Left err)
+                                                        Right () -> pure (Right authorized)
                                 Right result -> pure (Right result)
   where
     deviceCode = Text.strip rawDeviceCode
@@ -471,9 +485,30 @@ exchangeNativeGatewayAuthorizationCodeWith
                                             response of
                                         Left err -> pure (Left err)
                                         Right credential ->
-                                            saveGatewayCredentialWith
-                                                credential
-                                                afterSave
+                                            case validateGatewayMcpServers
+                                                baseUrl response.authorizationMcpServers of
+                                                Left err -> pure (Left err)
+                                                Right servers ->
+                                                    saveAuthorizedCredential
+                                                        credential servers afterSave
+
+saveAuthorizedCredential
+    :: GatewayCredential
+    -> [GatewayMcpServer]
+    -> IO value
+    -> IO (Either Text value)
+saveAuthorizedCredential credential servers afterSave =
+    checkGatewayMcpServersInstallable servers >>= \case
+        Left err -> pure (Left err)
+        Right () -> saveGatewayCredentialWith credential
+            (installOrFail servers >> afterSave) >>= \case
+                Left err -> pure (Left err)
+                Right value -> invalidateMcpConnectionRuntimes
+                    >> pure (Right value)
+
+installOrFail :: [GatewayMcpServer] -> IO ()
+installOrFail servers =
+    installGatewayMcpServers servers >>= either failText pure
 
 postGatewayOAuthForm
     :: HTTP.Manager

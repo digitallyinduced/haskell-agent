@@ -16,7 +16,7 @@ import Agent.Runtime.GatewayClient
     , connectGatewayBrowserWithCancel
     , defaultGatewayBaseUrl
     , pollGatewayAuthorization
-    , saveGatewayCredential
+    , saveGatewayCredentialAndMcpServers
     , startGatewayAuthorization
     )
 import Agent.CLI.Input (readApprovalLine)
@@ -287,18 +287,18 @@ connectFullscreenGatewayDevice runtime = do
             _ -> pure Nothing
 
     handlePoll authorization schedule polledAt = \case
-        GatewayAuthorized accessToken websocketUrl
+        GatewayAuthorized accessToken websocketUrl mcpServers
             | devicePollReadiness polledAt schedule
                 == DevicePollExpired ->
                     gatewayTimedOut
             | otherwise -> do
                 saved <-
-                    saveGatewayCredential GatewayCredential
+                    saveGatewayCredentialAndMcpServers GatewayCredential
                         { gatewayBaseUrl =
                             authorization.authorizationBaseUrl
                         , gatewayWebSocketUrl = websocketUrl
                         , gatewayAccessToken = accessToken
-                        }
+                        } mcpServers
                 pure $ Just $ case saved of
                     Left err ->
                         LoginNotice False
