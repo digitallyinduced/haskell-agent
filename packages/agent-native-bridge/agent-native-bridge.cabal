@@ -293,6 +293,7 @@ test-suite agent-native-bridge-test
                      , Agent.CLI.MacOS.BridgeHeaderSpec
                      , Agent.CLI.MacOS.BridgeFFISpec
         build-depends: agent-repository
+                     , agent-accounts
                      , agent-openai
                      , agent-openrouter
                      , agent-xai
