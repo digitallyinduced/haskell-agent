@@ -12,6 +12,20 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "transport-independent semantic responses" do
+    it "keeps OCR text-only without advancing the accessibility baseline" do
+        result <- validate ReadComputerText emptyResponse
+        result `shouldBe` Right
+            ( SemanticComputerResult (Aeson.object []) Nothing Nothing
+            , initialAccessibilityDeltaState
+            )
+    it "rejects accessibility data attached to OCR" do
+        result <- validate ReadComputerText emptyResponse
+            { semanticAccessibilityBytes = "{}" }
+        result `shouldSatisfy` isLeft
+    it "rejects screenshots attached to OCR" do
+        result <- validate ReadComputerText emptyResponse
+            { semanticImageBytes = "invalid", semanticImageFormat = 1 }
+        result `shouldSatisfy` isLeft
     it "accepts a target list without image or accessibility data" do
         result <- validate ListComputerTargets emptyResponse
         result `shouldSatisfy` isRight

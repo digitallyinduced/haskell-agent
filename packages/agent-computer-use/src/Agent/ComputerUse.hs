@@ -1478,6 +1478,8 @@ summarizeSemanticComputerCall arguments =
             ObserveComputerTarget _ ->
                 "inspect the bound accessible window"
                     <> screenshotSuffix request
+            ReadComputerText ->
+                "read visible text in the bound window using local OCR"
             QueryComputerTarget query _ ->
                 "query the bound accessible window"
                     <> maybe "" (\role -> " with role " <> safeQuoted 128 role) query.queryRole

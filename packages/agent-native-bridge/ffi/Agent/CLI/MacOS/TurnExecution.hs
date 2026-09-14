@@ -70,7 +70,7 @@ runNativeTurn
     -> NativeProcessRuntime
     -> TurnControl
     -> [AppTool]
-    -> Maybe (AppTool, IO (), IO ())
+    -> Maybe (AppTool, Maybe AppTool, IO (), IO ())
     -> TurnStart
     -> [ImageAttachment]
     -> NativeTurnOptions
@@ -93,7 +93,7 @@ runNativeTurn
                         writeIORef completedRef True
                         modifyIORef' usageRef (<> output.tokenUsage)
                     ModelContextReset ->
-                        forM_ nativeComputerSession \(_, reset, _) -> reset
+                        forM_ nativeComputerSession \(_, _, reset, _) -> reset
                     _ -> pure ()
                 chartCalls <- readIORef chartCallsRef
                 case encodeNativeLoopEventWithChartCalls chartCalls control.turnControlId event of
@@ -132,10 +132,12 @@ runNativeTurn
                 requestFreshApproval callback context control
             , nativeRequestRootAccess =
                 requestRootAccessFromClient callback context control
-            , nativeToolGroups = [HostToolGroup nativeHostTools]
+            , nativeToolGroups = [HostToolGroup
+                (nativeHostTools <> maybe [] (\(_, ocr, _, _) -> maybe [] pure ocr)
+                    nativeComputerSession)]
             , nativeComposeTools =
                 composeNativeTools
-                    ((\(tool, _, _) -> tool) <$> nativeComputerSession)
+                    ((\(tool, _, _, _) -> tool) <$> nativeComputerSession)
             , nativePlanHooks =
                 nativePlanModeHooks control interactions
             , nativeInteractionMode =

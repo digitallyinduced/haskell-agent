@@ -17,6 +17,20 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "semantic computer protocol" do
+    it "keeps text-only OCR native-wire-only and image-free" do
+        decodeSemanticComputerWireRequest
+            (encodeSemanticComputerRequest ReadComputerText)
+            `shouldBe` Right ReadComputerText
+        semanticComputerRequestOperation ReadComputerText
+            `shouldBe` ObserveOrActOnComputerTargetOperation
+        semanticComputerRequestWantsScreenshot ReadComputerText
+            `shouldBe` False
+        decodeSemanticComputerRequest
+            "{\"operation\":\"ocr\",\"target_id\":null,\"actions\":null,\"include_screenshot\":false}"
+            `shouldSatisfy` either (const True) (const False)
+        decodeSemanticComputerWireRequest
+            "{\"protocol_version\":1,\"operation\":\"ocr\",\"target_id\":null,\"actions\":null,\"include_screenshot\":true}"
+            `shouldSatisfy` either (const True) (const False)
     it "discloses the app-wide Electron accessibility side effect in tool guidance" do
         let schema = TextEncoding.decodeUtf8
                 (LBS.toStrict (Aeson.encode semanticComputerRequestSchema))

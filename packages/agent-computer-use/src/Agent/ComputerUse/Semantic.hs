@@ -56,6 +56,7 @@ validateSemanticComputerResponse request state response =
                 image <- decodedImage
                 let (observation, successor) = case request of
                         ListComputerTargets -> (Nothing, state)
+                        ReadComputerText -> (Nothing, state)
                         _ -> let (value, next) =
                                     decodeAccessibility response.semanticAccessibilityBytes state
                              in (Just value, next)
@@ -86,6 +87,9 @@ validateSemanticComputerResponse request state response =
         when (request == ListComputerTargets
                 && not (BS.null response.semanticAccessibilityBytes)) $
             Left "The native computer host returned accessibility data for list_targets."
+        when (request == ReadComputerText
+                && not (BS.null response.semanticAccessibilityBytes)) $
+            Left "The native computer host returned accessibility data for OCR."
         pure object
     accessibilityIsFresh = \case
         AccessibilityFull{} -> True

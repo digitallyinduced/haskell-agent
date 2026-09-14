@@ -3,6 +3,9 @@
 #include <stddef.h>
 #include <string.h>
 
+_Static_assert(HA_COMPUTER_CAPABILITIES == 7, "optional capability operation");
+_Static_assert(HA_COMPUTER_ABI_VERSION == 3, "capabilities preserve ABI v3");
+
 static int32_t computer_callback(
     void *context,
     uint32_t abi_version,
