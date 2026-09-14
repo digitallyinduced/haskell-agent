@@ -1,10 +1,13 @@
 module Agent.CLI.RepositoryDelivery
     ( RepositoryPullRequest(..)
+    , RepositoryPullRequestSummary(..)
     , repositoryPullRequest
     , parseRepositoryPullRequest
+    , parseRepositoryPullRequestSummary
     , pullRequestURLs
     , conversationPullRequestURLs
     , pullRequestByURL
+    , pullRequestSummaryByURL
     , DeliveryStatus(..)
     , PushPreview(..)
     , PullRequestPreview(..)
@@ -56,12 +59,24 @@ import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
-import Data.Char (isHexDigit, isSpace)
+import Data.Char
+    ( GeneralCategory(Format)
+    , generalCategory
+    , isAsciiLower
+    , isAsciiUpper
+    , isControl
+    , isDigit
+    , isHexDigit
+    , isSpace
+    )
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
-import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
+import Data.Time.Clock (UTCTime)
+import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime, utcTimeToPOSIXSeconds)
+import Data.Time.Format.ISO8601 (iso8601ParseM)
+import Data.Int (Int64)
 import Data.Word (Word8, Word64)
 import GHC.Clock (getMonotonicTimeNSec)
 import System.Directory
@@ -1740,36 +1755,51 @@ parseRepositoryPullRequest repository bytes = do
             (fail "invalid pull request URL")
         state <- o .: "state" :: AesonTypes.Parser Text
         draft <- o .: "isDraft"
-        checks <- o .:? "statusCheckRollup" .!= []
-        statuses <- traverse parseCheck checks
-        let ci | null statuses = 1
-               | 4 `elem` statuses = 4
-               | 2 `elem` statuses = 2
-               | 0 `elem` statuses = 0
-               | otherwise = 3
-        prState <- case state of
-            "OPEN" -> pure (if draft then 2 else 1)
-            "MERGED" -> pure 3
-            "CLOSED" -> pure 4
-            _ -> fail "unknown pull request state"
+        ci <- pullRequestCheckRollup o
+        prState <- parsePullRequestState state draft
         pure (RepositoryPullRequest number url prState ci)
-    parseCheck = Aeson.withObject "check" \o -> do
-        kind <- o .: "__typename" :: AesonTypes.Parser Text
-        case kind of
-            "CheckRun" -> do
-                status <- o .: "status" :: AesonTypes.Parser Text
-                conclusion <- o .:? "conclusion" .!= ""
-                pure $ if status `elem` ["QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED"] then 2
-                    else if status /= "COMPLETED" then 0
-                    else classify conclusion
-            "StatusContext" -> classify <$> o .: "state"
-            _ -> pure 0
-    classify :: Text -> Int
-    classify value
-        | value `elem` ["SUCCESS", "NEUTRAL", "SKIPPED"] = 3
-        | value `elem` ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"] = 4
-        | value `elem` ["PENDING", "EXPECTED"] = 2
-        | otherwise = 0
+
+-- gh reports each check separately; the ABI carries one rolled-up code:
+-- unknown, none, pending, passed, failed (0..4).
+pullRequestCheckRollup :: Aeson.Object -> AesonTypes.Parser Int
+pullRequestCheckRollup o = do
+    checks <- o .:? "statusCheckRollup" .!= []
+    statuses <- traverse parsePullRequestCheck checks
+    pure (rollup statuses)
+  where
+    rollup statuses
+        | null statuses = 1
+        | 4 `elem` statuses = 4
+        | 2 `elem` statuses = 2
+        | 0 `elem` statuses = 0
+        | otherwise = 3
+
+parsePullRequestCheck :: Aeson.Value -> AesonTypes.Parser Int
+parsePullRequestCheck = Aeson.withObject "check" \o -> do
+    kind <- o .: "__typename" :: AesonTypes.Parser Text
+    case kind of
+        "CheckRun" -> do
+            status <- o .: "status" :: AesonTypes.Parser Text
+            conclusion <- o .:? "conclusion" .!= ""
+            pure $ if status `elem` ["QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED"] then 2
+                else if status /= "COMPLETED" then 0
+                else classifyPullRequestCheck conclusion
+        "StatusContext" -> classifyPullRequestCheck <$> o .: "state"
+        _ -> pure 0
+
+classifyPullRequestCheck :: Text -> Int
+classifyPullRequestCheck value
+    | value `elem` ["SUCCESS", "NEUTRAL", "SKIPPED"] = 3
+    | value `elem` ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"] = 4
+    | value `elem` ["PENDING", "EXPECTED"] = 2
+    | otherwise = 0
+
+parsePullRequestState :: Text -> Bool -> AesonTypes.Parser Int
+parsePullRequestState state draft = case state of
+    "OPEN" -> pure (if draft then 2 else 1)
+    "MERGED" -> pure 3
+    "CLOSED" -> pure 4
+    _ -> fail "unknown pull request state"
 
 
 -- A conversation association is independent of checkout branch and fork origin.
@@ -1795,6 +1825,119 @@ pullRequestByURL root url = runExceptT do
                 Just pr | Text.toCaseFold pr.repositoryPullRequestUrl == Text.toCaseFold url -> pure pr
                 _ -> throwE (DeliveryCommandFailed "PR identity changed")
         _ -> throwE (DeliveryInvalidRequest "invalid PR URL")
+
+
+-- Public review metadata for one pull-request link, as rendered by the macOS
+-- transcript hover card. It carries no diff content, no branch names, no
+-- remote URLs, and no credentials.
+data RepositoryPullRequestSummary = RepositoryPullRequestSummary
+    { pullRequestSummaryNumber :: !Int
+    , pullRequestSummaryUrl :: !Text
+    , pullRequestSummaryRepository :: !Text -- owner/name
+    , pullRequestSummaryTitle :: !Text
+    , pullRequestSummaryAuthorLogin :: !Text
+    , pullRequestSummaryAuthorName :: !Text -- empty when the profile has none
+    , pullRequestSummaryAuthorAvatarUrl :: !Text -- empty when not derivable
+    , pullRequestSummaryState :: !Int -- open, draft, merged, closed: 1..4
+    , pullRequestSummaryCI :: !Int -- unknown, none, pending, passed, failed: 0..4
+    , pullRequestSummaryAdditions :: !Int
+    , pullRequestSummaryDeletions :: !Int
+    , pullRequestSummaryChangedFiles :: !Int
+    , pullRequestSummaryUpdatedAt :: !Int64 -- Unix seconds, 0 when absent
+    } deriving (Eq, Show)
+
+-- A link summary is independent of the current checkout: the root supplies the
+-- gh identity only, so a link to any repository in the conversation resolves.
+pullRequestSummaryByURL
+    :: FilePath -> Text -> IO (Either DeliveryError RepositoryPullRequestSummary)
+pullRequestSummaryByURL root url = runExceptT do
+    unless (pullRequestURLs url == [url]) (throwE (DeliveryInvalidRequest "invalid PR URL"))
+    case Text.splitOn "/" (Text.drop 19 url) of
+        [owner, repo, "pull", number] -> do
+            let repository = owner <> "/" <> repo
+            output <- liftDelivery (runGhByIdentity root
+                [ "pr", "view", Text.unpack number
+                , "--repo", githubRepoArgument repository
+                , "--json"
+                , "number,url,state,isDraft,title,author,additions,deletions,\
+                  \changedFiles,updatedAt,statusCheckRollup"
+                ])
+            either (throwE . DeliveryCommandFailed . Text.pack) pure
+                (parseRepositoryPullRequestSummary repository url output)
+        _ -> throwE (DeliveryInvalidRequest "invalid PR URL")
+
+-- The response must still describe the requested pull request; gh redirects a
+-- transferred number to its new repository without saying so.
+parseRepositoryPullRequestSummary
+    :: Text -> Text -> BS.ByteString -> Either String RepositoryPullRequestSummary
+parseRepositoryPullRequestSummary repository requested bytes = do
+    value <- Aeson.eitherDecodeStrict' bytes
+    AesonTypes.parseEither parse value
+  where
+    parse = Aeson.withObject "pull request" \o -> do
+        number <- o .: "number"
+        url <- o .: "url"
+        let canonical = "https://github.com/" <> repository <> "/pull/"
+                <> Text.pack (show (number :: Int))
+        unless (number > 0 && Text.toCaseFold url == Text.toCaseFold canonical
+            && Text.toCaseFold requested == Text.toCaseFold canonical)
+            (fail "pull request identity changed")
+        state <- o .: "state" :: AesonTypes.Parser Text
+        draft <- o .: "isDraft"
+        prState <- parsePullRequestState state draft
+        ci <- pullRequestCheckRollup o
+        title <- o .:? "title" .!= ""
+        (login, name, bot) <- o .:? "author" >>= \case
+            Nothing -> pure ("", "", True)
+            Just author -> flip (Aeson.withObject "author") author \p -> do
+                login <- p .:? "login" .!= ""
+                name <- p .:? "name" .!= ""
+                bot <- p .:? "is_bot" .!= False
+                pure (login, name, bot)
+        additions <- o .:? "additions" .!= 0
+        deletions <- o .:? "deletions" .!= 0
+        changedFiles <- o .:? "changedFiles" .!= 0
+        updatedAt <- o .:? "updatedAt" .!= ""
+        pure RepositoryPullRequestSummary
+            { pullRequestSummaryNumber = number
+            , pullRequestSummaryUrl = canonical
+            , pullRequestSummaryRepository = repository
+            , pullRequestSummaryTitle = boundedSummaryText 1024 title
+            , pullRequestSummaryAuthorLogin = boundedSummaryText 128 login
+            , pullRequestSummaryAuthorName = boundedSummaryText 128 name
+            , pullRequestSummaryAuthorAvatarUrl =
+                if bot then "" else githubAvatarURL login
+            , pullRequestSummaryState = prState
+            , pullRequestSummaryCI = ci
+            , pullRequestSummaryAdditions = max 0 additions
+            , pullRequestSummaryDeletions = max 0 deletions
+            , pullRequestSummaryChangedFiles = max 0 changedFiles
+            , pullRequestSummaryUpdatedAt = pullRequestSummaryTimestamp updatedAt
+            }
+
+-- Remote text reaches an AppKit view directly. Drop control and format
+-- characters — a newline truncates the rendered line and a bidirectional
+-- override reorders it — and bound the length.
+boundedSummaryText :: Int -> Text -> Text
+boundedSummaryText limit = Text.take limit . Text.filter renderable
+  where
+    renderable c = not (isControl c) && generalCategory c /= Format
+
+-- GitHub serves a login's current avatar from this stable public endpoint, so
+-- no additional account lookup is required to render one.
+githubAvatarURL :: Text -> Text
+githubAvatarURL login
+    | Text.null login || Text.length login > 39 = ""
+    | not (Text.all permitted login) = ""
+    | otherwise = "https://avatars.githubusercontent.com/" <> login <> "?size=96"
+  where
+    permitted c = isAsciiLower c || isAsciiUpper c || isDigit c || c == '-'
+
+pullRequestSummaryTimestamp :: Text -> Int64
+pullRequestSummaryTimestamp text =
+    case iso8601ParseM (Text.unpack text) :: Maybe UTCTime of
+        Just time -> floor (utcTimeToPOSIXSeconds time)
+        Nothing -> 0
 
 
 -- Unlike branch discovery, looking up a persisted PR does not require .git or

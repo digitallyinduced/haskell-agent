@@ -81,6 +81,7 @@ _ha_mobile_relay_receive
 _ha_mobile_relay_send
 _ha_mobile_runner_register
 _ha_mobile_session_open
+_ha_pull_request_summary
 _ha_repository_apply_hunks
 _ha_repository_apply_path
 _ha_repository_cancel_all
