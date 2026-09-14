@@ -148,6 +148,14 @@ systemMessageDecoder = Json.object do
     retractedMessageUuids <- strictOptionalNonEmptyTextList
         "retracted_message_uuids"
         "`retracted_message_uuids` must be an array of non-empty strings"
+    attempt <- optionalNonNegativeNumber "attempt"
+    maxRetries <- optionalNonNegativeNumber "max_retries"
+    retryDelayMs <- optionalNonNegativeNumber "retry_delay_ms"
+    errorStatus <- optionalNonNegativeNumber "error_status"
+    errorKind <- optionalNonEmptyText "error"
+    let apiRetry
+            | subtype == "api_retry" = Just ApiRetry{..}
+            | otherwise = Nothing
     pure SystemMessage{..}
 
 resultMessageDecoder :: Json.Decoder ResultMessage

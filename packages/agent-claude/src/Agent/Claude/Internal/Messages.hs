@@ -40,7 +40,8 @@ import Agent.ToolDispatch
     , ToolCallMode(..)
     )
 import Claude.Agent.SDK.Types
-    ( AssistantMessage(..)
+    ( ApiRetry(..)
+    , AssistantMessage(..)
     , ContentBlock(..)
     , Message(..)
     , ResultMessage(..)
@@ -64,7 +65,8 @@ import qualified Data.Aeson as AesonValue
 import qualified Data.Aeson.Encoding as Aeson
 import qualified Data.ByteString.Base64 as Base64
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Functor ((<&>))
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -180,7 +182,45 @@ streamClaudeMessage state message
                             _ -> current)
                     nextState
                     toolEvents
-        in appendUnknownWarning withIds message events
+        in appendApiRetryActivity message
+            (appendUnknownWarning withIds message events)
+
+-- | Claude Code sleeps silently between automatic provider retries. Without
+-- a live status the session looks hung for the whole backoff sequence, which
+-- can exceed three minutes for a persistent HTTP 429.
+appendApiRetryActivity
+    :: Message
+    -> (ClaudeEventState, [LoopEvent])
+    -> (ClaudeEventState, [LoopEvent])
+appendApiRetryActivity message (state, events) =
+    case message of
+        MessageSystem SystemMessage{apiRetry = Just retry} ->
+            (state, events <> [ActivityUpdated (describeApiRetry retry)])
+        _ -> (state, events)
+
+describeApiRetry :: ApiRetry -> Text
+describeApiRetry retry =
+    Text.intercalate " · " (failure : catMaybes [delay, attempt])
+  where
+    failure =
+        "Claude Code retrying provider request"
+            <> case (retry.errorStatus, retry.errorKind) of
+                (Just status, Just kind) ->
+                    " after HTTP " <> showText status <> " " <> kind
+                (Just status, Nothing) ->
+                    " after HTTP " <> showText status
+                (Nothing, Just kind) -> " after " <> kind
+                (Nothing, Nothing) -> ""
+    delay =
+        retry.retryDelayMs <&> \millis ->
+            "next try in " <> showText ((millis + 999) `div` 1000) <> "s"
+    attempt =
+        retry.attempt <&> \current ->
+            "attempt "
+                <> showText current
+                <> maybe "" (\limit -> "/" <> showText limit) retry.maxRetries
+    showText :: Int -> Text
+    showText = Text.pack . show
 
 -- | Apply the query layer's classification before projecting a live Claude
 -- record. Retraction identifiers refer to wire message UUIDs, not tool call

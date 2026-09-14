@@ -6,6 +6,8 @@ module Agent.Claude.LoopBackend
     , claudeCodeOneShotBackend
     , appendHostTranscript
     , sdkErrorToApiError
+    , emptyClaudeEventState
+    , streamClaudeProgress
     ) where
 
 import Agent.Claude.Options

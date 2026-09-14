@@ -232,13 +232,13 @@ formatProviderError retryPresentation errorType providerMessage retryAfter =
         RateLimitError ->
             message
                 "Rate limit reached."
-                []
+                (providerDetails providerMessage)
                 [retryOr retryPresentation retryAfter
                     "Wait a moment and retry, or choose another provider with /model."]
         UsageLimitReached ->
             message
                 "Usage limit reached for this account."
-                []
+                (providerDetails providerMessage)
                 [retryOr retryPresentation retryAfter
                     "Check /usage or choose another provider with /model."]
         UsageBalanceExhausted ->

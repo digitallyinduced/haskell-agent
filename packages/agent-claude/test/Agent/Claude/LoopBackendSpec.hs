@@ -3,10 +3,14 @@ module Agent.Claude.LoopBackendSpec (spec) where
 import Agent.Claude.LoopBackend
     ( appendHostTranscript
     , claudeCodeOneShotBackend
+    , emptyClaudeEventState
     , sdkErrorToApiError
+    , streamClaudeProgress
     , withClaudeCodeBackend
     )
 import Claude.Agent.SDK.Errors (ClaudeSDKError(..))
+import Claude.Agent.SDK.Internal.MessageParser (decodeMessageLine)
+import Claude.Agent.SDK.Types (QueryMessageScope(..), QueryProgress(..))
 import Agent.Claude.Transport (ClaudeCodeTransport(..))
 import Agent.Claude.Options
     ( ClaudeCodeOptions(..)
@@ -151,6 +155,41 @@ spec = do
                 `shouldSatisfy` \case
                     ProviderError{errorType = AuthenticationError} -> True
                     _ -> False
+
+    describe "streamClaudeProgress" do
+        it "shows Claude Code's automatic provider retries as live activity" do
+            let line =
+                    "{\"type\":\"system\",\"subtype\":\"api_retry\",\
+                    \\"attempt\":3,\"max_retries\":10,\"retry_delay_ms\":32180,\
+                    \\"error_status\":429,\"error\":\"rate_limit\",\
+                    \\"session_id\":\"session-1\",\"uuid\":\"retry-3\"}"
+            case decodeMessageLine line of
+                Left err -> expectationFailure (show err)
+                Right message ->
+                    snd
+                        (streamClaudeProgress
+                            emptyClaudeEventState
+                            (QueryMessageObserved QueryTopLevel message))
+                        `shouldBe`
+                            [ ActivityUpdated
+                                "Claude Code retrying provider request after HTTP 429 rate_limit \
+                                \· next try in 33s · attempt 3/10"
+                            ]
+
+        it "ignores retry records nested under a subagent" do
+            let line =
+                    "{\"type\":\"system\",\"subtype\":\"api_retry\",\
+                    \\"attempt\":1,\"retry_delay_ms\":500,\
+                    \\"parent_tool_use_id\":\"agent-1\",\
+                    \\"session_id\":\"session-1\",\"uuid\":\"retry-1\"}"
+            case decodeMessageLine line of
+                Left err -> expectationFailure (show err)
+                Right message ->
+                    snd
+                        (streamClaudeProgress
+                            emptyClaudeEventState
+                            (QueryMessageObserved QueryTopLevel message))
+                        `shouldBe` []
 
     describe "appendHostTranscript" do
         it "appends turn inputs followed by assistant text" $ do
