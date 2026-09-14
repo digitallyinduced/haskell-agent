@@ -1480,6 +1480,8 @@ summarizeSemanticComputerCall arguments =
             ObserveComputerTarget _ ->
                 "inspect the bound accessible window"
                     <> screenshotSuffix request
+            ReadComputerText ->
+                "read visible text in the bound window using local OCR"
             ActOnComputerTarget actions _ ->
                 Text.intercalate
                     "; "

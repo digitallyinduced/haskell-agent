@@ -532,7 +532,7 @@ supervisorLoop
                         pending.pendingTurnOptions.nativeTurnPromptContext.attachedWindowToken
                     else pure (Right Nothing))
                 (\case
-                    Right (Just (_, _, close)) -> close
+                    Right (Just (_, _, _, close)) -> close
                     _ -> pure ())
                 (\case
                     Left err -> pure TurnOutcome

@@ -552,7 +552,13 @@ enum {
      * Unsupported or expired tokens must fail; never fall back to OPEN.
      * LIST/BIND/OBSERVE_OR_ACT on the resulting session must remain restricted
      * to the attached window. Usual callback threading/ownership rules apply. */
-    HA_COMPUTER_OPEN_ATTACHED = 6
+    HA_COMPUTER_OPEN_ATTACHED = 6,
+    /* Optional v3 capability query on an existing session. Empty request;
+     * result is {"ocr":true} when text-only OCR is supported (false or absent
+     * otherwise). All other outputs are empty, output_session_token is zero.
+     * No capture, target change, or AX-state mutation is permitted. Older
+     * hosts may reject this operation; runtimes then omit optional tools. */
+    HA_COMPUTER_CAPABILITIES = 7
 };
 
 enum {
@@ -604,6 +610,14 @@ enum {
  * The perform action string is one advertised by the AX snapshot.
  * Model-provided coordinates are not part of this ABI. The selected target is
  * session-local.
+ *
+ * A host advertising OCR also accepts OBSERVE_OR_ACT with the canonical
+ * {"protocol_version":1,"operation":"ocr","target_id":null,"actions":null,
+ *  "include_screenshot":false}. It recognizes only the bound window and
+ * returns text, confidence and window-image pixel bounds in result JSON.
+ * It must return no image or accessibility payload, preserve the AX baseline,
+ * and never imply that OCR bounds are actionable element IDs. OCR is exposed
+ * by the runtime's separate computer_ocr tool, not the computer tool schema.
  *
  * Successful non-lifecycle calls write a UTF-8 JSON object to result. BIND,
  * OBSERVE, and ACT normally write a schema-versioned AX snapshot to

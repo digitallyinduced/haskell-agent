@@ -16,6 +16,20 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "semantic computer protocol" do
+    it "keeps text-only OCR native-wire-only and image-free" do
+        decodeSemanticComputerWireRequest
+            (encodeSemanticComputerRequest ReadComputerText)
+            `shouldBe` Right ReadComputerText
+        semanticComputerRequestOperation ReadComputerText
+            `shouldBe` ObserveOrActOnComputerTargetOperation
+        semanticComputerRequestWantsScreenshot ReadComputerText
+            `shouldBe` False
+        decodeSemanticComputerRequest
+            "{\"operation\":\"ocr\",\"target_id\":null,\"actions\":null,\"include_screenshot\":false}"
+            `shouldSatisfy` either (const True) (const False)
+        decodeSemanticComputerWireRequest
+            "{\"protocol_version\":1,\"operation\":\"ocr\",\"target_id\":null,\"actions\":null,\"include_screenshot\":true}"
+            `shouldSatisfy` either (const True) (const False)
     it "decodes every operation and scalar into typed requests" do
         decode requestList `shouldBe` Right ListComputerTargets
         decode requestBind `shouldBe`

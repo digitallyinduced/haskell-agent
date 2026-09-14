@@ -176,6 +176,7 @@ data SemanticComputerRequest
     = ListComputerTargets
     | BindComputerTarget !Text !Bool
     | ObserveComputerTarget !Bool
+    | ReadComputerText
     | ActOnComputerTarget !(NonEmpty SemanticComputerAction) !Bool
     deriving (Eq, Show)
 
@@ -207,6 +208,7 @@ semanticComputerRequestOperation = \case
     ListComputerTargets -> ListComputerTargetsOperation
     BindComputerTarget{} -> BindComputerTargetOperation
     ObserveComputerTarget{} -> ObserveOrActOnComputerTargetOperation
+    ReadComputerText -> ObserveOrActOnComputerTargetOperation
     ActOnComputerTarget{} -> ObserveOrActOnComputerTargetOperation
 
 semanticComputerRequestWantsScreenshot :: SemanticComputerRequest -> Bool
@@ -214,6 +216,7 @@ semanticComputerRequestWantsScreenshot = \case
     ListComputerTargets -> False
     BindComputerTarget _ includeScreenshot -> includeScreenshot
     ObserveComputerTarget includeScreenshot -> includeScreenshot
+    ReadComputerText -> False
     ActOnComputerTarget _ includeScreenshot -> includeScreenshot
 
 -- | Strict decoder for the model-facing function arguments.
@@ -255,6 +258,8 @@ semanticComputerRequestWireValue request =
             ("bind", Aeson.String targetId, Aeson.Null)
         ObserveComputerTarget{} ->
             ("observe", Aeson.Null, Aeson.Null)
+        ReadComputerText ->
+            ("ocr", Aeson.Null, Aeson.Null)
         ActOnComputerTarget semanticActions _ ->
             ( "act"
             , Aeson.Null
@@ -353,6 +358,12 @@ validateRequest envelope fields = do
             requireNothing "target_id" target
             requireNothing "actions" actions
             pure (ObserveComputerTarget includeScreenshot)
+        "ocr" | envelope == NativeWire -> do
+            requireNothing "target_id" target
+            requireNothing "actions" actions
+            when includeScreenshot $
+                fail "ocr cannot include a screenshot"
+            pure ReadComputerText
         "act" -> do
             requireNothing "target_id" target
             rawActions <- requireJust "actions" actions

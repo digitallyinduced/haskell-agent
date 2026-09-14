@@ -5,6 +5,7 @@ module Agent.CLI.MacOS.ComputerBridgeSpec (spec) where
 import Agent.CLI.ComputerUse.Accessibility
     ( AccessibilityObservation(..)
     )
+import Control.Monad (forM_)
 import Agent.CLI.MacOS.ComputerBridge
     ( ComputerCallback
     , ComputerHost
@@ -25,6 +26,7 @@ import Agent.ComputerUse.Protocol
     , SemanticComputerRequest(..)
     , SemanticComputerScalar(..)
     , computerUseVerdictField
+    , decodeSemanticComputerWireRequest
     , observationComputerUseVerdict
     , suspectedNoopComputerUseVerdict
     , semanticComputerRequestWireValue
@@ -99,6 +101,91 @@ foreign import ccall "wrapper"
 
 spec :: Spec
 spec = describe "native AX-first computer bridge" do
+    it "exposes text-only OCR only after an explicit capability response" do
+        requests <- newIORef []
+        closes <- newIORef 0
+        let callback context abi operation token request requestLength
+                result resultCapacity resultLength ax axCapacity axLength
+                image imageCapacity imageLength err errCapacity errLength
+                outputToken outputFormat
+                | operation == 7 = do
+                    requestLength `shouldBe` 0
+                    token `shouldBe` 73
+                    zeroLengths resultLength axLength imageLength errLength
+                    poke outputToken 0
+                    poke outputFormat 0
+                    writeBytes "{\"ocr\":true}" result resultCapacity resultLength
+                | operation == 4 = do
+                    bytes <- peekBytes request requestLength
+                    decodeSemanticComputerWireRequest bytes
+                        `shouldBe` Right ReadComputerText
+                    modifyIORef' requests (<> [semanticComputerRequestWireValue ReadComputerText])
+                    image `shouldBe` nullPtr
+                    imageCapacity `shouldBe` 0
+                    zeroLengths resultLength axLength imageLength errLength
+                    poke outputToken 0
+                    poke outputFormat 0
+                    writeBytes "{\"text_recognition\":{\"status\":\"recognized\",\"lines\":[]}}"
+                        result resultCapacity resultLength
+                | otherwise =
+                    recordingCallback "ocr" requests closes context abi operation token
+                        request requestLength result resultCapacity resultLength
+                        ax axCapacity axLength image imageCapacity imageLength
+                        err errCapacity errLength outputToken outputFormat
+        withHost callback \host -> do
+            Right (Just (_, Just ocr, _, close)) <- computerToolSessionWhenEnabled host
+            ocr.appToolName `shouldBe` "computer_ocr"
+            case ocr.appToolSchema of
+                JsonFunctionSchema [] -> pure ()
+                _ -> expectationFailure "OCR must be an ordinary empty-object function"
+            response <- runTool ocr
+                (ToolCall "ocr" "computer_ocr" "{}" FunctionCallKind False)
+            response.toolDispatchSucceeded `shouldBe` True
+            toolCallResultImages response.toolDispatchResult `shouldBe` []
+            invalid <- runTool ocr
+                (ToolCall "invalid" "computer_ocr" "{\"include_screenshot\":true}" FunctionCallKind False)
+            invalid.toolDispatchSucceeded `shouldBe` False
+            close
+        readIORef requests `shouldReturn` [semanticComputerRequestWireValue ReadComputerText]
+        readIORef closes `shouldReturn` 1
+
+    it "preserves the AX baseline across text-only OCR observations" do
+        let callback context abi operation token request requestLength
+                result resultCapacity resultLength ax axCapacity axLength
+                image imageCapacity imageLength err errCapacity errLength
+                outputToken outputFormat = do
+                    bytes <- peekBytes request requestLength
+                    let isOCR = decodeSemanticComputerWireRequest bytes == Right ReadComputerText
+                    fixedImageCallbackWithAccessibility (not isOCR)
+                        "{\"ok\":true}" Nothing False context abi operation token
+                        request requestLength result resultCapacity resultLength
+                        ax axCapacity axLength image imageCapacity imageLength
+                        err errCapacity errLength outputToken outputFormat
+        withHost callback \host -> do
+            Right session <- newComputerSession host
+            first <- invokeComputerSessionRequest session (ObserveComputerTarget False)
+            text <- invokeComputerSessionRequest session ReadComputerText
+            second <- invokeComputerSessionRequest session (ObserveComputerTarget False)
+            accessibilityKind first `shouldBe` Just "full"
+            accessibilityKind text `shouldBe` Nothing
+            accessibilityKind second `shouldBe` Just "delta"
+            resultVerdict text `shouldBe` Nothing
+            closeComputerSession session
+
+    it "rejects accessibility payloads for OCR" do
+        withHost (fixedImageCallbackWithAccessibility True "{}" Nothing False) \host -> do
+            Right session <- newComputerSession host
+            response <- invokeComputerSessionRequest session ReadComputerText
+            response `shouldBe` Left "The native computer host returned accessibility data for OCR."
+            closeComputerSession session
+
+    it "omits OCR when capabilities are absent, false or malformed" do
+        forM_ ["{}", "{\"ocr\":false}", "{\"ocr\":\"true\"}", "not json"] \payload ->
+            withHost (fixedImageCallbackWithAccessibility False payload Nothing False) \host -> do
+                Right (Just (_, ocr, _, close)) <- computerToolSessionWhenEnabled host
+                fmap (.appToolName) ocr `shouldBe` Nothing
+                close
+
     it "matches the authoritative v3 C ABI" do
         computerCallbackABISmoke `shouldReturn` 0
 
@@ -109,7 +196,8 @@ spec = describe "native AX-first computer bridge" do
             computerToolSessionWhenEnabled host >>= \case
                 Left err -> expectationFailure (Text.unpack err)
                 Right Nothing -> expectationFailure "native computer tool was disabled"
-                Right (Just (tool, _, close)) -> do
+                Right (Just (tool, ocr, _, close)) -> do
+                    fmap (.appToolName) ocr `shouldBe` Nothing
                     case tool.appToolSchema of
                         HostedComputerFunctionSchema parameters -> do
                             let serialized = Aeson.encode parameters
@@ -238,9 +326,9 @@ spec = describe "native AX-first computer bridge" do
                         image imageCapacity imageLength err errCapacity errLength
                         outputToken outputFormat
         withHost callback \host -> do
-            Right (Just (_, _, close)) <- computerToolSessionForAttachment host 987654
+            Right (Just (_, _, _, close)) <- computerToolSessionForAttachment host 987654
             close
-        readIORef operations `shouldReturn` [(6, 987654), (5, 73)]
+        readIORef operations `shouldReturn` [(6, 987654), (7, 73), (5, 73)]
         readIORef closes `shouldReturn` 1
 
     it "fails attached window admission when no computer host is registered" do
@@ -569,6 +657,7 @@ recordingCallback label requests closes _context abi operation _token
         image imageCapacity imageLength _err _errorCapacity errorLength
         outputToken outputImageFormat
     | abi /= 3 = pure 1
+    | operation == 7 = pure 1 -- An older v3 host rejects optional capabilities.
     | operation == 1 = do
         poke outputToken 73
         zeroLengths resultLength accessibilityLength imageLength errorLength
