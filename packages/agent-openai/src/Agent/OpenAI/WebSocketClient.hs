@@ -17,6 +17,7 @@ module Agent.OpenAI.WebSocketClient
     , defaultCodexWsOptions
     , buildWsPayloadWithOptions
     , addTurnStateToPayload
+    , addClientMetadataToPayload
     , buildCodexWsHeaders
     , buildCodexWsHandshakeHeaders
     , WebSocketEndpoint(..)
@@ -29,6 +30,10 @@ module Agent.OpenAI.WebSocketClient
     , readCodexTurnState
     , recordCodexTurnState
     , resetCodexTurnState
+    , readCodexTurnIdentifier
+    , readCodexContextWindow
+    , advanceCodexContextWindow
+    , resolveCodexRequestIdentity
     , finishCodexTurnStateResponse
     , copyCodexTurnState
     , withCodexWsRetryingUsingTurnState
@@ -53,6 +58,23 @@ import Agent.OpenAI.Features (remoteCompactionV2Feature)
 import Agent.OpenAI.Http (rejectFailedCodexResponse)
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.OpenAI.Request (sanitizeCodexRequest)
+import Agent.OpenAI.RequestIdentity
+    ( CodexRequestKind(..)
+    , codexClientMetadata
+    , codexOriginator
+    )
+import Agent.OpenAI.TurnState
+    ( CodexTurnState
+    , advanceCodexContextWindow
+    , copyCodexTurnRecord
+    , newCodexTurnState
+    , readCodexContextWindow
+    , readCodexTurnIdentifier
+    , readCodexTurnState
+    , recordCodexTurnState
+    , resetCodexTurnState
+    , resolveCodexRequestIdentity
+    )
 import Agent.Responses.StreamAssembly
     ( ResponseFailure(..)
     , applyStreamEvent
@@ -86,12 +108,6 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
-import Data.IORef
-    ( IORef
-    , atomicModifyIORef'
-    , newIORef
-    , readIORef
-    )
 import Data.List (find)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -106,21 +122,14 @@ import Text.Read (readMaybe)
 -- Connection handle
 --------------------------------------------------------------------------------
 
--- | Turn-scoped sticky-routing state shared by every physical transport used
--- during one logical Codex turn. Codex treats this as a first-write-wins token:
--- once received from response headers/metadata, it must be replayed unchanged
--- on tool and empty-model continuations, reconnects, HTTP fallback, and inline
--- compaction.
-newtype CodexTurnState = CodexTurnState (IORef (Maybe Text))
-
+-- | A connection carries the turn-scoped attribution state (turn identifier
+-- and first-write-wins sticky-routing token) shared by every physical
+-- transport used during one logical Codex turn; see "Agent.OpenAI.TurnState".
 data CodexConn = CodexWsConn
     !WebSocket.WebSocketSession
     !CodexTurnState
     | CodexHttpFallback
     !CodexTurnState
-
-newCodexTurnState :: IO CodexTurnState
-newCodexTurnState = CodexTurnState <$> newIORef Nothing
 
 codexConnTurnState :: CodexConn -> CodexTurnState
 codexConnTurnState (CodexWsConn _ turnState) = turnState
@@ -132,20 +141,6 @@ codexConnTurnState (CodexHttpFallback turnState) = turnState
 codexConnUsesHttpFallback :: CodexConn -> Bool
 codexConnUsesHttpFallback CodexWsConn{} = False
 codexConnUsesHttpFallback CodexHttpFallback{} = True
-
-readCodexTurnState :: CodexTurnState -> IO (Maybe Text)
-readCodexTurnState (CodexTurnState turnState) = readIORef turnState
-
-recordCodexTurnState :: CodexTurnState -> Text -> IO ()
-recordCodexTurnState (CodexTurnState turnState) value
-    | Text.null (Text.strip value) = pure ()
-    | otherwise =
-        atomicModifyIORef' turnState \current ->
-            (current <|> Just value, ())
-
-resetCodexTurnState :: CodexTurnState -> IO ()
-resetCodexTurnState (CodexTurnState turnState) =
-    atomicModifyIORef' turnState (const (Nothing, ()))
 
 -- | End a normal model request. Tool calls keep the turn open for their output
 -- continuation, and empty model steps keep it open for the loop's
@@ -162,13 +157,14 @@ closeCodexConn (CodexWsConn session _) =
     WebSocket.closeWebSocketSession session "switching account"
 closeCodexConn CodexHttpFallback{} = pure ()
 
--- | Carry the current logical turn's sticky-routing token across a physical
--- reconnect. Codex scopes this state to the turn rather than to the socket.
+-- | Carry the current logical turn's identity and sticky-routing token across
+-- a physical reconnect. Codex scopes this state to the turn rather than to
+-- the socket.
 copyCodexTurnState :: CodexConn -> CodexConn -> IO ()
-copyCodexTurnState source destination = do
-    snapshot <- readCodexTurnState (codexConnTurnState source)
-    let CodexTurnState destinationState = codexConnTurnState destination
-    atomicModifyIORef' destinationState (const (snapshot, ()))
+copyCodexTurnState source destination =
+    copyCodexTurnRecord
+        (codexConnTurnState source)
+        (codexConnTurnState destination)
 
 --------------------------------------------------------------------------------
 -- Connect
@@ -539,9 +535,13 @@ buildCodexWsHandshakeHeaders credential
     | otherwise = pure (buildCodexWsHeaders credential)
 
 -- | Pure authentication-header builder exported for transport contract tests.
+--
+-- Per-turn attribution travels in each frame's @client_metadata@ because a
+-- socket outlives turns; the handshake carries only the static originator.
 buildCodexWsHeaders :: Credential -> WS.Headers
 buildCodexWsHeaders credential =
     [ ("Authorization", "Bearer " <> Text.encodeUtf8 credential.accessToken)
+    , ("originator", codexOriginator)
     ]
     <> [ ("chatgpt-account-id", Text.encodeUtf8 credential.accountId)
        | not (Text.null credential.accountId)
@@ -576,11 +576,13 @@ data CodexWsOptions = CodexWsOptions
     { compactThreshold :: !(Maybe Int)
     , sendIdleTimeoutMicros :: !(Maybe Int)
     , receiveIdleTimeoutMicros :: !(Maybe Int)
+    , requestKind :: !CodexRequestKind
     } deriving (Eq, Show)
 
 defaultCodexWsOptions :: CodexWsOptions
 defaultCodexWsOptions = CodexWsOptions
     { compactThreshold = Nothing
+    , requestKind = CodexTurnRequest
     , sendIdleTimeoutMicros = Just 30_000_000
     -- Reasoning-heavy turns can legitimately spend several minutes between
     -- frames. Keep an idle guard, but match Codex's five-minute default
@@ -673,7 +675,7 @@ sendWsRequestWithEventsPreservingTurnState
 sendWsRequestWithEventsPreservingTurnState cc request previousResponseId onEvent =
     sendWsRequestWithEventsAndOptions
         PreserveTurnState
-        defaultCodexWsOptions
+        defaultCodexWsOptions { requestKind = CodexCompactionRequest }
         cc
         request
         previousResponseId
@@ -730,9 +732,16 @@ sendWsRequestWithEventsAndOptions completion options cc request previousResponse
             "OpenAI WebSocket unavailable; HTTPS fallback required"
   where
     sendOverWs session turnState = do
+        identity <-
+            resolveCodexRequestIdentity
+                turnState
+                options.requestKind
+                request.promptCacheKey
         turnStateValue <- readCodexTurnState turnState
-        let wsPayload = addTurnStateToPayload turnStateValue
-                (buildWsPayloadWithOptions options request previousResponseId)
+        let wsPayload =
+                addTurnStateToPayload turnStateValue $
+                    addClientMetadataToPayload (codexClientMetadata identity) $
+                        buildWsPayloadWithOptions options request previousResponseId
             encoded = Aeson.encode wsPayload
         result <- WebSocket.withWebSocketRequestWithTimeout
             options.sendIdleTimeoutMicros
@@ -776,24 +785,30 @@ responseEventTurnState = \case
     OtherResponseStreamEvent{turnState} -> turnState
     _ -> Nothing
 
+-- | WebSocket request headers are fixed at handshake time. The Responses
+-- WebSocket protocol carries the per-request sticky-routing value through
+-- @client_metadata@ instead.
 addTurnStateToPayload :: Maybe Text -> Aeson.Value -> Aeson.Value
 addTurnStateToPayload Nothing payload = payload
-addTurnStateToPayload (Just turnState) (Aeson.Object object) =
-    -- WebSocket request headers are fixed at handshake time. The Responses
-    -- WebSocket protocol carries this per-request sticky-routing value through
-    -- client_metadata instead.
-    Aeson.Object
-        (KeyMap.insert "client_metadata" metadataValue object)
+addTurnStateToPayload (Just turnState) payload =
+    addClientMetadataToPayload
+        (KeyMap.singleton "x-codex-turn-state" (Aeson.String turnState))
+        payload
+
+-- | Merge fields into a frame's @client_metadata@ object, creating it when
+-- absent. Supplied fields replace existing values of the same name.
+addClientMetadataToPayload
+    :: KeyMap.KeyMap Aeson.Value
+    -> Aeson.Value
+    -> Aeson.Value
+addClientMetadataToPayload fields (Aeson.Object object) =
+    Aeson.Object (KeyMap.insert "client_metadata" metadataValue object)
   where
     metadataValue = case KeyMap.lookup "client_metadata" object of
         Just (Aeson.Object metadata) ->
-            Aeson.Object
-                (KeyMap.insert "x-codex-turn-state"
-                    (Aeson.String turnState)
-                    metadata)
-        _ -> Aeson.object
-            [ "x-codex-turn-state" Aeson..= turnState ]
-addTurnStateToPayload _ payload = payload
+            Aeson.Object (KeyMap.union fields metadata)
+        _ -> Aeson.Object fields
+addClientMetadataToPayload _ payload = payload
 
 -- | Pure WebSocket envelope builder, exported for payload contract tests.
 -- All fields are flattened at the top level (not nested inside "response").

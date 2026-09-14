@@ -27,6 +27,7 @@ import qualified Agent.ToolDSLSpec as ToolDSLSpec
 import qualified Agent.Tools.ResourceArbiterSpec as ResourceArbiterSpec
 import qualified Agent.Transport.WebSocketSpec as WebSocketSpec
 import qualified Agent.Transport.SSESpec as SSESpec
+import qualified Agent.UuidSpec as UuidSpec
 import Test.Hspec (hspec)
 
 main :: IO ()
@@ -57,4 +58,5 @@ main = hspec do
     ToolArgsSpec.spec
     ToolDSLSpec.spec
     ResourceArbiterSpec.spec
+    UuidSpec.spec
     WebSocketSpec.spec

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Attribute Codex requests the way the official client does. Every HTTP
+  request and WebSocket frame now carries `originator`, `session-id`,
+  `thread-id`, `x-client-request-id`, `x-codex-window-id`, and an
+  `x-codex-turn-metadata` record (also mirrored in `client_metadata`) with a
+  turn identifier that is shared by tool continuations, retries, reconnects,
+  and inline compaction, and rotated per logical turn. Compaction requests
+  are labelled `request_kind: compaction`; the context-window number advances
+  after a committed compaction. See `Agent.OpenAI.RequestIdentity` and
+  `Agent.OpenAI.TurnState`.
 - Classify `upstream_connection_error` as temporary provider unavailability,
   allowing automatic retries after partial output without weakening the
   replay guard for admitted asynchronous tool calls.
