@@ -58,6 +58,8 @@ library
                     , Agent.OpenAI.Usage
                     , Agent.OpenAI.Client
                     , Agent.OpenAI.Request
+                    , Agent.OpenAI.RequestIdentity
+                    , Agent.OpenAI.TurnState
                     , Agent.OpenAI.ReasoningEffort
                     , Agent.OpenAI.Features
                     , Agent.OpenAI.ModelMetadata
@@ -155,9 +157,11 @@ test-suite agent-openai-test
                     , Agent.OpenAI.ModelsManagerSpec
                     , Agent.OpenAI.ModelsTypesSpec
                     , Agent.OpenAI.CompactionSpec
+                    , Agent.OpenAI.RequestIdentitySpec
                     , Agent.OpenAI.ToolDSLSpec
                     , Agent.OpenAI.TestSupport
                     , Agent.OpenAI.TranscriptionSpec
+                    , Agent.OpenAI.TurnStateSpec
                     , Agent.OpenAI.UsageSpec
                     , Agent.OpenAI.WebSocketClientSpec
     ghc-options:      -threaded

@@ -42,6 +42,7 @@ library
     exposed-modules:  Agent.Auth.JWT
                     , Agent.ClientIdentity
                     , Agent.Cancel
+                    , Agent.Uuid
                     , Agent.Concurrent
                     , Agent.Transcription.Receive
                     , Agent.ComputerUse.Protocol
@@ -267,6 +268,7 @@ test-suite agent-core-test
                     , Agent.ToolDSLSpec
                     , Agent.Transport.SSESpec
                     , Agent.Transport.WebSocketSpec
+                    , Agent.UuidSpec
                     , Paths_agent_core
     autogen-modules:  Paths_agent_core
     build-depends:    base >= 4.14 && < 5

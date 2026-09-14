@@ -6,6 +6,7 @@ import Agent.ClientIdentity (gatewayUserAgent)
 import Agent.Provider (Credential(..), Provider(..))
 import Agent.Responses.Types
 import qualified Agent.Responses.Codec as ResponsesCodec
+import Agent.OpenAI.RequestIdentity (CodexRequestKind(..))
 import Agent.OpenAI.WebSocketClient
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
@@ -111,6 +112,19 @@ spec = do
         lookup "x-codex-beta-features" (buildCodexWsHeaders credential)
             `shouldBe` Just "remote_compaction_v2"
 
+    it "identifies the client with the originator header on every handshake" do
+        let credential = Credential
+                { accessToken = "token"
+                , accountId = "account"
+                , leaseId = Nothing
+                , provider = OpenAIProvider
+                }
+            gateway = credential { accountId = "wss://gateway.example/v1/responses" }
+        lookup "originator" (buildCodexWsHeaders credential)
+            `shouldBe` Just "haskell-agent"
+        lookup "originator" (buildCodexWsHeaders gateway)
+            `shouldBe` Just "haskell-agent"
+
     it "recognizes gateway websocket credentials without leaking the URL as an account id" do
         let credential = Credential
                 { accessToken = "gateway-token"
@@ -174,6 +188,34 @@ spec = do
         shouldFallbackDirectCodexHandshakeToHttp gateway
             (HttpError 403 "WebSocket handshake returned HTTP 403")
             `shouldBe` False
+
+  describe "addClientMetadataToPayload" do
+    it "creates client metadata on frames that have none" do
+        let payload = addClientMetadataToPayload
+                (KeyMap.fromList [("turn_id", Aeson.String "turn-1")])
+                (Aeson.object ["type" Aeson..= ("response.create" :: Text)])
+        (field "client_metadata" payload >>= field "turn_id")
+            `shouldBe` Just (Aeson.String "turn-1")
+        field "type" payload `shouldBe` Just (Aeson.String "response.create")
+
+    it "merges with existing metadata and keeps the sticky-routing token" do
+        let payload =
+                addTurnStateToPayload (Just "ts-1") $
+                    addClientMetadataToPayload
+                        (KeyMap.fromList [("turn_id", Aeson.String "turn-1")])
+                        (buildWsPayloadWithOptions
+                            defaultCodexWsOptions sampleRequest Nothing)
+            metadata = field "client_metadata" payload
+        (metadata >>= field "turn_id") `shouldBe` Just (Aeson.String "turn-1")
+        (metadata >>= field "x-codex-turn-state")
+            `shouldBe` Just (Aeson.String "ts-1")
+        (metadata >>= field
+            "ws_request_header_x_openai_internal_codex_responses_lite")
+            `shouldBe` Just (Aeson.String "true")
+
+    it "leaves non-object payloads unchanged" do
+        addClientMetadataToPayload KeyMap.empty (Aeson.String "raw")
+            `shouldBe` Aeson.String "raw"
 
   describe "buildWsPayloadWithOptions" do
     it "forces store=false for the Codex WebSocket contract" do
@@ -315,6 +357,7 @@ spec = do
                 { compactThreshold = Just 180000
                 , sendIdleTimeoutMicros = defaultCodexWsOptions.sendIdleTimeoutMicros
                 , receiveIdleTimeoutMicros = defaultCodexWsOptions.receiveIdleTimeoutMicros
+                , requestKind = CodexTurnRequest
                 }
         contextManagement options `shouldBe` Just (Aeson.toJSON
             [ Aeson.object
@@ -328,6 +371,7 @@ spec = do
                 { compactThreshold = Just 0
                 , sendIdleTimeoutMicros = defaultCodexWsOptions.sendIdleTimeoutMicros
                 , receiveIdleTimeoutMicros = defaultCodexWsOptions.receiveIdleTimeoutMicros
+                , requestKind = CodexTurnRequest
                 }
         contextManagement options `shouldBe` Nothing
 

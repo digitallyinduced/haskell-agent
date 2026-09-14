@@ -7,9 +7,11 @@ import qualified Agent.Responses.Codec as ResponsesCodec
 import Agent.OpenAI.Credential (staticBearerProvider)
 import Agent.Error
 import Agent.OpenAI.Http
+import Agent.OpenAI.RequestIdentity (codexOriginator)
 import Agent.OpenAI.TestSupport (withLoopbackApplication)
 import Agent.OpenAI.WebSocketClient
-    ( newCodexTurnState
+    ( advanceCodexContextWindow
+    , newCodexTurnState
     , readCodexTurnState
     , recordCodexTurnState
     )
@@ -20,11 +22,13 @@ import Control.Monad (replicateM_)
 import Control.Retry (constantDelay, limitRetries)
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.CaseInsensitive as CI
+import Data.Foldable (for_)
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -381,6 +385,120 @@ spec = do
                     , Nothing
                     ]
 
+        it "attributes every request of a logical turn to one Codex turn" do
+            recorded <- newIORef []
+            responseNumber <- newIORef (0 :: Int)
+            turnState <- newCodexTurnState
+            let handler _request = do
+                    number <- atomicModifyIORef' responseNumber \current ->
+                        let next = current + 1
+                        in (next, next)
+                    pure $ case number of
+                        1 -> jsonFunctionCall [] "call-1"
+                        2 -> jsonCompleted "done"
+                        3 -> jsonCompleted "new turn"
+                        _ -> error "unexpected extra request"
+                request = withPromptCacheKey
+                    (Just "2026-09-14-67ed6793") (helloRequest "hi")
+            withMockResponses recorded handler \baseUrl -> do
+                _ <- expectRight =<<
+                    createCodexMessageWithProviderAtWithTurnState
+                        baseUrl turnState (staticBearerProvider "router-key") request
+                _ <- expectRight =<<
+                    createCodexMessageWithProviderAtWithTurnState
+                        baseUrl turnState (staticBearerProvider "router-key") request
+                advanceCodexContextWindow turnState
+                _ <- expectRight =<<
+                    createCodexMessageWithProviderAtWithTurnState
+                        baseUrl turnState (staticBearerProvider "router-key") request
+                pure ()
+
+            requests <- readIORef recorded
+            length requests `shouldBe` 3
+            metadata <- traverse recordedTurnMetadata requests
+            -- The tool continuation shares the first request's turn; a new
+            -- logical turn after the final assistant message gets a fresh one.
+            case map (lookupText "turn_id") metadata of
+                [Just first, Just continuation, Just next] -> do
+                    continuation `shouldBe` first
+                    next `shouldNotBe` first
+                other ->
+                    expectationFailure ("unexpected turn ids: " <> show other)
+            map (lookupText "request_kind") metadata
+                `shouldBe` replicate 3 (Just "turn")
+            map (lookupText "thread_id") metadata
+                `shouldBe` replicate 3 (Just "2026-09-14-67ed6793")
+            map (lookupText "window_id") metadata
+                `shouldBe`
+                    [ Just "2026-09-14-67ed6793:0"
+                    , Just "2026-09-14-67ed6793:0"
+                    , Just "2026-09-14-67ed6793:1"
+                    ]
+            for_ (zip requests metadata) \(request, turnMetadata) -> do
+                lookup "originator" request.headers
+                    `shouldBe` Just (Text.decodeUtf8 codexOriginator)
+                lookup "session-id" request.headers
+                    `shouldBe` Just "2026-09-14-67ed6793"
+                lookup "thread-id" request.headers
+                    `shouldBe` Just "2026-09-14-67ed6793"
+                lookup "x-client-request-id" request.headers
+                    `shouldBe` Just "2026-09-14-67ed6793"
+                -- The body metadata mirrors the headers and the turn record.
+                let bodyMetadata = bodyClientMetadata request
+                lookup "x-codex-window-id" bodyMetadata
+                    `shouldBe` lookup "x-codex-window-id" request.headers
+                lookup "x-codex-turn-metadata" bodyMetadata
+                    `shouldBe` lookup "x-codex-turn-metadata" request.headers
+                lookup "turn_id" bodyMetadata
+                    `shouldBe` lookupText "turn_id" turnMetadata
+                lookup "thread_id" bodyMetadata
+                    `shouldBe` Just "2026-09-14-67ed6793"
+
+        it "labels remote compaction requests without leaving the current turn" do
+            recorded <- newIORef []
+            turnState <- newCodexTurnState
+            let handler _request = pure $ jsonFunctionCall [] "call-1"
+                request = withPromptCacheKey
+                    (Just "2026-09-14-67ed6793") (helloRequest "hi")
+            withMockResponses recorded handler \baseUrl -> do
+                _ <- expectRight =<<
+                    createCodexMessageWithProviderAtWithTurnState
+                        baseUrl turnState (staticBearerProvider "router-key") request
+                _ <- expectRight =<<
+                    createCodexMessageWithProviderAtWithOptionsAndTurnState
+                        remoteCompactionV2RequestOptions
+                        baseUrl turnState (staticBearerProvider "router-key") request
+                pure ()
+
+            requests <- readIORef recorded
+            metadata <- traverse recordedTurnMetadata requests
+            map (lookupText "request_kind") metadata
+                `shouldBe` [Just "turn", Just "compaction"]
+            case map (lookupText "turn_id") metadata of
+                [Just first, Just compaction] -> compaction `shouldBe` first
+                other ->
+                    expectationFailure ("unexpected turn ids: " <> show other)
+
+        it "attributes requests without a turn scope as standalone turns" do
+            recorded <- newIORef []
+            let handler _request = pure $ jsonCompleted "done"
+            withMockResponses recorded handler \baseUrl -> do
+                _ <- expectRight =<< createCodexMessageWithProviderAt
+                    baseUrl (staticBearerProvider "router-key") (helloRequest "one")
+                _ <- expectRight =<< createCodexMessageWithProviderAt
+                    baseUrl (staticBearerProvider "router-key") (helloRequest "two")
+                pure ()
+
+            requests <- readIORef recorded
+            metadata <- traverse recordedTurnMetadata requests
+            case map (lookupText "turn_id") metadata of
+                [Just first, Just second] -> second `shouldNotBe` first
+                other ->
+                    expectationFailure ("unexpected turn ids: " <> show other)
+            for_ requests \request -> do
+                lookup "originator" request.headers `shouldBe` Just "haskell-agent"
+                lookup "thread-id" request.headers `shouldSatisfy` (/= Nothing)
+
         it "preserves shared turn state after inline remote compaction" do
             recorded <- newIORef []
             turnState <- newCodexTurnState
@@ -665,6 +783,46 @@ data RecordedRequest = RecordedRequest
     , headers :: ![(Text, Text)]
     , body :: !Aeson.Value
     }
+
+-- | The string-valued @client_metadata@ fields of a recorded request body.
+bodyClientMetadata :: RecordedRequest -> [(Text, Text)]
+bodyClientMetadata request =
+    case request.body of
+        Aeson.Object object
+            | Just (Aeson.Object metadata) <- KeyMap.lookup "client_metadata" object ->
+                [ (Key.toText name, value)
+                | (name, Aeson.String value) <- KeyMap.toList metadata
+                ]
+        _ -> []
+
+-- | Decode the @x-codex-turn-metadata@ header of a recorded request.
+recordedTurnMetadata :: RecordedRequest -> IO [(Text, Text)]
+recordedTurnMetadata request =
+    case lookup "x-codex-turn-metadata" request.headers of
+        Nothing -> do
+            expectationFailure "expected an x-codex-turn-metadata header"
+            pure []
+        Just encoded ->
+            case Aeson.decodeStrict (Text.encodeUtf8 encoded) of
+                Just (Aeson.Object metadata) ->
+                    pure
+                        [ (Key.toText name, value)
+                        | (name, Aeson.String value) <- KeyMap.toList metadata
+                        ]
+                _ -> do
+                    expectationFailure
+                        ("expected JSON turn metadata, got " <> Text.unpack encoded)
+                    pure []
+
+lookupText :: Text -> [(Text, Text)] -> Maybe Text
+lookupText = lookup
+
+withPromptCacheKey
+    :: Maybe Text
+    -> ResponseCreateParams
+    -> ResponseCreateParams
+withPromptCacheKey cacheKey ResponseCreateParams { promptCacheKey = _, .. } =
+    ResponseCreateParams { promptCacheKey = cacheKey, .. }
 
 withMockResponses
     :: IORef [RecordedRequest]

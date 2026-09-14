@@ -22,6 +22,7 @@ import Agent.Runtime.Providers.Types
     , ProviderCompaction(..), ProviderRuntime(..)
     , ProviderAccountSelection(..), ProviderSubagents(..)
     )
+import Agent.Runtime.Compaction.Types (CompactionInstall(..))
 import Agent.Runtime.Session.History (readLiveTranscript)
 import Agent.Runtime.Session.Backend
     ( SessionBackend(..)
@@ -34,6 +35,7 @@ import Agent.OpenAI.Auth (Pool)
 import Agent.OpenAI.ModelMetadata (codexEffectiveContextWindowFor)
 import Agent.OpenAI.WebSocketClient
     ( CodexConn
+    , advanceCodexContextWindow
     , closeCodexConn
     , codexConnTurnState
     , codexConnUsesHttpFallback
@@ -338,7 +340,18 @@ withConnectedOpenAiProvider OpenAiConfig{..}
             accounts
             conn
             credential
-    let (compactSender, lockedBackend) =
+    let activeTurnState = do
+            OpenAiPersistentConnection _credential _connectionHealthy activeConn <-
+                readIORef activeConnectionRef
+            pure (codexConnTurnState activeConn)
+        -- A committed compaction starts the next Codex context window; the
+        -- compaction request itself was still attributed to the old window.
+        installAutomaticCompactAdvancingWindow outcome inputs = do
+            install <- installAutomaticCompact outcome inputs
+            when (install == CompactionInstalled) $
+                activeTurnState >>= advanceCodexContextWindow
+            pure install
+        (compactSender, lockedBackend) =
             lockedOpenAiSession
                 networkRecovery
                 (isGatewayWebSocketCredential
@@ -354,7 +367,7 @@ withConnectedOpenAiProvider OpenAiConfig{..}
                 recordCompactionUsage
                 (decorateCompactOutcomeWithTaskPlan
                     taskPlan)
-                installAutomaticCompact
+                installAutomaticCompactAdvancingWindow
         btwBackend privateParams =
             freshOpenAiBackend
                 showRawReasoning
@@ -390,8 +403,13 @@ withConnectedOpenAiProvider OpenAiConfig{..}
                                             . (.model)))
                             focus
                 resetCodexTurnState turnState
-                runCompact `finally`
-                    resetCodexTurnState turnState
+                result <-
+                    runCompact `finally`
+                        resetCodexTurnState turnState
+                case result of
+                    Right _ -> advanceCodexContextWindow turnState
+                    Left _ -> pure ()
+                pure result
     withAsync switchLoop \switchWorker -> do
         link switchWorker
         use ProviderRuntime

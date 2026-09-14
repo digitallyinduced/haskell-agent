@@ -33,8 +33,18 @@ import Agent.OpenAI.Http
     )
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.OpenAI.Request (sanitizeCodexRequest)
+import Agent.OpenAI.RequestIdentity
+    ( CodexRequestKind(..)
+    , codexAttributionHeaders
+    , codexClientMetadata
+    )
+import Agent.OpenAI.TurnState
+    ( resolveCodexRequestIdentity
+    , transientCodexRequestIdentity
+    )
 import Agent.OpenAI.WebSocketClient
     ( CodexTurnState
+    , addClientMetadataToPayload
     , finishCodexTurnStateResponse
     , readCodexTurnState
     , recordCodexTurnState
@@ -91,6 +101,7 @@ data CodexRequestOptions = CodexRequestOptions
     { betaFeatures :: ![Text]
     , responseIdleTimeoutMicros :: !Int
     , preserveTurnStateAfterResponse :: !Bool
+    , requestKind :: !CodexRequestKind
     } deriving (Eq, Show)
 
 defaultCodexRequestOptions :: CodexRequestOptions
@@ -98,12 +109,15 @@ defaultCodexRequestOptions = CodexRequestOptions
     { betaFeatures = [remoteCompactionV2Feature]
     , responseIdleTimeoutMicros = 300 * 1_000_000
     , preserveTurnStateAfterResponse = False
+    , requestKind = CodexTurnRequest
     }
 
 -- | Normal Responses transport options for the @compaction_trigger@ protocol.
+-- The request stays inside the current turn but is attributed as compaction.
 remoteCompactionV2RequestOptions :: CodexRequestOptions
 remoteCompactionV2RequestOptions = defaultCodexRequestOptions
     { preserveTurnStateAfterResponse = True
+    , requestKind = CodexCompactionRequest
     }
 
 -- | Send a request to the Codex Responses API and parse the response.
@@ -300,10 +314,22 @@ makeCodexRequest options baseUrl accessToken accountId turnState request = do
     -- and rejects an omitted/false stream flag. WebSocket callers do not need
     -- this field, so enforce it at the HTTP transport boundary.
     turnStateValue <- maybe (pure Nothing) readCodexTurnState turnState
-    let requestBody = Aeson.toJSON
-            (sanitizeCodexRequest request) { OpenAI.stream = Just True }
+    -- A request outside any turn scope is attributed as a turn of its own.
+    identity <- case turnState of
+        Just state ->
+            resolveCodexRequestIdentity
+                state options.requestKind request.promptCacheKey
+        Nothing ->
+            transientCodexRequestIdentity
+                options.requestKind request.promptCacheKey
+    let requestBody =
+            addClientMetadataToPayload (codexClientMetadata identity) $
+                Aeson.toJSON
+                    (sanitizeCodexRequest request) { OpenAI.stream = Just True }
         addBetaFeaturesHeader req = do
             req
+            forM_ (codexAttributionHeaders identity) \(name, value) ->
+                Network.Http.Client.setHeader name value
             forM_ (betaFeaturesHeaderValue options.betaFeatures) \features ->
                 Network.Http.Client.setHeader
                     "x-codex-beta-features"
