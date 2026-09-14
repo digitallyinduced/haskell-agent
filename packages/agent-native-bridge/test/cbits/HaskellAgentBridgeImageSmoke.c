@@ -518,6 +518,35 @@ static void repository_pr_status_callback(
     atomic_fetch_add(&pr_status_callbacks, 1);
 }
 
+static atomic_int pull_request_summary_callbacks;
+static atomic_int pull_request_summary_valid;
+
+static void pull_request_summary_callback(
+    void *context, int32_t status, int64_t number,
+    const char *url, size_t url_length,
+    const char *repository, size_t repository_length,
+    const char *title, size_t title_length,
+    const char *author_login, size_t author_login_length,
+    const char *author_name, size_t author_name_length,
+    const char *author_avatar_url, size_t author_avatar_url_length,
+    int32_t state, int32_t ci,
+    int64_t additions, int64_t deletions, int64_t changed_files,
+    int64_t updated_at_unix
+) {
+    (void)context;
+    atomic_store(&pull_request_summary_valid, status == -1 && number == 0
+        && url == NULL && url_length == 0
+        && repository == NULL && repository_length == 0
+        && title == NULL && title_length == 0
+        && author_login == NULL && author_login_length == 0
+        && author_name == NULL && author_name_length == 0
+        && author_avatar_url == NULL && author_avatar_url_length == 0
+        && state == 0 && ci == 0
+        && additions == 0 && deletions == 0 && changed_files == 0
+        && updated_at_unix == 0);
+    atomic_fetch_add(&pull_request_summary_callbacks, 1);
+}
+
 static void repository_delivery_status_callback(
         void *context, int32_t status,
         const uint8_t *snapshot_id, size_t snapshot_id_length,
@@ -707,6 +736,30 @@ int ha_repository_review_abi_smoke(void) {
     }
     if (ha_session_pr_status(value, sizeof(value) - 1, NULL, NULL) != 1) return 42;
     if (ha_session_pr_status(NULL, 0, repository_pr_status_callback, NULL) != 2) return 43;
+    if (ha_pull_request_summary(
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            NULL, NULL) != 1) {
+        return 44;
+    }
+    if (ha_pull_request_summary(
+            NULL, 0,
+            value, sizeof(value) - 1,
+            pull_request_summary_callback, NULL) != 2
+        || ha_pull_request_summary(
+            value, sizeof(value) - 1,
+            NULL, 0,
+            pull_request_summary_callback, NULL) != 2
+        || ha_pull_request_summary(
+            value, (size_t)16 * 1024 + 1,
+            value, sizeof(value) - 1,
+            pull_request_summary_callback, NULL) != 2
+        || ha_pull_request_summary(
+            value, sizeof(value) - 1,
+            value, (size_t)2048 + 1,
+            pull_request_summary_callback, NULL) != 2) {
+        return 45;
+    }
     if (ha_repository_pr_status(value, sizeof(value) - 1, NULL, NULL) != 1
         || ha_repository_delivery_status(
             value, sizeof(value) - 1,
@@ -809,6 +862,26 @@ int ha_repository_review_abi_smoke(void) {
     }
     ha_repository_cancel_all();
     if (atomic_load(&pr_status_callbacks) != 1 || !atomic_load(&pr_status_valid)) return 41;
+    /* A well-formed but non-canonical link is rejected on the worker, so this
+     * exercises the terminal callback without reaching the network. */
+    const uint8_t unsupported_url[] = "https://github.com/example/example/pulls/1";
+    atomic_store(&pull_request_summary_callbacks, 0);
+    atomic_store(&pull_request_summary_valid, 0);
+    if (ha_pull_request_summary(missing_path, sizeof(missing_path) - 1,
+            unsupported_url, sizeof(unsupported_url) - 1,
+            pull_request_summary_callback, NULL) != 0) {
+        return 46;
+    }
+    for (int attempt = 0;
+            attempt < 10000 && atomic_load(&pull_request_summary_callbacks) == 0;
+            ++attempt) {
+        usleep(1000);
+    }
+    ha_repository_cancel_all();
+    if (atomic_load(&pull_request_summary_callbacks) != 1
+        || !atomic_load(&pull_request_summary_valid)) {
+        return 47;
+    }
     return 0;
 }
 

@@ -102,6 +102,62 @@ spec = describe "repository delivery service" do
         it "ignores same-named branches from another fork and deleted head repositories" do
             parseRepositoryPullRequest "owner/repo" "[{\"headRepository\":{\"name\":\"repo\"},\"headRepositoryOwner\":{\"login\":\"someone-else\"}}]" `shouldBe` Right Nothing
             parseRepositoryPullRequest "owner/repo" "[{\"headRepository\":null,\"headRepositoryOwner\":null}]" `shouldBe` Right Nothing
+
+    describe "pull request link summary" do
+        let canonical = "https://github.com/owner/repo/pull/42"
+            response fields = BS8.pack ("{\"number\":42,\"url\":\"" <> canonical
+                <> "\",\"state\":\"MERGED\",\"isDraft\":false" <> fields <> "}")
+            summary fields = parseRepositoryPullRequestSummary
+                "owner/repo" (Text.pack canonical) (response fields)
+            author login = ",\"author\":{\"login\":\"" <> login
+                <> "\",\"name\":\"Marc\",\"is_bot\":false}"
+        it "carries every field the hover card renders" do
+            summary (",\"title\":\"Raise the daily budget\"" <> author "mpscholten"
+                <> ",\"additions\":12,\"deletions\":14,\"changedFiles\":1\
+                   \,\"updatedAt\":\"2026-09-01T10:11:12Z\"\
+                   \,\"statusCheckRollup\":[{\"__typename\":\"StatusContext\"\
+                   \,\"state\":\"SUCCESS\"}]")
+                `shouldBe` Right RepositoryPullRequestSummary
+                    { pullRequestSummaryNumber = 42
+                    , pullRequestSummaryUrl = Text.pack canonical
+                    , pullRequestSummaryRepository = "owner/repo"
+                    , pullRequestSummaryTitle = "Raise the daily budget"
+                    , pullRequestSummaryAuthorLogin = "mpscholten"
+                    , pullRequestSummaryAuthorName = "Marc"
+                    , pullRequestSummaryAuthorAvatarUrl =
+                        "https://avatars.githubusercontent.com/mpscholten?size=96"
+                    , pullRequestSummaryState = 3
+                    , pullRequestSummaryCI = 3
+                    , pullRequestSummaryAdditions = 12
+                    , pullRequestSummaryDeletions = 14
+                    , pullRequestSummaryChangedFiles = 1
+                    , pullRequestSummaryUpdatedAt = 1788257472
+                    }
+        it "renders a link whose optional review metadata GitHub omits" do
+            fmap (\pr -> (pr.pullRequestSummaryTitle, pr.pullRequestSummaryAuthorLogin,
+                    pr.pullRequestSummaryCI, pr.pullRequestSummaryUpdatedAt))
+                (summary ",\"author\":null,\"updatedAt\":\"not a timestamp\"")
+                `shouldBe` Right ("", "", 1, 0)
+        it "keeps remote text renderable as a single line" do
+            fmap (\pr -> pr.pullRequestSummaryTitle)
+                (summary ",\"title\":\"Fix\\u0007 the\\u202e budget\\n\"")
+                `shouldBe` Right "Fix the budget"
+            fmap (\pr -> Text.length pr.pullRequestSummaryTitle)
+                (summary (",\"title\":\"" <> replicate 4096 'x' <> "\""))
+                `shouldBe` Right 1024
+        it "offers no avatar for bots or logins GitHub could not have issued" do
+            fmap (\pr -> pr.pullRequestSummaryAuthorAvatarUrl)
+                (summary ",\"author\":{\"login\":\"dependabot\",\"is_bot\":true}")
+                `shouldBe` Right ""
+            fmap (\pr -> pr.pullRequestSummaryAuthorAvatarUrl)
+                (summary (author "../../attacker")) `shouldBe` Right ""
+        it "refuses a response describing a different pull request" do
+            parseRepositoryPullRequestSummary "owner/repo"
+                "https://github.com/owner/repo/pull/7" (response "") `shouldSatisfy` isLeft
+            parseRepositoryPullRequestSummary "other/repo"
+                (Text.pack canonical) (response "") `shouldSatisfy` isLeft
+            parseRepositoryPullRequestSummary "owner/repo" (Text.pack canonical) "{}"
+                `shouldSatisfy` isLeft
     it "reclaims expired confirmation payloads while idle" do
         expiry <- newEmptyMVar
         bracket

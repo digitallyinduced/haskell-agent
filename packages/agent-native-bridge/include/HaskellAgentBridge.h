@@ -2128,6 +2128,44 @@ int32_t ha_repository_pr_status(
 int32_t ha_session_pr_status(const uint8_t *session_id, size_t session_id_len,
     ha_repository_pr_status_callback callback, void *context);
 
+/*
+ * Public review metadata for one pull-request link, as rendered by a hover
+ * summary card. path is a UTF-8 repository path that supplies the gh identity
+ * only: a link to any repository resolves regardless of the checkout it is
+ * read from, and the path need not exist. url must be a canonical
+ * https://github.com/<owner>/<name>/pull/<number> address.
+ *
+ * Synchronous return codes match ha_repository_pr_status: 0 accepted,
+ * 1 missing callback, 2 invalid input (path above 16 KiB, url above 2 KiB, or
+ * either empty), 3 the worker could not start. Rejected calls never invoke the
+ * callback; an accepted call invokes it exactly once on a runtime worker.
+ *
+ * Callback status is 0 for a summary, -1 unavailable, -3 cancelled. Every
+ * field is zero or NULL unless status is 0. Buffers are callback-scoped UTF-8
+ * and must be copied before returning. title, author_login, author_name and
+ * author_avatar_url may be empty; author_avatar_url is empty for bots and for
+ * logins outside [A-Za-z0-9-]. state and ci use the ha_repository_pr_status
+ * codes. updated_at_unix is 0 when GitHub reported no timestamp. No diff
+ * content, branch name, remote URL, or credential crosses this surface.
+ */
+typedef void (*ha_pull_request_summary_callback)(
+    void *context, int32_t status, int64_t number,
+    const char *url, size_t url_length,
+    const char *repository, size_t repository_length,
+    const char *title, size_t title_length,
+    const char *author_login, size_t author_login_length,
+    const char *author_name, size_t author_name_length,
+    const char *author_avatar_url, size_t author_avatar_url_length,
+    int32_t state, int32_t ci,
+    int64_t additions, int64_t deletions, int64_t changed_files,
+    int64_t updated_at_unix
+);
+int32_t ha_pull_request_summary(
+    const uint8_t *path, size_t path_length,
+    const uint8_t *url, size_t url_length,
+    ha_pull_request_summary_callback callback, void *context
+);
+
 
 int32_t ha_repository_delivery_status(
     const uint8_t *path, size_t path_length,

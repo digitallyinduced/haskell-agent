@@ -418,10 +418,11 @@ deliveryInputValid pointer length limit =
         && length > 0
         && toInteger length <= toInteger limit
 
-deliveryPathLimit, deliveryTokenLimit, deliveryRefLimit :: Int
+deliveryPathLimit, deliveryTokenLimit, deliveryRefLimit, deliveryUrlLimit :: Int
 deliveryPathLimit = 16 * 1024
 deliveryTokenLimit = 4 * 1024
 deliveryRefLimit = 1024
+deliveryUrlLimit = 2048
 
 deliveryTitleLimit, deliveryBodyLimit :: Int
 deliveryTitleLimit = 4 * 1024
@@ -512,6 +513,75 @@ ha_session_pr_status sessionBytes sessionLength callback context
             (case reads (Text.unpack (Text.takeWhileEnd (/= '/') url)) of
                 [(n, "")] -> n
                 _ -> 0) url 0 0)
+
+-- Read-only public review metadata for one pull-request link. Carries the same
+-- narrow, typed shape as the status surface: no JSON, no diff content, no
+-- credentials. The path supplies the gh identity only, so a link to any
+-- repository resolves regardless of the checkout it is read from.
+type PullRequestSummaryCallback =
+    Ptr () -> CInt -> CLLong
+    -> CString -> CSize -- url
+    -> CString -> CSize -- repository
+    -> CString -> CSize -- title
+    -> CString -> CSize -- author login
+    -> CString -> CSize -- author name
+    -> CString -> CSize -- author avatar url
+    -> CInt -> CInt -- state, ci
+    -> CLLong -> CLLong -> CLLong -- additions, deletions, changed files
+    -> CLLong -- updated at, Unix seconds
+    -> IO ()
+
+foreign import ccall "dynamic"
+    invokePullRequestSummaryCallback
+        :: FunPtr PullRequestSummaryCallback -> PullRequestSummaryCallback
+
+foreign export ccall ha_pull_request_summary
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr PullRequestSummaryCallback -> Ptr () -> IO CInt
+
+ha_pull_request_summary
+    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr PullRequestSummaryCallback -> Ptr () -> IO CInt
+ha_pull_request_summary pathBytes pathLength urlBytes urlLength callback context
+    | callback == nullFunPtr = pure 1
+    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit) = pure 2
+    | not (deliveryInputValid urlBytes urlLength deliveryUrlLimit) = pure 2
+    | otherwise =
+        copyRequiredTexts [(pathBytes, pathLength), (urlBytes, urlLength)] >>= \case
+            Right [path, url] -> do
+                terminal <- newMVar False
+                let empty status = invokePullRequestSummaryCallback callback context
+                        status 0 nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
+                        nullPtr 0 0 0 0 0 0 0
+                started <- startRepositoryWorker
+                    (emitDeliveryOnce terminal (empty (-3))) $
+                    prepareDeliveryResult terminal
+                        (RepositoryDelivery.pullRequestSummaryByURL (Text.unpack path) url)
+                        (empty (-1)) (\_ _ -> empty (-1)) emit
+                pure (if started then 0 else 3)
+            _ -> pure 2
+  where
+    emit summary =
+        withText summary.pullRequestSummaryUrl \urlPtr urlSize ->
+        withText summary.pullRequestSummaryRepository \repositoryPtr repositorySize ->
+        withText summary.pullRequestSummaryTitle \titlePtr titleSize ->
+        withText summary.pullRequestSummaryAuthorLogin \loginPtr loginSize ->
+        withText summary.pullRequestSummaryAuthorName \namePtr nameSize ->
+        withText summary.pullRequestSummaryAuthorAvatarUrl \avatarPtr avatarSize ->
+            invokePullRequestSummaryCallback callback context 0
+                (fromIntegral summary.pullRequestSummaryNumber)
+                urlPtr urlSize
+                repositoryPtr repositorySize
+                titlePtr titleSize
+                loginPtr loginSize
+                namePtr nameSize
+                avatarPtr avatarSize
+                (fromIntegral summary.pullRequestSummaryState)
+                (fromIntegral summary.pullRequestSummaryCI)
+                (fromIntegral summary.pullRequestSummaryAdditions)
+                (fromIntegral summary.pullRequestSummaryDeletions)
+                (fromIntegral summary.pullRequestSummaryChangedFiles)
+                (fromIntegral summary.pullRequestSummaryUpdatedAt)
 
 indexSessionPullRequests :: StorePool -> OsPath -> Text -> IO (Either Text [Text])
 indexSessionPullRequests pool root sessionId =
