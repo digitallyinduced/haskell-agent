@@ -21,6 +21,7 @@ module Claude.Agent.SDK.Types
     , UserMessage(..)
     , AssistantMessage(..)
     , SystemMessage(..)
+    , ApiRetry(..)
     , ResultMessage(..)
     , StreamEvent(..)
     , ConversationResetMessage(..)
@@ -346,6 +347,20 @@ data SystemMessage = SystemMessage
     , parentToolUseId :: !(Maybe Text)
     , hasParentToolUseId :: !Bool
     , retractedMessageUuids :: ![Text]
+    -- | Populated for @api_retry@ records: Claude Code is sleeping before
+    -- resending a failed provider request.
+    , apiRetry :: !(Maybe ApiRetry)
+    } deriving (Eq, Show)
+
+-- | One automatic provider retry announced by Claude Code before it waits.
+-- Every field is optional on the wire; absent counters are reported as
+-- 'Nothing' rather than guessed.
+data ApiRetry = ApiRetry
+    { attempt :: !(Maybe Int)
+    , maxRetries :: !(Maybe Int)
+    , retryDelayMs :: !(Maybe Int)
+    , errorStatus :: !(Maybe Int)
+    , errorKind :: !(Maybe Text)
     } deriving (Eq, Show)
 
 data ResultMessage = ResultMessage

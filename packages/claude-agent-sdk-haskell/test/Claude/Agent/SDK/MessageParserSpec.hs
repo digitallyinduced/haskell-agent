@@ -9,6 +9,38 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "decodeMessageLine" do
+    it "decodes api_retry system records with their backoff details" do
+        let line =
+                "{\"type\":\"system\",\"subtype\":\"api_retry\",\
+                \\"attempt\":3,\"max_retries\":10,\"retry_delay_ms\":32180,\
+                \\"error_status\":429,\"error\":\"rate_limit\",\
+                \\"session_id\":\"session-1\",\"uuid\":\"retry-3\"}"
+        case decodeMessageLine line of
+            Right (MessageSystem system) -> do
+                system.subtype `shouldBe` "api_retry"
+                system.apiRetry
+                    `shouldBe` Just ApiRetry
+                        { attempt = Just 3
+                        , maxRetries = Just 10
+                        , retryDelayMs = Just 32180
+                        , errorStatus = Just 429
+                        , errorKind = Just "rate_limit"
+                        }
+            other ->
+                expectationFailure ("unexpected decode: " <> show other)
+
+    it "leaves retry details absent on other system records" do
+        let line =
+                "{\"type\":\"system\",\"subtype\":\"init\",\
+                \\"attempt\":3,\"apiKeySource\":\"none\",\
+                \\"session_id\":\"session-1\"}"
+        case decodeMessageLine line of
+            Right (MessageSystem system) -> do
+                system.subtype `shouldBe` "init"
+                system.apiRetry `shouldBe` Nothing
+            other ->
+                expectationFailure ("unexpected decode: " <> show other)
+
     it "retains autonomous origin identifiers and the raw origin object" do
         let originBytes =
                 "{\"kind\":\"task-notification\",\"server\":\"team\",\
