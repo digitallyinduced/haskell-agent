@@ -1,6 +1,6 @@
 module Agent.CLI.McpManagerSpec (spec) where
 
-import Agent.CLI.Config
+import Agent.Runtime.Config
 import Agent.CLI.McpAdd
 import Agent.CLI.McpManager
 import Agent.CLI.McpManager.Fullscreen

@@ -378,6 +378,7 @@ truncateUiBlocks count ui =
             Map.filter (`Map.member` indices) ui.uiShellProcesses
     in ui
         { uiBlocks = blocks
+        , uiStreamingMarkdown = Nothing
         , uiSelectedBlock =
             selectedIndex >>= \index ->
                 (.blockId) <$> Seq.lookup index blocks

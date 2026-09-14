@@ -3,6 +3,7 @@ module Agent.CLI.TUIAppSpec (spec) where
 import qualified Agent.TUI.Theme as Theme
 import Agent.CLI.TUI.Keyboard (decodeKeyboardBody, classifyKeyboard, runKeyboardInput)
 import Agent.CLI.TUI.App (finishedMarkdownProseCaches)
+import qualified Agent.CLI.TUI.App as Runtime
 import Control.Monad (forM_, when)
 import Control.Monad.IO.Class (liftIO)
 import Graphics.Vty.Platform.Unix.Input.Classify.Types (KClass(..))
@@ -172,9 +173,10 @@ import Agent.TUI.Presentation
     )
 import Agent.TUI.Motion
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, threadDelay)
-import Control.Concurrent.Async (waitCatch, withAsync)
+import Control.Concurrent.Async (cancel, waitCatch, withAsync)
 import Control.Exception.Safe (bracket, bracket_)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
+import qualified System.Directory as Directory
 import Control.Exception (AsyncException(UserInterrupt))
 import qualified Control.Exception as Exception
 import Control.Concurrent.STM
@@ -182,6 +184,7 @@ import Control.Concurrent.STM
     , readTVar
     , readTMVar
     , newEmptyTMVarIO
+    , putTMVar
     , newTChanIO
     , retry
     , tryReadTMVar
@@ -264,6 +267,50 @@ spec = do
                     <> map (`FullscreenScriptCachePresent` False) names
                     <> [FullscreenScriptHalt]
                 pure ()
+    describe "active-turn prompt routing" do
+        it "queues explicit queued prompts and steers explicit and plain prompts" $
+            withSystemTempDirectory "agent-tui-prompt-routing" \directory ->
+                bracket
+                    (lookupEnv "HOME")
+                    (\previous -> maybe (unsetEnv "HOME") (setEnv "HOME") previous)
+                    \_ -> do
+                        setEnv "HOME" directory
+                        forM_
+                            [ ("/queue inspect the tests", True)
+                            , ("/steer inspect the tests", False)
+                            , ("inspect the tests", False)
+                            ]
+                            \(draft, queuedPrompt) -> do
+                                completed <- timeout 5_000_000 do
+                                    steeringCalls <- newIORef []
+                                    let running = reduceUi
+                                            (UiSetDraft draft (Text.length draft)) $
+                                                reduceUi (UiLoop TurnStarted) initialUiState
+                                    baseRuntime <- newScriptRuntime running
+                                    let runtime = baseRuntime
+                                            { runtimeSteer = \pasted prompt -> do
+                                                modifyIORef' steeringCalls (<> [(pasted, prompt)])
+                                                pure (Right ())
+                                            }
+                                    (_, submitted) <- runFullscreenScriptWithState
+                                        (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                                        [ FullscreenScriptVty (V.EvKey V.KEnter [])
+                                        , FullscreenScriptHalt
+                                        ]
+                                    queued <- toList <$> atomically
+                                        (Composer.readFullscreenInputs runtime.runtimeInput)
+                                    map (.fullscreenInputLine) queued `shouldBe`
+                                        if queuedPrompt then [ReplText draft] else []
+                                    map (.fullscreenInputQueued) queued `shouldBe`
+                                        if queuedPrompt then [True] else []
+                                    readIORef steeringCalls `shouldReturn`
+                                        if queuedPrompt
+                                            then []
+                                            else [(False, "inspect the tests")]
+                                    submitted.appUi.uiDraft `shouldBe` ""
+                                    submitted.appUi.uiRunning `shouldBe` True
+                                completed `shouldBe` Just ()
+
     describe "active-turn image paste" do
         it "shows a bracketed image paste before the REPL consumes it and survives delayed refreshes" $
             withPastedImageFixtures \path _ -> do
@@ -581,6 +628,111 @@ spec = do
                 `shouldBe` Just [("Current", "")]
 
     describe "idle choice closure" do
+        it "replaces a choice whose reply has already completed without blocking" do
+            runtime <- newScriptRuntime initialUiState
+            previous <- newEmptyTMVarIO
+            current <- newEmptyTMVarIO
+            atomically (putTMVar previous (Just 0))
+            result <- timeout 1_000_000 $
+                runFullscreenScriptWithState
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    [ FullscreenScriptApp
+                        (AppAskChoice ChoiceDialog "Completed approval" "" 0
+                            [("Allow", "")] previous)
+                    , FullscreenScriptApp
+                        (AppAskChoice ChoiceDialog "Current question" "" 0
+                            [("Continue", "")] current)
+                    , FullscreenScriptHalt
+                    ]
+            case result of
+                Nothing -> expectationFailure "replacing a completed reply blocked the event loop"
+                Just (_, replaced) ->
+                    fmap (.dialogOverlay.choiceTitle) replaced.appChoice
+                        `shouldBe` Just "Current question"
+            atomically (tryReadTMVar previous) `shouldReturn` Just (Just 0)
+            atomically (tryReadTMVar current) `shouldReturn` Nothing
+
+        it "releases a displaced plan approval without approving it" do
+            runtime <- newScriptRuntime initialUiState
+            approval <- newEmptyTMVarIO
+            question <- newEmptyTMVarIO
+            let initial = initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, replaced) <- runFullscreenScriptWithState initial
+                [ FullscreenScriptApp
+                    (AppAskChoice ChoiceDialog "Enter plan mode?" "" 0
+                        [("Enter", ""), ("Stay", "")] approval)
+                , FullscreenScriptApp
+                    (AppAskChoice ChoicePlanning "Planning question" "" 0
+                        [("Continue", "")] question)
+                , FullscreenScriptHalt
+                ]
+            atomically (tryReadTMVar approval) `shouldReturn` Just Nothing
+            atomically (tryReadTMVar question) `shouldReturn` Nothing
+            (_, closed) <- runFullscreenScriptWithState replaced
+                [ FullscreenScriptApp (AppCloseChoice approval)
+                , FullscreenScriptVty (V.EvKey V.KEnter [])
+                , FullscreenScriptHalt
+                ]
+            atomically (tryReadTMVar question) `shouldReturn` Just (Just 0)
+            isNothing closed.appChoice `shouldBe` True
+
+        it "releases a choice displaced by a searchable or adjustable picker" do
+            forM_ (["filter", "adjustable", "dynamic"] :: [String]) \picker -> do
+                runtime <- newScriptRuntime initialUiState
+                approval <- newEmptyTMVarIO
+                indexReply <- newEmptyTMVarIO
+                adjustmentReply <- newEmptyTMVarIO
+                dynamicReply <- newEmptyTMVarIO
+                let replacement = case picker of
+                        "filter" -> AppAskFilterChoice "Select" 0 [("Item", "")] indexReply
+                        "adjustable" -> AppAskAdjustableFilterChoice "Select" 0
+                            [("Item", "", ["high"], 0)] adjustmentReply
+                        _ -> AppAskDynamicAdjustableFilterChoice "Select" "" 0
+                            [("item", "Item", "", ["high"], 0)] dynamicReply
+                _ <- runFullscreenScriptWithState
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    [ FullscreenScriptApp
+                        (AppAskChoice ChoiceDialog "Enter plan mode?" "" 0
+                            [("Enter", "")] approval)
+                    , FullscreenScriptApp replacement
+                    , FullscreenScriptHalt
+                    ]
+                atomically (tryReadTMVar approval) `shouldReturn` Just Nothing
+
+        it "closes the published choice when its waiting caller is cancelled" do
+            runtime <- newScriptRuntime initialUiState
+            withAsync
+                (Runtime.requestFullscreenChoiceWithBody runtime "Enter plan mode?"
+                    "" 0 [("Enter", "")]) \worker -> do
+                published <- timeout 1_000_000 $ atomically do
+                    let AppEventMailbox mailbox = runtime.runtimeMailbox
+                    pending <- readTVar mailbox
+                    case
+                        [ (event, reply)
+                        | PendingEvent event@(AppAskChoice _ _ _ _ _ reply) <-
+                            toList pending.mailboxPendingEvents
+                        ] of
+                        entry : _ -> pure entry
+                        _ -> retry
+                case published of
+                    Nothing -> expectationFailure "choice was not published"
+                    Just (event, reply) -> do
+                        cancel worker
+                        let AppEventMailbox mailbox = runtime.runtimeMailbox
+                        pending <- atomically (readTVar mailbox)
+                        let closes =
+                                [ close
+                                | PendingEvent close@(AppCloseChoice token) <-
+                                    toList pending.mailboxPendingEvents
+                                , token == reply
+                                ]
+                        length closes `shouldBe` 1
+                        (_, closed) <- runFullscreenScriptWithState
+                            (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                            (map FullscreenScriptApp (event : closes) ++ [FullscreenScriptHalt])
+                        isNothing closed.appChoice `shouldBe` True
+                        atomically (tryReadTMVar reply) `shouldReturn` Just Nothing
+
         it "renders fresh approval details literally and denies on Escape" do
             runtime <- newScriptRuntime initialUiState
             reply <- newEmptyTMVarIO
@@ -1166,6 +1318,30 @@ spec = do
                     Skip width -> Text.replicate width " "
                     RowEnd width -> Text.replicate width " "
             rendered `shouldSatisfy` Text.isInfixOf marker
+
+    describe "messages below indicator" do
+        it "shows a count while scrolled up and resumes following when clicked" do
+            let transcript = Text.unlines
+                    ([ "Earlier row " <> Text.pack (show index)
+                     | index <- [1 .. 100 :: Int]
+                     ] <> ["LATEST_MESSAGE_MARKER"])
+                ui = reduceUi (UiAssistantHistory transcript) initialUiState
+                bounds = (80, 24)
+            runtime <- newScriptRuntime ui
+            let initial = (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    { appUi = ui }
+            (_, frames, finalState) <- runFullscreenScriptDetailedAt bounds initial
+                [ FullscreenScriptMouseDown ConversationViewport
+                    V.BScrollUp (B.Location (0, 0))
+                , FullscreenScriptMouseDown ConversationLatest
+                    V.BLeft (B.Location (0, 0))
+                , FullscreenScriptHalt
+                ]
+            let rendered = map (renderedPictureTextAt bounds) frames
+            rendered `shouldSatisfy` any (Text.isInfixOf "1 Message")
+            last rendered `shouldSatisfy` Text.isInfixOf "LATEST_MESSAGE_MARKER"
+            last rendered `shouldSatisfy` (not . Text.isInfixOf "Click to resume")
+            finalState.appUi.uiFollow `shouldBe` True
 
     describe "planning question panel" do
         forM_ [False, True] \textPrompt ->
@@ -3012,6 +3188,7 @@ spec = do
                 reopenedText = renderShell reopened
                 ghciText = renderShell ghciCompleted
                 execText = renderShell execCompleted
+                execExpandedText = renderShell (reduceUi UiToggleSelected execCompleted)
                 failedText = renderShell failed
             collapsedText `shouldSatisfy`
                 Text.isInfixOf "$ printf shell-command"
@@ -3024,13 +3201,41 @@ spec = do
             ghciText `shouldNotSatisfy`
                 Text.isInfixOf "ghci-output-marker"
             execText `shouldSatisfy`
-                Text.isInfixOf "$ exec · text(\"exec-invocation-marker\");"
+                Text.isInfixOf "JavaScript execution"
             execText `shouldNotSatisfy`
+                Text.isInfixOf "exec-invocation-marker"
+            execText `shouldNotSatisfy`
+                Text.isInfixOf "exec-output-marker"
+            execExpandedText `shouldSatisfy`
+                Text.isInfixOf "exec-invocation-marker"
+            execExpandedText `shouldSatisfy`
                 Text.isInfixOf "exec-output-marker"
             failedText `shouldSatisfy`
                 Text.isInfixOf "› ✗ $ false"
             failedText `shouldNotSatisfy`
                 Text.isInfixOf "failed-output-marker"
+
+    describe "background task prompt status" do
+        it "renders idle work above the editable prompt and hides it during a turn" do
+            runtime <- newScriptRuntime initialUiState
+            let base = initialFullscreenAppState runtime [] AgentRoot [] 0
+                idle = initialUiState
+                    { uiAwaitingInput = True
+                    , uiDraft = "follow-up message"
+                    , uiCursor = 17
+                    , uiBackgroundTaskStatus =
+                        [ "◌ 1 background task · 4m 32s · Release build"
+                        , "  Agent will resume when a shell task finishes."
+                        ]
+                    }
+                rendered ui = renderedAppText (100, 24) (base { appUi = ui })
+            rendered idle `shouldSatisfy` Text.isInfixOf "1 background task"
+            rendered idle `shouldSatisfy` Text.isInfixOf "follow-up message"
+            rendered idle `shouldSatisfy` Text.isInfixOf "Agent will resume"
+            rendered (idle { uiRunning = True })
+                `shouldNotSatisfy` Text.isInfixOf "1 background task"
+            rendered (idle { uiBackgroundTaskStatus = [] })
+                `shouldNotSatisfy` Text.isInfixOf "1 background task"
 
     describe "conversation scrollbar" do
         it "uses a visible trough that repaints old thumb cells" do
@@ -3159,6 +3364,46 @@ spec = do
                 state <- runTranscriptFocusInput [] [V.EvKey key []]
                 state.appUi.uiDraft `shouldBe` "before"
                 state.appUi.uiFocus `shouldBe` FocusComposer
+
+        it "restores prompt focus and inserts a paste, including after returning to a terminal tab" do
+            forM_ [[], [UiLoop TurnStarted]] $ \setup ->
+                forM_ [[], [V.EvLostFocus], [V.EvLostFocus, V.EvGainedFocus]] $ \focusEvents -> do
+                    state <- runTranscriptFocusInput setup
+                        (focusEvents <> [V.EvPaste (encoded "first\nsecond λ")])
+                    state.appUi.uiDraft `shouldBe` "befirst\nsecond λfore"
+                    state.appUi.uiCursor `shouldBe` 16
+                    state.appUi.uiFocus `shouldBe` FocusComposer
+                    state.appHistorySelectedBlock `shouldBe` Nothing
+
+        it "does not redirect paste out of an approval overlay" do
+            state <- runTranscriptFocusInput
+                [UiPermissionShown "Approve a test operation"]
+                [V.EvPaste (encoded "paste text")]
+            state.appUi.uiDraft `shouldBe` "before"
+            state.appUi.uiFocus `shouldBe` FocusPermission
+            state.appUi.uiPermission `shouldSatisfy` isJust
+
+        it "restores prompt focus for legacy and modified clipboard shortcuts" do
+            withClipboardTextFixture do
+                forM_
+                    [ V.EvKey (V.KChar '\SYN') []
+                    , V.EvKey (V.KChar 'v') [V.MCtrl]
+                    , V.EvKey (V.KChar 'v') [V.MMeta]
+                    ] $ \pasteEvent ->
+                    forM_ [[], [V.EvLostFocus], [V.EvLostFocus, V.EvGainedFocus]] $ \focusEvents -> do
+                        state <- runTranscriptFocusInput [] (focusEvents <> [pasteEvent])
+                        state.appUi.uiDraft `shouldBe` "beclipboard textfore"
+                        state.appUi.uiCursor `shouldBe` 16
+                        state.appUi.uiFocus `shouldBe` FocusComposer
+                        state.appHistorySelectedBlock `shouldBe` Nothing
+
+        it "does not redirect legacy clipboard input out of an approval overlay" do
+            state <- runTranscriptFocusInput
+                [UiPermissionShown "Approve a test operation"]
+                [V.EvKey (V.KChar '\SYN') []]
+            state.appUi.uiDraft `shouldBe` "before"
+            state.appUi.uiFocus `shouldBe` FocusPermission
+            state.appUi.uiPermission `shouldSatisfy` isJust
 
         it "does not insert navigation keys or modified character shortcuts" do
             forM_
@@ -3801,6 +4046,24 @@ unfocusedStreamingRefreshesOnMotionTick = do
             ]
     rendered <- runFullscreenScript initialState script
     pure $ encoded marker `ByteString.isInfixOf` rendered
+
+-- Exercise the platform clipboard reader without accessing the user's clipboard.
+withClipboardTextFixture :: IO a -> IO a
+withClipboardTextFixture action =
+    withSystemTempDirectory "agent-tui-clipboard-text" \directory -> do
+        shell <- Directory.findExecutable "sh" >>= maybe
+            (fail "clipboard fixture requires a shell") pure
+        forM_ ["pbpaste", "wl-paste", "xclip"] $ \command -> do
+            let path = directory </> command
+            writeFile path ("#!" <> shell <> "\nprintf '%s' 'clipboard text'\n")
+            permissions <- Directory.getPermissions path
+            Directory.setPermissions path (Directory.setOwnerExecutable True permissions)
+        bracket
+            (lookupEnv "PATH")
+            (\previous -> maybe (unsetEnv "PATH") (setEnv "PATH") previous)
+            \_ -> do
+                setEnv "PATH" directory
+                action
 
 withPastedImageFixtures :: (FilePath -> FilePath -> IO a) -> IO a
 withPastedImageFixtures action =

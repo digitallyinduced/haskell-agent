@@ -63,6 +63,7 @@ import Agent.TUI.Model.ToolResult
 import Agent.TUI.Model.State
 import Agent.TUI.Model.Timing
 import Agent.TUI.Model.Types
+import Agent.TUI.Markdown.Stream (emptyMarkdownStreamState, feedMarkdownStream)
 import Agent.TUI.Motion
     ( completionStatusDurationMillis )
 import Agent.Loop
@@ -113,7 +114,7 @@ reduceUi event state = case event of
                 , uiCursor = 0
                 , uiFollow = True
                 , uiNotice =
-                    Just (progressNotice "Steering the current turn…")
+                    Just (progressNotice "Guidance queued…")
                 , uiNoticeElapsedMillis = 0
                 }
     UiInputQueued text ->
@@ -176,6 +177,8 @@ reduceUi event state = case event of
         state { uiBranch = branch, uiCwd = cwd, uiWorkspaceRoot = workspace }
     UiSetNotice notice ->
         state { uiNotice = notice, uiNoticeElapsedMillis = 0 }
+    UiSetBackgroundTaskStatus rows ->
+        state { uiBackgroundTaskStatus = rows }
     UiMoveSelection delta ->
         moveSelection delta state
     UiSelectBlock ident ->
@@ -287,6 +290,7 @@ clearConversation :: UiState -> UiState
 clearConversation state =
     state
         { uiBlocks = Seq.empty
+        , uiStreamingMarkdown = Nothing
         , uiSelectedBlock = Nothing
         , uiSelectedBlockIndex = Nothing
         , uiBlockIndices = Map.empty
@@ -299,6 +303,7 @@ clearConversation state =
         , uiShellPolls = Map.empty
         , uiRetryCountdown = Nothing
         , uiTodos = []
+        , uiBackgroundTaskStatus = []
         , uiGenerating = False
         , uiGenerationChars = 0
         , uiGenerationMillis = 0
@@ -330,6 +335,7 @@ restartTurn :: UiState -> UiState
 restartTurn state =
     state
         { uiBlocks = blocks
+        , uiStreamingMarkdown = Nothing
         , uiSelectedBlock = (.blockId) . snd <$> selected
         , uiSelectedBlockIndex = fst <$> selected
         , uiBlockIndices =
@@ -381,6 +387,7 @@ snapshotGenerationRate usage state =
     in state
         { uiGenerating = False
         , uiGenerationMillis = generationMillis
+        , uiStreamingMarkdown = Nothing
         , uiLastTokensPerSecond =
             generationTokensPerSecond
                 usage.outputTokens
@@ -548,6 +555,16 @@ appendOrExtend kind title delta streamState state =
                     { uiBlocks =
                         rest Seq.|> block
                             { blockBody = block.blockBody <> delta }
+                    , uiStreamingMarkdown =
+                        if kind == BlockAssistant
+                            then
+                                let previous = case state.uiStreamingMarkdown of
+                                        Just (ident, parsed)
+                                            | ident == block.blockId -> parsed
+                                        _ -> feedMarkdownStream emptyMarkdownStreamState block.blockBody
+                                    parsed = feedMarkdownStream previous delta
+                                in parsed `seq` Just (block.blockId, parsed)
+                            else Nothing
                     }
         _ ->
             appendBlock kind title delta "" streamState Nothing state
@@ -784,15 +801,17 @@ finishVisibleTool result state =
                 _ -> state.uiTodos
         next =
             state
-                { uiRunning = True
-                , uiAwaitingInput = False
-                , uiActivity = "Thinking…"
+                { uiActivity =
+                    if state.uiRunning
+                        then "Thinking…"
+                        else state.uiActivity
                 , uiToolCalls =
                     Map.delete result.callId state.uiToolCalls
                 , uiTodos = todos
                 }
     in case activeCall of
-        Nothing -> next
+        -- Nested or late completions are not evidence of an active turn.
+        Nothing -> state
         Just (blockIndex, call)
             | blockIndex < Seq.length state.uiBlocks
             , Just _ <- trackedShellOwner call next ->
@@ -1081,6 +1100,7 @@ discardResponseAttempt state =
             retainShellProcesses blocks state.uiShellProcesses
     in state
         { uiBlocks = blocks
+        , uiStreamingMarkdown = Nothing
         , uiSelectedBlock = (.blockId) . snd <$> selected
         , uiSelectedBlockIndex = fst <$> selected
         , uiBlockIndices =
@@ -1171,6 +1191,7 @@ finalizeTurn terminalState state =
     in state
         { uiBlocks = blocks
         , uiRunning = False
+        , uiStreamingMarkdown = Nothing
         , uiGenerating = False
         , uiGenerationMillis = generationMillis
         , uiLastTokensPerSecond =
@@ -1219,7 +1240,8 @@ transientNotice kind text = UiNotice
 finalizeStreams :: UiState -> UiState
 finalizeStreams state =
     state
-        { uiBlocks =
+        { uiStreamingMarkdown = Nothing
+        , uiBlocks =
             fmap
                 (\block ->
                     if block.blockState == BlockStreaming

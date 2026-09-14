@@ -1,17 +1,17 @@
 module Agent.Telegram.Internal.Launch (runTelegram, runTelegramWithStore) where
 
 
-import Agent.CLI.AgentSessions.Process
+import Agent.Runtime.AgentSessions.Process
     ( SessionProcessLifetime(ScopedSessionProcesses)
     , closeSessionProcessManager
     , newSessionProcessManagerWithLifetime
     )
-import Agent.CLI.ManagedTurn ()
-import Agent.CLI.Runtime.Options
+import Agent.Runtime.ManagedTurn ()
+import Agent.Runtime.Options
     ( ApprovalPolicy(..)
     , defaultEffortFor
     )
-import Agent.CLI.Models
+import Agent.Runtime.Models
     ( ModelOption(..)
     , ModelTarget(..)
     , defaultModelOptionFor
@@ -19,8 +19,8 @@ import Agent.CLI.Models
     , resolveConfiguredModel
     , resolveModelOptionDialect
     )
-import Agent.CLI.ModelConfig (loadModelCatalog)
-import Agent.CLI.Session (sessionsRoot)
+import Agent.Runtime.ModelConfig (loadModelCatalog)
+import Agent.Runtime.Session (sessionsRoot)
 import Agent.Telegram.Types
 import Agent.Telegram.Classify ()
 import Agent.Telegram.Bridge ()

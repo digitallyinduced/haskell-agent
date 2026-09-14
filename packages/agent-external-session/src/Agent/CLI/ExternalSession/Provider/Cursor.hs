@@ -13,13 +13,14 @@ import Agent.CLI.ExternalSession.Types
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (IOException, tryAny, tryIO)
 import Control.Monad (filterM, foldM)
+import Control.Monad.Extra (firstJustM)
 import Crypto.Hash (Digest, MD5, hash)
 import Data.Aeson (Value(..))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
-import Data.IORef (modifyIORef', newIORef, readIORef)
-import qualified Data.IORef as IORef
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
+import Data.List (dropWhileEnd)
+import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -49,7 +50,7 @@ discoverCursor env cwd = do
             (hash (encodeUtf8 (Text.pack canonicalCwd)) :: Digest MD5)
         chats = env.externalCursorRoot </> "chats" </> digest
     cliDirectories <- directoryChildren chats
-    cli <- mapMaybe id <$> traverse
+    cli <- catMaybes <$> traverse
         (\directory -> cursorCliCandidate env directory (Just cwd))
         cliDirectories
     desktop <- concat <$> traverse (discoverDesktop env cwd)
@@ -69,7 +70,7 @@ discoverDesktop _env cwd databasePath = do
         else tryAny
             (withReadOnlyDatabase databasePath \database -> do
                 headers <- cursorHeaderValues database
-                mapMaybe id <$> traverse (headerCandidate databasePath) headers)
+                catMaybes <$> traverse (headerCandidate databasePath) headers)
             >>= pure . either (const []) id
   where
     headerCandidate databasePath header
@@ -162,7 +163,7 @@ discoverCursorTranscripts env cwd = do
     let projects = env.externalCursorRoot </> "projects"
     paths <- recursiveFiles projects
         (Text.isSuffixOf ".jsonl" . Text.pack)
-    mapMaybe id <$> traverse (cursorTranscriptCandidate env cwd) paths
+    catMaybes <$> traverse (cursorTranscriptCandidate env cwd) paths
 
 cursorTranscriptCandidate
     :: ExternalSessionEnv
@@ -244,7 +245,7 @@ cursorProjectSlug =
     trimDashes . map (\character ->
         if isAsciiAlphaNumeric character then character else '-')
   where
-    trimDashes = reverse . dropWhile (== '-') . reverse . dropWhile (== '-')
+    trimDashes = dropWhileEnd (== '-') . dropWhile (== '-')
     isAsciiAlphaNumeric character =
         character >= 'A' && character <= 'Z'
             || character >= 'a' && character <= 'z'
@@ -370,7 +371,7 @@ findDesktop _env reference databasePath = do
     result <- tryAny $
         withReadOnlyDatabase databasePath \database -> do
             headers <- cursorHeaderValues database
-            mapMaybe id <$> traverse convert headers
+            catMaybes <$> traverse convert headers
     pure (either (const []) id result)
   where
     convert header =
@@ -387,7 +388,7 @@ findDesktop _env reference databasePath = do
                                 , externalTextValue "title" header
                                 ]
                             )
-                            (Text.unpack <$> firstMaybe paths)
+                            (Text.unpack <$> listToMaybe paths)
                             (externalObjectValue "createdAt" header)
                             (externalObjectValue "lastUpdatedAt" header)
             _ -> pure Nothing
@@ -410,20 +411,14 @@ readCursor env candidate maxToolChars = do
                             )
             pure (state, jsonlWarnings counters)
         Nothing -> do
-            stateRef <- newIORef (emptyBoundedTurns, mempty)
-            warningRef <- newIORef []
-            let consume value =
-                    modifyIORef' stateRef \state ->
-                        cursorStateStep maxToolChars state value
             if takeFileName candidate.candidatePath == "state.vscdb"
-                then readDesktopRows candidate consume warningRef
+                then readDesktopRows candidate maxToolChars
                 else do
                     directory <-
                         doesDirectoryExist candidate.candidatePath
                     if directory
-                        then readCursorStore candidate consume warningRef
-                        else readDesktopRows candidate consume warningRef
-            (,) <$> readIORef stateRef <*> readIORef warningRef
+                        then readCursorStore candidate maxToolChars
+                        else readDesktopRows candidate maxToolChars
     let turns = boundedRecent bounded
         unavailable =
             [ warning
@@ -494,22 +489,20 @@ cursorTranscriptForSession env sessionId cwd
 
 readCursorStore
     :: ExternalCandidate
-    -> (Value -> IO ())
-    -> IORef.IORef [ExternalWarning]
-    -> IO ()
-readCursorStore candidate consume warningRef = do
+    -> Int
+    -> IO ((BoundedTurns, ContentOmissions), [ExternalWarning])
+readCursorStore candidate maxToolChars = do
     let store = candidate.candidatePath </> "store.db"
     safe <- isSafeFile candidate.candidatePath store
     if not safe
-        then pure ()
-        else do
-            result <- tryAny $
+        then pure ((emptyBoundedTurns, mempty), [])
+        else readCursorRows maxToolChars "Cursor blob(s)" \consume ->
                 withReadOnlyDatabase store \database -> do
                     columns <- tableColumns database "blobs"
-                    let keyColumn = firstMaybe
+                    let keyColumn = listToMaybe
                             [ name | name <- ["id", "key", "hash"],
                                 name `Set.member` columns ]
-                        dataColumn = firstMaybe
+                        dataColumn = listToMaybe
                             [ name | name <- ["data", "value", "blob"],
                                 name `Set.member` columns ]
                     case (keyColumn, dataColumn) of
@@ -520,62 +513,67 @@ readCursorStore candidate consume warningRef = do
                                     <> keyName <> "\""
                                 )
                                 []
-                            consumeRows consume rows
-                        _ -> pure 0
-            case result of
-                Left exception ->
-                    modifyIORef' warningRef
-                        (<> [warning "cursor_store_error"
-                            (oneLine 200 (Text.pack (show exception)))])
-                Right unavailable -> appendUnavailable
-                    "Cursor blob(s)" unavailable warningRef
+                            consume rows
+                        _ -> consume []
 
 readDesktopRows
     :: ExternalCandidate
-    -> (Value -> IO ())
-    -> IORef.IORef [ExternalWarning]
-    -> IO ()
-readDesktopRows candidate consume warningRef = do
+    -> Int
+    -> IO ((BoundedTurns, ContentOmissions), [ExternalWarning])
+readDesktopRows candidate maxToolChars = do
     let prefix = "bubbleId:" <> candidate.candidateSessionId <> ":"
         composer = "composerData:" <> candidate.candidateSessionId
-    result <- tryAny $
+    readCursorRows maxToolChars "Cursor row(s)" \consume ->
         withReadOnlyDatabase candidate.candidatePath \database -> do
             rows <- queryRows database
                 "SELECT value FROM cursorDiskKV \
                 \WHERE key = ? OR substr(key, 1, length(?)) = ? ORDER BY key"
                 [SQLText composer, SQLText prefix, SQLText prefix]
-            consumeRows consume rows
+            consume rows
+
+-- Thread the fold state explicitly. The checkpoint is only for synchronous
+-- exceptions (including database close): previously consumed turns survive,
+-- but the unavailable-row warning is emitted only on complete success.
+readCursorRows
+    :: Int
+    -> Text
+    -> (([[SQLData]] -> IO ((BoundedTurns, ContentOmissions), Int))
+        -> IO ((BoundedTurns, ContentOmissions), Int))
+    -> IO ((BoundedTurns, ContentOmissions), [ExternalWarning])
+readCursorRows maxToolChars label readRows = do
+    let initialState = (emptyBoundedTurns, mempty)
+    checkpoint <- newIORef initialState
+    result <- tryAny $ readRows $
+        foldM (step (writeIORef checkpoint)) (initialState, 0)
     case result of
-        Left exception ->
-            modifyIORef' warningRef
-                (<> [warning "cursor_store_error"
-                    (oneLine 200 (Text.pack (show exception)))])
-        Right unavailable ->
-            appendUnavailable "Cursor row(s)" unavailable warningRef
-
-consumeRows :: (Value -> IO ()) -> [[SQLData]] -> IO Int
-consumeRows consume = foldM step 0
+        Left exception -> do
+            state <- readIORef checkpoint
+            pure (state, [warning "cursor_store_error"
+                (oneLine 200 (Text.pack (show exception)))])
+        Right (state, unavailable) ->
+            pure (state, unavailableWarnings label unavailable)
   where
-    step unavailable row =
+    step save (!state, !unavailable) row =
         case lastMaybe row >>= decodeJsonish of
-            Nothing -> pure (unavailable + 1)
-            Just value -> consume value >> pure unavailable
+            Nothing -> pure (state, unavailable + 1)
+            Just value -> do
+                let nextState = cursorStateStep maxToolChars state value
+                () <- nextState `seq` save nextState
+                pure (nextState, unavailable)
 
-appendUnavailable
+unavailableWarnings
     :: Text
     -> Int
-    -> IORef.IORef [ExternalWarning]
-    -> IO ()
-appendUnavailable label unavailable warningRef =
+    -> [ExternalWarning]
+unavailableWarnings label unavailable =
     if unavailable <= 0
-        then pure ()
-        else modifyIORef' warningRef
-            (<> [ warning
+        then []
+        else [ warning
                     "binary_content_unavailable"
                     ( Text.pack (show unavailable) <> " " <> label
                         <> " were binary, protobuf, or non-JSON and were not inferred."
                     )
-                ])
+                ]
 
 cursorTurns :: Int -> Value -> ([ExternalTurn], ContentOmissions)
 cursorTurns maxToolChars root = go [root] [] mempty
@@ -749,7 +747,7 @@ cursorCallsAndResults maxToolChars value =
 
 cursorFirstUserTitle :: Value -> Maybe Text
 cursorFirstUserTitle root =
-    firstMaybe
+    listToMaybe
         [ value.externalTurnText
         | value <- fst (cursorTurns 100 root)
         , value.externalTurnRole == "user"
@@ -841,23 +839,9 @@ truthy = \case
 
 firstNonEmptyText :: [Maybe Text] -> Text
 firstNonEmptyText values =
-    fromMaybe "" $ firstMaybe
+    fromMaybe "" $ listToMaybe
         [ value | Just value <- values, not (Text.null value) ]
-
-firstMaybe :: [value] -> Maybe value
-firstMaybe [] = Nothing
-firstMaybe (value : _) = Just value
 
 lastMaybe :: [value] -> Maybe value
 lastMaybe [] = Nothing
 lastMaybe values = Just (last values)
-
-firstJustM
-    :: (input -> IO (Maybe output))
-    -> [input]
-    -> IO (Maybe output)
-firstJustM _ [] = pure Nothing
-firstJustM action (value : values) =
-    action value >>= \case
-        Just output -> pure (Just output)
-        Nothing -> firstJustM action values

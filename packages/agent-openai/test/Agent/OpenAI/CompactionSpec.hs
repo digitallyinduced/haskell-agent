@@ -588,6 +588,7 @@ spec = do
                     , user "# Skill instructions: example\n\n<SKILL_INSTRUCTIONS>generated</SKILL_INSTRUCTIONS>"
                     , user "## Skills\nThe following reusable skills are available in this session.\n"
                     , user "<learned-skills>\nThese are durable, reusable instructions learned from earlier sessions.\n"
+                    , user "<structured-memory>\n## Available structured memory\n<table scope=\"user\" name=\"people\" />\n</structured-memory>"
                     , user "<system-reminder>\nAs you answer the user's questions, you can use the following context\n"
                     , user "<subagent_notification>\nstatus: completed\n</subagent_notification>"
                     , user generatedTaskPlanContext
@@ -1137,6 +1138,7 @@ spec = do
                     , user "# Skill instructions: test\nrules"
                     , user "## Skills\nThe following reusable skills are available in this session.\nrules"
                     , user "<learned-skills>\nThese are durable, reusable instructions learned from earlier sessions.\nrules"
+                    , user "<structured-memory>\n## Available structured memory\n<table scope=\"user\" name=\"people\" />\n</structured-memory>"
                     , user "<system-reminder>\nAs you answer the user's questions, you can use the following context\nrules"
                     , user generatedTaskPlanContext
                     , user "old request"

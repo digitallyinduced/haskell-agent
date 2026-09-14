@@ -22,38 +22,38 @@ import Agent.CLI.AgentSessions
                            toolsGatewayIdentity, toolsCwd, toolsEffort,
                            toolsCurrentSessionId, toolsLaunchTurn, toolsPrepareSessionWait,
                            toolsDeliverToOwner) )
-import Agent.CLI.Auth (isGatewayLoadedAuth)
-import qualified Agent.CLI.ComputerUse as ComputerUse
-import Agent.CLI.Config (HarnessConfig(..))
-import Agent.CLI.Database ( databaseTools )
-import Agent.CLI.Database.Store
+import Agent.Accounts.Auth (isGatewayLoadedAuth)
+import qualified Agent.ComputerUse as ComputerUse
+import Agent.Runtime.Config (HarnessConfig(..))
+import Agent.Runtime.Database ( databaseTools )
+import Agent.Runtime.Database.Store
     (databaseToolsEnvForStore)
-import Agent.CLI.Dialects
+import Agent.Runtime.Tools.Dialects
     ( CodingTools(..),
       codingToolsForWithTypes,
       filterBashTools,
       filterGhciTools )
-import Agent.CLI.Error ( formatException )
-import Agent.CLI.GatewayBridge ( managedGatewayTools )
+import Agent.Runtime.Error ( formatException )
+import Agent.Runtime.GatewayBridge ( managedGatewayTools )
 import Agent.CLI.LearnedSkills ( learnedSkillTools )
 import Agent.CLI.LearnedSkills.Store
     ( learnedSkillToolsEnvForStore
     , loadApplicableLearnedSkillsForStore
     , successfulLearnedSkillsPreload
     )
-import Agent.CLI.Lsp
-    ( LspStartup(..), closeLspRuntime, lspRuntimeTool, newLspRuntime )
+import Agent.Runtime.Lsp
+    ( LspStartup(..), lspRuntimeTool )
 import Agent.CLI.IntegrationGateway (gatewayIntegrationAuthority)
 import Agent.Integration.API
     ( IntegrationRuntime
     , acquireIntegrationRuntime
     )
 import Agent.OsPath (unsafeToFilePath)
-import Agent.CLI.ModelConfig (builtinConnectionId)
-import Agent.CLI.Models (ModelTarget(targetConnectionId, targetWireModelId))
+import Agent.Runtime.ModelConfig (builtinConnectionId)
+import Agent.Runtime.Models (ModelTarget(targetConnectionId, targetWireModelId))
 import Agent.CLI.Options
     ( isOneShot, resolveComputerUseEnabled
-    , CliOptions(optGhci, optBash, optSkills)
+    , CliOptions(optGhci, optBash, optSkills, optAgentsMd)
     )
 import Agent.CLI.Plan (resumedPlanNeedsApproval)
 import Agent.CLI.Runtime.Orchestration.Background
@@ -67,12 +67,10 @@ import Agent.CLI.Runtime.Orchestration.Types
     , nativeLoadsHostWorkspaceContext
     , nativePreparedDiscovery
     )
-import Agent.CLI.Resume
-    ( SessionInitialContext
-        ( initialContextMayRestoreSnapshot
-        , initialContextNeeded
-        )
-    , resolveSessionInitialContext
+import Agent.Runtime.Startup.Context
+    ( SessionInitialContext, ContextPreloadPolicy(..)
+    , resolveSessionInitialContext, preloadInitialContext, preloadAgentsContext
+    , assembleInitialSkills
     )
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.Runtime.Orchestration.Session ( AgentSessionRequest(..)
@@ -81,7 +79,7 @@ import Agent.CLI.Runtime.Orchestration.Session ( AgentSessionRequest(..)
 import Agent.CLI.Runtime.Orchestration.Startup
     ( reportStartupWarning )
 import Agent.CLI.Runtime.Types (RunResult)
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( SessionHandle(sessionDir, sessionMeta), SessionMeta(metaId)
     , SessionTurn(turnAssistantText) )
 import Agent.CLI.Session.Runtime.Types
@@ -89,24 +87,19 @@ import Agent.CLI.Session.Runtime.Types
     , StartupRuntime(startupDatabaseStore, startupNativeHooks, startupStdinTty) )
 import Agent.CLI.Session.Selection
     ( currentSessionId, reservedSessionId )
-import Agent.CLI.Session.Inbox
+import Agent.Runtime.Session.Inbox
     ( deliverSessionInboxMessage
     , inboxUnavailableError
     )
-import Agent.CLI.SessionLock
+import Agent.Runtime.SessionLock
     ( acquireSessionLock,
       releaseSessionLock,
       sessionLockFilePath,
       sessionLockPath )
 import Agent.CLI.Startup.Auth (startupDie)
-import Agent.CLI.StartupContext ( preloadAgentsContext )
-import Agent.CLI.Skills (loadMcpSkillsCatalog, mergeSkillCatalogs)
-import Agent.CLI.WebFetch
-    ( WebFetchRuntime
-    , closeWebFetchRuntime
-    , newWebFetchRuntime
-    , webFetchRuntimeTool
-    )
+import Agent.CLI.Skills (loadMcpSkillsCatalog)
+import Agent.Runtime.WebFetch
+    ( webFetchRuntimeTool )
 import Agent.Dialect (DialectId(CodexDialect, GrokBuildDialect))
 import Agent.OpenAI.ImageGeneration
     ( clearImageGenerationHistory
@@ -120,8 +113,13 @@ import Agent.ResourceScope
     , registerResource
     , logSlowCleanup
     )
-import Agent.CLI.Runtime.Orchestration.Tools.Resources
+import Agent.Runtime.Tools.Resources
     ( SessionResourceScopes(..), withSessionResourceScopes )
+import Agent.Runtime.Tools.Startup
+    ( ToolAcquisitions(..), ToolStartupResources(..), acquireToolStartup )
+import Agent.Runtime.Tools.LocalStartup
+    ( LocalToolSettings(..), LocalToolPolicy(..), LocalToolAcquisitions(..)
+    , localToolAcquisitions, resolveLocalToolPolicy )
 import Agent.Skills
     ( SkillCatalog(..)
     , SkillInvocation
@@ -132,14 +130,13 @@ import Agent.Tools.PlanMode
       activatePlanMode,
       PlanModeState(PlanPending) )
 import Agent.Tools.Types
-    ( AppTool
+    ( AppTool(appToolName)
     , AppToolGroup(..)
     , BackgroundTaskHooks(..)
     , BackgroundTaskNotice(..)
     , ToolEnv(..)
     , appToolsFromGroups
     )
-import Control.Concurrent.Async ( Concurrently(..), concurrently )
 import Control.Exception.Safe
     ( SomeException, mask_, throwIO, try )
 import Control.Monad ( forM_, when, void )
@@ -151,7 +148,9 @@ import Data.Unique (newUnique, hashUnique)
 import System.Info (os)
 import System.OsPath (OsPath)
 import qualified Agent.MCP as MCP
-    ( mcpFleetGrokMetaToolsForArtifactDirectory,
+    ( mcpFleetCodexToolsForArtifactDirectory,
+      newMcpToolDiscovery,
+      mcpFleetGrokMetaToolsForArtifactDirectory,
       mcpFleetMetaToolsForArtifactDirectory,
       mcpFleetRegistrationsForArtifactDirectory,
       mcpFleetResourceTools,
@@ -161,15 +160,6 @@ import qualified Data.Text as Text (unpack, pack)
 data LocalToolRuntime = LocalToolRuntime
     { localCoding :: CodingTools
     , localInitialSkills :: SkillCatalog
-    }
-
-data StartupResources = StartupResources
-    { startupMcp :: McpRuntime
-    , startupLocalTools :: LocalToolRuntime
-    , startupWebFetch :: Maybe WebFetchRuntime
-    , startupLsp :: LspStartup
-    , startupComputerUse :: Maybe ComputerUse.ComputerUseRuntime
-    , startupInitialContext :: (SessionInitialContext, InitialContextPreload)
     }
 
 data CodingRuntime = CodingRuntime
@@ -191,6 +181,7 @@ data SessionToolsRuntime = SessionToolsRuntime
     { sessionAllTools :: [AppTool]
     , sessionTools :: [AppTool]
     , sessionMcpTools :: [AppTool]
+    , sessionDeferredTools :: Maybe (IO [AppTool])
     , sessionDatabaseTools :: [AppTool]
     , sessionLearnedSkillTools :: [AppTool]
     , sessionGatewayTools :: [AppTool]
@@ -228,42 +219,28 @@ runAgentTools request = withSessionResourceScopes \resources -> do
                 collaborationRuntime)
             (logSlowCleanup "session temporary resources" . (.scratchCleanup))
     integrationRuntime <- acquireSessionIntegrationRuntime request
-    let acquireOwnedMcp =
-            snd <$> allocateAcquire resources.mcpResources
-                (mkAcquire
-                    (acquireMcpRuntime
-                        request toolStartup toolModelRuntime
-                        collaborationRuntime scratchRuntime integrationRuntime)
-                    (logSlowCleanup "session MCP resources" . (.runtimeCloseMcp)))
-        acquireOwnedCoding =
-            snd <$> allocateAcquire resources.codingResources
-                (acquireLocalToolRuntime
-                    request toolModelRuntime toolHostHooks
-                    collaborationRuntime scratchRuntime)
-        acquireOwnedWebFetch =
-            snd <$> allocateAcquire resources.webFetchResources
-                (mkAcquire
-                    (acquireWebFetchRuntime request toolStartup toolModelRuntime)
-                    (logSlowCleanup "web fetch runtime" . mapM_ closeWebFetchRuntime))
-        acquireOwnedLsp =
-            snd <$> allocateAcquire resources.lspResources
-                (mkAcquire
-                    (acquireLspStartup request toolStartup toolModelRuntime)
-                    (logSlowCleanup "language server runtime" . mapM_ closeLspRuntime . (.lspStartupRuntime)))
-        acquireOwnedComputerUse =
-            snd <$> allocateAcquire resources.computerUseResources
-                (mkAcquire
-                    (acquireComputerUseRuntime toolModelRuntime)
-                    (logSlowCleanup "computer use runtime" . mapM_ ComputerUse.closeComputerUseRuntime))
-    -- Startup is concurrent; resource scopes determine shutdown order.
-    startupResources <- runConcurrently $
-        StartupResources
-            <$> Concurrently acquireOwnedMcp
-            <*> Concurrently acquireOwnedCoding
-            <*> Concurrently acquireOwnedWebFetch
-            <*> Concurrently acquireOwnedLsp
-            <*> Concurrently acquireOwnedComputerUse
-            <*> Concurrently (prepareInitialContextPreload request toolModelRuntime)
+    let localAcquisitions =
+            localToolAcquisitions
+                (localToolSettings request toolStartup toolModelRuntime)
+                toolStartup.toolHarnessConfig.configWebFetch
+                toolStartup.toolHarnessConfig.configLsp
+                request.baseToolEnv
+                (\err -> startupDie request.startup
+                    ("Failed to initialize web_fetch: " <> err))
+    startupResources <- acquireToolStartup resources ToolAcquisitions
+        { acquireMcp = mkAcquire
+            (acquireMcpRuntime
+                request toolStartup toolModelRuntime
+                collaborationRuntime scratchRuntime integrationRuntime)
+            (logSlowCleanup "session MCP resources" . (.runtimeCloseMcp))
+        , acquireCoding = acquireLocalToolRuntime
+            request toolModelRuntime toolHostHooks
+            collaborationRuntime scratchRuntime
+        , acquireWebFetch = localAcquisitions.localAcquireWebFetch
+        , acquireLsp = localAcquisitions.localAcquireLsp
+        , acquireComputerUse = localAcquisitions.localAcquireComputerUse
+        , preloadContext = prepareInitialContextPreload request toolModelRuntime
+        }
     let mcpRuntime = startupResources.startupMcp
         localToolRuntime = startupResources.startupLocalTools
         webFetchRuntime = startupResources.startupWebFetch
@@ -280,14 +257,11 @@ runAgentTools request = withSessionResourceScopes \resources -> do
         (reportStartupWarning request.startup)
         lspStartup.lspStartupWarnings
     installCollaborationCallbacks request collaborationRuntime
-    remoteInitialSkills <-
-        if request.options.optSkills
-            then loadMcpSkillsCatalog mcpRuntime.runtimeMcpFleet
-            else pure (SkillCatalog [] [])
-    let initialSkills =
-            mergeSkillCatalogs
-                localToolRuntime.localInitialSkills
-                remoteInitialSkills
+    initialSkills <-
+        assembleInitialSkills
+            request.options.optSkills
+            localToolRuntime.localInitialSkills
+            (loadMcpSkillsCatalog mcpRuntime.runtimeMcpFleet)
     sessionControlRuntime <-
         newSessionControlRuntime
             request
@@ -383,64 +357,27 @@ acquireLocalToolRuntime AgentToolsRequest
     let localInitialSkills = initialSkills
     pure LocalToolRuntime{..}
 
-acquireWebFetchRuntime
+localToolSettings
     :: AgentToolsRequest windowTitleResult
     -> ToolStartup
     -> ToolModelRuntime
-    -> IO (Maybe WebFetchRuntime)
-acquireWebFetchRuntime AgentToolsRequest
+    -> LocalToolSettings
+localToolSettings AgentToolsRequest
     { startup
-    , baseToolEnv
+    , options
     } ToolStartup
     { toolNativeCapabilities = nativeCapabilities
-    , toolHarnessConfig = harnessConfig
     } ToolModelRuntime
     { toolDialectId = dialectId
-    }
-    | not nativeCapabilities.nativeHostExtensions
-        || dialectId /= GrokBuildDialect =
-        pure Nothing
-    | otherwise =
-        newWebFetchRuntime
-            harnessConfig.configWebFetch
-            baseToolEnv >>= \case
-                Left err ->
-                    startupDie startup
-                        ("Failed to initialize web_fetch: " <> err)
-                Right runtime -> pure runtime
-
-acquireLspStartup
-    :: AgentToolsRequest windowTitleResult
-    -> ToolStartup
-    -> ToolModelRuntime
-    -> IO LspStartup
-acquireLspStartup AgentToolsRequest
-    { baseToolEnv
-    } ToolStartup
-    { toolNativeCapabilities = nativeCapabilities
-    , toolHarnessConfig = harnessConfig
-    } ToolModelRuntime
-    { toolDialectId = dialectId
-    }
-    | not nativeCapabilities.nativeHostExtensions
-        || dialectId /= GrokBuildDialect =
-        pure LspStartup
-            { lspStartupRuntime = Nothing
-            , lspStartupWarnings = []
-            }
-    | otherwise =
-        newLspRuntime harnessConfig.configLsp baseToolEnv
-
-acquireComputerUseRuntime
-    :: ToolModelRuntime
-    -> IO (Maybe ComputerUse.ComputerUseRuntime)
-acquireComputerUseRuntime ToolModelRuntime
-    { toolProvider = provider
-    }
-    | provider == OpenAIProvider
-        && os `elem` ["darwin", "linux"] =
-        Just <$> ComputerUse.newComputerUseRuntime
-    | otherwise = pure Nothing
+    , toolProvider = provider
+    } = LocalToolSettings
+        { localHostExtensions = nativeCapabilities.nativeHostExtensions
+        , localDialectId = dialectId
+        , localProvider = provider
+        , localPlatform = Text.pack os
+        , localComputerUseEnabled =
+            resolveComputerUseEnabled options startup.startupStdinTty
+        }
 
 prepareInitialContextPreload
     :: AgentToolsRequest windowTitleResult
@@ -460,7 +397,17 @@ prepareInitialContextPreload AgentToolsRequest
     , toolRefreshDialectContext = refreshDialectContext
     } = do
     (preloadedAgentsContext, preloadedLearnedSkills) <-
-        concurrently preloadAgents preloadLearnedSkills
+        preloadInitialContext
+            ContextPreloadPolicy
+                { contextLoadsHostWorkspace = loadsHostWorkspaceContext
+                , contextRefreshDialect = refreshDialectContext
+                }
+            contextRequirements
+            (preloadAgentsContext options.optAgentsMd dialect home cwd)
+            (successfulLearnedSkillsPreload
+                <$> loadApplicableLearnedSkillsForStore
+                    startup.startupDatabaseStore
+                    databaseScopes)
     pure (contextRequirements, InitialContextPreload{..})
   where
     contextRequirements =
@@ -475,23 +422,6 @@ prepareInitialContextPreload AgentToolsRequest
                 . (.nativeWorkspaceDiscovery)
             )
             startup.startupNativeHooks
-    preloadAgents
-        | loadsHostWorkspaceContext
-            && ( contextRequirements.initialContextNeeded
-                || refreshDialectContext
-               ) =
-            if refreshDialectContext
-                || not contextRequirements.initialContextMayRestoreSnapshot
-                then preloadAgentsContext options dialect home cwd
-                else pure Nothing
-        | otherwise = pure Nothing
-    preloadLearnedSkills
-        | contextRequirements.initialContextNeeded =
-            successfulLearnedSkillsPreload
-                <$> loadApplicableLearnedSkillsForStore
-                    startup.startupDatabaseStore
-                    databaseScopes
-        | otherwise = pure Nothing
 
 newSessionControlRuntime
     :: AgentToolsRequest windowTitleResult
@@ -623,7 +553,7 @@ assembleSessionToolsRuntime
     -> CodingRuntime
     -> SessionControlRuntime
     -> IO SessionToolsRuntime
-assembleSessionToolsRuntime AgentToolsRequest
+assembleSessionToolsRuntime request@AgentToolsRequest
     { startup
     , databaseScopes
     , gatewayIdentity
@@ -632,9 +562,9 @@ assembleSessionToolsRuntime AgentToolsRequest
     , tokenProvider
     , baseToolEnv
     , resumed
-    } ToolStartup
+    } toolStartup@ToolStartup
     { toolNativeCapabilities = nativeCapabilities
-    } ToolModelRuntime
+    } toolModelRuntime@ToolModelRuntime
     { toolProvider = provider
     , toolDialectId = dialectId
     , toolInferredTarget = inferredTarget
@@ -661,11 +591,34 @@ assembleSessionToolsRuntime AgentToolsRequest
     , controlSessionTools = persistedSessionTools
     } = do
     let artifactDirectory = Just (unsafeToFilePath sessionTmp)
+    discovery <- MCP.newMcpToolDiscovery
+    let readCodexTools =
+            MCP.mcpFleetCodexToolsForArtifactDirectory
+                artifactDirectory mcpFleet discovery
+        sessionDeferredTools
+            | dialectId == CodexDialect
+            , not (null mcpServerConfigs) =
+                Just $
+                    composeDeferredTools
+                        . filter ((/= "tool_search") . (.appToolName))
+                        <$> readCodexTools
+            | otherwise = Nothing
+        composeDeferredTools appTools =
+            case startup.startupNativeHooks of
+                Nothing -> appTools
+                Just hooks -> hooks.nativeComposeTools [HostToolGroup appTools]
+    initialCodexTools <-
+        if dialectId == CodexDialect && not (null mcpServerConfigs)
+            then readCodexTools
+            else pure []
+    let
         sessionMcpTools =
             if null mcpServerConfigs
                 then []
                 else
-                    (if dialectId == GrokBuildDialect
+                    (if dialectId == CodexDialect
+                        then initialCodexTools
+                        else if dialectId == GrokBuildDialect
                         then
                             MCP.mcpFleetGrokMetaToolsForArtifactDirectory
                                 artifactDirectory
@@ -714,7 +667,8 @@ assembleSessionToolsRuntime AgentToolsRequest
                 computerUseRuntime
         activeComputerTools =
             [ tool
-            | resolveComputerUseEnabled options startup.startupStdinTty
+            | (resolveLocalToolPolicy
+                (localToolSettings request toolStartup toolModelRuntime)).localComputerToolExposed
             , tool <- computerTools
             ]
         imageGenerationTools =
@@ -847,6 +801,7 @@ launchAgentToolsSession codeModeResourceScope AgentToolsRequest{..} ToolStartup
     { sessionAllTools = allTools
     , sessionTools = tools
     , sessionMcpTools = mcpTools
+    , sessionDeferredTools = deferredTools
     , sessionDatabaseTools = databaseAppTools
     , sessionLearnedSkillTools = learnedSkillAppTools
     , sessionGatewayTools = gatewayTools
@@ -870,6 +825,7 @@ launchAgentToolsSession codeModeResourceScope AgentToolsRequest{..} ToolStartup
         , activeAccountRef
         , agentTypesRef
         , allTools
+        , deferredTools
         , recordImageGenerationInputs =
             recordImageGenerationImages imageGenerationHistory
         , clearImageGenerationHistory =

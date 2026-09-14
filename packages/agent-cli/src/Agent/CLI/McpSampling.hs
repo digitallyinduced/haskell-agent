@@ -4,7 +4,7 @@ module Agent.CLI.McpSampling
     ) where
 
 import Agent.CLI.Btw (BtwBackendFactory)
-import Agent.CLI.Error (formatApiErrorInline)
+import Agent.Runtime.Error (formatApiErrorInline)
 import Agent.Json (RawJson, rawJsonBytes, rawJsonFromEncoding)
 import Agent.Loop
     ( Backend(..), BackendResult(..), TurnOutput(..), initialBackendSnapshot )

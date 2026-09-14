@@ -38,6 +38,7 @@ import Data.Foldable (toList)
 import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
+import Data.Maybe (listToMaybe)
 import qualified Data.Sequence as Seq
 import Data.Sequence (Seq)
 import Data.Text (Text)
@@ -301,7 +302,7 @@ replayAfter journal cursor =
 replayFromState :: Sequence -> JournalState -> Replay
 replayFromState cursor journalState =
     let events = toList journalState.retainedEvents
-        earliest = fmap (.sequenceNumber) (safeHead events)
+        earliest = fmap (.sequenceNumber) (listToMaybe events)
         replayGap =
             case earliest of
                 Nothing -> cursor < journalState.durableSnapshot.lastSequence
@@ -655,11 +656,6 @@ eventsPath config = config.directory </> "events.jsonl"
 
 encodeLine :: ToJSON value => value -> BS.ByteString
 encodeLine value = LBS.toStrict (encode value) <> "\n"
-
-safeHead :: [value] -> Maybe value
-safeHead = \case
-    value : _ -> Just value
-    [] -> Nothing
 
 takeLast :: Int -> [value] -> [value]
 takeLast count values = drop (max 0 (length values - max 0 count)) values

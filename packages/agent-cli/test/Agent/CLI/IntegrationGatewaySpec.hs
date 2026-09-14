@@ -1,6 +1,6 @@
 module Agent.CLI.IntegrationGatewaySpec (spec) where
 
-import Agent.CLI.GatewayClient (GatewayCredential(..))
+import Agent.Runtime.GatewayClient (GatewayCredential(..))
 import Agent.CLI.IntegrationGateway
     (availableIntegrationServerName, gatewayIntegrationMcpConfig, integrationEndpointServers)
 import Agent.Integration.API (IntegrationEndpoint(..))

@@ -15,6 +15,7 @@ module Agent.CLI.AccountSelection
     ) where
 
 import Agent.CLI.AccountUsageCache (refreshLoginAccountCached)
+import Agent.Accounts.Selection
 import Agent.CLI.Login
     ( AccountBilling(..)
     , AccountUsage(..)
@@ -25,9 +26,8 @@ import Agent.CLI.Login
     , loginAccountSelectionId
     , refreshLoginAccount
     )
-import Agent.CLI.Auth
+import Agent.Accounts.Auth
     ( LoadedAuth(..)
-    , isGatewayLoadedAuth
     , loadDirectOpenAiAuth
     , loadAuthForAccount
     , probeLoadedAuthCredential
@@ -41,51 +41,9 @@ import Agent.Provider
     )
 import Control.Concurrent.Async (mapConcurrently)
 import Agent.Store.Postgres.Connection (StorePool)
-import Data.List (find, sortOn)
-import Data.Ord (Down(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Text.Read (readMaybe)
-
-data SelectedAccount = SelectedAccount
-    { selectedProvider :: !Provider
-    , selectedSelectionId :: !Text
-    , selectedAccountId :: !Text
-    , selectedBillingMode :: !BillingMode
-    , selectedLabel :: !Text
-    }
-    deriving (Eq, Show)
-
--- | Providers whose credentials can be enumerated and compared through a
--- provider usage endpoint. Claude Code owns authentication inside its CLI and
--- therefore keeps the already-loaded auth instead.
-providerSupportsUsageAccountSelection :: Provider -> Bool
-providerSupportsUsageAccountSelection = \case
-    OpenAIProvider -> True
-    XAIProvider -> True
-    OpenRouterProvider -> True
-    GeminiProvider -> False
-    ClaudeCodeProvider -> False
-
--- | Whether startup may replace the loaded credential with a usage-ranked
--- local account. A connected gateway is already the user's selected
--- credential source, even though it routes an OpenAI model.
-loadedAuthSupportsUsageAccountSelection :: LoadedAuth -> Bool
-loadedAuthSupportsUsageAccountSelection loaded =
-    not (isGatewayLoadedAuth loaded)
-        && providerSupportsUsageAccountSelection loaded.loadedProvider
-
--- | Provider-neutral input to the pure account ranking policy. A missing
--- capacity means that the account could not be verified.
-data AccountCandidate = AccountCandidate
-    { candidateProvider :: !Provider
-    , candidateSelectionId :: !Text
-    , candidateAccountId :: !Text
-    , candidateBillingMode :: !BillingMode
-    , candidateLabel :: !Text
-    , candidateCapacity :: !(Maybe Double)
-    }
-    deriving (Eq, Show)
 
 -- | Discover and check every enabled account for one provider. Automatic
 -- selection only considers accounts whose usage endpoint returned a usable
@@ -197,29 +155,6 @@ selectAccount remembered accounts =
         , selectedBillingMode = candidate.candidateBillingMode
         , selectedLabel = candidate.candidateLabel
         }
-
--- | Pure ranking policy: a usable remembered account wins. Otherwise choose
--- the greatest capacity, preserving discovery order for ties.
-selectCandidates
-    :: Maybe (Text, Text)
-    -> [AccountCandidate]
-    -> Maybe AccountCandidate
-selectCandidates remembered candidates =
-    case remembered >>= rememberedCandidate usable of
-        Just candidate -> Just candidate
-        Nothing -> case sortOn ranking usable of
-            candidate : _ -> Just candidate
-            [] -> Nothing
-  where
-    usable = filter (maybe False (> 0) . (.candidateCapacity)) candidates
-    rememberedCandidate available (selectionId, accountId) =
-        find
-            (\candidate ->
-                candidate.candidateAccountId == accountId
-                    && (candidate.candidateSelectionId == selectionId
-                        || selectionId == accountId))
-            available
-    ranking candidate = Down <$> candidate.candidateCapacity
 
 -- | Provider-local capacity score. Subscription accounts use their tightest
 -- active percentage window. Credit accounts use known remaining credit/key

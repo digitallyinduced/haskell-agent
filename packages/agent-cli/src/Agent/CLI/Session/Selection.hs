@@ -13,7 +13,7 @@ import Agent.CLI.AgentViewport
     , AgentTarget
     , pickAgentViewport
     )
-import Agent.CLI.ManagedTurn
+import Agent.Runtime.ManagedTurn
     ( ManagedTurnRequest
     , loadTextPrompt
     , loadManagedTurnRequest
@@ -32,9 +32,9 @@ import Agent.CLI.Resume
     , filterResumeSessionsForBoundary
     )
 import Agent.CLI.Runtime.Types (RunResult(..))
-import Agent.CLI.ModelConfig (organizationGatewayConnectionId)
-import Agent.CLI.Models (validateResumedGatewayBoundary)
-import Agent.CLI.Session
+import Agent.Runtime.ModelConfig (organizationGatewayConnectionId)
+import Agent.Runtime.Models (validateResumedGatewayBoundary)
+import Agent.Runtime.Session
     ( Persistence(..)
     , PersistenceState(..)
     , SessionHandle(..)

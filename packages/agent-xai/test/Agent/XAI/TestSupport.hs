@@ -1,5 +1,6 @@
 module Agent.XAI.TestSupport
     ( withLoopbackApplication
+    , requireLoopbackListener
     ) where
 
 import Control.Exception (IOException, try)

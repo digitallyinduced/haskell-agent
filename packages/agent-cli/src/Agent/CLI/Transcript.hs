@@ -13,7 +13,7 @@ module Agent.CLI.Transcript
     , markdownFence
     ) where
 
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( SessionMeta(..)
     , SessionTurn(..)
     , TranscriptEffect(..)

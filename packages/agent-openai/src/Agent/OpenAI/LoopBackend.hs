@@ -45,6 +45,7 @@ import qualified Agent.Responses.LoopBackend as Responses
 import Agent.Loop
     ( Backend(..)
     , BackendCallbacks(..)
+    , BackendCancellationMode(..)
     , BackendContinuation(..)
     , BackendMiddleware
     , BackendResult(..)
@@ -666,6 +667,27 @@ isOpenAiReplayUnsafeWebSocketTransportFailure = \case
         errorType == replayUnsafeWebSocketTransportType
     _ -> False
 
+-- A done event can also finish an explicitly incomplete item. Only retain
+-- supported, independently complete output; never replay truncated arguments
+-- or an unfinished assistant message as if it had completed.
+isCompletedOutputItem :: ResponseItem -> Bool
+isCompletedOutputItem = \case
+    MessageItem item -> complete item.status
+    FunctionCallItem item -> complete item.status
+    CustomToolCallItem item -> complete item.status
+    ComputerCallItem item -> complete item.computerCallStatus
+    ReasoningItemValue item -> complete item.status
+    LocalShellCallItem item -> complete item.status
+    ToolSearchCallItem item -> completeText item.status
+    ToolSearchOutputItem item -> completeText item.status
+    WebSearchCallItem item -> completeText item.status
+    ImageGenerationCallItem item -> completeText item.status
+    CompactionItemValue{} -> True
+    _ -> False
+  where
+    complete = maybe True (== ItemCompleted)
+    completeText = maybe True (== "completed")
+
 -- | Reset Codex sticky-routing state when a backend submission starts a new
 -- logical turn, while preserving it for tool continuations in the same turn.
 --
@@ -782,6 +804,7 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
 openAiBackendWithRetryPoliciesAndReasoningVisibility
         showRawReasoning transientPolicy reconnectPolicy send getParams =
     backendWithCallbacks \snapshot legacyPreviousResponseId inputs callbacks -> do
+        callbacks.onCancellationMode CancelSubmission
         baseParams <- sanitizeCodexRequest <$> getParams
         let history = snapshot.backendItems
             previousResponseId =
@@ -840,6 +863,15 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
                 , attemptObservation = emptyAttemptObservation
                 }
             result <- send request previousResponseId \event -> do
+                -- Like Codex, retain independently completed items even when
+                -- the response itself never reaches response.completed. Text
+                -- deltas remain display-only; no continuation is checkpointed.
+                case event of
+                    ResponseOutputItemDoneEvent { item }
+                        | isCompletedOutputItem item ->
+                        callbacks.onCompletedResponseItem item
+                            (Responses.responseItemToToolCall item)
+                    _ -> pure ()
                 loopEvents <- atomicModifyIORef' attemptState $
                     openAiAttemptStep showRawReasoning event
                 mapM_ (\loopEvent -> do
@@ -858,7 +890,8 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
                     ) loopEvents
                 case event of
                     ResponseOutputItemDoneEvent { item }
-                        | Just call <- Responses.responseItemToToolCall item
+                        | isCompletedOutputItem item
+                        , Just call <- Responses.responseItemToToolCall item
                         , AsyncToolCall <- toolCallMode call -> do
                             atomicModifyIORef' attemptState \state ->
                                 (state { attemptObservation =

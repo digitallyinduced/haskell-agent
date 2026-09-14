@@ -6,7 +6,7 @@ module Agent.CLI.Subagents.Runtime.Identity
     ) where
 
 import Agent.CLI.Subagents.Runtime.Types (SubagentRuntime(..))
-import Agent.CLI.ModelConfig (organizationGatewayConnectionId)
+import Agent.Runtime.ModelConfig (organizationGatewayConnectionId)
 import Agent.Dialect
     ( DialectId
     , codexDialect

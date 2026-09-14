@@ -8,15 +8,15 @@ module Agent.CLI.MacOS.AccountConnection
     , connectAccountAPIKey
     ) where
 
-import Agent.CLI.Auth
+import Agent.Accounts.Auth
     ( GrokAuthState(..)
     , grokAuthStateToJson
     , openAIOAuthClientId
     , openaiAuthStateFromJson
     , xaiOAuthClientId
     )
-import Agent.CLI.CredentialStore (ManagedAuthKind(..))
-import Agent.CLI.Environment (lookupNonEmpty)
+import Agent.Accounts.CredentialStore (ManagedAuthKind(..))
+import Agent.Environment (lookupNonEmpty)
 import Agent.CLI.Login (storeConnectedCredential)
 import qualified Agent.OpenAI.Auth as OpenAIAuth
 import qualified Agent.OpenAI.Auth.Types as OpenAIAuthTypes

@@ -23,14 +23,14 @@ module Agent.CLI.Permission
     ) where
 
 import Agent.CLI.Input (readApprovalLine)
-import Agent.CLI.ComputerUse (computerApprovalPrompt)
+import Agent.ComputerUse (computerApprovalPrompt)
 import Agent.CLI.Notification
     ( AttentionRequest(PermissionRequested)
     , notifyAttention
     )
 import Agent.CLI.Options (ApprovalAnswer(..), parseApprovalAnswer)
 import Agent.CLI.Options (ApprovalPolicy(..))
-import Agent.CLI.Permission.Types (PermissionChoice(..))
+import Agent.Runtime.Permission.Types (PermissionChoice(..))
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
 import Agent.CLI.Style (glyphWarn, roleMuted, roleSuccess, roleWarn)
 import Agent.TUI.Presentation (permissionToolCallPromptRelative)

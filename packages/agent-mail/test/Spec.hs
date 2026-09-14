@@ -7,6 +7,9 @@ import Agent.Mail.SecretCodec
 import Agent.Mail.Transport
 import Agent.Mail.Types
 import qualified Agent.Mail.Types as MailTypes
+import Agent.Mail.Utf8 (truncateUtf8, utf8Length)
+import Control.Monad (forM_)
+import qualified Data.ByteString as BS
 import Data.Aeson (Result(..), Value(..), object, (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -21,6 +24,28 @@ import Test.Hspec
 
 main :: IO ()
 main = hspec do
+    describe "UTF-8 byte-bounded text" do
+        forM_
+            [ ("empty", "", [0])
+            , ("ASCII", "abc", [0, 1, 2, 3])
+            , ("two-byte", "éø", [0, 2, 4])
+            , ("three-byte", "€中", [0, 3, 6])
+            , ("four-byte", "😀🚀", [0, 4, 8])
+            , ("mixed", "aé€😀z", [0, 1, 3, 6, 10, 11])
+            ] \(label, input, boundaries) -> do
+                it (label <> ": measures encoded bytes") do
+                    utf8Length input `shouldBe` last boundaries
+                forM_ (minBound : [-2 .. last boundaries + 2] <> [maxBound]) \limit ->
+                    it (label <> ": truncates at byte limit " <> show limit) do
+                        let result = truncateUtf8 limit input
+                            bytes = TextEncoding.encodeUtf8 result
+                            fitting = takeWhile (<= max 0 limit) boundaries
+                            expected = Text.pack (take (length fitting - 1) (Text.unpack input))
+                        result `shouldBe` expected
+                        BS.length bytes `shouldSatisfy` (<= max 0 limit)
+                        TextEncoding.decodeUtf8' bytes `shouldBe` Right result
+                        result `shouldSatisfy` (`Text.isPrefixOf` input)
+
     describe "email domain types" do
         it "requires fail-closed account status flags" do
             let partial = object

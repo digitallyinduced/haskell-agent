@@ -3,7 +3,7 @@ module Agent.CLI.Runtime.Recap
     , runSessionTurnSummary
     ) where
 
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( readSessionRequestParams
     )
 import Agent.CLI.Btw (sideCallSnapshot)
@@ -22,7 +22,7 @@ import Agent.CLI.Recap
     , runTurnSummaryWithCancel
     )
 import Agent.CLI.Render (RenderConfig(..), putTextLn)
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( Persistence(..)
     , PersistenceState(..)
     , SessionHandle(..)

@@ -40,7 +40,7 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import Data.Foldable (toList)
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, mapMaybe)
 import Data.Scientific (formatScientific, FPFormat(Generic))
 import Data.Sequence (Seq((:<|), (:|>)))
 import qualified Data.Sequence as Seq
@@ -565,7 +565,7 @@ lastOuterRequest raw =
               in extractTagged "current_request" suffix
             | offset <- starts
             ]
-    in clipped . Text.strip <$> lastMaybe (mapMaybe id candidates)
+    in clipped . Text.strip <$> lastMaybe (catMaybes candidates)
 
 occurrences :: Text -> Text -> [Int]
 occurrences needle haystack

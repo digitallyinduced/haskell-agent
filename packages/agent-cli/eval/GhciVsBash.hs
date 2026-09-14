@@ -1,6 +1,6 @@
 module Main (main) where
 
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( SessionMeta(..)
     , SessionTurn(..)
     , loadSession

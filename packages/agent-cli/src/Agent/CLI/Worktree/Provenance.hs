@@ -11,9 +11,9 @@ module Agent.CLI.Worktree.Provenance
     , existingSessionLockActive
     ) where
 
-import Agent.CLI.Session (listSessions, sessionDirForId)
-import Agent.CLI.SessionLock (sessionLockPath, sessionActivityLockPath)
-import Agent.CLI.Session.Types (SessionMeta(..))
+import Agent.Runtime.Session (listSessions, sessionDirForId)
+import Agent.Runtime.SessionLock (sessionLockPath, sessionActivityLockPath)
+import Agent.Runtime.Session.Types (SessionMeta(..))
 import Agent.CLI.Worktree.ReadOnlyLock (withExistingReadOnlyLock)
 import Agent.Store.Postgres.Connection (StorePool)
 import Control.Exception.Safe (tryAny, tryIO)

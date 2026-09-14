@@ -19,7 +19,7 @@ import Agent.CLI.ImagePreview
     , previewRowsFor
     , renderImagePreview
     )
-import Agent.CLI.Session.History
+import Agent.Runtime.Session.History
     ( LiveConversation
     , modifyLiveAttachments
     )

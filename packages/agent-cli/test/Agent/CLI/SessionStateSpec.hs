@@ -1,7 +1,7 @@
 module Agent.CLI.SessionStateSpec (spec) where
 
 import Agent.CLI.SessionState
-import Agent.CLI.Session.History
+import Agent.Runtime.Session.History
     ( modifyLiveAttachments
     , readLiveAttachments
     )

@@ -13,10 +13,10 @@ import Control.Concurrent (MVar, modifyMVar, newMVar)
 import Control.Exception.Safe (mask, tryAny)
 import Agent.CLI.MacOS.NativeGatewayBoundary (withNativeSessionBoundary, validateNativeSessionBoundary)
 import Agent.CLI.MacOS.SessionTransferBridge (withNativeSessionStore)
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( SessionMeta(..), SessionTurnPage(..), isValidSessionId
     , loadSessionHistorySnapshot, loadSessionHistoryTurnsRangeBounded )
-import Agent.CLI.Session.PullRequest (advanceSessionPullRequestIndex, sessionTurnPullRequestURLs)
+import Agent.Runtime.Session.PullRequest (advanceSessionPullRequestIndex, sessionTurnPullRequestURLs)
 import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Types (renderStoreError)
 import qualified Agent.Store.Postgres.Session as PRStore

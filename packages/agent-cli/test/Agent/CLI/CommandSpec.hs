@@ -1,16 +1,149 @@
 module Agent.CLI.CommandSpec (spec) where
 
 import Agent.CLI.Command
+import Agent.CLI.Command.CompletionIndex (buildGroupedCompletionIndex, matchingCommandGroups)
 import Agent.CLI.Afk
 import Agent.Dialect (DialectId(..))
 import Agent.ReasoningEffort (ReasoningEffort(..))
 import Agent.Responses.Types
-import Data.List (isInfixOf)
+import Control.Monad (forM_)
+import qualified Data.IntSet as IntSet
+import Data.List (isInfixOf, isSubsequenceOf)
 import qualified Data.Text as Text
 import Test.Hspec
+import Test.QuickCheck (property)
+
+catalogWithCompletionSkills :: [Text.Text] -> SlashCatalog
+catalogWithCompletionSkills names =
+    slashCatalogWithSkills
+        (map (\name -> SkillCommand name "Summary" Nothing "test") names)
+        defaultSlashCatalog
+
+-- Retain the replaced completion algorithm as the behavioral oracle.
+baselineNameCompletion :: SlashCatalog -> String -> [String]
+baselineNameCompletion catalog word =
+    let needle = Text.toLower (Text.dropWhile (== '/') (Text.pack word))
+        names = concatMap
+            (\command -> ("/" <> command.slashName)
+                : map ("/" <>) command.slashAliases)
+            catalog.slashCatalogCommands
+        skillNames = map (("/" <>) . (.skillCommandName))
+            catalog.slashCatalogSkills
+    in filter
+        (\name -> needle `Text.isPrefixOf`
+            Text.drop 1 (Text.toLower (Text.pack name)))
+        (map Text.unpack (names <> skillNames))
 
 spec :: Spec
 spec = do
+    describe "command completion index" do
+        it "does not force derived indexes when comparing catalogs" do
+            let catalog = defaultSlashCatalog
+                    { slashCatalogCompletionIndex = error "forced completion index"
+                    , slashCatalogCompletionCommands = error "forced completion entries"
+                    }
+            (catalog == defaultSlashCatalog) `shouldBe` True
+            (catalog == slashCatalogWithSkills
+                [SkillCommand "verification" "Summary" Nothing "test"] defaultSlashCatalog)
+                `shouldBe` False
+
+        it "matches grouped subsequence filtering for arbitrary names and queries" $
+            property \(groups :: [[String]]) (query :: String) ->
+                let texts = map (map Text.pack) groups
+                    needle = Text.toLower (Text.pack query)
+                    expected = IntSet.fromList
+                        [ ordinal
+                        | (ordinal, names) <- zip [0 ..] texts
+                        , any (isSubsequenceOf (Text.unpack needle)
+                            . Text.unpack . Text.toLower) names
+                        ]
+                in matchingCommandGroups (buildGroupedCompletionIndex texts) needle
+                    == expected
+
+        it "matches the prefix filter for arbitrary names and queries" $
+            property \(names :: [String]) (query :: String) ->
+                let texts = map Text.pack names
+                    catalog = catalogWithCompletionSkills texts
+                    word = "/" <> query
+                in slashCompletionCandidatesWithCatalog catalog "" word
+                    == baselineNameCompletion catalog word
+
+        it "preserves ordering, duplicates, Unicode, and compressed-edge matches" do
+            let names =
+                    [ "review-tests", "review", "Review", "review-tests"
+                    , "resume", "Änderung", "Änderung-prüfen", "İnfo"
+                    , "Σχέδιο", "𐐀command", "", "re", "repository"
+                    ]
+                catalog = catalogWithCompletionSkills names
+                queries = "not-present" : concatMap
+                    (Text.inits . Text.toLower) names
+            forM_ queries \query ->
+                let word = Text.unpack ("/" <> query)
+                in slashCompletionCandidatesWithCatalog catalog "" word
+                    `shouldBe` baselineNameCompletion catalog word
+
+        it "matches catalog-order completion across dialects and aliases" do
+            forM_ [CodexDialect, GrokBuildDialect, ClaudeCodeDialect, GenericResponsesDialect] \dialect -> do
+                let catalog = mkSlashCatalog True dialect
+                        ["goal", "workflow", "run_data_batch"] [] []
+                    names = concatMap
+                        (\command -> command.slashName : command.slashAliases)
+                        catalog.slashCatalogCommands
+                    queries = "not-present" : concatMap Text.inits names
+                forM_ queries \query -> do
+                    let expected = map (Text.unpack . ("/" <>))
+                            (filter (Text.isPrefixOf (Text.toLower query)
+                                . Text.toLower) names)
+                    slashCompletionCandidatesWithCatalog catalog ""
+                        (Text.unpack ("/" <> query))
+                        `shouldBe` expected
+                    slashCompletionCandidatesWithCatalog catalog ""
+                        (Text.unpack ("///" <> Text.toUpper query))
+                        `shouldBe` expected
+
+        it "replaces the completion index when runtime skills are refreshed" do
+            let skill name = SkillCommand name "Summary" Nothing "test"
+                original = slashCatalogWithSkills
+                    [skill "Deploy", skill "Deploy"] defaultSlashCatalog
+                refreshed = slashCatalogWithSkills [skill "Verify"] original
+            slashCompletionCandidatesWithCatalog original "" "/dep"
+                `shouldBe` ["/Deploy", "/Deploy"]
+            slashCompletionCandidatesWithCatalog refreshed "" "/dep"
+                `shouldBe` []
+            slashCompletionCandidatesWithCatalog refreshed "" "/VER"
+                `shouldBe` ["/Verify"]
+
+        it "preserves complete live menu rows and ranking compared with scoring every command" do
+            let skill name = SkillCommand name "Summary" Nothing "test"
+                skills = map skill
+                    ["Review", "review", "review-tests", "Änderung-prüfen", "İnfo", "Σχέδιο", "𐐀command"]
+                tools = concatMap (.slashRequiredTools) slashCommands
+            forM_ [CodexDialect, GrokBuildDialect, ClaudeCodeDialect, GenericResponsesDialect] \dialect -> do
+                let catalog = mkSlashCatalog True dialect tools skills []
+                    groups =
+                        map (\command -> command.slashName : command.slashAliases)
+                            catalog.slashCatalogCommands
+                            <> map (\entry -> [entry.skillCommandName]) skills
+                    everyOther = Text.pack . map snd
+                        . filter (even . fst) . zip [0 :: Int ..] . Text.unpack
+                    queries = ["", "rr", "rrr", "not-present", "rvi", "Äp", "İ", "σχ", "𐐨c"]
+                        <> concatMap
+                            (\name -> Text.inits name <> [everyOther name])
+                            (concat groups)
+                forM_ queries \query -> do
+                    -- Assign every original ordinal a matching index entry,
+                    -- bypassing candidate pruning without duplicating scoring.
+                    -- This is equivalent to the original full-catalog scan.
+                    let unfiltered = catalog
+                            { slashCatalogCompletionIndex =
+                                buildGroupedCompletionIndex
+                                    (replicate (length groups) [Text.toLower query])
+                            }
+                        token = "/" <> query
+                    slashMenuForCatalog catalog token (Text.length token)
+                        `shouldBe`
+                            slashMenuForCatalog unfiltered token (Text.length token)
+
     describe "parseReplLine" do
         it "recognizes bare shell- and Vim-style exit aliases" do
             map parseReplLine
@@ -408,14 +541,34 @@ spec = do
             parseReplLine "/context" `shouldBe` ReplContext
             parseReplLine "/view-plan now"
                 `shouldBe` ReplCommandError "usage: /view-plan"
-            parseReplLine "/queue now"
-                `shouldBe` ReplCommandError "usage: /queue"
             parseReplLine "/transcript now"
                 `shouldBe` ReplCommandError "usage: /transcript"
             parseReplLine "/edit-prompt now"
                 `shouldBe` ReplCommandError "usage: /edit-prompt"
             parseReplLine "/context now"
                 `shouldBe` ReplCommandError "usage: /context"
+
+        it "queues a prompt while preserving the full suffix" do
+            parseReplLine "/queue inspect the tests"
+                `shouldBe` ReplQueuedPrompt "inspect the tests"
+            parseReplLine "/QUEUE   keep  spaces\nand newlines"
+                `shouldBe` ReplQueuedPrompt "keep  spaces\nand newlines"
+            parseReplLine "/queue /steer literal prompt"
+                `shouldBe` ReplQueuedPrompt "/steer literal prompt"
+            parseReplLine "/queue   "
+                `shouldBe` ReplQueue
+
+        it "steers explicitly while preserving the full suffix" do
+            parseReplLine "/steer inspect the tests"
+                `shouldBe` ReplPrompt "inspect the tests"
+            parseReplLine "/STEER   keep  spaces\nand newlines"
+                `shouldBe` ReplPrompt "keep  spaces\nand newlines"
+            parseReplLine "/steer /queue literal prompt"
+                `shouldBe` ReplPrompt "/queue literal prompt"
+            parseReplLine "/steer"
+                `shouldBe` ReplCommandError "usage: /steer <prompt>"
+            parseReplLine "/steer   "
+                `shouldBe` ReplCommandError "usage: /steer <prompt>"
 
         it "asks a side question with the full suffix" do
             parseReplLine "/btw why this file?"
@@ -483,6 +636,7 @@ spec = do
                     , "plan"
                     , "view-plan"
                     , "queue"
+                    , "steer"
                     , "transcript"
                     , "edit-prompt"
                     , "context"

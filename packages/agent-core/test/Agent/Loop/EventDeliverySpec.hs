@@ -1,10 +1,11 @@
 module Agent.Loop.EventDeliverySpec (spec) where
 
 import Agent.Loop
+import Agent.Error (ApiError(..))
 import Agent.Loop.Fixtures
 import Agent.ToolDispatch
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (wait, withAsync)
+import Control.Concurrent.Async (concurrently_, wait, withAsync)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception.Safe (throwIO)
 import Data.IORef
@@ -14,6 +15,36 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    it "retains concurrent publishers in the same order as event-pump delivery" do
+        delivered <- newIORef []
+        let publish onEvent prefix = mapM_ (\index -> do
+                onEvent $ ToolStarted $ functionToolCall
+                    (prefix <> Text.pack (show index)) "tool" "{}"
+                onEvent $ TextDelta prefix) [1 .. 300 :: Int]
+            backend = Backend \_state _prev _inputs onEvent -> do
+                concurrently_ (publish onEvent "a") (publish onEvent "b")
+                pure (Left (ConnectionError "stopped"))
+            -- The pump and journal both coalesce adjacent text, but the pump
+            -- may deliver a partial chunk before the next delta is admitted.
+            normalize = foldr (\event rest -> case (event, rest) of
+                (TextDelta a, TextDelta b : tail) -> TextDelta (a <> b) : tail
+                _ -> event : rest) []
+            replayable = \case
+                ToolStarted _ -> True
+                TextDelta _ -> True
+                _ -> False
+        config0 <- testConfig backend
+        let config = config0 { loopOnEvent = \event -> do
+                modifyIORef' delivered (event :)
+                threadDelay 100 }
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "go"]
+        seen <- normalize . filter replayable . reverse <$> readIORef delivered
+        execution.executionUncommittedDisplayEvents `shouldBe` seen
+        let text = maybe "" id execution.executionUncommittedAssistantText
+        Text.count "a" text `shouldBe` 300
+        Text.count "b" text `shouldBe` 300
+        length [() | ToolStarted _ <- seen] `shouldBe` 600
+
     it "serializes loopOnEvent across parallel tool calls" do
         inFlight <- newIORef (0 :: Int)
         maxInFlight <- newIORef (0 :: Int)

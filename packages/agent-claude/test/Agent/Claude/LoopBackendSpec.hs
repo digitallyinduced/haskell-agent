@@ -1316,6 +1316,8 @@ spec = do
                                             _ -> pure ()
                                         , Loop.onAsyncToolCall = \_ -> pure ()
                                         , Loop.onRecoveryCheckpoint = writeIORef recovery
+                                        , Loop.onCompletedResponseItem = \_ _ -> pure ()
+                                        , Loop.onCancellationMode = const (pure ())
                                         }
                                 result <- timeout 5_000_000
                                     (backend.submitTurnWithCallbacks emptyBackendSnapshot Nothing
@@ -1381,10 +1383,11 @@ spec = do
                                             { Loop.loopBackend = recoveringBackend
                                             , Loop.loopBackendState = store
                                             , Loop.loopTools = tools
+                                            , Loop.loopReadTools = Nothing
                                             , Loop.loopDispatch = Loop.defaultLoopDispatch
                                             , Loop.loopMaxTurns = 2
                                             , Loop.loopOnEvent = \_ -> pure ()
-                                            , Loop.loopApprove = \_ -> pure (Right True)
+                                            , Loop.loopApprove = \_ -> pure Loop.ToolApprovalGranted
                                             , Loop.loopReadSteering = pure []
                                             , Loop.loopCommitSteering = \_ -> pure ()
                                             , Loop.loopInterrupt = pure ()

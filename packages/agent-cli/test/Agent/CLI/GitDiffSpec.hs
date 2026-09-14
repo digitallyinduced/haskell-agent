@@ -23,6 +23,13 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.CLI.GitDiff" do
+    it "retains Unicode, NULs and lenient decoding in both output streams" $
+        withFakeGit
+            [ "capture) printf 'caf\\303\\251\\000\\377'; printf '\\342\\202' >&2;;" ]
+            \repo ->
+                runSafeGit repo [] ["capture"] `shouldReturn`
+                    Right (GitCommandOutput ExitSuccess "café\0\xfffd" "\xfffd\xfffd")
+
     it "reports a directory outside Git without failing" $
         withTempDir "agent-diff-not-git-" \dir ->
             getGitDiff dir `shouldReturn` Right GitDiffNotRepository
@@ -37,6 +44,7 @@ spec = describe "Agent.CLI.GitDiff" do
             git repo ["add", "README"]
             writeUtf8 (repo </> fromText "new file.txt") "new\n"
             writeUtf8 (repo </> fromText "line\nbreak.txt") "odd\n"
+            writeUtf8 (repo </> fromText "café.txt") "Unicode content\n"
 
             result <- getGitDiff repo
             diff <- expectDiff result
@@ -45,6 +53,7 @@ spec = describe "Agent.CLI.GitDiff" do
             diff `shouldSatisfy` Text.isInfixOf "new file.txt"
             diff `shouldSatisfy` Text.isInfixOf "break.txt"
             diff `shouldSatisfy` Text.isInfixOf "odd"
+            diff `shouldSatisfy` Text.isInfixOf "Unicode content"
 
     it "includes staged files in an unborn repository" $
         withTempDir "agent-git-diff-unborn-" \repo -> do

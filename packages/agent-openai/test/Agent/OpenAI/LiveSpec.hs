@@ -143,6 +143,8 @@ spec = describe "Codex Live protocol" do
     it "routes gateway voice only to the configured secure origin" do
         gatewayLiveEndpoint "https://gateway.example/base/" `shouldBe`
             Right (True, "gateway.example", 443, "/base/v1/voice")
+        gatewayLiveEndpoint "https://gateway.example/base///" `shouldBe`
+            Right (True, "gateway.example", 443, "/base/v1/voice")
         gatewayLiveEndpoint "http://127.0.0.1:8080" `shouldBe`
             Right (False, "127.0.0.1", 8080, "/v1/voice")
         mapM_ (\url -> gatewayLiveEndpoint url `shouldSatisfy` isLeft)

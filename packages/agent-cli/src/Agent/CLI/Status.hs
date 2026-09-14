@@ -5,6 +5,7 @@ module Agent.CLI.Status
     , formatContextUsage
     , formatFooterAccount
     , formatReplStatusLine
+    , formatBackgroundTaskStatus
     , formatTokenUsage
     , formatTokenUsageOrZero
     , formatEstimatedTokensPerSecond
@@ -23,6 +24,8 @@ import Agent.CLI.ReplMode
     )
 import Agent.CLI.Style (roleMuted)
 import Agent.Loop (TokenUsage(..), emptyTokenUsage)
+import Agent.Tools.Background (BackgroundTaskStatus(..))
+import Data.Time.Clock (UTCTime, diffUTCTime)
 import System.OsPath (OsPath)
 import Agent.Tools.PlanMode
     ( PlanModeEnv(..)
@@ -33,6 +36,28 @@ import Control.Monad (when)
 import Data.IORef (IORef, readIORef, writeIORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
+
+-- | A bounded, terminal-safe summary. Continuation is promised only when both
+-- the task and the current prompt have a registered automatic delivery path.
+formatBackgroundTaskStatus :: UTCTime -> Bool -> [BackgroundTaskStatus] -> [Text]
+formatBackgroundTaskStatus _ _ [] = []
+formatBackgroundTaskStatus now canResume tasks@(first : _) =
+    [ "◌ " <> Text.pack (show (length tasks))
+        <> (if length tasks == 1 then " background task" else " background tasks")
+        <> " · " <> elapsed <> " · " <> label
+    ]
+    <> [ "  Agent will resume when a shell task finishes."
+       | canResume && any (.taskAutoResume) tasks
+       ]
+  where
+    label = truncateDisplayText 100 $
+        Text.unwords (Text.words first.taskLabel)
+    seconds = max 0 (floor (diffUTCTime now first.taskStartedAt) :: Integer)
+    elapsed
+        | seconds < 60 = Text.pack (show seconds) <> "s"
+        | otherwise =
+            Text.pack (show (seconds `div` 60)) <> "m "
+                <> Text.pack (show (seconds `mod` 60)) <> "s"
 
 -- | Idle prompt chrome: model, reasoning effort, interaction mode, and active
 -- account on the left; session token totals and last generation rate right-aligned

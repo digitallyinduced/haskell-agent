@@ -36,18 +36,19 @@ import Agent.TUI.Model
     ( BlockId(..)
     , BlockKind(..)
     , BlockState(..)
+    , Focus(..)
     , UiBlock(..)
     , UiState(..)
     , initialUiState
     )
 import Agent.TUI.Motion (MotionMode(..))
+import qualified Agent.TUI.Theme as Theme
 import Brick
     ( Padding(..)
     , Location(..)
     , ViewportType(..)
     , VScrollBarOrientation(..)
     , Widget
-    , attrMap
     , cached
     , emptyWidget
     , hBox
@@ -64,7 +65,8 @@ import Brick
     )
 import Brick.Types (RenderState)
 import Control.DeepSeq (force)
-import Control.Monad (replicateM)
+import Control.Exception.Safe (bracket)
+import Control.Monad (foldM, replicateM)
 import Data.Foldable (toList)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (sortOn)
@@ -74,7 +76,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Lazy as LazyText
 import GHC.Clock (getMonotonicTimeNSec)
-import GHC.Stats (RTSStats(..), getRTSStats)
+import GHC.Stats (GCDetails(..), RTSStats(..), getRTSStats)
+import Foreign.StablePtr (newStablePtr, freeStablePtr)
 import qualified Graphics.Vty as V
 import Graphics.Vty.PictureToSpans (displayOpsForPic)
 import Graphics.Vty.Span (SpanOp(..))
@@ -88,6 +91,7 @@ data Workload
     | HistoryMeasuredViewport
     | HistoryChunkCacheTrace
     | HistoryMeasuredViewportTrace
+    | HistoryMeasuredViewportInteraction
     | PerBlockCache
     | ChunkCache
     deriving (Eq)
@@ -96,12 +100,20 @@ data Sample = Sample
     { elapsedMillis :: !Double
     , cpuMillis :: !Double
     , allocatedBytes :: !Integer
+    , liveBytes :: !Integer
+    , memoryInUseBytes :: !Integer
     }
 
 main :: IO ()
 main = do
     arguments <- getArgs
     case arguments of
+        ["verify", workloadText, blockCountText, bodyLinesText] -> do
+            workload <- parseWorkload workloadText
+            rawState <- benchmarkState (read blockCountText) (read bodyLinesText)
+            let widgetForFrame = productionWidget workload (prepareHistory workload rawState 0)
+            _ <- foldM (verifyFrame workload widgetForFrame) emptyRenderState [0 .. 24]
+            pure ()
         [workloadText, blockCountText, bodyLinesText, sampleCountText] -> do
             workload <- parseWorkload workloadText
             let blockCount = read blockCountText
@@ -134,6 +146,7 @@ main = do
                 "usage: transcript-scrolling-bench \
                 \(history-per-block|history-chunk-cache|history-measured-viewport|\
                 \history-chunk-cache-trace|history-measured-viewport-trace|\
+                \history-measured-viewport-interaction|\
                 \per-block-cache|chunk-cache) \
                 \BLOCKS BODY_LINES SAMPLES"
 
@@ -144,6 +157,7 @@ parseWorkload = \case
     "history-measured-viewport" -> pure HistoryMeasuredViewport
     "history-chunk-cache-trace" -> pure HistoryChunkCacheTrace
     "history-measured-viewport-trace" -> pure HistoryMeasuredViewportTrace
+    "history-measured-viewport-interaction" -> pure HistoryMeasuredViewportInteraction
     "per-block-cache" -> pure PerBlockCache
     "chunk-cache" -> pure ChunkCache
     other -> error ("unknown workload: " <> other)
@@ -155,6 +169,14 @@ productionWidget workload state frame =
         HistoryMeasuredViewport ->
             measuredViewport ConversationViewport 0 $
                 map (padLeftRight 2) (drawTranscriptChunks framedState)
+        HistoryMeasuredViewportInteraction ->
+            measuredViewport ConversationViewport 0 $
+                [ padLeftRight 2 $
+                    if index == interactionChunkIndex
+                        then visibleRegion (Location (0, 0)) (1, 1) chunk
+                        else chunk
+                | (index, chunk) <- zip [0 ..] (drawTranscriptChunks framedState)
+                ]
         HistoryChunkCacheTrace ->
             withVScrollBarRenderer conversationScrollbarRenderer $
             withVScrollBars OnRight $
@@ -178,13 +200,43 @@ productionWidget workload state frame =
                     HistoryMeasuredViewport -> error "unreachable"
                     HistoryChunkCacheTrace -> error "unreachable"
                     HistoryMeasuredViewportTrace -> error "unreachable"
+                    HistoryMeasuredViewportInteraction -> error "unreachable"
                     PerBlockCache ->
                         syntheticTranscriptWidget PerBlockCache framedState
                     ChunkCache ->
                         syntheticTranscriptWidget ChunkCache framedState
   where
-    framedState = state
-        { appUi = state.appUi{uiElapsedMillis = frame} }
+    framedState
+        | workload == HistoryMeasuredViewportInteraction =
+            state
+                { appUi = state.appUi
+                    { uiElapsedMillis = frame
+                    , uiFocus = FocusScrollback
+                    }
+                , appHistorySelectedBlock =
+                    if interactionPhase == 1 then interactionBlockId else Nothing
+                , appHoveredControl =
+                    if interactionPhase `elem` [3, 4] then interactionCode else Nothing
+                , appPressedControl =
+                    if interactionPhase == 4 then interactionCode else Nothing
+                }
+        | otherwise = state
+            { appUi = state.appUi{uiElapsedMillis = frame} }
+    -- Warm a whole chunk, select, clear, hover code, press code, clear;
+    -- then move to another chunk. No resize: this isolates the nested-cache
+    -- fallback cost instead of hiding it behind global width invalidation.
+    interactionPhase = frame `mod` 6
+    interactionChunks = state.appHistoryWindow.historyWindowTranscriptChunks
+    interactionChunkIndex =
+        (frame `div` 6) `mod` max 1 (length interactionChunks)
+    interactionBlockId =
+        case drop interactionChunkIndex interactionChunks of
+            chunk : _ ->
+                case [block.blockId | block <- toList chunk, block.blockKind == BlockAssistant] of
+                    ident : _ -> Just ident
+                    [] -> Nothing
+            [] -> Nothing
+    interactionCode = (\ident -> CodeCopy AgentRoot ident 1) <$> interactionBlockId
 
 -- Include the changed setter in cold measurements, not just warm redraws.
 -- Input blocks/runtime are prepared outside timing; indexes/projection are not.
@@ -198,6 +250,7 @@ prepareHistory workload state frame =
             HistoryMeasuredViewport -> setHistoryWindowTurns turns window
             HistoryChunkCacheTrace -> setHistoryWindowTurns turns window
             HistoryMeasuredViewportTrace -> setHistoryWindowTurns turns window
+            HistoryMeasuredViewportInteraction -> setHistoryWindowTurns turns window
             HistoryPerBlock -> window
                 { historyWindowTurnsByCursor = Map.fromList
                     [(turn.historyTurnCursor, turn) | turn <- toList turns]
@@ -368,7 +421,7 @@ warmCache :: V.DisplayRegion -> Widget Name -> IO (RenderState Name)
 warmCache region widget = do
     let (renderState, picture, _, _) =
             renderFinal
-                (attrMap V.defAttr [])
+                Theme.terminalDefault
                 [widget]
                 region
                 (const Nothing)
@@ -405,7 +458,9 @@ measure workload iterations widgetForFrame stateRef =
     measureAction (redraw iterations 0)
   where
     redraw remaining checksum
-        | remaining <= 0 = pure $! checksum
+        | remaining <= 0 = do
+            finalState <- readIORef stateRef
+            checksum `seq` pure (checksum, finalState)
         | otherwise = do
             renderState <- readIORef stateRef
             let frame = iterations - remaining
@@ -413,7 +468,7 @@ measure workload iterations widgetForFrame stateRef =
                 widget = widgetForFrame frame
                 (nextState, picture, _, extents) =
                     renderFinal
-                        (attrMap V.defAttr [])
+                        Theme.terminalDefault
                         [widget]
                         region
                         (const Nothing)
@@ -442,6 +497,25 @@ pictureScore region picture =
     spanScore (Skip width) = width
     spanScore (RowEnd width) = width
 
+-- Exact rendered text, attributes, geometry, and hit targets for comparing
+-- separately built baseline/candidate binaries. This is outside timings.
+verifyFrame :: Workload -> (Int -> Widget Name) -> RenderState Name -> Int -> IO (RenderState Name)
+verifyFrame workload widgetForFrame previous frame = do
+    let region = regionForFrame workload frame
+        (next, picture, _, extents) = renderFinal
+            Theme.terminalDefault [widgetForFrame frame] region (const Nothing) previous
+        rows =
+            [ map spanSignature (toList row)
+            | row <- toList (displayOpsForPic picture region)
+            ]
+    print (frame, region, rows, show extents)
+    pure next
+  where
+    spanSignature (TextSpan attr outputWidth charWidth text) =
+        show (show attr, outputWidth, charWidth, text)
+    spanSignature (Skip width) = "skip " <> show width
+    spanSignature (RowEnd width) = "end " <> show width
+
 measureAction :: IO a -> IO Sample
 measureAction action = do
     performGC
@@ -453,14 +527,19 @@ measureAction action = do
     afterTime <- getMonotonicTimeNSec
     afterCpu <- getCPUTime
     -- Flush nursery allocation into RTS counters, outside the timed interval.
-    performGC
-    afterStats <- getRTSStats
+    -- In the cold case the result is the populated render cache. Keep it
+    -- reachable through collection, rather than measuring a discarded cache.
+    afterStats <- bracket (newStablePtr result) freeStablePtr $ \_ -> do
+        performGC
+        getRTSStats
     pure Sample
         { elapsedMillis = fromIntegral (afterTime - beforeTime) / 1.0e6
         , cpuMillis = fromIntegral (afterCpu - beforeCpu) / 1.0e9
         , allocatedBytes =
             fromIntegral
                 (allocated_bytes afterStats - allocated_bytes beforeStats)
+        , liveBytes = fromIntegral afterStats.gc.gcdetails_live_bytes
+        , memoryInUseBytes = fromIntegral afterStats.gc.gcdetails_mem_in_use_bytes
         }
 
 median :: [Sample] -> Sample
@@ -479,6 +558,8 @@ printSample workload blockCount bodyLines sampleCount redrawCount sample =
             , "elapsed_ms=" <> show sample.elapsedMillis
             , "cpu_ms=" <> show sample.cpuMillis
             , "allocated_bytes=" <> show sample.allocatedBytes
+            , "live_bytes=" <> show sample.liveBytes
+            , "rts_memory_in_use_bytes=" <> show sample.memoryInUseBytes
             ]
 
 chunksOf :: Int -> [a] -> [[a]]

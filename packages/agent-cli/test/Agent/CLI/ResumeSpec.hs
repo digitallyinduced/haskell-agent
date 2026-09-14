@@ -2,7 +2,7 @@ module Agent.CLI.ResumeSpec (spec) where
 
 import Agent.CLI.Picker (PickerKey(..))
 import Agent.CLI.Resume
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( LegacySubagentTarget(..)
     , SessionMeta(..)
     , SessionResumeStats(..)
@@ -180,6 +180,14 @@ spec = do
             resumeNeedsGeneratedContext [boundary, ordinary]
                 `shouldBe` True
             resumeNeedsGeneratedContext [boundary, regenerated]
+                `shouldBe` False
+            let memoryOnly = ordinary
+                    { turnItems =
+                        [ userTextItem
+                            "<structured-memory>\n## Available structured memory\n</structured-memory>"
+                        ]
+                    }
+            resumeNeedsGeneratedContext [boundary, memoryOnly]
                 `shouldBe` False
 
         it "does not mistake ephemeral harness context for a reload" do

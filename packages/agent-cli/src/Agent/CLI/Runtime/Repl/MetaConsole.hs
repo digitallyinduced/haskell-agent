@@ -11,7 +11,7 @@ import Agent.CLI.Command
     , SlashCatalog
     , parseReplLineWithCatalog
     )
-import Agent.CLI.Config
+import Agent.Runtime.Config
     ( HarnessConfig(..)
     , McpServerConfig(..)
     , loadHarnessConfig
@@ -19,13 +19,14 @@ import Agent.CLI.Config
     )
 import Agent.CLI.Input ( readApprovalLine )
 import Agent.CLI.Login ( connectProviderAccount )
-import Agent.CLI.McpOAuth ( loginMcp )
+import Agent.Runtime.McpOAuth ( loginMcp )
 import Agent.CLI.Options ( ApprovalPolicy(..) )
 import Agent.CLI.Render ( clearThinking, putTextLn, renderEvent )
 import Agent.CLI.Runtime.MetaConsole
     ( MetaSecretValue(..)
     , applyMetaConfigActions
     , buildMetaContext
+    , collectMetaSecretsWith
     , isMetaConfigAction
     , metaConfigRequiresRestart
     , runMetaPlanner
@@ -40,7 +41,7 @@ import Agent.CLI.Runtime.Repl.Selection ( selectRequestedAccount )
 import Agent.CLI.Runtime.Types
     ( RunResult(RunQuit, RunRestart) )
 import Agent.CLI.Secret ( promptSecretLine )
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( Persistence(..)
     , SessionHandle(sessionMeta)
     , SessionMeta(metaId)
@@ -291,62 +292,7 @@ collectMetaSecrets
     -> [Meta.MetaAction]
     -> IO (Either Text [MetaSecretValue])
 collectMetaSecrets runtime =
-    foldM (collectOneMetaSecret runtime) (Right [])
-
-collectOneMetaSecret
-    :: MetaConsoleRuntime
-    -> Either Text [MetaSecretValue]
-    -> Meta.MetaAction
-    -> IO (Either Text [MetaSecretValue])
-collectOneMetaSecret _ result@(Left _) _ = pure result
-collectOneMetaSecret runtime (Right values) action = case action of
-    Meta.MetaSetMcpSecretEnv server key ->
-        promptMetaSecret
-            runtime
-            ("MCP " <> server <> " · " <> key)
-            ("Enter the value for environment variable "
-                <> key
-                <> " on MCP server "
-                <> server
-                <> ". It stays local and is never sent to the model.")
-            >>= \case
-                Nothing ->
-                    pure
-                        (Left
-                            ("secret input for MCP server '"
-                                <> server
-                                <> "' was cancelled"))
-                Just value ->
-                    pure
-                        (Right
-                            (values
-                                <> [ MetaMcpSecretValue
-                                        server key value
-                                   ]))
-    Meta.MetaSetLspSecretEnv server key ->
-        promptMetaSecret
-            runtime
-            ("LSP " <> server <> " · " <> key)
-            ("Enter the value for environment variable "
-                <> key
-                <> " on LSP server "
-                <> server
-                <> ". It stays local and is never sent to the model.")
-            >>= \case
-                Nothing ->
-                    pure
-                        (Left
-                            ("secret input for LSP server '"
-                                <> server
-                                <> "' was cancelled"))
-                Just value ->
-                    pure
-                        (Right
-                            (values
-                                <> [ MetaLspSecretValue
-                                        server key value
-                                   ]))
-    _ -> pure (Right values)
+    collectMetaSecretsWith (promptMetaSecret runtime)
 
 promptMetaSecret
     :: MetaConsoleRuntime

@@ -15,6 +15,7 @@ import Control.Concurrent
     , writeChan
     )
 import Control.Exception (Exception, SomeException, finally, throwIO, toException)
+import Control.Concurrent.Async (cancel, wait, withAsync)
 import qualified Control.Exception.Safe as Safe
 import Control.Retry
     ( RetryPolicyM
@@ -31,6 +32,7 @@ import Data.IORef
 import qualified Network.Connection as Connection
 import qualified Network.TLS as TLS
 import qualified Network.WebSockets as WS
+import qualified Network.WebSockets.Connection as WSConnection
 import qualified Network.WebSockets.Stream as WSStream
 import System.Timeout (timeout)
 import Test.Hspec
@@ -280,6 +282,83 @@ spec = describe "Agent.Transport.WebSocket" do
                         (ConnectionError
                             "WebSocket session invalidated: response consumer interrupted")
 
+    it "keeps an owned transport reusable after completed responses and closes it on scope exit" do
+        withConnectionPairAndClose \client server closeClient -> do
+            released <- newIORef False
+            let connect use =
+                    use client `finally` (closeClient >> writeIORef released True)
+                exchanges = [("first", "first response"), ("second", "second response")]
+            withAsync (serveRoundTrips server exchanges) \serverWorker -> do
+                withOwnedWebSocketSession testSessionOptions connect \session -> do
+                    withWebSocketRequest session (roundTrip "first")
+                        `shouldReturn` Right "first response"
+                    readIORef released `shouldReturn` False
+                    withWebSocketRequest session (roundTrip "second")
+                        `shouldReturn` Right "second response"
+                    readIORef released `shouldReturn` False
+                wait serverWorker
+            readIORef released `shouldReturn` True
+
+    it "releases an owned transport after cancellation while the session action remains alive" do
+        withConnectionPairAndClose \client server closeClient -> do
+            firstFrame <- newEmptyMVar
+            never <- newEmptyMVar
+            released <- newEmptyMVar
+            let connect use =
+                    use client `finally` (closeClient >> putMVar released ())
+            withOwnedWebSocketSession testSessionOptions connect \session -> do
+                withAsync (cancelledRequest session firstFrame never) \worker -> do
+                    assertFirstFrame server firstFrame
+                    assertQueuedFrame server
+                    cancel worker
+                requireWithin "owned transport was not released" (takeMVar released)
+                withWebSocketRequest session receiveWebSocketData
+                    `shouldReturn` Left
+                        (ConnectionError
+                            "WebSocket session invalidated: response consumer interrupted")
+
+    it "releases an owned transport without waiting for a blocked writer or close handshake" do
+        withConnectionPairAndClose \client _server closeClient -> do
+            writing <- newEmptyMVar
+            never <- newEmptyMVar
+            writerStopped <- newEmptyMVar
+            released <- newEmptyMVar
+            let blockedClient = client
+                    { WSConnection.connectionWrite = \_ ->
+                        (putMVar writing () >> takeMVar never)
+                            `finally` putMVar writerStopped ()
+                    }
+                connect use =
+                    use blockedClient `finally` (closeClient >> putMVar released ())
+            withOwnedWebSocketSession testSessionOptions connect \session -> do
+                withAsync (withWebSocketRequest session \request ->
+                    sendWebSocketText request "request") \worker -> do
+                    requireWithin "writer did not start" (takeMVar writing)
+                    cancel worker
+                requireWithin "writer was not joined" (takeMVar writerStopped)
+                requireWithin "blocked writer retained transport" (takeMVar released)
+
+    it "propagates owned connection establishment failures before invoking the session action" do
+        called <- newIORef False
+        withOwnedWebSocketSession testSessionOptions
+            (\_ -> throwIO UnexpectedConnectFailure)
+            (\_ -> writeIORef called True)
+            `shouldThrow` (\UnexpectedConnectFailure -> True)
+        readIORef called `shouldReturn` False
+
+    it "joins a cancelled owned connection attempt" do
+        connecting <- newEmptyMVar
+        never <- newEmptyMVar
+        released <- newEmptyMVar
+        let connect _ =
+                (putMVar connecting () >> takeMVar never)
+                    `finally` putMVar released ()
+        withAsync (withOwnedWebSocketSession testSessionOptions connect
+            (\_ -> expectationFailure "unexpected connected session")) \worker -> do
+            requireWithin "connection attempt did not start" (takeMVar connecting)
+            cancel worker
+        requireWithin "connection attempt was not joined" (takeMVar released)
+
 transientHandshakeException :: Int -> SomeException
 transientHandshakeException status =
     toException $ WS.MalformedResponse responseHead "Wrong response status"
@@ -446,7 +525,13 @@ testSessionOptions = defaultWebSocketSessionOptions
     }
 
 withConnectionPair :: (WS.Connection -> WS.Connection -> IO value) -> IO value
-withConnectionPair action = do
+withConnectionPair action =
+    withConnectionPairAndClose \client server _ -> action client server
+
+withConnectionPairAndClose
+    :: (WS.Connection -> WS.Connection -> IO () -> IO value)
+    -> IO value
+withConnectionPairAndClose action = do
     clientToServer <- newChan
     serverToClient <- newChan
     clientStream <- makeChannelStream serverToClient clientToServer
@@ -464,7 +549,7 @@ withConnectionPair action = do
         []
     server <- requireWithin "timed out creating server connection" (takeMVar serverResult)
         >>= either throwIO pure
-    action client server `finally` do
+    action client server (WSStream.close clientStream) `finally` do
         WSStream.close clientStream
         WSStream.close serverStream
 

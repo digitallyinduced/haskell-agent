@@ -5,13 +5,13 @@
 -- | Read-only scoped database browsing and callback-scoped row marshalling.
 module Agent.CLI.MacOS.DatabaseBrowseBridge () where
 
-import Agent.CLI.Database (DatabaseScope(..))
-import Agent.CLI.Database.Store
+import Agent.Runtime.Database (CustomDatabaseScope(..))
+import Agent.Runtime.Database.Store
     ( DatabaseBrowsePage(..), DatabaseScopes, deriveDatabaseScopes
     , listDatabaseObjects, loadDatabaseRows )
 import Agent.CLI.MacOS.Marshalling (decodeInput, withOptionalText, withText)
 import Agent.CLI.Project (resolveProjectRoot)
-import Agent.CLI.Session (sessionsRoot)
+import Agent.Runtime.Session (sessionsRoot)
 import Agent.CLI.SessionAdmin (managedPostgresConfigForHome)
 import Agent.Store.Postgres (Store, closeStore, openStore)
 import Agent.Store.Postgres.Custom
@@ -175,7 +175,7 @@ loadDataCatalogFor cwd =
 
 loadDataPageFor
     :: FilePath
-    -> DatabaseScope
+    -> CustomDatabaseScope
     -> Text
     -> Int64
     -> Int
@@ -241,7 +241,7 @@ dataObjectKind = \case
     "materialized_view" -> 1
     _ -> 0
 
-dataScopeFromCode :: CInt -> Maybe DatabaseScope
+dataScopeFromCode :: CInt -> Maybe CustomDatabaseScope
 dataScopeFromCode = \case
     0 -> Just DatabaseUserScope
     1 -> Just DatabaseRepositoryScope

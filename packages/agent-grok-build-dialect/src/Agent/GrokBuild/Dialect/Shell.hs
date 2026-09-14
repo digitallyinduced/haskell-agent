@@ -44,6 +44,8 @@ import Agent.Tools.Background
     , newCompletionGate
     , publishBackgroundTaskNotice
     , publishCompletion
+    , registerBackgroundTask
+    , removeBackgroundTask
     , suppressCompletion
     , systemReminder
     )
@@ -65,7 +67,7 @@ import Agent.Tools.Types
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (mapConcurrently_, race)
 import Control.Concurrent.MVar
-import Control.Exception.Safe (mask, onException, throwIO, tryAny)
+import Control.Exception.Safe (bracketOnError, mask, onException, throwIO, tryAny)
 import Control.Monad (forM, void)
 import Data.IORef
 import Data.List (sortOn)
@@ -326,18 +328,27 @@ startBackgroundCommand authorization session command =
                                 -- command owns the persistent session.
                                 let wrapped =
                                         executionScript authorization shell False command
-                                    publish result =
+                                    removeStatus =
+                                        removeBackgroundTask session.grokEnv
+                                            (grokCompletionKey taskId)
+                                    publish result = do
+                                        removeStatus
                                         publishCompletion completion $
                                             publishBackgroundTaskNotice
                                                 session.grokEnv
                                                 (grokCompletionNotice
                                                     taskId command result)
-                                    suppress =
+                                    suppress = do
+                                        removeStatus
                                         suppressCompletion completion $
                                             dismissBackgroundTaskNotice
                                                 session.grokEnv
                                                 (grokCompletionKey taskId)
                                 started <- tryAny $
+                                  bracketOnError
+                                    (registerBackgroundTask session.grokEnv
+                                        (grokCompletionKey taskId) command True)
+                                    (const removeStatus) \() ->
                                     allocateResource session.grokResources
                                         (startShellCommandWithCompletionAuthorized
                                             authorization
@@ -350,7 +361,8 @@ startBackgroundCommand authorization session command =
                                                 pure)
                                         stopShellCommand
                                 case started of
-                                    Left exception ->
+                                    Left exception -> do
+                                        removeStatus
                                         pure
                                             ( shell
                                             , Left (Text.pack (show exception))
@@ -522,14 +534,18 @@ killTask session taskId = do
             pure $ "killed " <> taskId <> "\n" <> formatCommandResult result
 
 consumeTaskCompletion :: GrokSession -> BackgroundTask -> IO ()
-consumeTaskCompletion session task =
+consumeTaskCompletion session task = do
+    removeBackgroundTask
+        session.grokEnv (grokCompletionKey task.backgroundId)
     consumeCompletion task.backgroundCompletion $
         dismissBackgroundTaskNotice
             session.grokEnv
             (grokCompletionKey task.backgroundId)
 
 suppressTaskCompletion :: GrokSession -> BackgroundTask -> IO ()
-suppressTaskCompletion session task =
+suppressTaskCompletion session task = do
+    removeBackgroundTask
+        session.grokEnv (grokCompletionKey task.backgroundId)
     suppressCompletion task.backgroundCompletion $
         dismissBackgroundTaskNotice
             session.grokEnv

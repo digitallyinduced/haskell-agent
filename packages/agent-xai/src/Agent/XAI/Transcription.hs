@@ -2,12 +2,14 @@
 module Agent.XAI.Transcription
     ( TranscriptEvent(..)
     , decodeTranscriptEvent
+    , transcribeOnConnection
     , transcribeAudioWithXAI
     , transcribePcmWithXAI
     ) where
 
 import Agent.Error (ApiError(..))
 import qualified Agent.Json.Decode as Json
+import qualified Agent.Transcription.Receive as Receive
 import Agent.XAI.Options
     ( defaultGrokClientVersion
     , grokClientIdentifier
@@ -23,12 +25,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (cancel, withAsync)
 import Control.Concurrent.MVar
     ( MVar
-    , modifyMVar
     , newEmptyMVar
-    , newMVar
-    , readMVar
-    , takeMVar
-    , tryPutMVar
     )
 import Control.Exception.Safe
     ( SomeException
@@ -58,7 +55,6 @@ import System.Process
     , terminateProcess
     , waitForProcess
     )
-import qualified System.Timeout as Timeout
 import qualified Wuss
 
 data TranscriptEvent
@@ -190,23 +186,27 @@ transcribe credential produceAudio onTranscript = do
         , ("User-Agent"
           , Text.encodeUtf8 (grokUserAgent defaultGrokClientVersion))
         ]
-        \connection -> Json.withDecoderSession \decoderSession -> do
-            awaitCreated decoderSession connection
-            state <- newMVar emptyTranscriptState
-            finished <- newEmptyMVar
-            withAsync
-                (receiveTranscripts
-                    decoderSession
-                    connection
-                    state
-                    finished
-                    onTranscript)
-                \receiver -> do
+        \connection -> transcribeOnConnection connection produceAudio onTranscript
+
+-- | Run transcription on an already authenticated WebSocket. The caller owns
+-- the transport; this scopes the receiver and closes the transcription session.
+transcribeOnConnection
+    :: WS.Connection
+    -> ((BS.ByteString -> IO ()) -> IO ())
+    -> (Text -> IO ())
+    -> IO Text
+transcribeOnConnection connection produceAudio onTranscript =
+    Json.withDecoderSession \decoderSession -> do
+        awaitCreated decoderSession connection
+        finished <- newEmptyMVar
+        withAsync
+            (receiveTranscripts decoderSession connection finished onTranscript)
+            \receiver ->
                 (do
                     produceAudio (WS.sendBinaryData connection)
                     WS.sendTextData connection
                         ("{\"type\":\"audio.done\"}" :: Text)
-                    waitForTranscript state finished)
+                    waitForTranscript finished)
                     `finally` do
                         void (tryAny (WS.sendClose connection ("done" :: Text)))
                         cancel receiver
@@ -230,57 +230,34 @@ sttLanguage = do
             || char == '_'
 
 awaitCreated :: Json.DecoderSession -> WS.Connection -> IO ()
-awaitCreated decoderSession connection = do
-    next <- Timeout.timeout (10 * 1_000_000) loop
-    case next of
-        Nothing ->
-            fail "timed out waiting for xAI transcript.created"
-        Just () ->
-            pure ()
-  where
-    loop = do
-        bytes <- WS.receiveData connection
-        Json.decodeIO
-            decoderSession
-            transcriptEventDecoder
-            (LBS.toStrict bytes) >>= \case
-            Right TranscriptCreated -> pure ()
-            Right TranscriptError{transcriptMessage} ->
-                fail (Text.unpack transcriptMessage)
-            _ -> loop
+awaitCreated decoderSession connection =
+    Receive.awaitReady
+        (10 * 1_000_000)
+        "timed out waiting for xAI transcript.created"
+        (Receive.receiveEvent decoderSession transcriptEventDecoder connection)
+        \case
+            TranscriptCreated -> Just (Right ())
+            TranscriptError{transcriptMessage} -> Just (Left transcriptMessage)
+            _ -> Nothing
 
 receiveTranscripts
     :: Json.DecoderSession
     -> WS.Connection
-    -> MVar TranscriptState
-    -> MVar (Either SomeException ())
+    -> MVar (Either SomeException TranscriptState)
     -> (Text -> IO ())
     -> IO ()
-receiveTranscripts decoderSession connection state finished onTranscript =
-    tryAny loop >>= void . tryPutMVar finished
+receiveTranscripts decoderSession connection finished onTranscript =
+    Receive.receiveTranscripts
+        (Receive.receiveEvent decoderSession transcriptEventDecoder connection)
+        step emptyTranscriptState finished onTranscript
   where
-    loop = do
-        bytes <- WS.receiveData connection
-        Json.decodeIO
-            decoderSession
-            transcriptEventDecoder
-            (LBS.toStrict bytes) >>= \case
-            Left _ -> loop
-            Right event -> do
-                current <- modifyMVar state \previous ->
-                    let next = applyTranscriptEvent event previous
-                    in pure (next, next)
-                case event of
-                    TranscriptPartial{} ->
-                        void (tryAny (onTranscript (renderTranscript current)))
-                    TranscriptDone{} ->
-                        void (tryAny (onTranscript (renderTranscript current)))
-                    _ ->
-                        pure ()
-                case event of
-                    TranscriptDone{} -> pure ()
-                    TranscriptError{} -> pure ()
-                    _ -> loop
+    step event previous =
+        let current = applyTranscriptEvent event previous
+        in case event of
+            TranscriptPartial{} -> Receive.Continue current (Just (renderTranscript current))
+            TranscriptDone{} -> Receive.Complete current (Just (renderTranscript current))
+            TranscriptError{} -> Receive.Complete current Nothing
+            _ -> Receive.Continue current Nothing
 
 applyTranscriptEvent :: TranscriptEvent -> TranscriptState -> TranscriptState
 applyTranscriptEvent event state =
@@ -313,26 +290,19 @@ applyTranscriptEvent event state =
         | otherwise = values <> [text]
 
 waitForTranscript
-    :: MVar TranscriptState
-    -> MVar (Either SomeException ())
+    :: MVar (Either SomeException TranscriptState)
     -> IO Text
-waitForTranscript state finished = do
-    completedInTime <- Timeout.timeout (30 * 1_000_000) (takeMVar finished)
-    case completedInTime of
+waitForTranscript finished = do
+    current <- Receive.waitForCompletion
+        (30 * 1_000_000) "timed out waiting for xAI transcription" finished
+    case current.failure of
+        Just message ->
+            fail (Text.unpack message)
         Nothing ->
-            fail "timed out waiting for xAI transcription"
-        Just (Left err) ->
-            throwIO err
-        Just (Right ()) -> do
-            current <- readMVar state
-            case current.failure of
-                Just message ->
-                    fail (Text.unpack message)
-                Nothing ->
-                    let transcript = renderTranscript current
-                    in if Text.null transcript
-                        then fail "xAI transcription produced no text"
-                        else pure transcript
+            let transcript = renderTranscript current
+            in if Text.null transcript
+                then fail "xAI transcription produced no text"
+                else pure transcript
 
 renderTranscript :: TranscriptState -> Text
 renderTranscript state =

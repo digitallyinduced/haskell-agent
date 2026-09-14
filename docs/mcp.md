@@ -59,9 +59,22 @@ Enabled servers are shared with subagents. Tools explicitly annotated
 `readOnlyHint: true` run without generic mutation approval. All other tools are
 exposed as mutations and follow the session's normal approval policy; Telegram
 uses its scoped inline approval buttons, while `--deny-mutations` blocks them.
-Blocking startup publishes tools as `server__tool`. Progressive startup exposes
-`mcp_search` and `mcp_call` while servers connect, then publishes each server's
-catalog. Every mode also exposes `mcp_list_resources` and `mcp_read_resource`
+Top-level Codex sessions use deferred discovery regardless of startup strategy: initially
+only `tool_search` is published for MCP tool discovery. Search matches become
+direct `server__tool` functions on the next model request. With code mode, the
+next `exec` declaration includes the matching `tools.server__tool` methods;
+searching does not change the tools available inside an already-running cell.
+Discovery is session-local, while server connections remain shared. Built-in
+tools are not deferred. This uses an ordinary function tool, not Codex's native
+wire-level tool-search event.
+
+In-process Codex subagents retain `mcp_search` / `mcp_call` instead of sharing their
+parent's discovery state.
+
+Other dialects retain their existing surfaces: Grok uses `search_tool` and
+`use_tool`; other providers use direct `server__tool` tools with blocking startup
+and `mcp_search` / `mcp_call` with progressive startup.
+Every mode also exposes `mcp_list_resources` and `mcp_read_resource`
 for browsing server resources and following `resource_link` results.
 
 ## Protocol negotiation
@@ -138,9 +151,13 @@ arrives anyway.
 Modern servers that advertise `listChanged` receive a `subscriptions/listen`
 stream for tool, prompt, and resource list changes; legacy servers deliver
 the same notifications unsolicited. A `notifications/tools/list_changed`
-re-lists the server's tools and updates the catalog used by `mcp_search`,
+re-lists the server's tools and updates the catalog used by `tool_search`, `mcp_search`,
 `mcp_call`, and the `/mcp` manager. Statically registered `server__tool`
 handlers keep working as long as the server still offers the tool.
+
+For deferred discovery, changed schemas or approval metadata hide the tool from
+subsequent requests until it is rediscovered. Previously exposed handlers reject
+changed definitions rather than silently executing against a newer schema.
 
 Resource URIs can be subscribed and unsubscribed explicitly when the server
 advertises support. Legacy servers use `resources/subscribe` and

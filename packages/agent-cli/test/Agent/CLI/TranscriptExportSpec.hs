@@ -2,7 +2,7 @@
 
 module Agent.CLI.TranscriptExportSpec (spec) where
 
-import Agent.CLI.Session (SessionTurn(..), TranscriptEffect(..))
+import Agent.Runtime.Session (SessionTurn(..), TranscriptEffect(..))
 import Agent.CLI.TranscriptExport
     ( defaultExportFileName
     , renderTranscriptMarkdown

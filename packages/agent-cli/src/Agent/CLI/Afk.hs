@@ -6,7 +6,7 @@ module Agent.CLI.Afk
     , handoffRemote
     ) where
 
-import Agent.CLI.Session (SessionMeta(..), SessionTransfer(..))
+import Agent.Runtime.Session (SessionMeta(..), SessionTransfer(..))
 import Agent.OsPath (unsafeToFilePath)
 import Control.Concurrent.Async (concurrently)
 import Control.Exception.Safe (tryAny)

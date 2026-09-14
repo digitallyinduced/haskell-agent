@@ -13,8 +13,8 @@ module Agent.CLI.Usage
     , shortAccountId
     ) where
 
-import Agent.CLI.Duration (formatDuration)
-import Agent.CLI.Error (formatApiErrorInlineAt)
+import Agent.Runtime.Duration (formatDuration)
+import Agent.Runtime.Error (formatApiErrorInlineAt)
 import Agent.CLI.Style (roleMuted, roleSuccess, roleWarn)
 import Agent.Error (ApiError)
 import Agent.OpenAI.Usage (UsageLimit(..), UsageSnapshot(..), UsageWindow(..))
@@ -22,6 +22,7 @@ import Agent.OpenRouter.Usage (OpenRouterUsage(..))
 import Agent.TUI.Model (PromptLimitStatus(..))
 import Agent.XAI.Usage (GrokUsageSnapshot, weeklyLimitLeft)
 import Control.Applicative ((<|>))
+import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
@@ -143,7 +144,7 @@ formatAccountUsage color now line =
                             , primaryWindow
                             , secondaryWindow
                             } ->
-                            catWindows
+                            catMaybes
                                 [ formatLabeledUsageWindow color
                                     <$> primaryWindow
                                 , formatLabeledUsageWindow color
@@ -179,7 +180,7 @@ formatUsageSummary now cooldownUntil result =
     windows snapshot = case snapshot.rateLimit of
         Nothing -> []
         Just usageLimit ->
-            catWindows
+            catMaybes
                 [ summarizeWindow <$> usageLimit.primaryWindow
                 , summarizeWindow <$> usageLimit.secondaryWindow
                 ]
@@ -282,14 +283,6 @@ shortAccountId :: Text -> Text
 shortAccountId accountId
     | Text.length accountId <= 12 = accountId
     | otherwise = Text.take 8 accountId <> "…"
-
-catWindows :: [Maybe Text] -> [Text]
-catWindows = concatMap maybeToList
-
-maybeToList :: Maybe a -> [a]
-maybeToList = \case
-    Nothing -> []
-    Just value -> [value]
 
 formatSeconds :: Int -> Text
 formatSeconds total =

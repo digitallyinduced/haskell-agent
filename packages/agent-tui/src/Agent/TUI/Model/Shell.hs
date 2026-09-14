@@ -106,9 +106,10 @@ finishShellPoll sessionId result state =
     let
         next =
             state
-                { uiRunning = True
-                , uiAwaitingInput = False
-                , uiActivity = "Thinking…"
+                { uiActivity =
+                    if state.uiRunning
+                        then "Thinking…"
+                        else state.uiActivity
                 , uiShellPolls =
                     Map.delete result.callId state.uiShellPolls
                 }

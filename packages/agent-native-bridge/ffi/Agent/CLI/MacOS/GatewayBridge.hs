@@ -4,7 +4,7 @@
 -- the gateway client's lease, including exception containment after commit.
 module Agent.CLI.MacOS.GatewayBridge (invokeGatewayCallbackOnce) where
 
-import Agent.CLI.GatewayClient
+import Agent.Runtime.GatewayClient
     ( GatewayCredential(..)
     , GatewayAccount(..)
     , fetchGatewayAccount

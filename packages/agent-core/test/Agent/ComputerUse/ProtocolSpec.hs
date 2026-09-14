@@ -5,6 +5,7 @@ import Agent.Loop.InputItems (computerFunctionTextOutput)
 import Control.Monad (forM_)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.List.NonEmpty as NonEmpty
@@ -30,6 +31,12 @@ spec = describe "semantic computer protocol" do
         decodeSemanticComputerWireRequest
             "{\"protocol_version\":1,\"operation\":\"ocr\",\"target_id\":null,\"actions\":null,\"include_screenshot\":true}"
             `shouldSatisfy` either (const True) (const False)
+    it "discloses the app-wide Electron accessibility side effect in tool guidance" do
+        let schema = TextEncoding.decodeUtf8
+                (LBS.toStrict (Aeson.encode semanticComputerRequestSchema))
+        schema `shouldSatisfy` Text.isInfixOf "app-wide Electron AXEnhancedUserInterface"
+        schema `shouldSatisfy` Text.isInfixOf "send no input and do not activate"
+
     it "decodes every operation and scalar into typed requests" do
         decode requestList `shouldBe` Right ListComputerTargets
         decode requestBind `shouldBe`
@@ -40,7 +47,7 @@ spec = describe "semantic computer protocol" do
             Right fixtureActRequest
 
     it "round-trips every request through the versioned native wire" do
-        forM_ fixtureRequests \request ->
+        forM_ (fixtureRequests <> fixtureQueryRequests) \request ->
             decodeSemanticComputerWireRequest
                 (encodeSemanticComputerRequest request)
                 `shouldBe` Right request
@@ -56,6 +63,82 @@ spec = describe "semantic computer protocol" do
                 fixtureValue `shouldBe`
                     Aeson.toJSON
                         (map semanticComputerRequestWireValue fixtureRequests)
+
+    it "matches the shared protocol-v2 query fixture" do
+        fixturePath <- getDataFileName "data/computer-use/protocol-v2.json"
+        fixtureBytes <- BS.readFile fixturePath
+        (Aeson.eitherDecodeStrict' fixtureBytes :: Either String Aeson.Value)
+            `shouldBe` Right (Aeson.toJSON
+                (map semanticComputerRequestWireValue fixtureQueryRequests))
+
+    it "decodes bounded query filters and derives read-only ABI metadata" do
+        forM_ fixtureQueryRequests \request -> do
+            let modelValue = case semanticComputerRequestWireValue request of
+                    Aeson.Object object ->
+                        Aeson.Object (KeyMap.delete "protocol_version" object)
+                    value -> value
+            decode (TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode $ modelValue)
+                `shouldBe` Right request
+            semanticComputerRequestOperation request
+                `shouldBe` ObserveOrActOnComputerTargetOperation
+        semanticComputerRequestWantsScreenshot
+            (QueryComputerTarget (SemanticComputerQuery Nothing (Just "Search") 1) True)
+            `shouldBe` True
+
+    it "preserves v1 canonical envelopes when the model supplies query:null" do
+        decode
+            "{\"operation\":\"observe\",\"target_id\":null,\"actions\":null,\"include_screenshot\":false,\"query\":null}"
+            `shouldBe` Right (ObserveComputerTarget False)
+        wireDecode
+            "{\"protocol_version\":1,\"operation\":\"observe\",\"target_id\":null,\"actions\":null,\"include_screenshot\":false,\"query\":null}"
+            `shouldSatisfy` isLeft
+
+    it "rejects invalid, missing, duplicate, and extra query fields" do
+        forM_
+            [ "null"
+            , "{}"
+            , "{\"role\":null,\"text\":null,\"max_results\":20}"
+            , "{\"role\":\"\",\"text\":null,\"max_results\":20}"
+            , "{\"role\":null,\"text\":\"\",\"max_results\":20}"
+            , "{\"role\":\"AXButton\",\"text\":null,\"max_results\":0}"
+            , "{\"role\":\"AXButton\",\"text\":null,\"max_results\":101}"
+            , "{\"role\":\"AXButton\",\"text\":null,\"max_results\":1.5}"
+            , "{\"role\":\"AXButton\",\"text\":null,\"max_results\":true}"
+            , "{\"role\":\"AXButton\",\"text\":null}"
+            , "{\"role\":\"AXButton\",\"role\":null,\"text\":null,\"max_results\":20}"
+            , "{\"role\":\"AXButton\",\"text\":null,\"max_results\":20,\"recursive\":true}"
+            , "{\"role\":12,\"text\":null,\"max_results\":20}"
+            ] \query ->
+                decode (queryArguments query) `shouldSatisfy` isLeft
+        decode
+            "{\"operation\":\"query\",\"target_id\":null,\"actions\":null,\"include_screenshot\":false}"
+            `shouldSatisfy` isLeft
+        decode (Text.replace "\"target_id\":null" "\"target_id\":\"other\""
+            (queryArguments validQuery)) `shouldSatisfy` isLeft
+        decode (Text.replace "\"actions\":null" "\"actions\":[]"
+            (queryArguments validQuery)) `shouldSatisfy` isLeft
+        decode (Text.replace "\"operation\":\"query\"" "\"operation\":\"observe\""
+            (queryArguments validQuery)) `shouldSatisfy` isLeft
+        decode (Text.dropEnd 1 (queryArguments validQuery) <> ",\"query\":null}")
+            `shouldSatisfy` isLeft
+        forM_ [1, 3 :: Int] \version ->
+            wireDecode ("{\"protocol_version\":" <> Text.pack (show version)
+                <> "," <> Text.drop 1 (queryArguments validQuery))
+                `shouldSatisfy` isLeft
+
+    it "enforces query filter limits in UTF-8 bytes rather than characters" do
+        forM_ ["role", "text"] \field -> do
+            let queryFor value = Aeson.object
+                    [ "role" Aeson..= if field == "role" then Aeson.String value else Aeson.Null
+                    , "text" Aeson..= if field == "text" then Aeson.String value else Aeson.Null
+                    , "max_results" Aeson..= (20 :: Int)
+                    ]
+                arguments = queryArguments . TextEncoding.decodeUtf8
+                    . LBS.toStrict . Aeson.encode . queryFor
+            decode (arguments (Text.replicate 512 "é"))
+                `shouldSatisfy` either (const False) (const True)
+            decode (arguments (Text.replicate 513 "é"))
+                `shouldSatisfy` isLeft
 
     it "derives ABI metadata from the typed request" do
         semanticComputerRequestOperation ListComputerTargets
@@ -201,6 +284,21 @@ spec = describe "semantic computer protocol" do
 requestList :: Text
 requestList =
     "{\"operation\":\"list_targets\",\"target_id\":null,\"actions\":null,\"include_screenshot\":false}"
+
+queryArguments :: Text -> Text
+queryArguments query =
+    "{\"operation\":\"query\",\"target_id\":null,\"actions\":null,\"include_screenshot\":false,\"query\":"
+        <> query <> "}"
+
+validQuery :: Text
+validQuery = "{\"role\":\"AXButton\",\"text\":\"Save\",\"max_results\":20}"
+
+fixtureQueryRequests :: [SemanticComputerRequest]
+fixtureQueryRequests =
+    [ QueryComputerTarget (SemanticComputerQuery (Just "AXButton") (Just "Save") 20) False
+    , QueryComputerTarget (SemanticComputerQuery Nothing (Just "Search") 1) True
+    , QueryComputerTarget (SemanticComputerQuery (Just "AXTextField") Nothing 100) False
+    ]
 
 requestBind :: Text
 requestBind =

@@ -8,7 +8,7 @@ module Agent.CLI.Session.Interaction
     , syncFullscreenPrompt
     ) where
 
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( readSessionRequestParams
     , modifySessionRequestOptions
     )
@@ -43,7 +43,7 @@ import Agent.CLI.ReplMode
     ( replModeFromState
     , replModeLabel
     )
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( Persistence(..)
     , PersistenceState(..)
     , SessionHandle(..)

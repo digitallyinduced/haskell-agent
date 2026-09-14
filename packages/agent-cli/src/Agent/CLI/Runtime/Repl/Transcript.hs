@@ -21,7 +21,7 @@ import Agent.CLI.Runtime.Repl.Context
     , withReplSuspended
     )
 import Agent.CLI.Runtime.Types ( RunResult )
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( Persistence(..)
     , PersistenceState(..)
     , SessionHandle(sessionMeta)

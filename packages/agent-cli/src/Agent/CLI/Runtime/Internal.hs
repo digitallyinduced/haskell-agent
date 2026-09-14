@@ -29,7 +29,7 @@ module Agent.CLI.Runtime.Internal
 
 import Agent.CLI.AgentSessions
     ( closeSessionThreadManager, newSessionThreadManager )
-import Agent.CLI.GatewayClient (runGatewayCommand)
+import Agent.Runtime.GatewayClient (runGatewayCommand)
 import Agent.CLI.Interrupt ( catchUserInterrupt )
 import Agent.CLI.Login ( runLoginManager )
 import Agent.CLI.McpCatalog (runMcpCommand)
@@ -57,7 +57,7 @@ import Agent.CLI.Runtime.Orchestration
 import Agent.CLI.Runtime.Orchestration.Types
     ( AgentProcessRuntime(..), foregroundRunMode )
 import Agent.CLI.Runtime.Types ( DevResult(..) )
-import Agent.CLI.Session ( sessionsRoot )
+import Agent.Runtime.Session ( sessionsRoot )
 import Agent.CLI.Session.Interaction ( buildPromptState )
 import Agent.CLI.SessionAdmin
     ( runImportSession
@@ -100,7 +100,8 @@ import System.Exit ( die )
 import System.IO ( stderr )
 
 import qualified Agent.MCP as MCP
-import Agent.CLI.McpConnectionRuntime (mcpConnectionCredentials)
+import Agent.Runtime.McpConnectionRuntime (mcpConnectionCredentials)
+import Agent.Runtime.McpConnectionCredentials (newCredentialRuntime)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import qualified Data.Text as Text
 
@@ -226,6 +227,9 @@ runAgentWithRestarts options =
                 rootsRef <- newIORef Nothing
                 samplingRef <- newIORef Nothing
                 toolResourceArbiter <- newToolResourceArbiter 1024
+                -- Shared by the application supervisor, including background
+                -- sessions and restarts; CLI has no protected native store.
+                credentials <- newCredentialRuntime Nothing
                 cleanupStarted <- newIORef False
                 cleanupRequest <- newEmptyMVar
                 -- Cleanup is intentionally process-scoped rather than
@@ -241,7 +245,7 @@ runAgentWithRestarts options =
                                 { MCP.mcpHostElicit = readIORef elicitationRef
                                 , MCP.mcpHostRoots = readIORef rootsRef
                                 , MCP.mcpHostSample = readIORef samplingRef
-                                , MCP.mcpHostCredentials = mcpConnectionCredentials
+                                , MCP.mcpHostCredentials = mcpConnectionCredentials credentials
                                 }
                             `onException`
                                 closeIntegrationSupervisor integrationSupervisor

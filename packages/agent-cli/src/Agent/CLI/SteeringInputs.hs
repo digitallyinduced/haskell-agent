@@ -1,26 +1,29 @@
 -- | A bounded queue of steering inputs retained while a turn is active.
 module Agent.CLI.SteeringInputs
     ( SteeringInputs
-    , awaitBackgroundCompletion
+    , awaitSteeringInput
+    , awaitUserSteering
     , clearSteeringInputs
     , commitSteeringInputs
     , dismissBackgroundCompletion
     , enqueueBackgroundCompletion
     , enqueueSteeringInputs
-    , hasBackgroundCompletionWake
+    , hasSteeringInputWake
     , hasBackgroundCompletions
     , newSteeringInputs
     , prepareBackgroundCompletion
     , readSteeringInputs
+    , readSteeringTurn
     , steeringInputByteLimit
     , steeringInputCountLimit
+    , suppressUserSteeringWake
     ) where
 
 import Agent.CLI.InputBudget
     ( logicalTurnInputBytes
     , saturatingAdd
     )
-import Agent.Loop (TurnInput)
+import Agent.Loop (TurnInput(..))
 import Data.Foldable (toList)
 import Control.Concurrent.STM
     ( STM
@@ -35,6 +38,7 @@ import Control.Concurrent.STM
     )
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
+import qualified Data.Text as Text
 
 steeringInputCountLimit :: Int
 steeringInputCountLimit = 128
@@ -46,7 +50,7 @@ data SteeringEntry = SteeringEntry
     { steeringInput :: !TurnInput
     , steeringBytes :: !Int
     , steeringBackgroundKey :: !(Maybe Text)
-    , steeringBackgroundWake :: !Bool
+    , steeringWake :: !Bool
     }
 
 data SteeringState = SteeringState
@@ -73,7 +77,7 @@ enqueueSteeringInputs (SteeringInputs ref) inputs =
                     input
                     (logicalTurnInputBytes input)
                     Nothing
-                    False
+                    True
                 | input <- inputs
                 ]
             addedCount = length measured
@@ -156,6 +160,24 @@ readSteeringInputs (SteeringInputs ref) = do
     state <- readTVarIO ref
     pure [entry.steeringInput | entry <- toList state.steeringQueue]
 
+-- | Snapshot an idle wake's display text and pending inputs together. Inputs
+-- remain queued until the provider acknowledges them; the text is metadata
+-- for the enclosing turn, not another provider input. Background notices
+-- must not acquire the identity of a user submission.
+readSteeringTurn :: SteeringInputs -> IO (Text, [TurnInput])
+readSteeringTurn (SteeringInputs ref) = do
+    state <- readTVarIO ref
+    let entries = toList state.steeringQueue
+        userText entry =
+            case (entry.steeringBackgroundKey, entry.steeringInput) of
+                (Nothing, UserMessage text) -> [text]
+                (Nothing, UserMessageWithAttachments text _) -> [text]
+                _ -> []
+    pure
+        ( Text.intercalate "\n\n" (concatMap userText entries)
+        , map (.steeringInput) entries
+        )
+
 hasBackgroundCompletions :: SteeringInputs -> IO Bool
 hasBackgroundCompletions (SteeringInputs ref) = do
     state <- readTVarIO ref
@@ -163,24 +185,35 @@ hasBackgroundCompletions (SteeringInputs ref) = do
         any (maybe False (const True) . (.steeringBackgroundKey))
             state.steeringQueue
 
-hasBackgroundCompletionWake :: SteeringInputs -> IO Bool
-hasBackgroundCompletionWake (SteeringInputs ref) = do
+hasSteeringInputWake :: SteeringInputs -> IO Bool
+hasSteeringInputWake (SteeringInputs ref) = do
     state <- readTVarIO ref
-    pure $ any (.steeringBackgroundWake) state.steeringQueue
+    pure $ any (.steeringWake) state.steeringQueue
 
--- | Consume pending idle-wake edges without removing their notices. Keeping
--- notice queued preserves the loop's commit-on-provider-success semantics;
+-- | Consume pending idle-wake edges without removing their inputs. Every
+-- accepted input has an edge: guidance arriving after the active loop's final
+-- read must start a follow-up turn rather than remain stranded at the prompt.
+-- Keeping inputs queued preserves the loop's commit-on-provider-success semantics;
 -- consuming the edge prevents a failed synthetic turn from hot-looping.
-awaitBackgroundCompletion :: SteeringInputs -> STM ()
-awaitBackgroundCompletion (SteeringInputs ref) = do
+awaitSteeringInput :: SteeringInputs -> STM ()
+awaitSteeringInput (SteeringInputs ref) = do
     state <- readTVar ref
-    check $ any (.steeringBackgroundWake) state.steeringQueue
+    check $ any (.steeringWake) state.steeringQueue
     writeTVar ref state
         { steeringQueue =
             fmap
-                (\entry -> entry { steeringBackgroundWake = False })
+                (\entry -> entry { steeringWake = False })
                 state.steeringQueue
         }
+
+-- | Wake passive tool waits without consuming guidance or its idle-wake edge.
+-- Every concurrent wait must observe the same pending input. Only provider
+-- acknowledgement removes it; background completions are not user guidance.
+awaitUserSteering :: SteeringInputs -> STM ()
+awaitUserSteering (SteeringInputs ref) = do
+    state <- readTVar ref
+    check $ any (\entry -> entry.steeringBackgroundKey == Nothing)
+        state.steeringQueue
 
 dismissBackgroundCompletion :: SteeringInputs -> Text -> IO ()
 dismissBackgroundCompletion (SteeringInputs ref) key =
@@ -199,6 +232,19 @@ dismissBackgroundCompletion (SteeringInputs ref) key =
             { steeringQueue = kept
             , steeringBytes = keptBytes
             }
+
+-- | Cancelling a turn must not immediately restart it with earlier guidance.
+-- Retain that guidance for the next explicit turn, without changing managed
+-- background completion wake behavior.
+suppressUserSteeringWake :: SteeringInputs -> IO ()
+suppressUserSteeringWake (SteeringInputs ref) =
+    atomically $ modifyTVar' ref \state ->
+        state
+            { steeringQueue = fmap suppress state.steeringQueue }
+  where
+    suppress entry = case entry.steeringBackgroundKey of
+        Nothing -> entry { steeringWake = False }
+        Just _ -> entry
 
 commitSteeringInputs :: SteeringInputs -> Int -> IO ()
 commitSteeringInputs (SteeringInputs ref) count =

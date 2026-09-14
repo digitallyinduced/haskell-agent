@@ -18,6 +18,7 @@ import qualified Data.Sequence as Seq
 initialUiState :: UiState
 initialUiState = UiState
     { uiBlocks = Seq.empty
+    , uiStreamingMarkdown = Nothing
     , uiNextBlockId = 1
     , uiDraft = ""
     , uiCursor = 0
@@ -48,6 +49,7 @@ initialUiState = UiState
     , uiContextWindow = Nothing
     , uiPermission = Nothing
     , uiNotice = Nothing
+    , uiBackgroundTaskStatus = []
     , uiRetryCountdown = Nothing
     , uiNoticeElapsedMillis = 0
     , uiElapsedMillis = 0

@@ -8,7 +8,7 @@ module Agent.CLI.Runtime.Repl
     , preparePromptSkillInputsWithPaste
     ) where
 
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( readSessionRequestParams
     )
 import Agent.CLI.ActiveAccount
@@ -23,7 +23,7 @@ import Agent.CLI.Command
 import Agent.ReasoningEffort (reasoningEffortText)
 import Agent.CLI.Dictation
     ( dictationTargetForSession )
-import Agent.CLI.GatewayClient
+import Agent.Runtime.GatewayClient
     ( GatewayModelAccess
     , cachedGatewayModels
     , fetchGatewayUsage
@@ -35,10 +35,10 @@ import Agent.CLI.Input
     , readReplLineWithCatalogForTarget
     )
 import Agent.OpenAI.Models.Types (ModelInfo(..), modelServiceTierForRequest)
-import Agent.CLI.Models ( catalogModelIds )
+import Agent.Runtime.Models ( catalogModelIds )
 import Agent.CLI.SteeringInputs
-    ( awaitBackgroundCompletion
-    , hasBackgroundCompletions
+    ( awaitSteeringInput
+    , readSteeringTurn
     )
 import Agent.CLI.Provider.Switch
     ( reportProviderUnavailable, requestStartupProviderFallback )
@@ -66,7 +66,7 @@ import Agent.CLI.Session.Lifecycle ( SessionContinuation(..) )
 import Agent.CLI.SessionEnv ( SessionEnv(..), SessionInboxRuntime(..) )
 import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.CLI.Skills ( skillInvocationCommand )
-import Agent.CLI.Status ( formatReplStatusLine )
+import Agent.CLI.Status ( formatReplStatusLine, formatBackgroundTaskStatus )
 import Agent.CLI.Style
     ( beginBackground,
       endBackground,
@@ -106,18 +106,21 @@ import Agent.Skills
     ( SkillInvocation(invocationSkill), Skill(skillUserInvocable) )
 import Agent.TUI.Model
     ( PromptState
-    , UiEvent(UiSetPromptLimitStatus, UiSystemMessage) )
+    , UiEvent(UiSetPromptLimitStatus, UiSystemMessage, UiSetBackgroundTaskStatus) )
 import Agent.Tools.PlanMode
     ( PlanModeEnv(planStateRef),
       PlanModeState(PlanPending, PlanActive) )
-import Agent.CLI.Session.Inbox (releaseInboxPending)
+import Agent.Runtime.Session.Inbox (releaseInboxPending)
 import Control.Concurrent.Async ( race, withAsync )
+import Control.Concurrent (threadDelay)
+import Control.Exception.Safe (finally)
 import Control.Concurrent.MVar ( withMVar )
 import Control.Concurrent.STM (atomically, orElse, retry, takeTMVar, tryTakeTMVar)
 import Control.Monad ( when, forM_ )
 import Data.IORef ( atomicModifyIORef', readIORef, writeIORef )
 import Data.Maybe ( fromMaybe, isJust )
 import Data.Text ( Text )
+import Data.Time.Clock (getCurrentTime)
 import System.Console.ANSI ( getTerminalSize )
 import System.Console.ANSI.Codes ( clearFromCursorToLineEndCode )
 import System.IO ( stdout, hFlush )
@@ -138,7 +141,7 @@ sessionContinuation =
 
 data ReplWake
     = ProviderUnavailableWake !ApiError
-    | BackgroundCompletionWake
+    | SteeringInputWake
 
 runPendingTurn
     :: PendingTurnPresentation
@@ -315,19 +318,21 @@ replWithDraft env@SessionEnv
                         Left text -> (ReplText text, True)
                         Right line -> (line, False)
     case mlineResult of
-        Left BackgroundCompletionWake -> do
-            pending <-
-                hasBackgroundCompletions env.sessionSteeringInputs
-            if not pending
+        Left SteeringInputWake -> do
+            (promptText, pending) <-
+                readSteeringTurn env.sessionSteeringInputs
+            if null pending
                 then replWithDraft env draft
                 else do
                     forM_ fullscreen \runtime ->
                         emitUiEvent runtime
                             (UiSystemMessage
-                                "Background task completed; resuming the agent.")
-                    -- Keep the notice in the normal steering queue so it is
-                    -- acknowledged only after the provider commits it.
-                    result <- runOneTurn env "" []
+                                "Queued input received; resuming the agent.")
+                    -- Keep inputs in the normal steering queue so each is
+                    -- acknowledged only after the provider commits it. The
+                    -- prompt text preserves user guidance in durable history;
+                    -- it does not add a second copy to provider inputs.
+                    result <- runOneTurn env promptText []
                     finishTurn env False result
         Left (ProviderUnavailableWake apiError) -> do
             -- The startup check is one-shot. If no fallback account is usable,
@@ -391,27 +396,45 @@ readFullscreenPrompt
         \_ -> do
             startupUnavailable <- readIORef env.sessionStartupUnavailable
             failedTurn <- readIORef env.sessionLastFailedTurn
-            let backgroundWake =
+            let steeringWake =
                     case failedTurn of
                         -- Preserve the user's retry candidate. Its next retry
                         -- or replacement turn will consume the queued
-                        -- completion through normal steering.
+                        -- input through normal steering.
                         Just _ -> retry
                         Nothing ->
-                            BackgroundCompletionWake
-                                <$ awaitBackgroundCompletion
+                            SteeringInputWake
+                                <$ awaitSteeringInput
                                     env.sessionSteeringInputs
                 wake = case startupUnavailable of
-                    Nothing -> backgroundWake
+                    Nothing -> steeringWake
                     Just unavailable ->
                         (ProviderUnavailableWake <$> unavailable)
-                            `orElse` backgroundWake
-            readFullscreenLineOrWithCatalog
-                runtime
-                slashCatalog
-                promptState
-                draft
-                wake
+                            `orElse` steeringWake
+            (withAsync
+                (refreshBackgroundTaskStatus env runtime (not (isJust failedTurn)))
+                \_ ->
+                    readFullscreenLineOrWithCatalog
+                        runtime
+                        slashCatalog
+                        promptState
+                        draft
+                        wake)
+                `finally` emitUiEvent runtime (UiSetBackgroundTaskStatus [])
+
+-- | Scoped to the idle prompt, so elapsed time remains live without keeping a
+-- permanent polling worker or allowing a late update after a turn starts.
+refreshBackgroundTaskStatus :: SessionEnv -> FullscreenRuntime -> Bool -> IO ()
+refreshBackgroundTaskStatus env runtime canResume = refresh Nothing
+  where
+    refresh previous = do
+        tasks <- env.sessionReadBackgroundTasks
+        now <- getCurrentTime
+        let rows = formatBackgroundTaskStatus now canResume tasks
+        when (previous /= Just rows) $
+            emitUiEvent runtime (UiSetBackgroundTaskStatus rows)
+        threadDelay 1000000
+        refresh (Just rows)
 
 refreshPromptAccountLimit
     :: SessionEnv

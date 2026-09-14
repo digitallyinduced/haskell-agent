@@ -1,6 +1,13 @@
 module Agent.TUI.MarkdownSpec (spec) where
 
+import Agent.TUI.FencedCode
+    ( FenceSection(..)
+    , emptyFenceStreamState
+    , feedFenceStream
+    , fenceStreamSections
+    )
 import Agent.TUI.Markdown
+import Agent.TUI.Markdown.Stream
 import Agent.Syntax
     ( SyntaxClass(SyntaxComment)
     , SyntaxSpan(syntaxClass)
@@ -43,6 +50,7 @@ import Graphics.Vty.PictureToSpans (displayOpsForPic)
 import Graphics.Vty.Span (SpanOp(..))
 import System.Environment (lookupEnv)
 import Test.Hspec
+import Test.QuickCheck (elements, forAll, ioProperty, listOf, resize)
 
 spec :: Spec
 spec = describe "fullscreen Markdown rendering" do
@@ -55,10 +63,57 @@ spec = describe "fullscreen Markdown rendering" do
                 , "a\n\n\n\n界 👩\x200d💻\n\n---\n\n> quote\n\n"
                 , "| potential | table |\n\n| -- | -- |\n"
                 , "before\n\n```hs`not a fence\n\n[link](https://example.com)\n\nTail"
+                , "# heading\r\n> quote\r\n\n| A | B |\r\n| :- | -: |\r\n| 界 | `a|b` |\r\n"
+                , "**outer *inner*** [nested [label]](https://example.com/a(b)) https://example.com/x)."
+                , "| A | B |\n| --- | --- |\n| escaped \\| pipe | `unfinished | code` |\n"
+                , "```hs\nvalue\n```suffix\n```\n> quote\n1. item\n\n"
+                , Text.replicate 120 "a" <> " **bold** [docs](https://example.com)\r\nnext\n"
+                , "> " <> Text.replicate 125 "界" <> " *unfinished then closed*\n\n"
                 ]
         forM_ [12, 40, 80] \width ->
             forM_ inputs \input ->
                 checkStreamingPictures width (Text.inits input)
+
+    it "preserves rendering with randomized Markdown chunk partitions" $
+        forAll (resize 35 (listOf (elements
+            ["text", "*", "**", "_", "`", "```", "~", "|", "---", ":",
+             "[", "]", "(", ")", "\\", " ", "\n", "\r", "界", "https://x.y"]))) \chunks ->
+            ioProperty do
+                checkStreamingPictures 28 (scanl (<>) "" chunks)
+                pure True
+
+    it "preserves pending line classification transitions and Unicode prose deltas" do
+        forM_
+            [ "   界e\x301 👩\x200d💻 **bold**"
+            , "***not a rule***\n---not a rule\n___not a rule"
+            , "# heading 界\n##  heading\n-  bullet\n1. ordered\n> quote"
+            , " \t\n***\n#\n# heading\nplain 界 **more**\r\nnext"
+            ] \source ->
+                checkStreamingPictures 24 (Text.inits source)
+
+    it "preserves final syntax across every binary split and empty delta" do
+        let source = "| A | B |\n| --- | --- |\n| **one** | `two|three` |\n\n```hs\nx\n```suffix\n```\nTail"
+            expected = finishMarkdownStream (feedMarkdownStream emptyMarkdownStreamState source)
+        forM_ [0 .. Text.length source] \index -> do
+            let (prefix, suffix) = Text.splitAt index source
+                state = feedMarkdownStream
+                    (feedMarkdownStream
+                        (feedMarkdownStream emptyMarkdownStreamState prefix) "") suffix
+            finishMarkdownStream state `shouldBe` expected
+
+    it "retains fence metadata and prose cache indices at every prefix" do
+        let source = "- item\n\n    ```hs\n    value\n    ```suffix\n    ```\n\n| A | B |\n| - | - |\n\n~~~\ncode\n~~~"
+            deltas = Text.chunksOf 1 source
+            fences = scanl feedFenceStream emptyFenceStreamState deltas
+            markdown = scanl feedMarkdownStream emptyMarkdownStreamState deltas
+            fenceMetadata = map \case
+                FenceProseSection chunk section stable _ -> Left (chunk, section, stable)
+                FenceCodeSection chunk block -> Right (chunk, block)
+            markdownMetadata = map \case
+                MarkdownProseSection chunk section stable _ _ -> Left (chunk, section, stable)
+                MarkdownCodeSection chunk block -> Right (chunk, block)
+        map (markdownMetadata . markdownStreamSnapshot) markdown
+            `shouldBe` map (fenceMetadata . fenceStreamSections) fences
 
     it "keeps unterminated blank-looking lines live" do
         checkStreamingPictures 30
@@ -102,7 +157,7 @@ spec = describe "fullscreen Markdown rendering" do
                 renderFinal Theme.terminalDefault [widget True] (40, 20)
                     (const Nothing) warm
         V.imageHeight (V.picImage picture) `shouldSatisfy` (> 0)
-        map extentName extents `shouldBe` ["https://example.com"]
+        map extentName extents `shouldBe` replicate 2 "https://example.com"
 
     it "parses strong, emphasis, code, and links" do
         parseInline
@@ -125,6 +180,22 @@ spec = describe "fullscreen Markdown rendering" do
             rendered = show (renderWidget Nothing [widget] (40, 3))
         rendered `shouldSatisfy`
             isInfixOf "attrURL = SetTo \"https://example.com\""
+
+    it "renders a muted URL suffix without the link title's underline" do
+        let url = "https://example.com"
+            widget :: Widget ()
+            widget = markdownWidget ("[Example](" <> url <> ") after")
+            (_, picture, _, _) =
+                renderFinal Theme.terminalDefault [widget] (80, 3)
+                    (const Nothing) emptyRenderState
+            spans = concatMap toList (toList (displayOpsForPic picture (80, 3)))
+            attributeFor value = spanAttr <$> find (hasText value) spans
+        attributeFor "Example" `shouldBe`
+            Just (attrMapLookup Theme.linkAttr Theme.terminalDefault `V.withURL` url)
+        attributeFor " (https://example.com)" `shouldBe`
+            Just (attrMapLookup Theme.dimAttr Theme.terminalDefault `V.withURL` url)
+        attributeFor " after" `shouldSatisfy`
+            maybe False ((/= V.SetTo url) . V.attrURL)
 
     it "renders bare URLs with native terminal hyperlink metadata" do
         let url = "https://github.com/digitallyinduced/haskell-agent/pull/339"
@@ -149,7 +220,10 @@ spec = describe "fullscreen Markdown rendering" do
                 , extentSize extent
                 ))
             extents
-            `shouldContain` [(url, Location (5, 0), (31, 1))]
+            `shouldContain`
+                [ (url, Location (5, 0), (4, 1))
+                , (url, Location (9, 0), (27, 1))
+                ]
 
     it "registers a click target for every wrapped link fragment" do
         let url = "https://example.com/abcdefgh"
@@ -1192,19 +1266,31 @@ checkStreamingPicturesAtHeight height width =
     checkStreamingFrames . map ((width, height),)
 
 checkStreamingFrames :: [((Int, Int), Text.Text)] -> Expectation
-checkStreamingFrames = go Nothing emptyRenderState
+checkStreamingFrames frames =
+    forM_ [0 :: Int, 1, 2] \mode ->
+        go mode Nothing "" emptyFenceStreamState emptyMarkdownStreamState emptyRenderState frames
   where
-    go _ _ [] = pure ()
-    go previousRegion previous ((region, input) : rest) = do
+    go _ _ _ _ _ _ [] = pure ()
+    go mode previousRegion previousInput parser syntaxParser previous ((region, input) : rest) = do
         let baseline = markdownWidgetWithLinks id input
+            nextParser = case Text.stripPrefix previousInput input of
+                Just delta -> feedFenceStream parser delta
+                Nothing -> feedFenceStream emptyFenceStreamState input
+            nextSyntaxParser = case Text.stripPrefix previousInput input of
+                Just delta -> feedMarkdownStream syntaxParser delta
+                Nothing -> feedMarkdownStream emptyMarkdownStreamState input
+            proseCache chunk section = cached (Text.pack (show (chunk, section)))
             streaming =
-                markdownWidgetWithStreamingCache
-                    Nothing
-                    id
-                    (\chunk section -> cached (Text.pack (show (chunk, section))))
-                    (\_ widget -> widget)
-                    (\_ _ -> txt "")
-                    input
+                case mode of
+                    2 -> markdownWidgetWithMarkdownStreamingCache
+                        Nothing id proseCache (\_ widget -> widget)
+                        (\_ _ -> txt "") nextSyntaxParser
+                    1 -> markdownWidgetWithParsedStreamingCache
+                        Nothing id proseCache (\_ widget -> widget)
+                        (\_ _ -> txt "") nextParser
+                    _ -> markdownWidgetWithStreamingCache
+                        Nothing id proseCache (\_ widget -> widget)
+                        (\_ _ -> txt "") input
             (next, actual, _, actualExtents) =
                 renderFinal Theme.terminalDefault [streaming] region
                     (const Nothing)
@@ -1228,7 +1314,7 @@ checkStreamingFrames = go Nothing emptyRenderState
         rows actual `shouldBe` rows expected
         sortOn id (map extentKey actualExtents)
             `shouldBe` sortOn id (map extentKey expectedExtents)
-        go (Just region) next rest
+        go mode (Just region) input nextParser nextSyntaxParser next rest
 
 spanRowText :: [SpanOp] -> Text.Text
 spanRowText =

@@ -1,14 +1,14 @@
 module Agent.CLI.AuthSpec (spec) where
 
 import Data.List.NonEmpty (NonEmpty((:|)))
-import Agent.CLI.Auth
-import Agent.CLI.CredentialStore
+import Agent.Accounts.Auth
+import Agent.Accounts.CredentialStore
 import Agent.CLI.Dictation
     ( DictationAuthError(..)
     , DictationBackend(..)
     , loadDictationBackendAuth
     )
-import Agent.CLI.GatewayClient
+import Agent.Runtime.GatewayClient
     ( GatewayCredential(..)
     , gatewayCredentialPath
     , saveGatewayCredentialAt

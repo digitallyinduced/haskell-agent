@@ -9,7 +9,8 @@ module Agent.CLI.Clipboard.MacOS
     , readMacClipboardText
     ) where
 
-import Agent.CLI.Error (formatException)
+import Agent.CLI.Clipboard.Process (readClipboardProcessText)
+import Agent.Runtime.Error (formatException)
 import Agent.Loop (ImageAttachment(..))
 import Control.Exception.Safe (bracket, finally, tryAny)
 import Control.Monad (void)
@@ -60,12 +61,12 @@ readMacClipboardImage = do
 
 readMacClipboardText :: IO (Either Text Text)
 readMacClipboardText = do
-    result <- tryAny (readProcessWithExitCode "pbpaste" [] "")
+    result <- tryAny (readClipboardProcessText "pbpaste" [])
     pure $ case result of
         Left ex -> Left (formatException ex)
-        Right (ExitSuccess, out, _) -> Right (Text.pack out)
+        Right (ExitSuccess, out, _) -> Right out
         Right (ExitFailure _, _, err) ->
-            Left (Text.strip (Text.pack err))
+            Left (Text.strip err)
 
 readMacClipboardPaths :: IO [FilePath]
 readMacClipboardPaths = do

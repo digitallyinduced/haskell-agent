@@ -33,6 +33,8 @@ import Agent.Tools.Background
     , newCompletionGate
     , publishBackgroundTaskNotice
     , publishCompletion
+    , registerBackgroundTask
+    , removeBackgroundTask
     , suppressCompletion
     , systemReminder
     )
@@ -52,6 +54,7 @@ import Agent.Tools.IO
 import Agent.Tools.Types
     ( BackgroundTaskNotice(..)
     , ToolEnv(..)
+    , waitForToolYield
     )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (mapConcurrently_, race, withAsync)
@@ -267,7 +270,7 @@ waitForInitialYield session commandId task yieldMs onSnapshot =
         stopped <- race
             (waitCancel session.sessionEnv.toolCancel)
             (race
-                (threadDelay (max 1 yieldMs * 1000))
+                (waitForToolYield session.sessionEnv (max 1 yieldMs * 1000))
                 (readMVar task.managedRunning.runningResult))
         case stopped of
             Left () -> do
@@ -302,7 +305,7 @@ waitForContinuation session commandId task yieldMs = do
     stopped <- race
         (waitCancel session.sessionEnv.toolCancel)
         (race
-            (threadDelay (max 1 yieldMs * 1000))
+            (waitForToolYield session.sessionEnv (max 1 yieldMs * 1000))
             (readMVar task.managedRunning.runningResult))
     case stopped of
         Left () ->
@@ -379,11 +382,14 @@ startManagedCommand authorization session workdir command =
                         else do
                             let commandId = store.storeNextId + 1
                                 key = codexCompletionKey commandId
+                                removeStatus =
+                                    removeBackgroundTask session.sessionEnv key
                             completion <- newCompletionGate
                             cursor <- newMVar initialRunningOutputCursor
                             yielded <- newEmptyMVar
                             runningVar <- newEmptyMVar
                             let publish result = do
+                                    removeStatus
                                     didYield <- readMVar yielded
                                     when didYield $
                                       publishCompletion completion do
@@ -402,13 +408,16 @@ startManagedCommand authorization session workdir command =
                                                     { commandStdout = out
                                                     , commandStderr = err
                                                     })
-                            startShellCommandWithInputAndCompletionAuthorized
+                            registerBackgroundTask
+                                session.sessionEnv key command True
+                            (startShellCommandWithInputAndCompletionAuthorized
                                 authorization
                                 session.sessionEnv
                                 workdir
                                 command
-                                publish >>= \case
-                                Left err ->
+                                publish `onException` removeStatus) >>= \case
+                                Left err -> do
+                                    removeStatus
                                     pure
                                         ( Just store
                                         , (completedToRelease, Left err)
@@ -426,6 +435,7 @@ startManagedCommand authorization session workdir command =
                                                     <*> pure (shellExecutionIsEscalated authorization)
                                             pure (commandId, task))
                                             `onException` do
+                                                removeStatus
                                                 void $ tryPutMVar yielded False
                                                 suppressCompletion completion $
                                                     dismissBackgroundTaskNotice
@@ -486,14 +496,18 @@ stopManagedCommand session task = do
     stopShellCommand task.managedRunning
 
 consumeManagedCompletion :: CodexShellSession -> ManagedCommand -> IO ()
-consumeManagedCompletion session task =
+consumeManagedCompletion session task = do
+    removeBackgroundTask
+        session.sessionEnv (codexCompletionKey task.managedId)
     consumeCompletion task.managedCompletion $
         dismissBackgroundTaskNotice
             session.sessionEnv
             (codexCompletionKey task.managedId)
 
 suppressManagedCompletion :: CodexShellSession -> ManagedCommand -> IO ()
-suppressManagedCompletion session task =
+suppressManagedCompletion session task = do
+    removeBackgroundTask
+        session.sessionEnv (codexCompletionKey task.managedId)
     suppressCompletion task.managedCompletion $
         dismissBackgroundTaskNotice
             session.sessionEnv

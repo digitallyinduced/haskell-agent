@@ -754,6 +754,7 @@ isReloadedGeneratedContextUserText text =
         [ "# AGENTS.md instructions for "
         , "## Skills\nThe following reusable skills are available in this session."
         , "<learned-skills>\nThese are durable, reusable instructions learned from earlier sessions."
+        , "<structured-memory>\n## Available structured memory"
         , "<system-reminder>\nAs you answer the user's questions, you can use the following context"
         ]
 

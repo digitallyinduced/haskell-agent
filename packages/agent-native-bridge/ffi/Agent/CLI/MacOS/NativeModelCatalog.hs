@@ -6,11 +6,11 @@ module Agent.CLI.MacOS.NativeModelCatalog
 
 import Agent.CLI.MacOS.NativeGatewayBoundary (validateNativeSessionBoundary)
 import Agent.CLI.MacOS.NativeRequest (ModelsListRequest(..))
-import Agent.CLI.GatewayClient (GatewayCredential)
+import Agent.Runtime.GatewayClient (GatewayCredential)
 import Agent.CLI.GatewayModels (loadGatewayModelOptionsWithCredentialAt)
-import Agent.CLI.ModelConfig
+import Agent.Runtime.ModelConfig
     ( CatalogModel(..), ModelCatalog, catalogModelForConnection )
-import Agent.CLI.Models
+import Agent.Runtime.Models
     ( ModelOption(..)
     , ModelTarget(..)
     , PickerState(..)
@@ -29,7 +29,7 @@ import Agent.CLI.Project
     , loadProjectSettings
     , resolveProjectRoot
     )
-import Agent.CLI.Session (SessionMeta(..))
+import Agent.Runtime.Session (SessionMeta(..))
 import Agent.Dialect (dialectSlug)
 import Agent.Provider (Provider(..), providerSlug)
 import Agent.Store.Postgres (Store, trustedPool)

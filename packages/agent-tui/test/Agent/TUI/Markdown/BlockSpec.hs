@@ -1,6 +1,7 @@
 module Agent.TUI.Markdown.BlockSpec (spec) where
 
 import Agent.TUI.Markdown.Block
+import Control.Monad (forM_)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Test.Hspec
@@ -17,6 +18,51 @@ import Test.QuickCheck
 
 spec :: Spec
 spec = describe "Markdown block parsing" do
+    describe "pipe table row compatibility" do
+        it "distinguishes opening borders, trailing borders, and empty cells" do
+            forM_
+                [ ("", Nothing)
+                , ("|", Nothing)
+                , ("| lone", Nothing)
+                , ("lone |", Just ["lone"])
+                , ("| lone |", Just ["lone"])
+                , ("||", Just [""])
+                , ("|||", Just ["", ""])
+                , ("a || b |", Just ["a", "", "b"])
+                ] \(input, expected) ->
+                    splitTableRow input `shouldBe` expected
+
+        it "halves backslashes before pipes and escapes only odd runs" do
+            forM_ [0 .. 8] \count -> do
+                let slashes = Text.replicate count "\\"
+                    literal = Text.replicate (count `div` 2) "\\"
+                    expected
+                        | odd count = ["a" <> literal <> "|b", "c"]
+                        | otherwise = ["a" <> literal, "b", "c"]
+                splitTableRow ("a" <> slashes <> "|b|c")
+                    `shouldBe` Just expected
+                splitTableRow ("`a" <> slashes <> "|b`|c")
+                    `shouldBe` Just ["`a" <> literal <> "|b`", "c"]
+                splitTableRow ("a" <> slashes <> "x|c")
+                    `shouldBe` Just ["a" <> slashes <> "x", "c"]
+
+        it "keeps matching code pipes but splits unmatched backtick spans" do
+            forM_
+                [ ("`a|b`|c", ["`a|b`", "c"])
+                , ("``a|b```|c", ["``a|b```", "c"])
+                , ("``a`|b``|c", ["``a`|b``", "c"])
+                , ("``a|b`|c", ["``a", "b`", "c"])
+                , ("`a|b", ["`a", "b"])
+                , ("`a\\`|b", ["`a\\`", "b"])
+                ] \(input, expected) ->
+                    splitTableRow input `shouldBe` Just expected
+
+        it "strips Unicode whitespace without dropping Unicode cell content" do
+            splitTableRow "\x2003| \x00a0界\x2003 | 👩\x200d💻 \x202f|\x2003"
+                `shouldBe` Just ["界", "👩\x200d💻"]
+            splitTableRow "界|\x2003|\x00a0"
+                `shouldBe` Just ["界", ""]
+
     it "parses heading levels and requires following whitespace" do
         headingParts "  ### Title  " `shouldBe` Just (3, "Title")
         headingParts "###Title" `shouldBe` Nothing

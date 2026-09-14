@@ -5,21 +5,106 @@ import Agent.Error
     , ErrorType(..)
     )
 import Agent.Loop
+import Agent.Cancel (requestCancel)
 import Agent.OpenAI.Error (mkOpenAIError)
 import Agent.OpenAI.LoopBackend
 import Agent.Responses.Request (stripReplayedItemStatus)
 import Agent.Responses.Types
 import Agent.ToolDispatch
 import Control.Monad (forM_)
+import Control.Concurrent.Async (wait, withAsync)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import qualified Control.Exception as Exception
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef
 import qualified Data.Text as Text
 import Test.Hspec
+import System.Timeout (timeout)
 import Agent.OpenAI.LoopBackendSpec.Fixtures
 
 spec :: Spec
 spec = do
+    describe "OpenAI interruption recovery" do
+        it "replays completed items without a response ID after cancellation, not partial text" do
+            ready <- newEmptyMVar
+            release <- newEmptyMVar
+            requests <- newIORef []
+            joined <- newIORef False
+            let complete = assistantItem "finished commentary"
+                pending = functionCallItem "pending" "read_file" "{}"
+                send request previous onEvent = do
+                    modifyIORef' requests (<> [(inputItems request, previous)])
+                    onEvent ResponseOutputItemDoneEvent
+                        { item = complete, outputIndex = Just 0, sequenceNumber = Nothing }
+                    onEvent ResponseOutputItemDoneEvent
+                        { item = pending, outputIndex = Just 1, sequenceNumber = Nothing }
+                    onEvent (deltaEvent EventOutputTextDelta "unfinished final answer")
+                    putMVar ready ()
+                    takeMVar release `Exception.finally` writeIORef joined True
+                    pure (Left (ConnectionError "interrupted"))
+                backend = openAiBackendWithRetryPolicies
+                    (limitRetries 0) (limitRetries 0) send (pure baseParams)
+                history = turnInputsToItems [UserMessage "earlier"]
+                snapshot = advanceBackendSnapshot emptyBackendSnapshot history
+                    (Just (BackendContinuation "openai.responses" "previous-complete"))
+            config0 <- loopConfig backend
+            _ <- config0.loopBackendState.commitBackendState snapshot
+            let config = config0 { loopInterrupt = expectationFailure "OpenAI must cancel the stream directly" }
+            withAsync (runLoopInputsDetailed config Nothing [UserMessage "continue"]) \running -> do
+                timeout 1000000 (takeMVar ready) `shouldReturn` Just ()
+                requestCancel config.loopCancel
+                result <- timeout 1000000 (wait running)
+                execution <- maybe (expectationFailure "OpenAI cancellation waited for a grace period" >> fail "timeout") pure result
+                readIORef joined `shouldReturn` True
+                execution.executionResult `shouldBe` Left (LoopCancelled [])
+                execution.executionState `shouldBe`
+                    (history <> turnInputsToItems [UserMessage "continue"] <> [complete, pending])
+                execution.executionProgress `shouldBe` ResponseCommitted
+                show execution.executionState `shouldNotContain` "unfinished final answer"
+            recovered <- config.loopBackendState.readBackendState
+            recovered.backendContinuation `shouldBe` Nothing
+            let next = openAiBackendWith
+                    (\request previous _ -> do
+                        modifyIORef' requests (<> [(inputItems request, previous)])
+                        pure (Right (testResponse "next-complete" [assistantItem "done"])))
+                    (pure baseParams)
+            _ <- next.submitTurn recovered Nothing [UserMessage "go"] (const (pure ()))
+            seen <- readIORef requests
+            map snd seen `shouldBe` [Just "previous-complete", Nothing]
+            fst (last seen) `shouldBe` map stripReplayedItemStatus
+                (recovered.backendItems <> turnInputsToItems [UserMessage "go"])
+
+        it "does not duplicate journaled items when the whole response succeeds" do
+            let complete = assistantItem "done"
+                send _ _ onEvent = do
+                    onEvent ResponseOutputItemDoneEvent
+                        { item = complete, outputIndex = Just 0, sequenceNumber = Nothing }
+                    pure (Right (testResponse "complete" [complete]))
+            config <- loopConfig (openAiBackendWith send (pure baseParams))
+            execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+            execution.executionState `shouldBe`
+                (turnInputsToItems [UserMessage "hello"] <> [complete])
+            snapshot <- config.loopBackendState.readBackendState
+            backendContinuationToken "openai.responses" snapshot `shouldBe` Just "complete"
+
+        it "does not recover partial deltas or explicitly incomplete done items" do
+            let unfinished item = case item of
+                    MessageItem message -> MessageItem message { status = Just ItemIncomplete }
+                    FunctionCallItem call -> FunctionCallItem call { status = Just ItemIncomplete }
+                    _ -> item
+                send _ _ onEvent = do
+                    onEvent (deltaEvent EventOutputTextDelta "half an answer")
+                    mapM_ (\item -> onEvent ResponseOutputItemDoneEvent
+                        { item = unfinished item, outputIndex = Nothing, sequenceNumber = Nothing })
+                        [assistantItem "partial", functionCallItem "partial-call" "read_file" "{\"path\":"]
+                    pure (Left (ConnectionError "offline"))
+            config <- loopConfig (openAiBackendWithRetryPolicies
+                (limitRetries 0) (limitRetries 0) send (pure baseParams))
+            execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+            execution.executionState `shouldBe` []
+            execution.executionProgress `shouldBe` NoResponseCommitted
+
     describe "statelessResponsesBackend" do
         it "replays the local transcript on tool follow-ups" do
             seen <- newIORef []
@@ -785,6 +870,8 @@ spec = do
                         BackendCallbacks
                             { onLoopEvent = const (pure ())
                             , onRecoveryCheckpoint = const (pure ())
+                            , onCompletedResponseItem = \_ _ -> pure ()
+                            , onCancellationMode = const (pure ())
                             , onAsyncToolCall =
                                 \call -> modifyIORef' admitted (call.callId :)
                             }
@@ -834,6 +921,8 @@ spec = do
                 BackendCallbacks
                     { onLoopEvent = const (pure ())
                     , onRecoveryCheckpoint = const (pure ())
+                    , onCompletedResponseItem = \_ _ -> pure ()
+                    , onCancellationMode = const (pure ())
                     , onAsyncToolCall =
                         \call -> modifyIORef' admitted (call.callId :)
                     }

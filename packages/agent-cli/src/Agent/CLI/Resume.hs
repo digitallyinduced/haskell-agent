@@ -43,8 +43,8 @@ module Agent.CLI.Resume
     ) where
 
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
-import Agent.CLI.Models (validateResumedGatewayBoundary)
-import Agent.CLI.Session
+import Agent.Runtime.Models (validateResumedGatewayBoundary)
+import Agent.Runtime.Session
     ( SessionMeta(..)
     , SessionTurn(..)
     , SessionTurnPage(..)
@@ -53,10 +53,11 @@ import Agent.CLI.Session
     , loadSessionMeta
     , loadSessionResumeStats
     )
-import Agent.CLI.Session.History (foldSessionItems)
-import Agent.CLI.Session.Types (TranscriptEffect(..))
+import Agent.Runtime.Startup.Context
+    ( SessionInitialContext(..), resolveSessionInitialContext
+    , resumeNeedsGeneratedContext )
+import Agent.Runtime.Session.Types (TranscriptEffect(..))
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
-import Agent.OpenAI.Compaction (hasReloadedGeneratedContextItems)
 import Agent.CLI.TextLayout
     ( SplitPaneFrame(..)
     , clampSelectionIndex
@@ -68,10 +69,11 @@ import Agent.Responses.Types (ResponseItem(..))
 import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Postgres.Session (ConversationSearchResult(..))
 import Control.Monad (forM)
+import Control.Monad.Trans.Except (ExceptT(..), runExceptT)
 import Data.Char (isAlphaNum)
 import Data.Containers.ListUtils (nubOrd)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -86,46 +88,6 @@ data ResumeSourceFilter
     = ResumeAll
     | ResumeProvider !Text
     deriving (Eq, Show)
-
--- | Transcript-derived context requirements that can be resolved before
--- provider prompt construction. Keeping this decision pure allows startup
--- context reads to overlap independent tool acquisition without changing
--- resume semantics.
-data SessionInitialContext = SessionInitialContext
-    { initialContextItems :: [ResponseItem]
-    , initialContextResumeNeedsFresh :: Bool
-    , initialContextPrevious :: Maybe Text
-    , initialContextNeeded :: Bool
-    , initialContextMayRestoreSnapshot :: Bool
-    }
-    deriving (Eq, Show)
-
-resolveSessionInitialContext
-    :: Bool
-    -> Bool
-    -> Maybe (SessionMeta, [SessionTurn])
-    -> SessionInitialContext
-resolveSessionInitialContext hasTransition resumeTargetChanged resumed =
-    SessionInitialContext{..}
-  where
-    initialTurns = maybe [] snd resumed
-    initialContextItems = maybe [] (foldSessionItems . snd) resumed
-    initialContextResumeNeedsFresh =
-        resumeNeedsGeneratedContext initialTurns
-    initialContextPrevious
-        | hasTransition || resumeTargetChanged = Nothing
-        | otherwise =
-            resumed >>= \(meta, _) -> meta.metaLastResponseId
-    initialContextNeeded =
-        initialContextResumeNeedsFresh
-            || (null initialTurns && initialContextPrevious == Nothing)
-    initialContextMayRestoreSnapshot =
-        case resumed of
-            Just (meta, turns) ->
-                null turns
-                    && initialContextPrevious == Nothing
-                    && isJust meta.metaPromptSnapshot
-            Nothing -> False
 
 data ResumeEntry = ResumeEntry
     { resumeId :: !Text
@@ -170,24 +132,6 @@ data ResumeState = ResumeState
     }
     deriving (Eq, Show)
 
--- | Reinstall generated project and skill context after the newest durable
--- transcript-replacement boundary until a later persisted turn proves that
--- the regenerated context was consumed. This also repairs sessions compacted
--- by older clients that did not reload generated context.
-resumeNeedsGeneratedContext :: [SessionTurn] -> Bool
-resumeNeedsGeneratedContext turns =
-    case break isContextBoundary (reverse turns) of
-        (_, []) -> False
-        (newerTurns, _boundary : _) ->
-            null newerTurns
-                || not
-                    (any
-                        (hasReloadedGeneratedContextItems . (.turnItems))
-                        newerTurns)
-  where
-    isContextBoundary turn =
-        turn.turnEffect /= TranscriptAppend
-
 -- | Build picker entries from already loaded sessions.
 resumeEntriesFrom :: [(SessionMeta, [SessionTurn])] -> [ResumeEntry]
 resumeEntriesFrom = map (uncurry entryFrom)
@@ -231,21 +175,11 @@ publishResumeHistoryAfterBoundary boundaryResult publish =
         Right () -> publish >> pure (Right ())
 
 loadResumeEntry :: StorePool -> OsPath -> Text -> IO (Either Text ResumeEntry)
-loadResumeEntry pool root sessionId =
-    loadSessionMeta pool root sessionId >>= \case
-        Left err -> pure (Left err)
-        Right meta ->
-            loadRecentSessionTurns pool root sessionId 50 >>= \case
-                Left err -> pure (Left err)
-                Right page ->
-                    loadSessionResumeStats pool root sessionId >>= \case
-                        Left err -> pure (Left err)
-                        Right stats ->
-                            pure $ Right $
-                                resumeEntryFromPage
-                                    meta
-                                    stats
-                                    (map snd page.pageTurns)
+loadResumeEntry pool root sessionId = runExceptT do
+    meta <- ExceptT $ loadSessionMeta pool root sessionId
+    page <- ExceptT $ loadRecentSessionTurns pool root sessionId 50
+    stats <- ExceptT $ loadSessionResumeStats pool root sessionId
+    pure $ resumeEntryFromPage meta stats (map snd page.pageTurns)
 
 -- | Build a loaded resume entry from a bounded transcript page plus
 -- full-session aggregates. Counts and the first prompt describe the whole

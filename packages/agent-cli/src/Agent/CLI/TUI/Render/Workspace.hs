@@ -36,11 +36,11 @@ import Agent.CLI.Resume ()
 import Agent.CLI.Secret ()
 import Agent.CLI.Status ()
 import Agent.CLI.Style ( motionGlyphSet )
-import Agent.CLI.TUI.History ( HistoryWindow(historyWindowTurns) )
+import Agent.CLI.TUI.History ( HistoryWindow(historyWindowTurns, historyWindowHasNewer) )
 import Agent.CLI.TUI.ImagePreview ()
 import Agent.CLI.TUI.LambdaArt ()
 import Agent.CLI.TUI.Motion ( isBackgroundAgentActive )
-import Agent.CLI.TUI.MeasuredViewport ( measuredViewport )
+import Agent.CLI.TUI.MeasuredViewport ( measuredViewportWithFooter )
 import Agent.CLI.TUI.Render.Transcript
     ( drawTranscript,
       drawTranscriptChunks,
@@ -53,7 +53,7 @@ import Agent.CLI.TUI.Types
       AppState(appAgentHover, appRuntime, appMotionElapsedMillis, appUi,
                appAgentSelected, appHistoryWindow, appAgentEntries, appPullRequestURL),
       FullscreenRuntime(runtimeMotionMode),
-      Name(AgentPopover, ConversationViewportExtent,
+      Name(AgentPopover, ConversationViewportExtent, ConversationMessage, ConversationBlock, ConversationLatest, ConversationNewerGap,
            ConversationViewport, AgentRow, AgentPane, MarkdownLink) )
 import Agent.CLI.Terminal ()
 import Agent.CLI.Timestamp ()
@@ -61,7 +61,7 @@ import Agent.Loop ()
 import Agent.Syntax ()
 import Agent.TUI.Markdown ()
 import Agent.TUI.Model
-    ( reduceUi, conversationIsEmpty, UiEvent, UiState(uiBlocks) )
+    ( reduceUi, conversationIsEmpty, UiEvent, UiState(uiBlocks, uiFollow) )
 import Agent.TUI.Motion ( quietIndicator )
 import Agent.TUI.Presentation ()
 import Agent.TUI.TextWidth ( displayTerminalText )
@@ -84,24 +84,23 @@ import Brick
       txt,
       vBox,
       vLimit,
-      viewport,
       withAttr,
       withBorderStyle,
       withVScrollBarRenderer,
       withVScrollBars,
       AttrName,
+      Extent(..),
       Location(Location),
       Context(availHeight, availWidth),
       Size(Fixed, Greedy),
       VScrollBarOrientation(OnRight),
       VScrollbarRenderer(..),
-      ViewportType(Vertical),
       Widget(render, Widget),
       Padding(Pad) )
 import Brick.BChan ()
 import Brick.Widgets.Border ( borderWithLabel )
 import Brick.Widgets.Border.Style ( unicodeRounded )
-import Brick.Widgets.Center ()
+import Brick.Widgets.Center (hCenter)
 import Codec.Picture ()
 import Control.Applicative ()
 import Control.Concurrent ()
@@ -135,14 +134,15 @@ import qualified Brick.Widgets.Border as Border ( borderAttr )
 import qualified Agent.CLI.TUI.Bridge as Bridge ()
 import qualified Agent.CLI.TUI.Composer as Composer ()
 import qualified Data.Map.Strict as Map ()
-import qualified Agent.CLI.TUI.Scroll as Scroll ()
+import qualified Agent.CLI.TUI.Scroll as Scroll
+    ( conversationMessagesBelow, conversationMessagesBelowLabel )
 import qualified Data.Sequence as Seq ( null )
 import qualified Data.Set as Set ()
 import qualified Data.Text as Text
     ( pack, takeWhileEnd, stripPrefix, breakOn )
 import qualified Data.Text.Encoding as TextEncoding ()
 import qualified Agent.TUI.Theme as Theme
-    ( assistantAttr,
+    ( thinkingAttr, assistantAttr,
       baseAttr,
       borderActiveAttr,
       borderAttr,
@@ -232,8 +232,8 @@ drawConversationPane state =
             reportExtent ConversationViewportExtent $
                 withVScrollBarRenderer conversationScrollbarRenderer $
                     withVScrollBars OnRight $
-                        viewport ConversationViewport Vertical $
-                            padLeftRight 2 (drawAgentConversation state entry)
+                        conversationViewport state
+                            [padLeftRight 2 (drawAgentConversation state entry)]
         Nothing
             | conversationIsEmpty state.appUi
                 && Seq.null
@@ -250,10 +250,52 @@ drawConversationPane state =
                                 withVScrollBarRenderer
                                     conversationScrollbarRenderer $
                                     withVScrollBars OnRight $
-                                        measuredViewport ConversationViewport 1 $
+                                        conversationViewport state $
                                             map (padLeftRight 2)
                                                 (drawTranscriptChunks state)
                            ]
+
+conversationViewport :: AppState -> [Widget Name] -> Widget Name
+conversationViewport state =
+    measuredViewportWithFooter ConversationViewport 1 footer
+  where
+    footer
+        | state.appUi.uiFollow = Nothing
+        | otherwise = Just \bottom measuredExtents ->
+            let messageCount = Scroll.conversationMessagesBelow bottom
+                    [ (top, height)
+                    | extent <- measuredExtents
+                    , ConversationMessage target _ <- [extent.extentName]
+                    , let Location (_, top) = extent.extentUpperLeft
+                    , let (_, height) = extent.extentSize
+                    , target == state.appAgentSelected
+                    ]
+                hasNewer =
+                    state.appAgentSelected == AgentRoot
+                        && state.appHistoryWindow.historyWindowHasNewer
+                        && or
+                            [ height > 0 && top + height > bottom
+                            | extent <- measuredExtents
+                            , extent.extentName == ConversationNewerGap
+                            , let Location (_, top) = extent.extentUpperLeft
+                            , let (_, height) = extent.extentSize
+                            ]
+                otherContentBelow = or
+                    [ height > 0 && top + height > bottom
+                    | extent <- measuredExtents
+                    , ConversationBlock target _ <- [extent.extentName]
+                    , target == state.appAgentSelected
+                    , let Location (_, top) = extent.extentUpperLeft
+                    , let (_, height) = extent.extentSize
+                    ]
+                indicator label = hCenter $
+                    clickable ConversationLatest $
+                        withAttr Theme.thinkingAttr (txt label)
+            in case Scroll.conversationMessagesBelowLabel hasNewer messageCount of
+                Nothing
+                    | otherContentBelow -> indicator "↓ Latest output · Click to resume"
+                    | otherwise -> txt " "
+                Just label -> indicator label
 
 selectedChildEntry :: AppState -> Maybe AgentEntry
 selectedChildEntry state =

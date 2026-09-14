@@ -1,6 +1,6 @@
 module Agent.CLI.ProviderTransitionSpec (spec) where
 
-import Agent.CLI.Models (ModelTarget(..))
+import Agent.Runtime.Models (ModelTarget(..))
 import Agent.CLI.Options (CliOptions(..), defaultCliOptions, isOneShot)
 import Agent.CLI.ProviderTransition
 import Agent.Dialect (DialectId(..))

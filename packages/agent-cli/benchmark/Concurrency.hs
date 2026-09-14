@@ -1,6 +1,6 @@
 module Main (main) where
 
-import Agent.CLI.Dialects (CodingTools(..), codingToolsFor)
+import Agent.Runtime.Tools.Dialects (CodingTools(..), codingToolsFor)
 import Agent.CLI.Options (defaultCliOptions)
 import Agent.CLI.PendingInputs
     ( PendingInputs
@@ -8,9 +8,9 @@ import Agent.CLI.PendingInputs
     , newPendingInputs
     , withPendingInputs
     )
-import Agent.CLI.ModelConfig (loadModelCatalogAt)
+import Agent.Runtime.ModelConfig (loadModelCatalogAt)
 import Agent.CLI.Project (loadProjectSettings, loadUserSettings)
-import Agent.CLI.Session.History (detectGitBranch)
+import Agent.Runtime.Session.History (detectGitBranch)
 import Agent.CLI.Skills (loadSkillsCatalogQuiet)
 import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.Dialect (DialectId(CodexDialect), dialectForId)

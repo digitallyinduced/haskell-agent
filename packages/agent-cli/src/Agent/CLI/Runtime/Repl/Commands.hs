@@ -5,7 +5,7 @@ module Agent.CLI.Runtime.Repl.Commands
     , preparePromptSkillInputsWithPaste
     ) where
 
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( readSessionRequestParams
     )
 import Agent.CLI.AgentViewport
@@ -23,7 +23,7 @@ import Agent.CLI.Command
       ShellMode(ShellNone, ShellGhci, ShellBash, ShellBoth),
       SlashCatalog )
 import Agent.CLI.Command.Instructions ( initInstruction )
-import Agent.CLI.Compaction
+import Agent.Runtime.Compaction.Provider
     ( CompactOutcome(compactSummary, compactBeforeTokens,
                      compactAfterTokens, compactHistory) )
 import Agent.CLI.Context ( formatContextReport )
@@ -49,7 +49,7 @@ import Agent.CLI.Input
                ReplClipboardPaste, ReplClipboardPasteCaptured, ReplClipboardPasteOrText, ReplChooseModel,
                ReplChooseEffort, ReplChooseAccount, ReplRemovePendingImage, ReplRemoveCapturedImage,
                ReplPasted) )
-import Agent.CLI.GatewayClient ( loadGatewayCredential )
+import Agent.Runtime.GatewayClient ( loadGatewayCredential )
 import Agent.CLI.Login
     ( runFullscreenLoginManager
     , runLoginManager
@@ -108,7 +108,7 @@ import Agent.CLI.Runtime.Repl.Workflow ( handleWorkflowAction )
 import Agent.CLI.Runtime.Types
     ( RunResult(RunEnableCodeMode, RunFreshSession, RunRestart, RunUpdateAndRestart,
                 RunSwitchProvider, RunReload, RunQuit) )
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( TranscriptEffect(TranscriptReplace),
       appendTurnWithMetaUpdateIndexed,
       ensureSession,
@@ -122,7 +122,7 @@ import Agent.CLI.Session
 import Agent.CLI.Session.Attachments ( queueAttachedImages )
 import Agent.CLI.Session.Choices
     ( accountUsageText, showAccountUsage )
-import Agent.CLI.Session.History
+import Agent.Runtime.Session.History
     ( modifyLiveAttachments )
 import Agent.CLI.Session.Interaction ( runBtwQuestion )
 import Agent.CLI.Session.Selection
@@ -364,6 +364,8 @@ submitReplLine handlerContext finishTurn retryPendingTurn slashCatalog skillInvo
                     ReplMetaConsole request ->
                         runMetaConsoleRequest request
                     ReplPrompt text ->
+                        submitPrompt handlerContext finishTurn pasted continue color text
+                    ReplQueuedPrompt text ->
                         submitPrompt handlerContext finishTurn pasted continue color text
                     ReplExpandedPrompt original expanded ->
                         submitExpandedTurnWithPaste

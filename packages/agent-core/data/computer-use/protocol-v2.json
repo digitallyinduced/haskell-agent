@@ -1,0 +1,38 @@
+[
+  {
+    "protocol_version": 2,
+    "operation": "query",
+    "target_id": null,
+    "actions": null,
+    "include_screenshot": false,
+    "query": {
+      "role": "AXButton",
+      "text": "Save",
+      "max_results": 20
+    }
+  },
+  {
+    "protocol_version": 2,
+    "operation": "query",
+    "target_id": null,
+    "actions": null,
+    "include_screenshot": true,
+    "query": {
+      "role": null,
+      "text": "Search",
+      "max_results": 1
+    }
+  },
+  {
+    "protocol_version": 2,
+    "operation": "query",
+    "target_id": null,
+    "actions": null,
+    "include_screenshot": false,
+    "query": {
+      "role": "AXTextField",
+      "text": null,
+      "max_results": 100
+    }
+  }
+]

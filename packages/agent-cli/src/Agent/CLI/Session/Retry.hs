@@ -15,7 +15,7 @@ import Agent.CLI.Render
     , renderEvent
     )
 import Agent.CLI.Runtime.Types (RunResult(..))
-import Agent.CLI.Session
+import Agent.Runtime.Session
     ( clearPersistenceActivity
     , setPersistenceActivity
     )

@@ -9,11 +9,11 @@ module Agent.Server.Sandbox.Worker
     , sandboxWorkerMain
     ) where
 
-import Agent.CLI.Dialects
+import Agent.Runtime.Tools.Dialects
     ( CodingTools(..)
     , codingToolsFor
     )
-import Agent.CLI.Session (isValidSessionId)
+import Agent.Runtime.Session (isValidSessionId)
 import Agent.Dialect
     ( DialectId
     , dialectForId

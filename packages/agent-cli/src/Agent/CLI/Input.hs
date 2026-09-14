@@ -96,13 +96,6 @@ import System.Console.ANSI
     )
 import System.Console.ANSI.Codes
     ( cursorUpCode )
-import System.Console.Haskeline.History
-    ( addHistory
-    , emptyHistory
-    , historyLines
-    , readHistory
-    , writeHistory
-    )
 import System.Directory
     ( getHomeDirectory
     )
@@ -326,19 +319,17 @@ readInlineEditor
                     (hHideCursor stdout)
                     (\_ -> hShowCursor stdout >> hFlush stdout)
                     \() -> do
-                        history <-
+                        entries <-
                             if historyEnabled
-                                then
-                                    readHistory historyPath
-                                        `catchIO` \_ -> pure emptyHistory
-                                else pure emptyHistory
-                        let entries = map Text.pack (historyLines history)
-                            state =
+                                then readReplHistoryAt historyPath
+                                    `catchIO` \_ -> pure []
+                                else pure []
+                        let state =
                                 initialEditorState catalog slashEnabled initial
                         redrawEditor prompt state
-                        editorLoop history entries state
+                        editorLoop entries state
   where
-    editorLoop history entries state = do
+    editorLoop entries state = do
         key <- readEditorKey
         case (historyEnabled, key, currentMenu state) of
             (False, EditorEscape, Nothing) ->
@@ -358,9 +349,9 @@ readInlineEditor
           case requested of
             RedrawEditor -> do
                 redrawEditor prompt next
-                editorLoop history entries next
+                editorLoop entries next
             SubmitEditor ->
-                finish history next
+                finish next
             ReturnEditor line -> do
                 finishEditorLine prompt next
                 pure line
@@ -372,14 +363,14 @@ readInlineEditor
                             finishEditorLine prompt next
                             Text.putStrLn "^C"
                             redrawEditor prompt next
-                            editorLoop history entries next
+                            editorLoop entries next
                         QuitProcess -> do
                             finishEditorLine prompt next
                             pure ReplQuitInterrupt
             ClearEditorScreen -> do
                 Text.hPutStr stdout "\ESC[2J\ESC[H"
                 redrawEditor prompt next
-                editorLoop history entries next
+                editorLoop entries next
             DictateIntoEditor -> do
                 finishEditorLine prompt next
                 result <- tryAny $
@@ -409,22 +400,20 @@ readInlineEditor
                                 , editorSlashDismissed = False
                                 }
                 redrawEditor prompt state'
-                editorLoop history entries state'
+                editorLoop entries state'
             ReportEditorError message -> do
                 finishEditorLine prompt next
                 Text.putStrLn ("input ignored: " <> message)
                 redrawEditor prompt next
-                editorLoop history entries next
+                editorLoop entries next
             IgnoreEditorInput ->
-                editorLoop history entries next
-        finish history' state' = do
+                editorLoop entries next
+        finish state' = do
             finishEditorLine prompt state'
             let text = state'.editorText
             when historyEnabled $
                 unless (Text.all (== ' ') text) $
-                    writeHistory
-                        historyPath
-                        (addHistory (Text.unpack text) history')
+                    appendReplHistoryAt historyPath text
                         `catchIO` \_ -> pure ()
             pure $
                 if state'.editorPasted

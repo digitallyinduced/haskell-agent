@@ -25,6 +25,11 @@ spec = do
                     setEnv name ""
                 isSshSession `shouldReturn` False
 
+    describe "remote link instructions" do
+        it "explains Ghostty's mouse-capture bypass shortcut" do
+            remoteLinkInstructions `shouldSatisfy` Text.isInfixOf "Cmd+Shift+click"
+            remoteLinkInstructions `shouldSatisfy` Text.isInfixOf "Ghostty on macOS"
+
     describe "terminal protocol encoders" do
         it "reports an escaped working directory" do
             osc7WorkingDirectory "/tmp/a b"

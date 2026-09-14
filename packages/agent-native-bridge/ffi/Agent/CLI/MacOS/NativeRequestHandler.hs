@@ -7,7 +7,7 @@ import Agent.CLI.MacOS.EngineStore
 import Agent.CLI.MacOS.NativeGatewayBoundary
 import Agent.CLI.MacOS.NativeModelCatalog
 import Agent.CLI.MacOS.NativeRequest
-import Agent.CLI.Session (SessionMeta(..), listSessions, listArchivedSessionIds)
+import Agent.Runtime.Session (SessionMeta(..), listSessions, listArchivedSessionIds)
 import Agent.CLI.SessionAdmin (loadSessionPageJSON, sessionSummaryWithStatusJSON)
 import Agent.Store.Postgres (ManagedPostgresConfig, Store, trustedPool)
 import Control.Concurrent.MVar (MVar)

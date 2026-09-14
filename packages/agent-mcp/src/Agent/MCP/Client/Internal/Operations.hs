@@ -62,7 +62,6 @@ import Agent.MCP.Types
       mcpToolDecoder,
       projectRawOr )
 import Agent.ToolDispatch ( typedStreamingTool )
-import Agent.Tools.IO ()
 import Agent.Tools.Types
     ( AppTool(..),
       ApprovalRule(..),

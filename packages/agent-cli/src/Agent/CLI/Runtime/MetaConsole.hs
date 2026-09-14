@@ -8,12 +8,13 @@ module Agent.CLI.Runtime.MetaConsole
     ( MetaSecretValue(..)
     , applyMetaConfigActions
     , buildMetaContext
+    , collectMetaSecretsWith
     , isMetaConfigAction
     , metaConfigRequiresRestart
     , runMetaPlanner
     ) where
 
-import Agent.CLI.Session.Request
+import Agent.Runtime.Session.Request
     ( readSessionRequestParams
     )
 import Agent.Cancel (CancelFlag)
@@ -23,7 +24,7 @@ import Agent.CLI.Command
     , currentEffort
     , currentModel
     )
-import Agent.CLI.Config
+import Agent.Runtime.Config
     ( HarnessConfig(..)
     , LspConfig(..)
     , LspServerConfig(..)
@@ -32,7 +33,7 @@ import Agent.CLI.Config
     , WebFetchConfig(..)
     , mcpUsesConnectionCredentials
     )
-import Agent.CLI.GatewayClient (cachedGatewayModels, gatewayModelIds)
+import Agent.Runtime.GatewayClient (cachedGatewayModels, gatewayModelIds)
 import Agent.CLI.Interrupt (withTurnCancel)
 import Agent.CLI.MetaConsole
     ( MetaAction(..)
@@ -44,7 +45,7 @@ import Agent.CLI.MetaConsole
     , redactMetaContext
     , runMetaConsoleWithCancel
     )
-import Agent.CLI.ModelConfig
+import Agent.Runtime.ModelConfig
     ( organizationGatewayConnectionId
     , CatalogModel(..)
     , catalogModels
@@ -56,6 +57,8 @@ import Agent.ReasoningEffort (reasoningEffortText)
 import Agent.Responses.Types (ResponseCreateParams(..))
 import Control.Applicative ((<|>))
 import Control.Monad (foldM, when)
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Trans.Except (ExceptT, runExceptT, throwE)
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import Data.IORef (readIORef)
@@ -84,6 +87,46 @@ instance Show MetaSecretValue where
             <> " "
             <> show key
             <> " <redacted>"
+
+-- | Collect in action order, stopping at the first cancelled prompt.
+collectMetaSecretsWith
+    :: (Text -> Text -> IO (Maybe Text))
+    -> [MetaAction]
+    -> IO (Either Text [MetaSecretValue])
+collectMetaSecretsWith prompt actions =
+    runExceptT $ foldM (collectOneMetaSecret prompt) [] actions
+
+collectOneMetaSecret
+    :: (Text -> Text -> IO (Maybe Text))
+    -> [MetaSecretValue]
+    -> MetaAction
+    -> ExceptT Text IO [MetaSecretValue]
+collectOneMetaSecret prompt values action = case action of
+    MetaSetMcpSecretEnv server key -> do
+        value <- requireSecret
+            ("secret input for MCP server '" <> server <> "' was cancelled")
+            ("MCP " <> server <> " · " <> key)
+            ("Enter the value for environment variable "
+                <> key
+                <> " on MCP server "
+                <> server
+                <> ". It stays local and is never sent to the model.")
+        pure (values <> [MetaMcpSecretValue server key value])
+    MetaSetLspSecretEnv server key -> do
+        value <- requireSecret
+            ("secret input for LSP server '" <> server <> "' was cancelled")
+            ("LSP " <> server <> " · " <> key)
+            ("Enter the value for environment variable "
+                <> key
+                <> " on LSP server "
+                <> server
+                <> ". It stays local and is never sent to the model.")
+        pure (values <> [MetaLspSecretValue server key value])
+    _ -> pure values
+  where
+    requireSecret cancelled title body = do
+        value <- liftIO $ prompt title body
+        maybe (throwE cancelled) pure value
 
 -- | Apply all persistent actions to one in-memory value.  The caller saves
 -- the result once, so a bad action cannot leave a partially-written plan.

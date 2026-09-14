@@ -160,6 +160,7 @@ import qualified Brick.Widgets.Border as Border ()
 import qualified Agent.CLI.TUI.Bridge as Bridge ()
 import qualified Agent.CLI.TUI.Composer as Composer
     ( drawSlashMenu,
+      drawBackgroundTaskStatus,
       drawQueuedInputs,
       drawComposer )
 import qualified Data.Map.Strict as Map ()
@@ -197,7 +198,7 @@ import qualified Graphics.Vty.CrossPlatform as Vty ()
 
 import Agent.CLI.TUI.Render.Blocks (cacheableBlock, todoStatusAttr)
 import Agent.CLI.TUI.Render.Overlays
-    ( drawNotice, drawFollowStatus, drawFooter, drawPermission, drawResume
+    ( drawNotice, drawFooter, drawPermission, drawResume
     , drawChoice, drawTextPrompt, drawMetaConsole, choiceRowColumns
     , filterChoiceRowLimit
     , onboardingVisibleRowIndices
@@ -261,9 +262,9 @@ drawMain state =
                 , drawNotice state
                 , Composer.drawQueuedInputs state.appUi
                 , Composer.drawSlashMenu state
-                , drawFollowStatus state.appUi
                 , drawLiveTodos (activeConversationUi state)
                 , drawPromptActivity state
+                , Composer.drawBackgroundTaskStatus state.appUi
                 , case textOverlay state of
                     Just prompt
                         | prompt.textInputMode == TextInputPlanning ->

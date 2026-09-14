@@ -3,10 +3,10 @@
 module Agent.CLI.Voice.Session (runTerminalVoiceCall, runSessionVoiceCall) where
 
 import Agent.Cancel (resetCancel, waitCancel)
-import Agent.CLI.Auth (LoadedAuth(..), loadDirectOpenAiAuth)
+import Agent.Accounts.Auth (LoadedAuth(..), loadDirectOpenAiAuth)
 import Agent.CLI.ActiveAccount (ActiveAccount(..), readActiveAccount)
-import Agent.CLI.GatewayBoundary (GatewayBoundary(..), withGatewayTurnBoundary, renderGatewayBoundaryError)
-import Agent.CLI.GatewayClient (GatewayCredential(..), loadGatewayCredential, validateGatewayCredential)
+import Agent.Runtime.GatewayBoundary (GatewayBoundary(..), withGatewayTurnBoundary, renderGatewayBoundaryError)
+import Agent.Runtime.GatewayClient (GatewayCredential(..), loadGatewayCredential, validateGatewayCredential)
 import Agent.CLI.Interrupt (withTurnCancel)
 import Agent.CLI.ProviderTransition (TurnResult(..))
 import Agent.CLI.Render (RenderConfig(..), putTextLn)

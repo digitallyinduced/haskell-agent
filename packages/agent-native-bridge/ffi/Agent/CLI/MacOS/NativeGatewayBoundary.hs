@@ -14,9 +14,9 @@ module Agent.CLI.MacOS.NativeGatewayBoundary
     , nativeSessionRouteMatchesBoundary
     ) where
 
-import qualified Agent.CLI.GatewayBoundary as GatewayBoundary
-import Agent.CLI.GatewayClient (GatewayCredential)
-import Agent.CLI.Session (SessionMeta(..), loadSessionMeta)
+import qualified Agent.Runtime.GatewayBoundary as GatewayBoundary
+import Agent.Runtime.GatewayClient (GatewayCredential)
+import Agent.Runtime.Session (SessionMeta(..), loadSessionMeta)
 import Agent.Store.Postgres.Connection (StorePool)
 import Data.Bifunctor (first)
 import Data.Either (isRight)

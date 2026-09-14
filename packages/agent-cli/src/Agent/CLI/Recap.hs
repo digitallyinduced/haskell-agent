@@ -36,7 +36,7 @@ import Agent.CLI.Btw
     , sideCallSnapshotParams
     , sideCallSnapshotTranscript
     )
-import Agent.CLI.Error (formatApiErrorInline)
+import Agent.Runtime.Error (formatApiErrorInline)
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)

@@ -1,7 +1,7 @@
 module Agent.CLI.MetaConsoleSpec (spec) where
 
-import Agent.CLI.Session.Request (newSessionRequestState, readSessionRequestParams)
-import Agent.CLI.Session (Persistence(..))
+import Agent.Runtime.Session.Request (newSessionRequestState, readSessionRequestParams)
+import Agent.Runtime.Session (Persistence(..))
 import Agent.CLI.MetaConsole
 import Agent.Loop
     ( Backend(..)

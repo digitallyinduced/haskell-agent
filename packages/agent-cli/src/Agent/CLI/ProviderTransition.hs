@@ -11,7 +11,7 @@ module Agent.CLI.ProviderTransition
     , withOptimisticPromptTarget
     ) where
 
-import Agent.CLI.Models (ModelTarget(..))
+import Agent.Runtime.Models (ModelTarget(..))
 import Agent.CLI.Options (CliOptions(..))
 import Agent.ReasoningEffort (ReasoningEffort)
 import Agent.Error (ApiError)

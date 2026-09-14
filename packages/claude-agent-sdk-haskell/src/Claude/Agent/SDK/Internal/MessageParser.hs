@@ -188,7 +188,7 @@ streamEventDecoder = Json.object do
     event <- Json.atKeyOptional "event" rawJsonDecoder
         >>= maybe (fail "stream event is missing `event`") pure
     streamToolUse <- Json.atKeyOptional "event" streamToolUseDecoder
-        >>= pure . (>>= id)
+        >>= pure . join
     parentToolUseId <- optionalNonEmptyText "parent_tool_use_id"
     hasParentToolUseId <- parentFieldPresent
     pure StreamEvent{..}
@@ -200,7 +200,7 @@ streamToolUseDecoder = Json.withType \case
         case eventType of
             Just "content_block_start" ->
                 Json.atKeyOptional "content_block" streamToolBlockDecoder
-                    >>= pure . (>>= id)
+                    >>= pure . join
             _ -> pure Nothing
     _ -> pure Nothing
 
@@ -466,7 +466,7 @@ optionalOrigin key =
                     Right origin ->
                         pure (Just origin)
             _ -> pure Nothing)
-        >>= pure . (>>= id)
+        >>= pure . join
 
 originDecoder :: RawJson -> Json.Decoder MessageOrigin
 originDecoder raw = Json.object do
@@ -489,7 +489,7 @@ requiredText
     -> Json.FieldsDecoder Text
 requiredText key err =
     Json.atKeyOptional key tolerantOptionalText >>= \value ->
-        maybe (fail (Text.unpack err)) pure (value >>= id)
+        maybe (fail (Text.unpack err)) pure (join value)
 
 requiredNonEmptyText
     :: Text
@@ -498,7 +498,7 @@ requiredNonEmptyText
 requiredNonEmptyText key err =
     Json.atKeyOptional key tolerantOptionalText >>= \value ->
         maybe (fail (Text.unpack err)) pure
-            (value >>= id >>= nonEmptyText)
+            (join value >>= nonEmptyText)
 
 requiredBool
     :: Text
@@ -506,22 +506,22 @@ requiredBool
     -> Json.FieldsDecoder Bool
 requiredBool key err =
     Json.atKeyOptional key tolerantOptionalBool >>= \value ->
-        maybe (fail (Text.unpack err)) pure (value >>= id)
+        maybe (fail (Text.unpack err)) pure (join value)
 
 optionalText :: Text -> Json.FieldsDecoder (Maybe Text)
 optionalText key =
     (Json.atKeyOptional key tolerantOptionalText)
-        >>= pure . (>>= id)
+        >>= pure . join
 
 optionalNonEmptyText :: Text -> Json.FieldsDecoder (Maybe Text)
 optionalNonEmptyText key =
     Json.atKeyOptional key tolerantOptionalText >>= \value ->
-        pure (value >>= id >>= nonEmptyText)
+        pure (join value >>= nonEmptyText)
 
 optionalBool :: Text -> Json.FieldsDecoder (Maybe Bool)
 optionalBool key =
     (Json.atKeyOptional key tolerantOptionalBool)
-        >>= pure . (>>= id)
+        >>= pure . join
 
 optionalRaw :: Text -> Json.FieldsDecoder (Maybe RawJson)
 optionalRaw key =
@@ -529,7 +529,7 @@ optionalRaw key =
         Json.withType \case
             Json.VNull -> pure Nothing
             _ -> Just <$> rawJsonDecoder)
-        >>= pure . (>>= id)
+        >>= pure . join
 
 optionalTyped
     :: Text
@@ -540,7 +540,7 @@ optionalTyped key decoder =
         Json.withType \case
             Json.VNull -> pure Nothing
             _ -> Just <$> decoder)
-        >>= pure . (>>= id)
+        >>= pure . join
 
 optionalNumber
     :: Text
@@ -551,7 +551,7 @@ optionalNumber key decoder =
         Json.withType \case
             Json.VNumber -> Just <$> decoder
             _ -> pure Nothing)
-        >>= pure . (>>= id)
+        >>= pure . join
 
 nonNegativeNumber :: Text -> Json.FieldsDecoder Int
 nonNegativeNumber key =
@@ -561,7 +561,7 @@ optionalNonNegativeNumber :: Text -> Json.FieldsDecoder (Maybe Int)
 optionalNonNegativeNumber key =
     fmap (\value -> if value >= 0 then Just value else Nothing)
         <$> optionalNumber key Json.int
-        >>= pure . (>>= id)
+        >>= pure . join
 
 optionalNonNegativeNumberDefault :: Text -> Json.FieldsDecoder Int
 optionalNonNegativeNumberDefault key =

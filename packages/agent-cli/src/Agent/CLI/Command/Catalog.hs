@@ -22,7 +22,8 @@ slashCommands =
     , codexCmd "fast" [] "/fast" "Toggle the Fast service tier" False
     , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)" True
     , cmd "view-plan" ["show-plan", "plan-view"] "/view-plan" "Show the saved session plan" False
-    , cmd "queue" [] "/queue" "Show prompts waiting in the input queue" False
+    , cmd "queue" [] "/queue [prompt]" "Queue a prompt after the current turn, or show queued prompts" True
+    , cmd "steer" [] "/steer <prompt>" "Steer the current turn (the default for plain prompts)" True
     , cmd "transcript" ["log"] "/transcript" "Open the session transcript in a pager" False
     , cmd "edit-prompt" [] "/edit-prompt" "Edit a prompt draft without submitting it" False
     , cmd "context" [] "/context" "Show context-window usage and estimates" False

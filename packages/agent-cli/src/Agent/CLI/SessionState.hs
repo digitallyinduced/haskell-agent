@@ -7,7 +7,7 @@ module Agent.CLI.SessionState
     ) where
 
 import Agent.CLI.Session.ConversationStore (newConversationStore)
-import Agent.CLI.Session.History (LiveConversation)
+import Agent.Runtime.Session.History (LiveConversation)
 import Agent.Loop (ImageAttachment)
 import Data.IORef (IORef, newIORef)
 import Data.Text (Text)

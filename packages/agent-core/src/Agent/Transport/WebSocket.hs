@@ -6,6 +6,7 @@ module Agent.Transport.WebSocket
     , WebSocketSessionOptions(..)
     , defaultWebSocketSessionOptions
     , withWebSocketSession
+    , withOwnedWebSocketSession
     , closeWebSocketSession
     , withWebSocketRequest
     , withWebSocketRequestWithTimeout
@@ -27,7 +28,7 @@ import Agent.Retry
     ( ExceptionRetry(..)
     , retryingBeforeCommit
     )
-import Control.Concurrent.Async (withAsync)
+import Control.Concurrent.Async (waitCatchSTM, withAsync)
 import Control.Concurrent.STM
 import qualified Control.Exception as Exception
 import qualified Control.Exception.Safe as Safe
@@ -121,6 +122,48 @@ withWebSocketSession options connection action =
     withClientPings inner = case options.clientPingIntervalSeconds of
         Just seconds | seconds > 0 -> WS.withPingThread connection seconds (pure ()) inner
         _ -> inner
+
+-- | Own the physical connection independently of the caller's session action.
+-- An abandoned response ends the connection scope immediately, cancelling the
+-- pumps and releasing the socket even when the caller keeps the logical session
+-- alive. The connector must bracket its physical transport; merely returning a
+-- borrowed 'WS.Connection' cannot provide this guarantee.
+--
+-- The owner is scoped to this call, including during connection establishment.
+-- Setup exceptions propagate before the session action starts. Once published,
+-- connection failures are observed through the session's normal error state.
+withOwnedWebSocketSession
+    :: WebSocketSessionOptions
+    -> ((WS.Connection -> IO ()) -> IO ())
+    -> (WebSocketSession -> IO value)
+    -> IO value
+withOwnedWebSocketSession options connect action = do
+    published <- newEmptyTMVarIO
+    let ownConnection =
+            connect (\connection ->
+                withWebSocketSession options connection \session -> do
+                    atomically (putTMVar published session)
+                    atomically do
+                        state <- readTVar session.sessionState
+                        case state of
+                            SessionClosed{} -> pure ()
+                            SessionPoisoned{} -> pure ()
+                            _ -> retry)
+                `Safe.finally` atomically do
+                    available <- tryReadTMVar published
+                    case available of
+                        Just session -> closeSession session
+                            (ConnectionError "WebSocket connection owner stopped")
+                        Nothing -> pure ()
+    withAsync ownConnection \owner -> do
+        ready <- atomically $
+            (Right <$> readTMVar published)
+                `orElse` (Left <$> waitCatchSTM owner)
+        case ready of
+            Right session -> action session
+            Left (Left exception) -> Exception.throwIO exception
+            Left (Right ()) -> Safe.throwIO $
+                userError "WebSocket connector returned without a connection"
 
 -- | Close an idle reusable session and ask the writer pump to close the
 -- underlying WebSocket. Active requests observe the supplied connection error.
