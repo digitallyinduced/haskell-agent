@@ -10,6 +10,7 @@ module Agent.CLI.ImagePreview
     , parseImagePreviewProtocol
     , kittyImageSequence
     , kittyPlacedImageSequence
+    , kittyPlacedImageSequenceWithSource
     , kittyDeleteImageSequence
     , kittyCompatibleAttachment
     , itermImageSequence
@@ -118,6 +119,7 @@ kittyImageSequence imageId _columns rows mime bytes =
         imageId
         Nothing
         rows
+        Nothing
         compatible.imageMime
         compatible.imageBytes
 
@@ -133,12 +135,35 @@ kittyPlacedImageSequence
     -> ByteString
     -> Text
 kittyPlacedImageSequence imageId placementId columns rows mime bytes =
+    kittyPlacedImageSequenceWithSource
+        imageId
+        placementId
+        columns
+        rows
+        Nothing
+        mime
+        bytes
+
+-- | Like 'kittyPlacedImageSequence', with an optional source rectangle in
+-- pixels (@x,y,w,h@). A cropped rectangle displays one slice of the bitmap
+-- instead of stretching the whole image into the leftover cells.
+kittyPlacedImageSequenceWithSource
+    :: Int
+    -> Int
+    -> Int
+    -> Int
+    -> Maybe (Int, Int, Int, Int)
+    -> Text
+    -> ByteString
+    -> Text
+kittyPlacedImageSequenceWithSource imageId placementId columns rows sourceRect mime bytes =
     let compatible =
             kittyCompatibleAttachment (ImageAttachment mime bytes)
     in kittyTransmitSequence
         imageId
         (Just (placementId, columns))
         rows
+        sourceRect
         compatible.imageMime
         compatible.imageBytes
 
@@ -161,13 +186,25 @@ kittyTransmitSequence
     :: Int
     -> Maybe (Int, Int)
     -> Int
+    -> Maybe (Int, Int, Int, Int)
     -> Text
     -> ByteString
     -> Text
-kittyTransmitSequence imageId placement rows mime bytes =
+kittyTransmitSequence imageId placement rows sourceRect mime bytes =
     let fmt = kittyFormat mime
         chunks = chunkBytes 4096 (Base64.encode bytes)
         total = length chunks
+        sourceKeys = case sourceRect of
+            Nothing -> ""
+            Just (sourceX, sourceY, sourceWidth, sourceHeight) ->
+                ",x="
+                    <> Text.pack (show sourceX)
+                    <> ",y="
+                    <> Text.pack (show sourceY)
+                    <> ",w="
+                    <> Text.pack (show sourceWidth)
+                    <> ",h="
+                    <> Text.pack (show sourceHeight)
         transmit n chunk =
             let more = if n + 1 < total then 1 else 0 :: Int
                 controls
@@ -186,6 +223,7 @@ kittyTransmitSequence imageId placement rows mime bytes =
                                         <> ",p="
                                         <> Text.pack (show placementId)
                                         <> ",z=1"
+                            <> sourceKeys
                             <> ",C=1"
                     -- The protocol permits only m and optionally q after the
                     -- first chunk. Repeating a/i makes larger images fail in
