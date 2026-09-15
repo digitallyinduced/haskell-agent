@@ -149,9 +149,10 @@ openStartupOwnerPool config =
 -- | A socket path can outlive its intended configuration or be shared by a
 -- different PostgreSQL instance. Before bypassing lifecycle management, prove
 -- that the connected server is backed by this configuration's data directory.
+-- A single attempt keeps a failed probe on the prompt lifecycle fallback.
 warmPoolMatchesConfig :: ManagedPostgresConfig -> StorePool -> IO Bool
 warmPoolMatchesConfig config pool =
-    withSession
+    withSessionSingleAttempt
         pool
         (Session.statement () managedDataDirectoryStatement) >>= \case
         Left _ -> pure False

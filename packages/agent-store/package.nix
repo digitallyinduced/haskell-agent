@@ -1,6 +1,6 @@
 { mkDerivation, aeson, async, base, bytestring, containers
 , contravariant, directory, filelock, filepath, hasql, hasql-pool
-, hasql-transaction, hspec, lib, pqi, pqi-ffi, process
+, hasql-transaction, hspec, lib, mtl, pqi, pqi-ffi, process
 , safe-exceptions, stm, temporary, text, time, unix, uuid-types
 , vector
 }:
@@ -10,12 +10,13 @@ mkDerivation {
   src = ./.;
   libraryHaskellDepends = [
     aeson async base bytestring containers contravariant directory
-    filelock filepath hasql hasql-pool hasql-transaction pqi pqi-ffi
-    process safe-exceptions stm text time unix uuid-types vector
+    filelock filepath hasql hasql-pool hasql-transaction mtl pqi
+    pqi-ffi process safe-exceptions stm text time unix uuid-types
+    vector
   ];
   testHaskellDepends = [
-    async base bytestring filelock filepath hasql hspec safe-exceptions
-    temporary text time uuid-types
+    async base bytestring filelock filepath hasql hasql-pool hspec
+    safe-exceptions temporary text time uuid-types
   ];
   benchmarkHaskellDepends = [
     async base containers contravariant hasql safe-exceptions temporary
