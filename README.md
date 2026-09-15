@@ -55,7 +55,11 @@ have to be.
 - **Cross-provider state and billing policy:** provider transitions preserve
   the pending turn and durable session state. Credential failover understands
   account cooldowns and prevents automatic fallback from silently converting
-  subscription usage into API-credit spending.
+  subscription usage into API-credit spending. When a usage window is
+  exhausted and no other provider can take over, an interactive session waits
+  for the provider's reset time (Esc cancels) and then resumes on its own:
+  an interrupted turn continues with a real user message explaining the
+  interruption, while a turn that never started is simply submitted again.
 - **Explicit response ownership:** reusable WebSocket requests carry
   generation-scoped ownership. If an exchange is interrupted, malformed, or
   returned before its terminal frame, the connection is poisoned rather than

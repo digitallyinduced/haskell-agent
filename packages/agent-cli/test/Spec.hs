@@ -118,6 +118,7 @@ import qualified Agent.CLI.TUIScrollSpec as TUIScrollSpec
 import qualified Agent.CLI.TUITranscriptSpec as TUITranscriptSpec
 import qualified Agent.CLI.TUIMeasuredViewportSpec as TUIMeasuredViewportSpec
 import qualified Agent.CLI.UsageSpec as UsageSpec
+import qualified Agent.CLI.UsageLimitRecoverySpec as UsageLimitRecoverySpec
 import qualified Agent.CLI.WorktreeSpec as WorktreeSpec
 import qualified Agent.CLI.WorktreeCleanSpec as WorktreeCleanSpec
 import qualified Agent.CLI.WorktreeIgnoredSpec as WorktreeIgnoredSpec
@@ -260,6 +261,7 @@ specs = do
     TUITranscriptSpec.spec
     TUIMeasuredViewportSpec.spec
     UsageSpec.spec
+    UsageLimitRecoverySpec.spec
     WorktreeSpec.spec
     WorktreeCleanSpec.spec
     WorktreeIgnoredSpec.spec

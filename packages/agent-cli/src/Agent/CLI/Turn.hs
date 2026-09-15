@@ -854,7 +854,7 @@ finishGeneralFailureTurn executed err = do
         maybeIncompleteTurn
         (uncommittedAssistantText executed.executedLoop)
     planState <- readIORef env.sessionPlanMode.planStateRef
-    pure $ TurnFailed persistedFailureMessage PendingTurn
+    pure $ TurnFailed persistedFailureMessage (transportFailure err) PendingTurn
         { pendingPromptText = request.busyPromptText
         -- The live transcript checkpoints the exact stamped inputs, including
         -- attachments, so do not retain a second potentially large copy.
@@ -863,6 +863,15 @@ finishGeneralFailureTurn executed err = do
         , pendingExitAfter = False
         , pendingPlanState = planState
         }
+
+-- | The provider failure behind a transport error, so the session lifecycle
+-- can schedule an automatic retry or resumption. Other failures carry only
+-- their rendered text.
+transportFailure :: LoopError -> Maybe ApiError
+transportFailure = \case
+    LoopTransport apiError -> Just apiError
+    LoopTransportAfterOutput apiError -> Just apiError
+    _ -> Nothing
 
 finishSuccessfulTurn
     :: ExecutedBusyTurn

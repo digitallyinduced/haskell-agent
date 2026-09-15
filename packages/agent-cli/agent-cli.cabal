@@ -226,6 +226,7 @@ library
                     , Agent.CLI.ProviderFallback
                     , Agent.CLI.ProviderAvailability
                     , Agent.CLI.ProviderTransition
+                    , Agent.CLI.UsageLimitRecovery
                     , Agent.CLI.Render
                     , Agent.CLI.ReplMode
                     , Agent.CLI.Runtime.MetaConsole
@@ -620,6 +621,7 @@ test-suite agent-cli-test
                     , Agent.CLI.ProviderFallbackSpec
                     , Agent.CLI.ProviderAvailabilitySpec
                     , Agent.CLI.ProviderTransitionSpec
+                    , Agent.CLI.UsageLimitRecoverySpec
                     , Agent.CLI.RequestSpec
                     , Agent.CLI.RenderSpec
                     , Agent.CLI.ReplStatusSpec
