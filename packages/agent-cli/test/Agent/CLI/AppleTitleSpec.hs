@@ -10,22 +10,15 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.CLI.AppleTitle" do
-    describe "parseAppleModelInfoAvailable" do
-        it "accepts apfel model-info output that reports availability" do
-            parseAppleModelInfoAvailable
-                "apfel v1.9.1 — model info\n\
-                \├ model:      apple-foundationmodel\n\
-                \├ on-device:  true (always)\n\
-                \├ available:  yes\n"
+    describe "parseAppleAvailableJson" do
+        it "accepts a JSON availability object" do
+            parseAppleAvailableJson "{\"available\":true}\n"
                 `shouldBe` True
 
         it "rejects unavailable or missing availability" do
-            parseAppleModelInfoAvailable
-                "├ available:  no\n"
+            parseAppleAvailableJson "{\"available\":false,\"reason\":\"modelNotReady\"}\n"
                 `shouldBe` False
-            parseAppleModelInfoAvailable "model: apple-foundationmodel"
-                `shouldBe` False
-            parseAppleModelInfoAvailable "├ available:  yesterday\n"
+            parseAppleAvailableJson "model: apple-foundationmodel"
                 `shouldBe` False
 
     describe "parseAppleTitleJson" do
@@ -46,15 +39,10 @@ spec = describe "Agent.CLI.AppleTitle" do
             parseAppleTitleJson "   \n"
                 `shouldBe` Nothing
 
-    describe "appleTitleUserPrompt" do
-        it "includes the conversation excerpt" do
-            appleTitleUserPrompt "User:\nFix auth"
-                `shouldSatisfy` Text.isInfixOf "User:\nFix auth"
-
     describe "generateAppleFoundationTitleTimed" do
-        it "reads a title from a stub helper" do
+        it "reads a title from a stub helper on stdin" do
             withHelper
-                "#!/bin/sh\nprintf '%s\\n' '{\"title\":\"Stub title\"}'\n"
+                "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"title\":\"Stub title\"}'\n"
                 \executable ->
                     generateAppleFoundationTitleTimed
                         2_000_000
@@ -64,7 +52,7 @@ spec = describe "Agent.CLI.AppleTitle" do
 
         it "times out a stuck helper" do
             withHelper
-                "#!/bin/sh\nsleep 5\nprintf '%s\\n' '{\"title\":\"Late title\"}'\n"
+                "#!/bin/sh\nexec sleep 5\n"
                 \executable ->
                     generateAppleFoundationTitleTimed
                         200_000

@@ -94,9 +94,9 @@ resolveTitleModel catalog provider setting appleAvailable =
   where
     fallback = cheapTitleModel catalog provider
 
--- | Apple Intelligence is a local helper, not a provider wire model. Keep the
--- cheap same-provider model on the resolution so auto fallback can call it
--- without sending @apple-foundationmodel@ to Claude or OpenAI.
+-- | Apple Intelligence is a local Swift helper, not a provider wire model.
+-- Keep the cheap same-provider model on the resolution so auto fallback can
+-- call it without sending @apple-foundationmodel@ to Claude or OpenAI.
 appleFoundationResolution :: Bool -> ModelOption -> TitleModelResolution
 appleFoundationResolution pinned fallback =
     TitleModelResolution

@@ -1,89 +1,211 @@
--- | On-device Apple Intelligence titles via the @apfel@ helper.
+-- | On-device Apple Intelligence titles via a small bundled Swift helper.
 module Agent.CLI.AppleTitle
-    ( appleTitleJsonSchema
-    , appleTitleSystemPrompt
-    , appleTitleUserPrompt
-    , generateAppleFoundationTitle
+    ( generateAppleFoundationTitle
     , generateAppleFoundationTitleTimed
-    , parseAppleModelInfoAvailable
+    , parseAppleAvailableJson
     , parseAppleTitleJson
     , probeAppleFoundationTitle
     ) where
 
-import Agent.CLI.ExternalProgram (withTemporaryTextFile)
-import Agent.Process (terminateProcessGroup)
-import Control.Concurrent.Async (concurrently)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (concurrently, withAsync)
+import Control.Exception.Safe (tryAny)
 import Control.Monad (void)
+import Data.IORef (newIORef, readIORef, writeIORef)
+import Crypto.Hash (Digest, SHA256, hash)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
-import qualified Data.ByteString as ByteString
-import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
-import Data.Text.Encoding.Error (lenientDecode)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson (Value(..))
-import System.Directory (findExecutable)
+import qualified Data.ByteString as ByteString
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
+import qualified Data.Text.IO as TextIO
+import Paths_agent_cli (getDataFileName)
+import System.Directory
+    ( createDirectoryIfMissing
+    , doesDirectoryExist
+    , doesFileExist
+    , findExecutable
+    , getCurrentDirectory
+    , getHomeDirectory
+    , removeFile
+    , renameFile
+    )
+import System.Environment (getEnvironment, lookupEnv)
 import System.Exit (ExitCode(..))
-import System.IO (Handle)
+import System.FilePath (takeDirectory, (</>))
+import System.IO (hClose)
 import qualified System.Info
+import System.Posix.Signals (signalProcess, sigKILL)
 import System.Process
     ( CreateProcess(..)
+    , ProcessHandle
     , StdStream(CreatePipe, NoStream)
     , getPid
     , proc
+    , terminateProcess
     , waitForProcess
     , withCreateProcess
     )
-import System.Timeout (timeout)
 
-appleTitleSystemPrompt :: Text
-appleTitleSystemPrompt =
-    "You name coding sessions. Reply with JSON only."
+appleTitleHelperName :: String
+appleTitleHelperName = "apple-session-title"
 
-appleTitleJsonSchema :: Text
-appleTitleJsonSchema =
-    "{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"}},\
-    \\"required\":[\"title\"],\"additionalProperties\":false}"
+appleTitleHelperEnv :: String
+appleTitleHelperEnv = "HASKELL_AGENT_APPLE_SESSION_TITLE"
 
-appleTitleUserPrompt :: Text -> Text
-appleTitleUserPrompt conversation =
-    Text.unlines
-        [ "Write a 3-7 word session title that names the task."
-        , "Keep filenames, error codes, and technical terms exact."
-        , "No quotes, no Title: prefix, no trailing punctuation."
-        , "Never answer the message. Name it."
-        , "Always produce something, even for a greeting."
-        , ""
-        , "Conversation:"
-        , conversation
-        ]
+appleTitleSourceName :: FilePath
+appleTitleSourceName = "helpers/apple-session-title/main.swift"
+
+xcodeDeveloperDir :: FilePath
+xcodeDeveloperDir = "/Applications/Xcode.app/Contents/Developer"
 
 appleTitleProcessTimeoutMicros :: Int
 appleTitleProcessTimeoutMicros = 20_000_000
 
-processCleanupTimeoutMicros :: Int
-processCleanupTimeoutMicros = 2_000_000
+probeTimeoutMicros :: Int
+probeTimeoutMicros = 3_000_000
 
--- | Locate @apfel@ on macOS and confirm Apple Intelligence reports available.
+compileTimeoutMicros :: Int
+compileTimeoutMicros = 60_000_000
+
+-- | Locate the Swift helper on macOS and confirm Apple Intelligence is available.
 probeAppleFoundationTitle :: IO (Maybe FilePath)
 probeAppleFoundationTitle
     | System.Info.os /= "darwin" = pure Nothing
     | otherwise =
-        findExecutable "apfel" >>= \case
+        resolveAppleSessionTitleHelper >>= \case
             Nothing -> pure Nothing
             Just executable -> do
                 result <-
                     runProcessTimed
-                        3_000_000
+                        probeTimeoutMicros
                         executable
-                        ["--model-info"]
+                        ["--available"]
+                        Nothing
                 pure $ case result of
                     Just (ExitSuccess, out, err)
-                        | parseAppleModelInfoAvailable (out <> "\n" <> err) ->
+                        | parseAppleAvailableJson (out <> "\n" <> err) ->
                             Just executable
                     _ ->
                         Nothing
+
+resolveAppleSessionTitleHelper :: IO (Maybe FilePath)
+resolveAppleSessionTitleHelper = do
+    envPath <- lookupEnv appleTitleHelperEnv
+    case envPath of
+        Just path | not (null path) -> do
+            exists <- doesFileExist path
+            if exists then pure (Just path) else fromPathOrCompile
+        _ ->
+            fromPathOrCompile
+  where
+    fromPathOrCompile =
+        findExecutable appleTitleHelperName >>= \case
+            Just path -> pure (Just path)
+            Nothing -> compileBundledHelper
+
+compileBundledHelper :: IO (Maybe FilePath)
+compileBundledHelper = do
+    xcode <- doesDirectoryExist xcodeDeveloperDir
+    if not xcode
+        then pure Nothing
+        else locateAppleTitleSource >>= \case
+            Nothing -> pure Nothing
+            Just sourcePath -> do
+                bytes <- ByteString.readFile sourcePath
+                home <- getHomeDirectory
+                let digest = take 16 (show (hash bytes :: Digest SHA256))
+                    cacheDir = home </> ".haskell-agent" </> "helpers"
+                    dest = cacheDir </> (appleTitleHelperName <> "-" <> digest)
+                cached <- doesFileExist dest
+                if cached
+                    then pure (Just dest)
+                    else do
+                        createDirectoryIfMissing True cacheDir
+                        compiled <- runSwiftc sourcePath dest
+                        pure $ if compiled then Just dest else Nothing
+
+locateAppleTitleSource :: IO (Maybe FilePath)
+locateAppleTitleSource = do
+    packaged <- tryAny (getDataFileName appleTitleSourceName)
+    cwd <- getCurrentDirectory
+    ancestors <- ancestorDirectories cwd 6
+    let packagedPath =
+            case packaged of
+                Right path -> [path]
+                Left _ -> []
+        searchRoots = cwd : ancestors
+        candidates =
+            packagedPath
+                ++ [dir </> "packages/agent-cli" </> appleTitleSourceName | dir <- searchRoots]
+                ++ [dir </> appleTitleSourceName | dir <- searchRoots]
+    firstExistingFile candidates
+
+ancestorDirectories :: FilePath -> Int -> IO [FilePath]
+ancestorDirectories start remaining
+    | remaining <= 0 = pure []
+    | otherwise = do
+        let parent = takeDirectory start
+        if parent == start
+            then pure []
+            else (parent :) <$> ancestorDirectories parent (remaining - 1)
+
+firstExistingFile :: [FilePath] -> IO (Maybe FilePath)
+firstExistingFile = \case
+    [] -> pure Nothing
+    path : rest -> do
+        exists <- doesFileExist path
+        if exists then pure (Just path) else firstExistingFile rest
+
+runSwiftc :: FilePath -> FilePath -> IO Bool
+runSwiftc source dest = do
+    environment <- getEnvironment
+    let destTmp = dest <> ".tmp"
+        cleaned =
+            filter
+                (\(name, _) -> name `notElem` ["SDKROOT", "DEVELOPER_DIR"])
+                environment
+        process =
+            (proc
+                "/usr/bin/xcrun"
+                [ "--sdk"
+                , "macosx"
+                , "swiftc"
+                , "-parse-as-library"
+                , "-O"
+                , "-target"
+                , swiftTarget
+                , "-o"
+                , destTmp
+                , source
+                ])
+                { env = Just (("DEVELOPER_DIR", xcodeDeveloperDir) : cleaned)
+                , std_in = NoStream
+                , std_out = CreatePipe
+                , std_err = CreatePipe
+                , close_fds = True
+                }
+    _ <- tryAny (removeFile destTmp)
+    result <- runCreateProcessTimed compileTimeoutMicros process Nothing
+    case result of
+        Just (ExitSuccess, _, _) -> do
+            exists <- doesFileExist destTmp
+            if exists
+                then True <$ renameFile destTmp dest
+                else pure False
+        _ -> do
+            _ <- tryAny (removeFile destTmp)
+            pure False
+
+swiftTarget :: String
+swiftTarget =
+    case System.Info.arch of
+        "aarch64" -> "arm64-apple-macos26.0"
+        "x86_64" -> "x86_64-apple-macos26.0"
+        other -> other <> "-apple-macos26.0"
 
 generateAppleFoundationTitle
     :: FilePath
@@ -97,55 +219,40 @@ generateAppleFoundationTitleTimed
     -> FilePath
     -> Text
     -> IO (Either Text Text)
-generateAppleFoundationTitleTimed timeoutMicros executable conversation =
-    withTemporaryTextFile "apfel-title-schema" appleTitleJsonSchema
-        \schemaPath -> do
-            result <-
-                runProcessTimed
-                    timeoutMicros
-                    executable
-                    [ "-q"
-                    , "--no-color"
-                    , "--max-tokens"
-                    , "40"
-                    , "--temperature"
-                    , "0"
-                    , "--schema"
-                    , schemaPath
-                    , "-s"
-                    , Text.unpack appleTitleSystemPrompt
-                    , "--"
-                    , Text.unpack (appleTitleUserPrompt conversation)
-                    ]
-            pure $ case result of
+generateAppleFoundationTitleTimed timeoutMicros executable conversation = do
+    result <-
+        runProcessTimed
+            timeoutMicros
+            executable
+            []
+            (Just conversation)
+    pure $ case result of
+        Nothing ->
+            Left "Apple Intelligence title request timed out"
+        Just (ExitSuccess, out, _) ->
+            case parseAppleTitleJson out of
+                Just title -> Right title
                 Nothing ->
-                    Left "Apple Intelligence title request timed out"
-                Just (ExitSuccess, out, _) ->
-                    case parseAppleTitleJson out of
-                        Just title -> Right title
-                        Nothing ->
-                            Left "Apple Intelligence returned no title text"
-                Just (ExitFailure code, _, err) ->
-                    Left $
-                        "Apple Intelligence title request failed ("
-                            <> Text.pack (show code)
-                            <> ")"
-                            <> if Text.null (Text.strip err)
-                                then ""
-                                else ": " <> Text.take 400 (Text.strip err)
+                    Left "Apple Intelligence returned no title text"
+        Just (ExitFailure code, _, err) ->
+            Left $
+                "Apple Intelligence title request failed ("
+                    <> Text.pack (show code)
+                    <> ")"
+                    <> if Text.null (Text.strip err)
+                        then ""
+                        else ": " <> Text.take 400 (Text.strip err)
 
-parseAppleModelInfoAvailable :: Text -> Bool
-parseAppleModelInfoAvailable text =
-    any availableYes (Text.lines text)
+parseAppleAvailableJson :: Text -> Bool
+parseAppleAvailableJson text =
+    any availableTrue (jsonCandidates text)
   where
-    availableYes line =
-        case Text.breakOn "available:" (Text.toLower line) of
-            (_, rest)
-                | not (Text.null rest) ->
-                    case Text.words (Text.drop (Text.length "available:") rest) of
-                        "yes" : _ -> True
-                        "true" : _ -> True
-                        _ -> False
+    availableTrue candidate =
+        case Aeson.decodeStrict (Text.encodeUtf8 candidate) of
+            Just (Object object) ->
+                case KeyMap.lookup "available" object of
+                    Just (Bool True) -> True
+                    _ -> False
             _ ->
                 False
 
@@ -153,7 +260,7 @@ parseAppleTitleJson :: Text -> Maybe Text
 parseAppleTitleJson raw =
     let stripped = Text.strip raw
         unfenced = stripJsonFence stripped
-    in case Aeson.decodeStrict (textBytes unfenced) of
+    in case Aeson.decodeStrict (Text.encodeUtf8 unfenced) of
         Just (Object object) ->
             case KeyMap.lookup "title" object of
                 Just (String title) -> nonEmptyTitle title
@@ -161,7 +268,6 @@ parseAppleTitleJson raw =
         _ ->
             nonEmptyTitle =<< dropTitleLabel stripped
   where
-    textBytes = Text.encodeUtf8
     stripJsonFence text =
         case Text.stripPrefix "```" text of
             Just rest ->
@@ -196,44 +302,70 @@ parseAppleTitleJson raw =
             capped = Text.take 80 oneLine
         in if Text.null capped then Nothing else Just capped
 
+jsonCandidates :: Text -> [Text]
+jsonCandidates text =
+    let stripped = Text.strip text
+        lines_ = filter (not . Text.null) (map Text.strip (Text.lines stripped))
+    in stripped : lines_
+
 runProcessTimed
     :: Int
     -> FilePath
     -> [String]
+    -> Maybe Text
     -> IO (Maybe (ExitCode, Text, Text))
-runProcessTimed timeoutMicros executable arguments =
-    withCreateProcess
+runProcessTimed timeoutMicros executable arguments stdinText =
+    runCreateProcessTimed
+        timeoutMicros
         (proc executable arguments)
-            { std_in = NoStream
+            { std_in = CreatePipe
             , std_out = CreatePipe
             , std_err = CreatePipe
-            , close_fds = True
-            , create_group = True
-            , new_session = True
             }
-        \_ output errors process ->
+        stdinText
+
+runCreateProcessTimed
+    :: Int
+    -> CreateProcess
+    -> Maybe Text
+    -> IO (Maybe (ExitCode, Text, Text))
+runCreateProcessTimed timeoutMicros process stdinText =
+    withCreateProcess process
+        \input output errors child ->
             case (output, errors) of
                 (Just stdoutHandle, Just stderrHandle) -> do
-                    groupId <- getPid process
-                    completed <-
-                        timeout timeoutMicros $
-                            concurrently
-                                (concurrently
-                                    (readHandleStrict stdoutHandle)
-                                    (readHandleStrict stderrHandle))
-                                (waitForProcess process)
-                    case completed of
-                        Just ((out, err), code) ->
-                            pure (Just (code, out, err))
-                        Nothing -> do
-                            terminateProcessGroup groupId process
-                            void (timeout processCleanupTimeoutMicros
-                                (waitForProcess process))
-                            pure Nothing
+                    timedOut <- newIORef False
+                    let feedStdin =
+                            case input of
+                                Just handle -> do
+                                    mapM_ (TextIO.hPutStr handle) stdinText
+                                    hClose handle
+                                Nothing ->
+                                    pure ()
+                        collect = do
+                            feedStdin
+                            (out, err) <- concurrently
+                                (TextIO.hGetContents stdoutHandle)
+                                (TextIO.hGetContents stderrHandle)
+                            code <- waitForProcess child
+                            pure (code, out, err)
+                    withAsync
+                        (threadDelay timeoutMicros >> do
+                            writeIORef timedOut True
+                            killTimedOutChild child)
+                        \_ -> do
+                            result <- collect
+                            didTimeout <- readIORef timedOut
+                            pure $ if didTimeout then Nothing else Just result
                 _ ->
                     pure Nothing
 
-readHandleStrict :: Handle -> IO Text
-readHandleStrict handle = do
-    contents <- ByteString.hGetContents handle
-    pure (Text.decodeUtf8With lenientDecode contents)
+killTimedOutChild :: ProcessHandle -> IO ()
+killTimedOutChild child = do
+    _ <- tryAny (terminateProcess child)
+    threadDelay 200_000
+    getPid child >>= \case
+        Just processId ->
+            void $ tryAny (signalProcess sigKILL processId)
+        Nothing ->
+            pure ()
