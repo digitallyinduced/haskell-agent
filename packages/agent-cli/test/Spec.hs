@@ -34,6 +34,7 @@ import qualified Agent.CLI.AgentSessionsSpec as AgentSessionsSpec
 import qualified Agent.CLI.AgentSessionsWaitGraphSpec as AgentSessionsWaitGraphSpec
 import qualified Agent.CLI.AgentViewportSpec as AgentViewportSpec
 import qualified Agent.CLI.AgentViewportRuntimeSpec as AgentViewportRuntimeSpec
+import qualified Agent.CLI.AppleTitleSpec as AppleTitleSpec
 import qualified Agent.CLI.ApprovalSpec as ApprovalSpec
 import qualified Agent.CLI.ArtifactSpec as ArtifactSpec
 import qualified Agent.CLI.AuthSpec as AuthSpec
@@ -246,6 +247,7 @@ specs = do
     TerminalSpec.spec
     TextLayoutSpec.spec
     SessionStateSpec.spec
+    AppleTitleSpec.spec
     SessionTitleSpec.spec
     SkillsSpec.spec
     SubagentStoreSpec.spec

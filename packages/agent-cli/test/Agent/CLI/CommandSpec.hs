@@ -469,6 +469,9 @@ spec = do
                 `shouldBe` ReplSelection ReplShowTitleModel
             parseReplLine "/title-model haiku"
                 `shouldBe` ReplSelection (ReplSetTitleModel "haiku")
+            parseReplLine "/title-model apple-foundationmodel"
+                `shouldBe`
+                    ReplSelection (ReplSetTitleModel "apple-foundationmodel")
             parseReplLine "/title-model --auto"
                 `shouldBe` ReplSelection ReplClearTitleModel
             parseReplLine "/title-model haiku extra"

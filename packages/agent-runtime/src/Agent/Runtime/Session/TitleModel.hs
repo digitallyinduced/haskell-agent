@@ -1,7 +1,11 @@
 -- | Cheap auxiliary model used for generated session titles.
 module Agent.Runtime.Session.TitleModel
     ( TitleModelResolution(..)
+    , TitleModelSetting(..)
+    , appleFoundationTitleContextWindow
+    , appleFoundationTitleModelId
     , cheapTitleModel
+    , isAppleFoundationTitleModelName
     , resolveTitleModel
     , titleSourceCharBudget
     ) where
@@ -18,17 +22,35 @@ import Agent.Runtime.Models
 import Data.Text (Text)
 import qualified Data.Text as Text
 
+-- | Persisted title-model choice. 'Nothing' at the settings layer means auto.
+data TitleModelSetting
+    = TitleModelAppleFoundation
+    | TitleModelPinned !ModelTarget
+    deriving (Eq, Show)
+
 -- | The model a title request should send, independent of the live session
--- model. A pinned setting is used only while its provider matches the session;
--- otherwise the provider's cheap auxiliary model is selected.
+-- model. A pinned provider model is used only while its provider matches the
+-- session. On macOS, auto prefers on-device Apple Intelligence when available.
 data TitleModelResolution = TitleModelResolution
     { titleModelId :: !Text
     , titleWireModelId :: !Text
     , titleContextWindow :: !(Maybe Int)
     , titleReasoningEffort :: !Text
     , titlePinned :: !Bool
+    , titleUsesAppleFoundation :: !Bool
     }
     deriving (Eq, Show)
+
+appleFoundationTitleModelId :: Text
+appleFoundationTitleModelId = "apple-foundationmodel"
+
+appleFoundationTitleContextWindow :: Int
+appleFoundationTitleContextWindow = 4096
+
+isAppleFoundationTitleModelName :: Text -> Bool
+isAppleFoundationTitleModelName name =
+    Text.toLower (Text.strip name)
+        `elem` [appleFoundationTitleModelId, "apple-foundation-model", "apple", "apfel"]
 
 -- | OpenAI's cheap title model. Token cost is low enough that a stronger
 -- reasoning setting is worth using for a better name.
@@ -54,14 +76,38 @@ cheapTitleModel catalog provider =
 resolveTitleModel
     :: ModelCatalog
     -> Provider
-    -> Maybe ModelTarget
+    -> Maybe TitleModelSetting
+    -> Bool
     -> TitleModelResolution
-resolveTitleModel catalog provider pinned =
-    case pinned of
-        Just target | target.targetProvider == provider ->
-            resolutionFromPinned catalog target
-        _ ->
-            resolutionFromOption False (cheapTitleModel catalog provider)
+resolveTitleModel catalog provider setting appleAvailable =
+    case setting of
+        Just TitleModelAppleFoundation ->
+            appleFoundationResolution True fallback
+        Just (TitleModelPinned target)
+            | target.targetProvider == provider ->
+                resolutionFromPinned catalog target
+        _
+            | appleAvailable ->
+                appleFoundationResolution False fallback
+            | otherwise ->
+                resolutionFromOption False fallback
+  where
+    fallback = cheapTitleModel catalog provider
+
+-- | Apple Intelligence is a local Swift helper, not a provider wire model.
+-- Keep the cheap same-provider model on the resolution so auto fallback can
+-- call it without sending @apple-foundationmodel@ to Claude or OpenAI.
+appleFoundationResolution :: Bool -> ModelOption -> TitleModelResolution
+appleFoundationResolution pinned fallback =
+    TitleModelResolution
+        { titleModelId = appleFoundationTitleModelId
+        , titleWireModelId = fallback.modelTarget.targetWireModelId
+        , titleContextWindow = Just appleFoundationTitleContextWindow
+        , titleReasoningEffort =
+            titleReasoningEffortFor fallback.modelTarget.targetModelId
+        , titlePinned = pinned
+        , titleUsesAppleFoundation = True
+        }
 
 resolutionFromPinned :: ModelCatalog -> ModelTarget -> TitleModelResolution
 resolutionFromPinned catalog target =
@@ -77,6 +123,7 @@ resolutionFromPinned catalog target =
                 , titleReasoningEffort =
                     titleReasoningEffortFor target.targetModelId
                 , titlePinned = True
+                , titleUsesAppleFoundation = False
                 }
 
 resolutionFromOption :: Bool -> ModelOption -> TitleModelResolution
@@ -88,6 +135,7 @@ resolutionFromOption pinned option =
         , titleReasoningEffort =
             titleReasoningEffortFor option.modelTarget.targetModelId
         , titlePinned = pinned
+        , titleUsesAppleFoundation = False
         }
 
 -- | Luna is cheap enough that high effort is worth it for a better name.
