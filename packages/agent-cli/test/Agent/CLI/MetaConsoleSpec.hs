@@ -137,6 +137,28 @@ spec = do
                     Left err -> "require a remote URL" `Text.isInfixOf` err
                     Right _ -> False
 
+        it "allows pinning or clearing the session title model" do
+            decodeMetaPlan
+                "{\"summary\":\"haiku titles\",\"actions\":[{\"type\":\"session_command\",\"command\":\"/title-model haiku\"}]}"
+                `shouldBe`
+                    Right MetaPlan
+                        { metaSummary = "haiku titles"
+                        , metaActions = [MetaSessionCommand "/title-model haiku"]
+                        }
+            decodeMetaPlan
+                "{\"summary\":\"auto titles\",\"actions\":[{\"type\":\"session_command\",\"command\":\"/title-model --auto\"}]}"
+                `shouldBe`
+                    Right MetaPlan
+                        { metaSummary = "auto titles"
+                        , metaActions =
+                            [MetaSessionCommand "/title-model --auto"]
+                        }
+            decodeMetaPlan
+                "{\"summary\":\"picker\",\"actions\":[{\"type\":\"session_command\",\"command\":\"/title-model\"}]}"
+                `shouldSatisfy` \case
+                    Left err -> "unsafe or unsupported" `Text.isInfixOf` err
+                    Right _ -> False
+
         it "rejects arbitrary or destructive session commands" do
             decodeMetaPlan
                 "{\"summary\":\"leave\",\"actions\":[{\"type\":\"session_command\",\"command\":\"/quit\"}]}"

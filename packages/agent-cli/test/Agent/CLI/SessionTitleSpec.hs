@@ -1,6 +1,7 @@
 module Agent.CLI.SessionTitleSpec (spec) where
 
 import Agent.CLI.SessionTitle
+import Agent.Runtime.Session.TitleModel (TitleModelResolution(..))
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
@@ -70,7 +71,7 @@ spec = describe "Agent.CLI.SessionTitle" do
                                 (Just "Auth race cleanup")
                         , backendState = state
                         }
-        withSessionTitleManager backendFactory (pure baseParams) (putMVar notified) \manager -> do
+        withSessionTitleManager backendFactory (pure baseParams) (pure testTitleModel) (putMVar notified) \manager -> do
             requestSessionTitle manager "session-1" 3
                 "User:\nFix auth\n\nAssistant:\nI found the race"
             results <- waitForResults manager 100
@@ -86,11 +87,57 @@ spec = describe "Agent.CLI.SessionTitle" do
         sent.tools `shouldBe` Just []
         sent.parallelToolCalls `shouldBe` Just False
         sent.maxOutputTokens `shouldBe` Nothing
-        sent.reasoning `shouldBe` Just sessionReasoning
+        sent.model `shouldBe` Just "title-model"
+        fmap (.effort) sent.reasoning `shouldBe` Just (Just "low")
         [UserMessage titleInput] <- readIORef seenInputs
         titleInput `shouldSatisfy` Text.isInfixOf "User:\nFix auth"
         titleInput `shouldSatisfy`
             Text.isInfixOf "Assistant:\nI found the race"
+
+    it "forwards high reasoning effort for cheap OpenAI title models" do
+        seenParams <- newIORef Nothing
+        let backendFactory privateParams =
+                Backend \state _ _ _ -> do
+                    writeIORef seenParams (Just privateParams)
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "title-response" []
+                                (Just "Auth race cleanup")
+                        , backendState = state
+                        }
+            lunaTitle = testTitleModel
+                { titleModelId = "gpt-5.6-luna"
+                , titleWireModelId = "gpt-5.6-luna"
+                , titleReasoningEffort = "high"
+                }
+        withSessionTitleManager backendFactory (pure defaultResponseCreateParams)
+            (pure lunaTitle) (\_ -> pure ()) \manager -> do
+            requestSessionTitle manager "session-1" 1 "conversation"
+            _ <- waitForResults manager 100
+            pure ()
+        Just sent <- readIORef seenParams
+        sent.model `shouldBe` Just "gpt-5.6-luna"
+        fmap (.effort) sent.reasoning `shouldBe` Just (Just "high")
+
+    it "caps the title prompt for a 4K-token on-device window" do
+        seenInputs <- newIORef []
+        let backendFactory _ =
+                Backend \state _ inputs _ -> do
+                    writeIORef seenInputs inputs
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "title-response" []
+                                (Just "Local title")
+                        , backendState = state
+                        }
+            smallWindow = testTitleModel { titleContextWindow = Just 4096 }
+        withSessionTitleManager backendFactory (pure defaultResponseCreateParams)
+            (pure smallWindow) (\_ -> pure ()) \manager -> do
+            requestSessionTitle manager "session-1" 1
+                (Text.replicate 5000 "abcdefghij")
+            _ <- waitForResults manager 100
+            [UserMessage titleInput] <- readIORef seenInputs
+            Text.length titleInput `shouldSatisfy` (< 3000)
 
     it "drops a stale result after a manual rename invalidates generation" do
         started <- newEmptyMVar
@@ -105,7 +152,7 @@ spec = describe "Agent.CLI.SessionTitle" do
                                 (Just "Stale title")
                         , backendState = state
                         }
-        withSessionTitleManager backendFactory (pure defaultResponseCreateParams) (\_ -> pure ()) \manager -> do
+        withSessionTitleManager backendFactory (pure defaultResponseCreateParams) (pure testTitleModel) (\_ -> pure ()) \manager -> do
             requestSessionTitle manager "session-1" 1 "conversation"
             takeMVar started
             invalidateSessionTitles manager "session-1"
@@ -123,7 +170,7 @@ spec = describe "Agent.CLI.SessionTitle" do
                                 (Just "Finished title")
                         , backendState = state
                         }
-        withSessionTitleManager backendFactory (pure defaultResponseCreateParams) (\_ -> pure ()) \manager -> do
+        withSessionTitleManager backendFactory (pure defaultResponseCreateParams) (pure testTitleModel) (\_ -> pure ()) \manager -> do
             requestSessionTitle manager "session-1" 6 "conversation"
             waitForSessionTitleResults 1000000 manager
                 `shouldReturn`
@@ -151,7 +198,7 @@ spec = describe "Agent.CLI.SessionTitle" do
                                     else Just "Recovered title")
                         , backendState = state
                         }
-        withSessionTitleManager backendFactory (pure defaultResponseCreateParams) (putMVar notified) \manager -> do
+        withSessionTitleManager backendFactory (pure defaultResponseCreateParams) (pure testTitleModel) (putMVar notified) \manager -> do
             requestSessionTitle manager "session-1" 3 "conversation"
             takeMVar notified
                 `shouldReturn`
@@ -174,7 +221,7 @@ spec = describe "Agent.CLI.SessionTitle" do
                             emptyTurnOutput "title-response" [] Nothing
                         , backendState = state
                         }
-        withSessionTitleManager backendFactory (pure defaultResponseCreateParams) (putMVar notified) \manager -> do
+        withSessionTitleManager backendFactory (pure defaultResponseCreateParams) (pure testTitleModel) (putMVar notified) \manager -> do
             requestSessionTitle manager "session-1" 3 "conversation"
             takeMVar notified
                 `shouldReturn`
@@ -185,6 +232,15 @@ spec = describe "Agent.CLI.SessionTitle" do
                         , failureGeneration = 0
                         }
         readIORef attempts `shouldReturn` 2
+
+testTitleModel :: TitleModelResolution
+testTitleModel = TitleModelResolution
+    { titleModelId = "title-model"
+    , titleWireModelId = "title-model"
+    , titleContextWindow = Nothing
+    , titleReasoningEffort = "low"
+    , titlePinned = False
+    }
 
 waitForResults :: SessionTitleManager -> Int -> IO [SessionTitleResult]
 waitForResults manager attempts

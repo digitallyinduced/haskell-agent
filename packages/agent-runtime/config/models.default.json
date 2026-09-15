@@ -109,7 +109,7 @@
       "connection": "gemini",
       "dialect": "generic-responses",
       "context_window": 1048576,
-      "label": "1M context"
+      "label": "low cost · 1M context"
     },
     {
       "id": "stealth/ox-alpha",
@@ -142,6 +142,14 @@
       "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
       "default_reasoning_effort": "xhigh",
       "default": true
+    },
+    {
+      "id": "haiku",
+      "connection": "claude-code",
+      "dialect": "claude-code",
+      "label": "fast · low cost · subscription",
+      "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+      "default_reasoning_effort": "low"
     },
     {
       "id": "opus",

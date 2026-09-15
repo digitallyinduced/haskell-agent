@@ -23,6 +23,7 @@ module Agent.Runtime.Project
     , saveProjectMaxConcurrentAgents
     , saveProjectAccount
     , saveProjectModel
+    , saveUserTitleModel
     , persistModelSwitch
     , userSettingsPath
     , withInheritedLastModel
@@ -103,6 +104,7 @@ data ProjectSettings = ProjectSettings
     { settingsVersion :: !Int
     , settingsAutoApprove :: !Bool
     , settingsLastModel :: !(Maybe ProjectModel)
+    , settingsTitleModel :: !(Maybe ProjectModel)
     , settingsLastAccounts :: ![ProjectAccount]
     , settingsMaxConcurrentAgents :: !(Maybe Int)
     } deriving (Eq, Show)
@@ -112,6 +114,7 @@ defaultProjectSettings = ProjectSettings
     { settingsVersion = settingsSchemaVersion
     , settingsAutoApprove = False
     , settingsLastModel = Nothing
+    , settingsTitleModel = Nothing
     , settingsLastAccounts = []
     , settingsMaxConcurrentAgents = Nothing
     }
@@ -193,6 +196,7 @@ instance ToJSON ProjectSettings where
         [ "version" .= settings.settingsVersion
         , "autoApprove" .= settings.settingsAutoApprove
         , "lastModel" .= settings.settingsLastModel
+        , "titleModel" .= settings.settingsTitleModel
         , "lastAccounts" .= settings.settingsLastAccounts
         , "maxConcurrentAgents" .= settings.settingsMaxConcurrentAgents
         ]
@@ -202,6 +206,7 @@ projectSettingsDecoder = Hermes.object do
         version <- defaultKey settingsSchemaVersion "version" Hermes.int
         autoApprove <- defaultKey False "autoApprove" Hermes.bool
         lastModelValue <- optionalKey "lastModel" (lenient projectModelDecoder)
+        titleModelValue <- optionalKey "titleModel" (lenient projectModelDecoder)
         lastAccountsValue <- defaultKey [] "lastAccounts"
             (Hermes.list (lenient projectAccountDecoder))
         maxConcurrentAgents <- optionalKey "maxConcurrentAgents" Hermes.int
@@ -211,6 +216,7 @@ projectSettingsDecoder = Hermes.object do
             -- A malformed or obsolete model selection should not discard
             -- unrelated project settings such as auto-approve.
             , settingsLastModel = lastModelValue >>= id
+            , settingsTitleModel = titleModelValue >>= id
             , settingsLastAccounts = catMaybes lastAccountsValue
             , settingsMaxConcurrentAgents = maxConcurrentAgents
             }
@@ -367,6 +373,18 @@ saveProjectModel projectRoot target =
             { settingsLastModel = Just ProjectModel
                 { projectModelTarget = target }
             }
+
+-- | Remember the auxiliary model used for generated session titles. @Nothing@
+-- restores the provider's cheap automatic choice. This is user-level: write
+-- it to the home settings root rather than a checkout.
+saveUserTitleModel
+    :: OsPath
+    -> Maybe ModelTarget
+    -> IO ()
+saveUserTitleModel home target =
+    updateProjectSettings home \settings ->
+        settings
+            { settingsTitleModel = ProjectModel <$> target }
 
 -- | Whether a live model/provider switch may update inherited settings.
 -- Startup and resume targets are not switch events and must not be persisted;

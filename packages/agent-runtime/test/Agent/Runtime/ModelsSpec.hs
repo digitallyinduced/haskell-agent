@@ -74,7 +74,7 @@ spec = do
                     , "gemini-3.5-flash-lite"
                     ]
             modelIdsFor ClaudeCodeProvider
-                `shouldBe` ["sonnet", "opus", "claude-fable-5-1"]
+                `shouldBe` ["sonnet", "haiku", "opus", "claude-fable-5-1"]
 
         it "tags every option with its provider" do
             all ((== OpenAIProvider) . (.modelTarget.targetProvider))

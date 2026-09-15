@@ -421,6 +421,9 @@ validateSessionCommand :: Text -> Either Text ()
 validateSessionCommand raw =
     case Text.words (Text.strip raw) of
         ["/model", model] | nonBlank model -> pure ()
+        ["/title-model", "--auto"] -> pure ()
+        ["/title-model", model]
+            | nonBlank model -> pure ()
         ["/effort", effort]
             | Text.toLower effort
                 `elem` ["none", "low", "medium", "high", "xhigh", "max"] ->
@@ -894,6 +897,7 @@ metaConsolePrompt context request =
         , "  \"summary\": \"short description\","
         , "  \"actions\": ["
         , "    {\"type\":\"session_command\",\"command\":\"/model MODEL\"},"
+        , "    {\"type\":\"session_command\",\"command\":\"/title-model MODEL|--auto\"},"
         , "    {\"type\":\"connect_account\",\"provider\":\"openai|grok|xai|openrouter|claude\"},"
         , "    {\"type\":\"select_account\",\"provider\":\"openai|grok|xai|openrouter|claude\",\"account\":\"optional label or id\"},"
         , "    {\"type\":\"mcp_upsert\",\"name\":\"NAME\",\"enabled\":true,\"url\":\"https://...\"|null,\"command\":\"PROGRAM\"|null,\"args\":[],\"cwd\":null,\"startupTimeoutSeconds\":30,\"requestTimeoutSeconds\":60,\"protocol\":\"auto|modern|legacy\",\"oauthScopes\":[\"scope\"]},"
@@ -917,7 +921,7 @@ metaConsolePrompt context request =
         , "Secret environment actions carry only name and key; the host securely prompts for the value. Never add a value field."
         , "select_account must be the plan's only action. Omit account to show every connected account for that provider."
         , "A supplied account is matched exactly (case-insensitively) against its label or id. If it could refer to multiple accounts, use clarify rather than guessing."
-        , "Allowed session_command forms: /model MODEL, /effort LEVEL, /fast, /shell MODE, /computer-use [on|off], /codemod, /always-approve, /agents limit N, /skills reload."
+        , "Allowed session_command forms: /model MODEL, /title-model MODEL|--auto, /effort LEVEL, /fast, /shell MODE, /computer-use [on|off], /codemod, /always-approve, /agents limit N, /skills reload."
         ]
 
 renderJson :: Aeson.Value -> Text

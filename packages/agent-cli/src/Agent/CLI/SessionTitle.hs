@@ -16,6 +16,10 @@ module Agent.CLI.SessionTitle
 
 import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.Runtime.Error (formatApiErrorInline)
+import Agent.Runtime.Session.TitleModel
+    ( TitleModelResolution(..)
+    , titleSourceCharBudget
+    )
 import Agent.Runtime.Session.TitlePolicy (titleRefreshIndex)
 import Agent.Loop
     ( Backend(..)
@@ -25,7 +29,8 @@ import Agent.Loop
     , emptyBackendSnapshot
     )
 import Agent.Responses.Types
-    ( ResponseCreateParams(..)
+    ( ReasoningConfig(..)
+    , ResponseCreateParams(..)
     , ToolChoice(..)
     , ToolChoiceMode(..)
     )
@@ -75,15 +80,17 @@ data SessionTitleManager = SessionTitleManager
     , titleGenerations :: !(TVar (Map Text Int))
     , titleBackendFactory :: !BtwBackendFactory
     , titleParams :: !(IO ResponseCreateParams)
+    , titleModel :: !(IO TitleModelResolution)
     }
 
 withSessionTitleManager
     :: BtwBackendFactory
     -> IO ResponseCreateParams
+    -> IO TitleModelResolution
     -> (SessionTitleEvent -> IO ())
     -> (SessionTitleManager -> IO a)
     -> IO a
-withSessionTitleManager backendFactory paramsRef onEvent action = do
+withSessionTitleManager backendFactory paramsRef titleModel onEvent action = do
     jobs <- newTQueueIO
     results <- newTQueueIO
     requested <- newTVarIO Set.empty
@@ -95,6 +102,7 @@ withSessionTitleManager backendFactory paramsRef onEvent action = do
             , titleGenerations = generations
             , titleBackendFactory = backendFactory
             , titleParams = paramsRef
+            , titleModel = titleModel
             }
     withAsync (titleWorker onEvent manager) \_ -> action manager
 
@@ -219,12 +227,15 @@ generateTitleWithRetry manager job =
 generateTitle :: SessionTitleManager -> SessionTitleJob -> IO (Either Text Text)
 generateTitle manager job = do
     baseParams <- manager.titleParams
-    let params = titleRequestParams baseParams
+    resolution <- manager.titleModel
+    let params = titleRequestParams resolution baseParams
     let Backend submit =
             manager.titleBackendFactory params
     timeout 45000000
         (submit emptyBackendSnapshot Nothing
-            [UserMessage (titlePrompt job.jobSource)] (\_ -> pure ()))
+            [UserMessage
+                (titlePrompt (titleSourceCharBudget resolution) job.jobSource)]
+            (\_ -> pure ()))
         >>= \case
             Nothing -> pure (Left "timed out after 45 seconds")
             Just response -> case response of
@@ -238,8 +249,9 @@ generateTitle manager job = do
                             Nothing -> Left "provider returned no title text"
                             Just title -> Right title
 
-titleRequestParams :: ResponseCreateParams -> ResponseCreateParams
-titleRequestParams ResponseCreateParams{..} =
+titleRequestParams
+    :: TitleModelResolution -> ResponseCreateParams -> ResponseCreateParams
+titleRequestParams resolution ResponseCreateParams{..} =
     ResponseCreateParams
         { input = Nothing
         , previousResponseId = Nothing
@@ -248,20 +260,32 @@ titleRequestParams ResponseCreateParams{..} =
         , tools = Just []
         , toolChoice = Just (ToolChoiceMode ToolChoiceNone)
         , parallelToolCalls = Just False
+        , model = Just resolution.titleWireModelId
+        , reasoning = Just (titleReasoning resolution.titleReasoningEffort)
         -- Preserve the provider's output-token behavior. In particular, the
         -- Codex WebSocket transport rejects an explicit max_output_tokens.
         , ..
         }
 
-titlePrompt :: Text -> Text
-titlePrompt source =
+titleReasoning :: Text -> ReasoningConfig
+titleReasoning effort =
+    ReasoningConfig
+        { context = Nothing
+        , effort = Just effort
+        , generateSummary = Nothing
+        , reasoningMode = Nothing
+        , summary = Nothing
+        }
+
+titlePrompt :: Int -> Text -> Text
+titlePrompt charBudget source =
     Text.unlines
         [ "Generate a short and distinctive 5-10 word title for this coding session."
         , "Capture the main task or topic. Be information-dense and use no filler."
         , "Output only plain title text: no quotes, label, explanation, or markdown."
         , ""
         , "Conversation:"
-        , Text.take 24000 source
+        , Text.take charBudget source
         ]
 
 cleanGeneratedTitle :: Text -> Maybe Text

@@ -36,6 +36,7 @@ import Agent.Tools.Background
     ( setBackgroundTaskHooks, readBackgroundTasks, BackgroundTaskStatus(..) )
 import Data.List (sortOn)
 import Agent.CLI.SessionTitle
+import Agent.Runtime.Session.TitleModel (resolveTitleModel)
 import Agent.Runtime.ManagedTurn
 import Agent.Runtime.GatewayBridge
 import Agent.CLI.Notification
@@ -408,6 +409,13 @@ withSessionTitleRuntime host SessionRequest{..} SessionBackend{..} =
     withSessionTitleManager
         btwBackend
         (readSessionRequestParams paramsRef)
+        (do
+            settings <- loadUserSettings workspace.home
+            pure $
+                resolveTitleModel
+                    catalog
+                    provider
+                    ((.projectModelTarget) <$> settings.settingsTitleModel))
         host.hostTitleEvent
 
 -- | Mutable controls shared by rendering, tools, persistence, and the agent

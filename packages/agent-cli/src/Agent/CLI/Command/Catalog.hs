@@ -17,6 +17,7 @@ slashCommands =
     , cmd "find" [] "/find [TEXT]" "Search this conversation in a pager" True
     , cmd "permissions" [] "/permissions" "Choose the tool approval policy" False
     , cmd "model" ["m"] "/model [NAME]" "Open the model picker, or set a model" True
+    , cmd "title-model" [] "/title-model [NAME|--auto]" "Choose the model used to name sessions" True
     , cmd "theme" ["t"] "/theme [NAME]" "Open the theme picker, or set a theme" True
     , cmd "effort" [] "/effort [none|low|medium|high|xhigh|max]" "Show or set reasoning effort" True
     , codexCmd "fast" [] "/fast" "Toggle the Fast service tier" False

@@ -26,7 +26,8 @@ import Agent.CLI.Command
     ( currentEffort,
       currentModel,
       SelectionAction(ReplSetModel, ReplShowEffort, ReplSetEffort, ReplToggleFast,
-                 ReplShowModel, ReplShowTheme, ReplSetTheme) )
+                 ReplShowModel, ReplShowTitleModel, ReplSetTitleModel,
+                 ReplClearTitleModel, ReplShowTheme, ReplSetTheme) )
 import Agent.Runtime.Config
     ( HarnessConfig(configTheme)
     , updateHarnessConfig
@@ -45,6 +46,15 @@ import Agent.Runtime.Models
       ModelOption(modelTarget),
       ModelTarget(targetDialect, targetProvider, targetModelId,
                   targetConnectionId, targetWireModelId) )
+import Agent.CLI.Project
+    ( ProjectModel(..)
+    , ProjectSettings(..)
+    , loadUserSettings
+    , saveUserTitleModel
+    )
+import Agent.Runtime.ModelConfig (ModelCatalog)
+import Agent.Runtime.Session.TitleModel
+    ( cheapTitleModel )
 import Agent.CLI.Options
     ( normalizeReasoningEffortForDialect
     , reasoningEffortsForDialect
@@ -61,7 +71,7 @@ import Agent.CLI.ProviderTransition
 import Agent.CLI.Render ( clearThinking, renderEvent )
 import Agent.CLI.Runtime.Types ( RunResult(..) )
 import Agent.CLI.Session.Choices
-    ( atMay, effortChoice, modelChoiceWithEffort )
+    ( atMay, effortChoice, modelChoice, modelChoiceWithEffort )
 import Agent.CLI.ModelPicker
     ( ModelPickerSelection(modelPickerEffort, modelPickerOption) )
 import Agent.CLI.Session.Interaction ( setSessionEffort )
@@ -363,6 +373,12 @@ handleSelection
         continue
     Right ReplShowModel -> do
         chooseModel env continue
+    Right ReplShowTitleModel ->
+        chooseTitleModel env continue
+    Right (ReplSetTitleModel name) ->
+        setTitleModelByName env name continue
+    Right ReplClearTitleModel ->
+        persistTitleModel env Nothing continue
     Right (ReplSetModel name) -> do
         color <- resolveColor stdout
         resolveRequestedModel env name >>= \case
@@ -605,6 +621,88 @@ setTheme env theme next =
                         (UiSystemMessage
                             ("theme set to " <> themeKindText theme))
                     next
+
+chooseTitleModel :: SessionEnv -> IO RunResult -> IO RunResult
+chooseTitleModel env@SessionEnv
+    { sessionModelCatalog = catalog
+    , sessionGatewayModels = gatewayModelsRef
+    , sessionFullscreen = fullscreen
+    , sessionProvider = provider
+    , sessionWorkspace = WorkspaceContext{home}
+    } next = do
+    color <- resolveColor stderr
+    settings <- loadUserSettings home
+    gatewayAccess <- readIORef gatewayModelsRef
+    let currentTarget =
+            case settings.settingsTitleModel of
+                Just (ProjectModel target) -> target
+                Nothing ->
+                    (cheapTitleModel catalog provider).modelTarget
+    modelChoice
+        catalog
+        gatewayAccess
+        fullscreen
+        color
+        currentTarget.targetConnectionId
+        currentTarget.targetProvider
+        currentTarget.targetModelId
+        currentTarget.targetDialect >>= \case
+        Left err -> do
+            selectionError env err $
+                Text.hPutStrLn stderr (roleError color err)
+            next
+        Right Nothing -> next
+        Right (Just choice) ->
+            persistTitleModel env (Just choice.modelTarget) next
+
+setTitleModelByName
+    :: SessionEnv -> Text -> IO RunResult -> IO RunResult
+setTitleModelByName env name next = do
+    color <- resolveColor stdout
+    resolveRequestedModel env name >>= \case
+        Left err -> do
+            selectionError env err $
+                Text.hPutStrLn stderr (roleError color err)
+            next
+        Right choice ->
+            persistTitleModel env (Just choice.modelTarget) next
+
+persistTitleModel
+    :: SessionEnv -> Maybe ModelTarget -> IO RunResult -> IO RunResult
+persistTitleModel env target next = do
+    color <- resolveColor stdout
+    saveUserTitleModel env.sessionWorkspace.home target
+    let message =
+            formatTitleModelMessage
+                env.sessionModelCatalog
+                env.sessionProvider
+                target
+    selectionInfo env message $
+        Text.putStrLn (roleMuted color (glyphOk <> message))
+    next
+
+formatTitleModelMessage
+    :: ModelCatalog
+    -> Provider
+    -> Maybe ModelTarget
+    -> Text
+formatTitleModelMessage catalog provider pinned =
+    let autoName =
+            (cheapTitleModel catalog provider).modelTarget.targetModelId
+    in case pinned of
+        Nothing ->
+            "session title model: auto (" <> autoName <> ")"
+        Just target
+            | target.targetProvider == provider ->
+                "session title model: " <> target.targetModelId
+            | otherwise ->
+                "session title model: "
+                    <> target.targetModelId
+                    <> " (used for "
+                    <> providerSlug target.targetProvider
+                    <> " sessions; this session uses "
+                    <> autoName
+                    <> ")"
 
 switchModelTarget
     :: SessionEnv
