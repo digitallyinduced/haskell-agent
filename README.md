@@ -459,8 +459,10 @@ The built-in `add-model` skill can configure it for you. See the
 dialects, authentication, and compaction metadata.
 
 Session titles use a cheap auxiliary model by default (Haiku on Claude, not
-Fable). `/title-model` pins a catalog model in `~/.haskell-agent/settings.json`;
-`/title-model --auto` restores the automatic choice.
+Fable). On macOS, auto uses on-device Apple Intelligence when `apfel` is
+available. `/title-model` pins a catalog model or `apple-foundationmodel` in
+`~/.haskell-agent/settings.json`; `/title-model --auto` restores the automatic
+choice.
 
 The built-in `learn-about-user` skill can derive consent-reviewed technical
 defaults from a confirmed public GitHub profile. Invoke it with

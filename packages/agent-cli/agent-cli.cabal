@@ -161,6 +161,7 @@ library
                     , Agent.CLI.AgentViewport
                     , Agent.CLI.AgentViewport.Runtime
                     , Agent.CLI.Approval
+                    , Agent.CLI.AppleTitle
                     , Agent.CLI.Artifact
                     , Agent.CLI.Afk
                     , Agent.CLI.Btw
@@ -563,6 +564,7 @@ test-suite agent-cli-test
     other-modules:    Agent.CLI.ActiveAccountSpec
                     , Agent.CLI.DictationCaptureSpec
                     , Agent.CLI.AccountSelectionSpec
+                    , Agent.CLI.AppleTitleSpec
                     , Agent.CLI.ApprovalSpec
                     , Agent.CLI.AgentSessionsSpec
                     , Agent.CLI.AgentSessionsWaitGraphSpec

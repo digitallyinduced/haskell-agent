@@ -8,6 +8,7 @@ module Agent.Runtime.Project
     , ProjectAccount(..)
     , ProjectModel(..)
     , ProjectSettings(..)
+    , TitleModelSetting(..)
     , defaultProjectSettings
     , inheritProjectLastModel
     , loadProjectSettings
@@ -35,6 +36,11 @@ import Agent.Json.Decode (defaultKey, optionalKey)
 import Agent.Json.Decode qualified as Hermes
 import Agent.Runtime.Models (ModelTarget(..))
 import Agent.Runtime.ModelConfig (connectionSupportsDialect)
+import Agent.Runtime.Session.TitleModel
+    ( TitleModelSetting(..)
+    , appleFoundationTitleModelId
+    , isAppleFoundationTitleModelName
+    )
 import Agent.Dialect
     ( DialectId
     , dialectSlug
@@ -104,7 +110,7 @@ data ProjectSettings = ProjectSettings
     { settingsVersion :: !Int
     , settingsAutoApprove :: !Bool
     , settingsLastModel :: !(Maybe ProjectModel)
-    , settingsTitleModel :: !(Maybe ProjectModel)
+    , settingsTitleModel :: !(Maybe TitleModelSetting)
     , settingsLastAccounts :: ![ProjectAccount]
     , settingsMaxConcurrentAgents :: !(Maybe Int)
     } deriving (Eq, Show)
@@ -196,17 +202,25 @@ instance ToJSON ProjectSettings where
         [ "version" .= settings.settingsVersion
         , "autoApprove" .= settings.settingsAutoApprove
         , "lastModel" .= settings.settingsLastModel
-        , "titleModel" .= settings.settingsTitleModel
+        , "titleModel" .= titleModelSettingJson settings.settingsTitleModel
         , "lastAccounts" .= settings.settingsLastAccounts
         , "maxConcurrentAgents" .= settings.settingsMaxConcurrentAgents
         ]
+
+titleModelSettingJson :: Maybe TitleModelSetting -> Aeson.Value
+titleModelSettingJson = \case
+    Nothing -> Aeson.Null
+    Just TitleModelAppleFoundation ->
+        Aeson.String appleFoundationTitleModelId
+    Just (TitleModelPinned target) ->
+        toJSON ProjectModel { projectModelTarget = target }
 
 projectSettingsDecoder :: Hermes.Decoder ProjectSettings
 projectSettingsDecoder = Hermes.object do
         version <- defaultKey settingsSchemaVersion "version" Hermes.int
         autoApprove <- defaultKey False "autoApprove" Hermes.bool
         lastModelValue <- optionalKey "lastModel" (lenient projectModelDecoder)
-        titleModelValue <- optionalKey "titleModel" (lenient projectModelDecoder)
+        titleModelValue <- optionalKey "titleModel" (lenient titleModelSettingDecoder)
         lastAccountsValue <- defaultKey [] "lastAccounts"
             (Hermes.list (lenient projectAccountDecoder))
         maxConcurrentAgents <- optionalKey "maxConcurrentAgents" Hermes.int
@@ -220,6 +234,24 @@ projectSettingsDecoder = Hermes.object do
             , settingsLastAccounts = catMaybes lastAccountsValue
             , settingsMaxConcurrentAgents = maxConcurrentAgents
             }
+
+titleModelSettingDecoder :: Hermes.Decoder TitleModelSetting
+titleModelSettingDecoder =
+    Hermes.withOwnedRawJson \raw ->
+        case Aeson.decodeStrict raw of
+            Just (Aeson.String name)
+                | isAppleFoundationTitleModelName name ->
+                    pure TitleModelAppleFoundation
+                | otherwise ->
+                    fail "unknown title model"
+            Just Aeson.Object{} ->
+                case Hermes.decodeEither projectModelDecoder raw of
+                    Right model ->
+                        pure (TitleModelPinned model.projectModelTarget)
+                    Left _ ->
+                        fail "invalid title model"
+            _ ->
+                fail "titleModel must be a string or object"
 
 lenient :: Hermes.Decoder a -> Hermes.Decoder (Maybe a)
 lenient decoder =
@@ -379,12 +411,11 @@ saveProjectModel projectRoot target =
 -- it to the home settings root rather than a checkout.
 saveUserTitleModel
     :: OsPath
-    -> Maybe ModelTarget
+    -> Maybe TitleModelSetting
     -> IO ()
-saveUserTitleModel home target =
+saveUserTitleModel home setting =
     updateProjectSettings home \settings ->
-        settings
-            { settingsTitleModel = ProjectModel <$> target }
+        settings { settingsTitleModel = setting }
 
 -- | Whether a live model/provider switch may update inherited settings.
 -- Startup and resume targets are not switch events and must not be persisted;

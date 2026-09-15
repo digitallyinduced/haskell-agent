@@ -192,24 +192,33 @@ spec = describe "Agent.CLI.Project" do
                         "gpt-project" "gpt-project" CodexDialect)
                 saveUserTitleModel root
                     (Just
-                        (target ClaudeCodeProvider "claude-code"
-                            "haiku" "haiku" ClaudeCodeDialect))
+                        (TitleModelPinned
+                            (target ClaudeCodeProvider "claude-code"
+                                "haiku" "haiku" ClaudeCodeDialect)))
                 settings <- loadProjectSettings root
                 settings.settingsLastModel `shouldBe` Just ProjectModel
                     { projectModelTarget =
                         target OpenAIProvider "openai"
                             "gpt-project" "gpt-project" CodexDialect
                     }
-                settings.settingsTitleModel `shouldBe` Just ProjectModel
-                    { projectModelTarget =
-                        target ClaudeCodeProvider "claude-code"
-                            "haiku" "haiku" ClaudeCodeDialect
-                    }
+                settings.settingsTitleModel
+                    `shouldBe`
+                        Just
+                            (TitleModelPinned
+                                (target ClaudeCodeProvider "claude-code"
+                                    "haiku" "haiku" ClaudeCodeDialect))
                 saveUserTitleModel root Nothing
                 cleared <- loadProjectSettings root
                 cleared.settingsTitleModel `shouldBe` Nothing
                 projectModelFor OpenAIProvider cleared
                     `shouldBe` Just "gpt-project"
+
+        it "round-trips an Apple Intelligence title model as a string" $
+            withTempDir "agent-project-" \root -> do
+                saveUserTitleModel root (Just TitleModelAppleFoundation)
+                settings <- loadProjectSettings root
+                settings.settingsTitleModel
+                    `shouldBe` Just TitleModelAppleFoundation
 
         it "round-trips an organization gateway model dialect" $
             withTempDir "agent-project-" \root -> do

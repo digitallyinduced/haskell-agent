@@ -35,6 +35,10 @@ import Agent.Tools.OutputArtifact
 import Agent.Tools.Background
     ( setBackgroundTaskHooks, readBackgroundTasks, BackgroundTaskStatus(..) )
 import Data.List (sortOn)
+import Agent.CLI.AppleTitle
+    ( generateAppleFoundationTitle
+    , probeAppleFoundationTitle
+    )
 import Agent.CLI.SessionTitle
 import Agent.Runtime.Session.TitleModel (resolveTitleModel)
 import Agent.Runtime.ManagedTurn
@@ -405,7 +409,8 @@ withSessionTitleRuntime
     -> SessionBackend
     -> (SessionTitleManager -> IO a)
     -> IO a
-withSessionTitleRuntime host SessionRequest{..} SessionBackend{..} =
+withSessionTitleRuntime host SessionRequest{..} SessionBackend{..} action = do
+    appleExecutable <- probeAppleFoundationTitle
     withSessionTitleManager
         btwBackend
         (readSessionRequestParams paramsRef)
@@ -415,8 +420,11 @@ withSessionTitleRuntime host SessionRequest{..} SessionBackend{..} =
                 resolveTitleModel
                     catalog
                     provider
-                    ((.projectModelTarget) <$> settings.settingsTitleModel))
+                    settings.settingsTitleModel
+                    (isJust appleExecutable))
+        (generateAppleFoundationTitle <$> appleExecutable)
         host.hostTitleEvent
+        action
 
 -- | Mutable controls shared by rendering, tools, persistence, and the agent
 -- viewport. Allocation and viewport registration form one startup phase.

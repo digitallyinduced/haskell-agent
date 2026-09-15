@@ -71,7 +71,7 @@ spec = describe "Agent.CLI.SessionTitle" do
                                 (Just "Auth race cleanup")
                         , backendState = state
                         }
-        withSessionTitleManager backendFactory (pure baseParams) (pure testTitleModel) (putMVar notified) \manager -> do
+        withSessionTitleManager backendFactory (pure baseParams) (pure testTitleModel) Nothing (putMVar notified) \manager -> do
             requestSessionTitle manager "session-1" 3
                 "User:\nFix auth\n\nAssistant:\nI found the race"
             results <- waitForResults manager 100
@@ -111,7 +111,7 @@ spec = describe "Agent.CLI.SessionTitle" do
                 , titleReasoningEffort = "high"
                 }
         withSessionTitleManager backendFactory (pure defaultResponseCreateParams)
-            (pure lunaTitle) (\_ -> pure ()) \manager -> do
+            (pure lunaTitle) Nothing (\_ -> pure ()) \manager -> do
             requestSessionTitle manager "session-1" 1 "conversation"
             _ <- waitForResults manager 100
             pure ()
@@ -132,7 +132,7 @@ spec = describe "Agent.CLI.SessionTitle" do
                         }
             smallWindow = testTitleModel { titleContextWindow = Just 4096 }
         withSessionTitleManager backendFactory (pure defaultResponseCreateParams)
-            (pure smallWindow) (\_ -> pure ()) \manager -> do
+            (pure smallWindow) Nothing (\_ -> pure ()) \manager -> do
             requestSessionTitle manager "session-1" 1
                 (Text.replicate 5000 "abcdefghij")
             _ <- waitForResults manager 100
@@ -152,7 +152,7 @@ spec = describe "Agent.CLI.SessionTitle" do
                                 (Just "Stale title")
                         , backendState = state
                         }
-        withSessionTitleManager backendFactory (pure defaultResponseCreateParams) (pure testTitleModel) (\_ -> pure ()) \manager -> do
+        withSessionTitleManager backendFactory (pure defaultResponseCreateParams) (pure testTitleModel) Nothing (\_ -> pure ()) \manager -> do
             requestSessionTitle manager "session-1" 1 "conversation"
             takeMVar started
             invalidateSessionTitles manager "session-1"
@@ -170,7 +170,7 @@ spec = describe "Agent.CLI.SessionTitle" do
                                 (Just "Finished title")
                         , backendState = state
                         }
-        withSessionTitleManager backendFactory (pure defaultResponseCreateParams) (pure testTitleModel) (\_ -> pure ()) \manager -> do
+        withSessionTitleManager backendFactory (pure defaultResponseCreateParams) (pure testTitleModel) Nothing (\_ -> pure ()) \manager -> do
             requestSessionTitle manager "session-1" 6 "conversation"
             waitForSessionTitleResults 1000000 manager
                 `shouldReturn`
@@ -198,7 +198,7 @@ spec = describe "Agent.CLI.SessionTitle" do
                                     else Just "Recovered title")
                         , backendState = state
                         }
-        withSessionTitleManager backendFactory (pure defaultResponseCreateParams) (pure testTitleModel) (putMVar notified) \manager -> do
+        withSessionTitleManager backendFactory (pure defaultResponseCreateParams) (pure testTitleModel) Nothing (putMVar notified) \manager -> do
             requestSessionTitle manager "session-1" 3 "conversation"
             takeMVar notified
                 `shouldReturn`
@@ -221,7 +221,7 @@ spec = describe "Agent.CLI.SessionTitle" do
                             emptyTurnOutput "title-response" [] Nothing
                         , backendState = state
                         }
-        withSessionTitleManager backendFactory (pure defaultResponseCreateParams) (pure testTitleModel) (putMVar notified) \manager -> do
+        withSessionTitleManager backendFactory (pure defaultResponseCreateParams) (pure testTitleModel) Nothing (putMVar notified) \manager -> do
             requestSessionTitle manager "session-1" 3 "conversation"
             takeMVar notified
                 `shouldReturn`
@@ -233,6 +233,147 @@ spec = describe "Agent.CLI.SessionTitle" do
                         }
         readIORef attempts `shouldReturn` 2
 
+    it "uses an Apple Intelligence generator when the title model selects it" do
+        seenProvider <- newIORef False
+        notified <- newEmptyMVar
+        let backendFactory _ =
+                Backend \state _ _ _ -> do
+                    writeIORef seenProvider True
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "title-response" []
+                                (Just "Provider title")
+                        , backendState = state
+                        }
+            appleModel = testTitleModel
+                { titleModelId = "apple-foundationmodel"
+                , titleWireModelId = "apple-foundationmodel"
+                , titleContextWindow = Just 4096
+                , titleUsesAppleFoundation = True
+                }
+        withSessionTitleManager
+            backendFactory
+            (pure defaultResponseCreateParams)
+            (pure appleModel)
+            (Just (\_ -> pure (Right "Fix auth races")))
+            (putMVar notified)
+            \manager -> do
+                requestSessionTitle manager "session-1" 1 "User:\nFix auth"
+                takeMVar notified
+                    `shouldReturn`
+                        SessionTitleGenerated SessionTitleResult
+                            { resultSessionId = "session-1"
+                            , resultMilestone = 1
+                            , resultTitle = "Fix auth races"
+                            , resultGeneration = 0
+                            }
+        readIORef seenProvider `shouldReturn` False
+
+    it "falls back to the provider title model when auto Apple generation fails" do
+        seenParams <- newIORef Nothing
+        notified <- newEmptyMVar
+        let backendFactory privateParams =
+                Backend \state _ _ _ -> do
+                    writeIORef seenParams (Just privateParams)
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "title-response" []
+                                (Just "Haiku title")
+                        , backendState = state
+                        }
+            appleModel = testTitleModel
+                { titleModelId = "apple-foundationmodel"
+                , titleWireModelId = "haiku"
+                , titleUsesAppleFoundation = True
+                , titlePinned = False
+                }
+        withSessionTitleManager
+            backendFactory
+            (pure defaultResponseCreateParams)
+            (pure appleModel)
+            (Just (\_ -> pure (Left "Apple Intelligence title request failed")))
+            (putMVar notified)
+            \manager -> do
+                requestSessionTitle manager "session-1" 1 "conversation"
+                takeMVar notified
+                    `shouldReturn`
+                        SessionTitleGenerated SessionTitleResult
+                            { resultSessionId = "session-1"
+                            , resultMilestone = 1
+                            , resultTitle = "Haiku title"
+                            , resultGeneration = 0
+                            }
+        Just sent <- readIORef seenParams
+        sent.model `shouldBe` Just "haiku"
+
+    it "falls back when auto Apple generation returns empty title text" do
+        notified <- newEmptyMVar
+        let backendFactory _ =
+                Backend \state _ _ _ ->
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "title-response" []
+                                (Just "Haiku title")
+                        , backendState = state
+                        }
+            appleModel = testTitleModel
+                { titleUsesAppleFoundation = True
+                , titlePinned = False
+                }
+        withSessionTitleManager
+            backendFactory
+            (pure defaultResponseCreateParams)
+            (pure appleModel)
+            (Just (\_ -> pure (Right "   ")))
+            (putMVar notified)
+            \manager -> do
+                requestSessionTitle manager "session-1" 1 "conversation"
+                takeMVar notified
+                    `shouldReturn`
+                        SessionTitleGenerated SessionTitleResult
+                            { resultSessionId = "session-1"
+                            , resultMilestone = 1
+                            , resultTitle = "Haiku title"
+                            , resultGeneration = 0
+                            }
+
+    it "does not fall back to the provider when Apple Intelligence is pinned" do
+        seenProvider <- newIORef False
+        notified <- newEmptyMVar
+        let backendFactory _ =
+                Backend \state _ _ _ -> do
+                    writeIORef seenProvider True
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "title-response" []
+                                (Just "Provider title")
+                        , backendState = state
+                        }
+            appleModel = testTitleModel
+                { titleModelId = "apple-foundationmodel"
+                , titleWireModelId = "haiku"
+                , titleUsesAppleFoundation = True
+                , titlePinned = True
+                }
+        withSessionTitleManager
+            backendFactory
+            (pure defaultResponseCreateParams)
+            (pure appleModel)
+            (Just (\_ -> pure (Left "Apple Intelligence title request failed")))
+            (putMVar notified)
+            \manager -> do
+                requestSessionTitle manager "session-1" 1 "conversation"
+                takeMVar notified
+                    `shouldReturn`
+                        SessionTitleFailed SessionTitleFailure
+                            { failureSessionId = "session-1"
+                            , failureMilestone = 1
+                            , failureMessage =
+                                "Apple Intelligence title request failed"
+                            , failureGeneration = 0
+                            }
+        readIORef seenProvider `shouldReturn` False
+
 testTitleModel :: TitleModelResolution
 testTitleModel = TitleModelResolution
     { titleModelId = "title-model"
@@ -240,6 +381,7 @@ testTitleModel = TitleModelResolution
     , titleContextWindow = Nothing
     , titleReasoningEffort = "low"
     , titlePinned = False
+    , titleUsesAppleFoundation = False
     }
 
 waitForResults :: SessionTitleManager -> Int -> IO [SessionTitleResult]

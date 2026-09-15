@@ -47,14 +47,18 @@ import Agent.Runtime.Models
       ModelTarget(targetDialect, targetProvider, targetModelId,
                   targetConnectionId, targetWireModelId) )
 import Agent.CLI.Project
-    ( ProjectModel(..)
-    , ProjectSettings(..)
+    ( ProjectSettings(..)
+    , TitleModelSetting(..)
     , loadUserSettings
     , saveUserTitleModel
     )
 import Agent.Runtime.ModelConfig (ModelCatalog)
 import Agent.Runtime.Session.TitleModel
-    ( cheapTitleModel )
+    ( appleFoundationTitleModelId
+    , cheapTitleModel
+    , isAppleFoundationTitleModelName
+    )
+import Agent.CLI.AppleTitle (probeAppleFoundationTitle)
 import Agent.CLI.Options
     ( normalizeReasoningEffortForDialect
     , reasoningEffortsForDialect
@@ -113,7 +117,7 @@ import Agent.TUI.Theme
 import Control.Exception.Safe ( finally )
 import Data.IORef ( readIORef, writeIORef )
 import Data.List ( findIndex )
-import Data.Maybe ( fromMaybe, listToMaybe )
+import Data.Maybe ( fromMaybe, isJust, listToMaybe )
 import Data.Text ( Text )
 import Data.Time.Clock ( getCurrentTime )
 import System.IO ( stdout, stderr )
@@ -635,8 +639,8 @@ chooseTitleModel env@SessionEnv
     gatewayAccess <- readIORef gatewayModelsRef
     let currentTarget =
             case settings.settingsTitleModel of
-                Just (ProjectModel target) -> target
-                Nothing ->
+                Just (TitleModelPinned target) -> target
+                _ ->
                     (cheapTitleModel catalog provider).modelTarget
     modelChoice
         catalog
@@ -653,30 +657,41 @@ chooseTitleModel env@SessionEnv
             next
         Right Nothing -> next
         Right (Just choice) ->
-            persistTitleModel env (Just choice.modelTarget) next
+            persistTitleModel
+                env
+                (Just (TitleModelPinned choice.modelTarget))
+                next
 
 setTitleModelByName
     :: SessionEnv -> Text -> IO RunResult -> IO RunResult
-setTitleModelByName env name next = do
-    color <- resolveColor stdout
-    resolveRequestedModel env name >>= \case
-        Left err -> do
-            selectionError env err $
-                Text.hPutStrLn stderr (roleError color err)
-            next
-        Right choice ->
-            persistTitleModel env (Just choice.modelTarget) next
+setTitleModelByName env name next
+    | isAppleFoundationTitleModelName name =
+        persistTitleModel env (Just TitleModelAppleFoundation) next
+    | otherwise = do
+        color <- resolveColor stdout
+        resolveRequestedModel env name >>= \case
+            Left err -> do
+                selectionError env err $
+                    Text.hPutStrLn stderr (roleError color err)
+                next
+            Right choice ->
+                persistTitleModel
+                    env
+                    (Just (TitleModelPinned choice.modelTarget))
+                    next
 
 persistTitleModel
-    :: SessionEnv -> Maybe ModelTarget -> IO RunResult -> IO RunResult
-persistTitleModel env target next = do
+    :: SessionEnv -> Maybe TitleModelSetting -> IO RunResult -> IO RunResult
+persistTitleModel env setting next = do
     color <- resolveColor stdout
-    saveUserTitleModel env.sessionWorkspace.home target
+    saveUserTitleModel env.sessionWorkspace.home setting
+    appleAvailable <- isJust <$> probeAppleFoundationTitle
     let message =
             formatTitleModelMessage
                 env.sessionModelCatalog
                 env.sessionProvider
-                target
+                setting
+                appleAvailable
     selectionInfo env message $
         Text.putStrLn (roleMuted color (glyphOk <> message))
     next
@@ -684,15 +699,22 @@ persistTitleModel env target next = do
 formatTitleModelMessage
     :: ModelCatalog
     -> Provider
-    -> Maybe ModelTarget
+    -> Maybe TitleModelSetting
+    -> Bool
     -> Text
-formatTitleModelMessage catalog provider pinned =
-    let autoName =
+formatTitleModelMessage catalog provider setting appleAvailable =
+    let cheapName =
             (cheapTitleModel catalog provider).modelTarget.targetModelId
-    in case pinned of
+        autoName =
+            if appleAvailable
+                then appleFoundationTitleModelId
+                else cheapName
+    in case setting of
         Nothing ->
             "session title model: auto (" <> autoName <> ")"
-        Just target
+        Just TitleModelAppleFoundation ->
+            "session title model: " <> appleFoundationTitleModelId
+        Just (TitleModelPinned target)
             | target.targetProvider == provider ->
                 "session title model: " <> target.targetModelId
             | otherwise ->

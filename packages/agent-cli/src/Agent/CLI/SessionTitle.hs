@@ -81,16 +81,19 @@ data SessionTitleManager = SessionTitleManager
     , titleBackendFactory :: !BtwBackendFactory
     , titleParams :: !(IO ResponseCreateParams)
     , titleModel :: !(IO TitleModelResolution)
+    , titleAppleGenerate :: !(Maybe (Text -> IO (Either Text Text)))
     }
 
 withSessionTitleManager
     :: BtwBackendFactory
     -> IO ResponseCreateParams
     -> IO TitleModelResolution
+    -> Maybe (Text -> IO (Either Text Text))
     -> (SessionTitleEvent -> IO ())
     -> (SessionTitleManager -> IO a)
     -> IO a
-withSessionTitleManager backendFactory paramsRef titleModel onEvent action = do
+withSessionTitleManager
+        backendFactory paramsRef titleModel appleGenerate onEvent action = do
     jobs <- newTQueueIO
     results <- newTQueueIO
     requested <- newTVarIO Set.empty
@@ -103,6 +106,7 @@ withSessionTitleManager backendFactory paramsRef titleModel onEvent action = do
             , titleBackendFactory = backendFactory
             , titleParams = paramsRef
             , titleModel = titleModel
+            , titleAppleGenerate = appleGenerate
             }
     withAsync (titleWorker onEvent manager) \_ -> action manager
 
@@ -226,15 +230,52 @@ generateTitleWithRetry manager job =
 
 generateTitle :: SessionTitleManager -> SessionTitleJob -> IO (Either Text Text)
 generateTitle manager job = do
-    baseParams <- manager.titleParams
     resolution <- manager.titleModel
+    let excerpt =
+            Text.take (titleSourceCharBudget resolution) job.jobSource
+    if resolution.titleUsesAppleFoundation
+        then generateAppleTitle manager resolution excerpt
+        else generateProviderTitle manager resolution excerpt
+
+generateAppleTitle
+    :: SessionTitleManager
+    -> TitleModelResolution
+    -> Text
+    -> IO (Either Text Text)
+generateAppleTitle manager resolution excerpt =
+    case manager.titleAppleGenerate of
+        Just generate ->
+            generate excerpt >>= \case
+                Right title
+                    | Just cleaned <- cleanGeneratedTitle title ->
+                        pure (Right cleaned)
+                failure
+                    | resolution.titlePinned ->
+                        pure $ case failure of
+                            Left err -> Left err
+                            Right _ ->
+                                Left "Apple Intelligence returned no title text"
+                    | otherwise ->
+                        generateProviderTitle manager resolution excerpt
+        Nothing
+            | resolution.titlePinned ->
+                pure
+                    (Left "Apple Intelligence is not available for session titles")
+            | otherwise ->
+                generateProviderTitle manager resolution excerpt
+
+generateProviderTitle
+    :: SessionTitleManager
+    -> TitleModelResolution
+    -> Text
+    -> IO (Either Text Text)
+generateProviderTitle manager resolution excerpt = do
+    baseParams <- manager.titleParams
     let params = titleRequestParams resolution baseParams
-    let Backend submit =
-            manager.titleBackendFactory params
+        Backend submit = manager.titleBackendFactory params
     timeout 45000000
         (submit emptyBackendSnapshot Nothing
-            [UserMessage
-                (titlePrompt (titleSourceCharBudget resolution) job.jobSource)]
+            [UserMessage (titlePrompt (titleSourceCharBudget resolution) excerpt)]
             (\_ -> pure ()))
         >>= \case
             Nothing -> pure (Left "timed out after 45 seconds")
