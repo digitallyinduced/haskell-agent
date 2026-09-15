@@ -44,7 +44,8 @@ import Agent.CLI.TUI.Types
                         runtimeNativeImagePreviews, runtimeColor),
       activeTheme,
       Name(ConversationBodyCache, CodeBlockCache, MarkdownProseCache, ConversationBlock, ConversationMessage,
-           ConversationBlockCache, ConversationImage, CodeCopy,
+           ConversationBlockCache, ConversationImage, ConversationImageLayout,
+           ConversationImageRow, CodeCopy,
            MarkdownLink) )
 import Agent.CLI.Terminal ()
 import Agent.CLI.Timestamp ()
@@ -444,11 +445,7 @@ submittedUserMessage state target block =
                         submittedPreviewMaxColumns
                         submittedPreviewMaxRows
                         preview
-            in [ reportExtent
-                    (ConversationImage block.blockId index) $
-                    hLimit columns $
-                        vLimit rows (fill ' ')
-               ]
+            in [ nativeImagePlaceholder block.blockId index columns rows ]
 
 imagePreviewSummary :: TuiImagePreview -> Text
 imagePreviewSummary preview =
@@ -464,9 +461,9 @@ imagePreviewSummary preview =
 -- | Images the agent displayed with @show_image@ while this tool call ran.
 -- Only the root conversation carries previews; child viewports show the
 -- textual tool result alone. Native terminals get a placeholder extent that
--- the Kitty placement sync fills after each reflow, and only while Brick
--- still reports the complete cell rectangle. Cropped scrollback extents are
--- left empty so the terminal cannot stretch the bitmap. Other terminals draw
+-- the Kitty placement sync fills after each reflow. Brick may crop that
+-- rectangle while scrolling; the placement then shows the matching source
+-- slice instead of hiding or stretching the bitmap. Other terminals draw
 -- the sampled bitmap directly.
 toolImageSections :: AppState -> AgentTarget -> UiBlock -> [Widget Name]
 toolImageSections state target block =
@@ -500,15 +497,29 @@ toolImageSections state target block =
                                     maxColumns
                                     toolImageMaxRows
                                     preview
-                        in reportExtent
-                            (ConversationImage block.blockId index) $
-                            hLimit columns $
-                                vLimit rows (fill ' ')
+                        in nativeImagePlaceholder
+                            block.blockId
+                            index
+                            columns
+                            rows
                     else
                         renderTuiImagePreview
                             maxColumns
                             toolImageMaxRows
                             preview
+
+-- One named row per placeholder line so a cropped viewport still reports
+-- which slice of the bitmap remains on screen.
+nativeImagePlaceholder :: BlockId -> Int -> Int -> Int -> Widget Name
+nativeImagePlaceholder blockId index columns rows =
+    reportExtent (ConversationImage blockId index) $
+        reportExtent (ConversationImageLayout blockId index columns rows) $
+            hLimit columns $
+                vBox
+                    [ reportExtent (ConversationImageRow blockId index row) $
+                        vLimit 1 (fill ' ')
+                    | row <- [0 .. rows - 1]
+                    ]
 
 timestampedMessage :: AttrName -> Text -> Widget Name -> Widget Name
 timestampedMessage timestampAttr timestamp body

@@ -29,7 +29,7 @@ import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.ImagePreview ( ImagePreviewProtocol(..)
     , detectImagePreviewProtocol
     , kittyDeleteImageSequence
-    , kittyPlacedImageSequence
+    , kittyPlacedImageSequenceWithSource
     , positionImagePayload
     )
 import Agent.CLI.Command ( SkillCommand , SlashCatalog(..)
@@ -642,11 +642,12 @@ wrapNativePreviewVty runtime vty
             placementPayload placement =
                 let attachment = placement.nativePreviewAttachment
                     graphics =
-                        kittyPlacedImageSequence
+                        kittyPlacedImageSequenceWithSource
                             placement.nativePreviewImageId
                             placement.nativePreviewImageId
                             placement.nativePreviewColumns
                             placement.nativePreviewRows
+                            placement.nativePreviewSourceRect
                             attachment.imageMime
                             attachment.imageBytes
                 in positionImagePayload

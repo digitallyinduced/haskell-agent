@@ -106,6 +106,19 @@ spec = do
             seq_ `shouldSatisfy` Text.isInfixOf
                 "\ESC_Ga=T,q=2,i=2000000001,f=100,t=d,r=19,c=72,p=2000000001,z=1,C=1,m=0;"
 
+        it "crops the source rectangle instead of stretching a leftover cell slice" do
+            let seq_ =
+                    kittyPlacedImageSequenceWithSource
+                        2000000001
+                        2000000001
+                        72
+                        18
+                        (Just (0, 30, 960, 570))
+                        "image/png"
+                        "png-bytes"
+            seq_ `shouldSatisfy` Text.isInfixOf
+                "\ESC_Ga=T,q=2,i=2000000001,f=100,t=d,r=18,c=72,p=2000000001,z=1,x=0,y=30,w=960,h=570,C=1,m=0;"
+
         it "deletes only the requested image and frees its data" do
             kittyDeleteImageSequence 2000000001
                 `shouldBe` "\ESC_Ga=d,d=I,q=2,i=2000000001\ESC\\"

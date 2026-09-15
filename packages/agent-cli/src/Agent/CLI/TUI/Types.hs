@@ -100,6 +100,8 @@ data Name
     | ConversationViewportExtent
     | ConversationReserve
     | ConversationImage !BlockId !Int
+    | ConversationImageLayout !BlockId !Int !Int !Int
+    | ConversationImageRow !BlockId !Int !Int
     | OverlayViewport
     | PlanningPanel
     | PlanningSubmit

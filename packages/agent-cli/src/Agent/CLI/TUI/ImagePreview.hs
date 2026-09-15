@@ -12,6 +12,9 @@ module Agent.CLI.TUI.ImagePreview
     , previewCountForWidth
     , previewCellSize
     , completePreviewExtent
+    , recoverPreviewLayoutSize
+    , visiblePreviewRowSpan
+    , clippedPreviewSourceRect
     , submittedPreviewMaxColumns
     , submittedPreviewMaxRows
     , toolImageMaxColumns
@@ -67,6 +70,7 @@ sameNativePreviewLayout left right =
             && a.nativePreviewColumn == b.nativePreviewColumn
             && a.nativePreviewColumns == b.nativePreviewColumns
             && a.nativePreviewRows == b.nativePreviewRows
+            && a.nativePreviewSourceRect == b.nativePreviewSourceRect
 
 data NativePreviewPlacement = NativePreviewPlacement
     { nativePreviewImageId :: !Int
@@ -74,6 +78,7 @@ data NativePreviewPlacement = NativePreviewPlacement
     , nativePreviewColumn :: !Int
     , nativePreviewColumns :: !Int
     , nativePreviewRows :: !Int
+    , nativePreviewSourceRect :: !(Maybe (Int, Int, Int, Int))
     , nativePreviewAttachment :: !ImageAttachment
     }
     deriving (Eq, Show)
@@ -304,22 +309,105 @@ toolImageMaxRows = 24
 
 -- | Whether a Brick-reported cell rectangle is still the complete preview.
 -- Conversation widgets size themselves with the submitted or tool-image caps;
--- Brick then clamps extents to the visible viewport. Kitty placements must
--- ignore those fragments, otherwise the terminal stretches the bitmap into
--- the leftover cells while scrolling.
+-- Brick then clamps extents to the visible viewport. Cropped placements keep
+-- that leftover rectangle and display the matching source slice instead of
+-- stretching the whole bitmap.
 completePreviewExtent :: TuiImagePreview -> (Int, Int) -> Bool
 completePreviewExtent preview size@(columns, rows) =
     columns > 0
         && rows > 0
         && any (size ==)
             [ previewCellSize capColumns maxRows preview
-            | (capColumns, maxRows) <-
-                [ (columns, submittedPreviewMaxRows)
-                , (columns, toolImageMaxRows)
-                , (submittedPreviewMaxColumns, submittedPreviewMaxRows)
-                , (toolImageMaxColumns, toolImageMaxRows)
-                ]
+            | (capColumns, maxRows) <- previewSizeCaps columns
             ]
+
+-- | Recover the unclipped cell size when Brick has already cropped the
+-- reported rectangle. User-message thumbnails use a fixed cap. Tool images
+-- use the conversation width; if that guess does not reproduce the visible
+-- width, the visible width itself was the cap (a width-limited layout).
+recoverPreviewLayoutSize :: Bool -> Int -> Int -> TuiImagePreview -> (Int, Int)
+recoverPreviewLayoutSize isUserMessage visibleColumns viewportWidth preview
+    | isUserMessage =
+        previewCellSize
+            submittedPreviewMaxColumns
+            submittedPreviewMaxRows
+            preview
+    | otherwise =
+        let fromViewport =
+                previewCellSize
+                    (min toolImageMaxColumns (max 1 viewportWidth))
+                    toolImageMaxRows
+                    preview
+        in if fst fromViewport == visibleColumns
+            then fromViewport
+            else previewCellSize visibleColumns toolImageMaxRows preview
+
+previewSizeCaps :: Int -> [(Int, Int)]
+previewSizeCaps visibleColumns =
+    [ (visibleColumns, submittedPreviewMaxRows)
+    , (visibleColumns, toolImageMaxRows)
+    , (submittedPreviewMaxColumns, submittedPreviewMaxRows)
+    , (toolImageMaxColumns, toolImageMaxRows)
+    ]
+
+-- | Consecutive visible placeholder rows, from the first remaining row.
+-- Missing leading rows were scrolled off the top of the viewport.
+visiblePreviewRowSpan :: [Int] -> Maybe (Int, Int)
+visiblePreviewRowSpan present = case present of
+    [] -> Nothing
+    rows ->
+        let skipTop = minimum rows
+            consecutive = length (takeWhile (`elem` rows) [skipTop ..])
+        in Just (skipTop, consecutive)
+
+-- | Pixel source rectangle for a cell slice of a sized preview. Returns
+-- 'Nothing' when the slice is the complete bitmap.
+clippedPreviewSourceRect
+    :: TuiImagePreview
+    -> Int
+    -> Int
+    -> Int
+    -> Int
+    -> Int
+    -> Int
+    -> Maybe (Int, Int, Int, Int)
+clippedPreviewSourceRect
+    preview
+    fullColumns
+    fullRows
+    skipLeft
+    skipTop
+    visibleColumns
+    visibleRows
+    | fullColumns <= 0 || fullRows <= 0 = Nothing
+    | visibleColumns <= 0 || visibleRows <= 0 = Nothing
+    | skipLeft <= 0
+        && skipTop <= 0
+        && visibleColumns >= fullColumns
+        && visibleRows >= fullRows =
+        Nothing
+    | otherwise =
+        let (sourceX, sourceWidth) =
+                sourceSpan
+                    preview.previewSourceWidth
+                    fullColumns
+                    (max 0 skipLeft)
+                    (min visibleColumns (fullColumns - max 0 skipLeft))
+            (sourceY, sourceHeight) =
+                sourceSpan
+                    preview.previewSourceHeight
+                    fullRows
+                    (max 0 skipTop)
+                    (min visibleRows (fullRows - max 0 skipTop))
+        in Just (sourceX, sourceY, sourceWidth, sourceHeight)
+
+sourceSpan :: Int -> Int -> Int -> Int -> (Int, Int)
+sourceSpan pixelCount cellCount skip visible =
+    let cells = max 1 cellCount
+        pixels = max 1 pixelCount
+        start = skip * pixels `div` cells
+        end = (skip + visible) * pixels `div` cells
+    in (start, max 1 (end - start))
 
 -- | Match the centered Brick overlay layout with zero-based terminal-cell
 -- placements for Kitty graphics. The caption occupies the row immediately
@@ -365,6 +453,7 @@ nativePreviewPlacements imageIdBase terminalColumns terminalRows previews =
                     + max 0 ((segmentWidth - columns) `div` 2)
             , nativePreviewColumns = columns
             , nativePreviewRows = rows
+            , nativePreviewSourceRect = Nothing
             , nativePreviewAttachment = preview.previewKittyAttachment
             }
 

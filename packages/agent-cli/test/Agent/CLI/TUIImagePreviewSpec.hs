@@ -4,6 +4,7 @@ import Agent.CLI.TUI.ImagePreview
     ( NativePreviewPlacement(..)
     , TuiImagePreview(..)
     , completePreviewExtent
+    , clippedPreviewSourceRect
     , imageDimensions
     , nativePreviewPlacements
     , prepareNativeTuiImagePreview
@@ -11,11 +12,13 @@ import Agent.CLI.TUI.ImagePreview
     , previewCountForWidth
     , previewCellSize
     , previewImageAt
+    , recoverPreviewLayoutSize
     , sameNativePreviewLayout
     , submittedPreviewMaxColumns
     , submittedPreviewMaxRows
     , toolImageMaxColumns
     , toolImageMaxRows
+    , visiblePreviewRowSpan
     )
 import Agent.CLI.TUI.App
     ( previewLogicalEncodedBytes
@@ -50,6 +53,7 @@ spec = do
                     , nativePreviewColumn = 3
                     , nativePreviewColumns = 20
                     , nativePreviewRows = 6
+                    , nativePreviewSourceRect = Nothing
                     , nativePreviewAttachment = attachment
                     }
         it "ignores attachment contents when geometry is unchanged" do
@@ -66,6 +70,16 @@ spec = do
             sameNativePreviewLayout
                 [placement (ImageAttachment "image/png" "bytes")]
                 [moved]
+                `shouldBe` False
+
+        it "detects a cropped source rectangle while the destination stays put" do
+            let sliced =
+                    (placement (ImageAttachment "image/png" "bytes"))
+                        { nativePreviewSourceRect = Just (0, 30, 960, 570)
+                        }
+            sameNativePreviewLayout
+                [placement (ImageAttachment "image/png" "bytes")]
+                [sliced]
                 `shouldBe` False
 
     describe "imageDimensions" do
@@ -130,7 +144,7 @@ spec = do
                     previewCellSize 72 23 preview `shouldBe` (72, 20)
                     previewCellSize 48 12 preview `shouldBe` (42, 12)
 
-        it "rejects Brick extents cropped while scrolling a conversation image" do
+        it "slices Brick extents cropped while scrolling a conversation image" do
             let chartSource =
                     generateImage
                         (\_ _ -> PixelRGB8 10 20 30)
@@ -179,6 +193,82 @@ spec = do
                     completePreviewExtent chart
                         (fst narrowChartSize, 8)
                         `shouldBe` False
+                    recoverPreviewLayoutSize
+                        False
+                        (fst chartSize)
+                        80
+                        chart
+                        `shouldBe` chartSize
+                    recoverPreviewLayoutSize
+                        True
+                        (fst submittedSize)
+                        80
+                        chart
+                        `shouldBe` submittedSize
+                    recoverPreviewLayoutSize
+                        False
+                        (fst tallSize)
+                        80
+                        tall
+                        `shouldBe` tallSize
+                    recoverPreviewLayoutSize
+                        False
+                        (fst narrowChartSize)
+                        50
+                        chart
+                        `shouldBe` narrowChartSize
+                    let tallSkip = 5
+                        tallVisible = 8
+                        tallStart = tallSkip * 1000 `div` snd tallSize
+                        tallEnd =
+                            (tallSkip + tallVisible) * 1000 `div` snd tallSize
+                    clippedPreviewSourceRect
+                        tall
+                        (fst tallSize)
+                        (snd tallSize)
+                        0
+                        tallSkip
+                        (fst tallSize)
+                        tallVisible
+                        `shouldBe`
+                            Just (0, tallStart, 100, max 1 (tallEnd - tallStart))
+                    clippedPreviewSourceRect
+                        chart
+                        (fst chartSize)
+                        (snd chartSize)
+                        0
+                        0
+                        (fst chartSize)
+                        (snd chartSize)
+                        `shouldBe` Nothing
+                    let bottomCroppedHeight =
+                            (snd chartSize - 1) * 600 `div` snd chartSize
+                        topCroppedStart = 600 `div` snd chartSize
+                        topCroppedHeight = 600 - topCroppedStart
+                    clippedPreviewSourceRect
+                        chart
+                        (fst chartSize)
+                        (snd chartSize)
+                        0
+                        0
+                        (fst chartSize)
+                        (snd chartSize - 1)
+                        `shouldBe` Just (0, 0, 960, bottomCroppedHeight)
+                    clippedPreviewSourceRect
+                        chart
+                        (fst chartSize)
+                        (snd chartSize)
+                        0
+                        1
+                        (fst chartSize)
+                        (snd chartSize - 1)
+                        `shouldBe` Just (0, topCroppedStart, 960, topCroppedHeight)
+                    visiblePreviewRowSpan [0 .. snd chartSize - 1]
+                        `shouldBe` Just (0, snd chartSize)
+                    visiblePreviewRowSpan [1 .. snd chartSize - 1]
+                        `shouldBe` Just (1, snd chartSize - 1)
+                    visiblePreviewRowSpan [2 .. 8]
+                        `shouldBe` Just (2, 7)
                 (Left err, _) -> expectationFailure (show err)
                 (_, Left err) -> expectationFailure (show err)
 
@@ -205,6 +295,7 @@ spec = do
                         , nativePreviewColumn = 24
                         , nativePreviewColumns = 72
                         , nativePreviewRows = 20
+                        , nativePreviewSourceRect = Nothing
                         , nativePreviewAttachment = attachment
                         }
                     ]
@@ -284,6 +375,7 @@ spec = do
                                 , nativePreviewColumn = 24
                                 , nativePreviewColumns = 72
                                 , nativePreviewRows = 10
+                                , nativePreviewSourceRect = Nothing
                                 , nativePreviewAttachment = attachment
                                 }
                             ]

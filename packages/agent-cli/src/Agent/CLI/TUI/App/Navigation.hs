@@ -28,7 +28,6 @@ import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.ImagePreview ( ImagePreviewProtocol(..)
     , detectImagePreviewProtocol
     , kittyDeleteImageSequence
-    , kittyPlacedImageSequence
     , positionImagePayload
     )
 import Agent.CLI.Command ( SkillCommand , SlashCatalog(..)
@@ -97,13 +96,14 @@ import Agent.CLI.TUI.Motion ( advanceCompletionFlashes , appMotionTiming , compl
 import Agent.CLI.TUI.Render ( agentEntryWindow , agentPaneEntryLimit , agentPaneVisible , applyChildConversationUiEvent , choiceRowColumns , conversationUiForTarget , conversationScrollbarRenderer , drawApp , fullscreenBounds , fullscreenSurface , onboardingVisibleRowIndices , normalizeTextOverlayInsertion , maskedSecretText , quickStartRows , quickStartVisible , repositoryHeaderText , resumeSearchCursorColumn , selectedAgentConversation , textOverlayDisplayText )
 import Agent.CLI.TUI.ImagePreview ( NativePreviewPlacement(..)
     , TuiImagePreview(..)
-    , completePreviewExtent
+    , clippedPreviewSourceRect
     , nativePreviewPlacements
     , prepareTuiImagePreview
     , previewCountForWidth
-    , previewCellSize
+    , recoverPreviewLayoutSize
     , renderTuiImagePreview
     , sameNativePreviewLayout
+    , visiblePreviewRowSpan
     )
 import Agent.TUI.Markdown ( codeWidgetWithSyntaxHighlighting , markdownWidgetWithLinks , markdownWidgetWithSyntaxHighlightingAndLinks )
 import Agent.TUI.FencedCode ( FencedBlock(..)
@@ -150,7 +150,7 @@ import Data.IORef ( atomicModifyIORef' , modifyIORef' , newIORef , readIORef , w
 import Data.List ( find , findIndex , intersperse , nub , sort , sortOn )
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe, maybeToList)
+import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, listToMaybe, mapMaybe, maybeToList)
 import Data.Sequence (Seq, ViewL(..), ViewR(..), (|>))
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
@@ -728,41 +728,146 @@ placementFor
     -> EventM Name AppState [NativePreviewPlacement]
 placementFor state viewportBounds ordinal blockId index preview =
     lookupExtent (ConversationImage blockId index) >>= \case
-        Just imageBounds
-            | extentInside viewportBounds imageBounds
-            , let (columns, rows) = imageBounds.extentSize
-            , completePreviewExtent preview (columns, rows) ->
-                let Location (column, row) = imageBounds.extentUpperLeft
-                    imageId =
-                        submittedImageId
-                            state.appRuntime.runtimeImagePreviewIdBase
-                            ordinal
-                in pure
-                    [ NativePreviewPlacement
-                        { nativePreviewImageId = imageId
-                        , nativePreviewRow = row
-                        , nativePreviewColumn = column
-                        , nativePreviewColumns = columns
-                        , nativePreviewRows = rows
-                        , nativePreviewAttachment =
-                            preview.previewKittyAttachment
-                        }
-                    ]
-        _ -> pure []
+        Nothing -> pure []
+        Just imageBounds ->
+            case extentIntersection viewportBounds imageBounds of
+                Nothing -> pure []
+                Just (Location (column, row), (columns, rows)) -> do
+                    reportedLayout <-
+                        imageLayoutFromProbe imageBounds blockId index
+                    let (fullColumns, fullRows) =
+                            fromMaybe
+                                (recoverPreviewLayoutSize
+                                    (isUserMessageBlock state blockId)
+                                    columns
+                                    (viewportWidth viewportBounds)
+                                    preview)
+                                reportedLayout
+                    presentRows <-
+                        catMaybes
+                            <$> mapM
+                                (visibleImageRow viewportBounds blockId index)
+                                [0 .. fullRows - 1]
+                    let skipTop =
+                            clippedPreviewSkipTop
+                                viewportBounds
+                                row
+                                rows
+                                fullRows
+                                presentRows
+                        imageId =
+                            submittedImageId
+                                state.appRuntime.runtimeImagePreviewIdBase
+                                ordinal
+                    pure
+                        [ NativePreviewPlacement
+                            { nativePreviewImageId = imageId
+                            , nativePreviewRow = row
+                            , nativePreviewColumn = column
+                            , nativePreviewColumns = columns
+                            , nativePreviewRows = rows
+                            , nativePreviewSourceRect =
+                                clippedPreviewSourceRect
+                                    preview
+                                    fullColumns
+                                    fullRows
+                                    0
+                                    skipTop
+                                    columns
+                                    rows
+                            , nativePreviewAttachment =
+                                preview.previewKittyAttachment
+                            }
+                        ]
 
-extentInside :: Extent Name -> Extent Name -> Bool
-extentInside outer inner =
-    innerColumn >= outerColumn
-        && innerRow >= outerRow
-        && innerColumn + innerWidth <= outerColumn + outerWidth
-        && innerRow + innerHeight <= outerRow + outerHeight
-        && innerWidth > 0
-        && innerHeight > 0
+visibleImageRow
+    :: Extent Name
+    -> BlockId
+    -> Int
+    -> Int
+    -> EventM Name AppState (Maybe Int)
+visibleImageRow viewportBounds blockId index imageRow =
+    lookupExtent (ConversationImageRow blockId index imageRow) >>= \case
+        Just rowBounds
+            | isJust (extentIntersection viewportBounds rowBounds) ->
+                pure (Just imageRow)
+        _ -> pure Nothing
+
+imageLayoutFromProbe
+    :: Extent Name
+    -> BlockId
+    -> Int
+    -> EventM Name AppState (Maybe (Int, Int))
+imageLayoutFromProbe imageBounds blockId index = do
+    let Location (column, row) = imageBounds.extentUpperLeft
+        (width, height) = imageBounds.extentSize
+        probeColumn = column + max 0 (width `div` 2)
+        probeRow = row + max 0 (height `div` 2)
+    extents <- findClickedExtents (probeColumn, probeRow)
+    pure $
+        listToMaybe
+            [ (fullColumns, fullRows)
+            | extent <- extents
+            , ConversationImageLayout layoutId layoutIndex fullColumns fullRows <-
+                [extent.extentName]
+            , layoutId == blockId
+            , layoutIndex == index
+            ]
+
+isUserMessageBlock :: AppState -> BlockId -> Bool
+isUserMessageBlock state blockId =
+    case historyWindowBlock blockId state.appHistoryWindow of
+        Just block -> block.blockKind == BlockUser
+        Nothing -> False
+
+clippedPreviewSkipTop
+    :: Extent Name
+    -> Int
+    -> Int
+    -> Int
+    -> [Int]
+    -> Int
+clippedPreviewSkipTop viewportBounds row visibleRows fullRows presentRows =
+    min rawSkip (max 0 (fullRows - visibleRows))
   where
-    Location (outerColumn, outerRow) = outer.extentUpperLeft
-    (outerWidth, outerHeight) = outer.extentSize
-    Location (innerColumn, innerRow) = inner.extentUpperLeft
-    (innerWidth, innerHeight) = inner.extentSize
+    rawSkip = case visiblePreviewRowSpan presentRows of
+        Just (offset, _) -> offset
+        Nothing
+            | visibleRows >= fullRows -> 0
+            | row > viewportTopRow viewportBounds -> 0
+            | row + visibleRows < viewportBottomRow viewportBounds ->
+                max 0 (fullRows - visibleRows)
+            | otherwise -> 0
+
+viewportTopRow :: Extent Name -> Int
+viewportTopRow bounds = case bounds.extentUpperLeft of
+    Location (_, row) -> row
+
+viewportBottomRow :: Extent Name -> Int
+viewportBottomRow bounds =
+    viewportTopRow bounds + snd bounds.extentSize
+
+viewportWidth :: Extent Name -> Int
+viewportWidth bounds = fst bounds.extentSize
+
+extentIntersection
+    :: Extent Name
+    -> Extent Name
+    -> Maybe (Location, (Int, Int))
+extentIntersection outer inner =
+    let Location (outerColumn, outerRow) = outer.extentUpperLeft
+        (outerWidth, outerHeight) = outer.extentSize
+        Location (innerColumn, innerRow) = inner.extentUpperLeft
+        (innerWidth, innerHeight) = inner.extentSize
+        column = max outerColumn innerColumn
+        row = max outerRow innerRow
+        endColumn = min (outerColumn + outerWidth) (innerColumn + innerWidth)
+        endRow = min (outerRow + outerHeight) (innerRow + innerHeight)
+        width = endColumn - column
+        height = endRow - row
+    in if width > 0 && height > 0
+        then Just (Location (column, row), (width, height))
+        else Nothing
 
 submittedImageId :: Int -> Int -> Int
 submittedImageId imageIdBase ordinal =

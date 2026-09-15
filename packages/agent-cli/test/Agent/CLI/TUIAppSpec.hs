@@ -3882,6 +3882,7 @@ historyPlacement preview =
         , nativePreviewColumn = 0
         , nativePreviewColumns = 1
         , nativePreviewRows = 1
+        , nativePreviewSourceRect = Nothing
         , nativePreviewAttachment = preview.previewKittyAttachment
         }
 
