@@ -40,7 +40,10 @@ import Agent.CLI.Session.Interaction
     ( setSessionEffortText
     , syncFullscreenPrompt
     )
-import Agent.CLI.Session.Retry (waitAndRetryPendingTurn)
+import Agent.CLI.Session.Retry
+    ( waitAndResumeAfterUsageLimit
+    , waitAndRetryPendingTurn
+    )
 import Agent.CLI.SessionEnv (SessionEnv(..))
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.SteeringInputs
@@ -49,12 +52,26 @@ import Agent.CLI.Render
     ( RenderConfig(..)
     , putTextLn
     , renderPrintedText
+    , resetRenderPrintedText
     )
+import Agent.CLI.Style
+    ( beginBackground
+    , endBackground
+    , rolePrompt
+    , userBackground
+    )
+import Agent.CLI.Terminal (resolveColor)
 import Agent.CLI.TUI.App
     ( emitUiEvent
     , hasQueuedFullscreenInput
     )
 import Agent.CLI.Turn (retryCheckpointedTurn, runOneTurn)
+import Agent.CLI.UsageLimitRecovery
+    ( usageLimitResumeAt
+    , usageLimitResumeMessage
+    )
+import Agent.Error (ApiError)
+import Agent.Loop (TurnInput(UserMessage))
 import Agent.Tools.PlanMode (PlanModeEnv(..))
 import Agent.TUI.Model (UiEvent(..))
 import Control.Exception.Safe (throwIO)
@@ -67,7 +84,7 @@ import Data.Maybe (isNothing)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time.Clock (getCurrentTime)
+import Data.Time.Clock (UTCTime, getCurrentTime)
 import System.Exit (exitFailure)
 
 data SessionContinuation = SessionContinuation
@@ -101,7 +118,17 @@ retryFailedTurn
     -> SessionEnv
     -> PendingTurn
     -> IO RunResult
-retryFailedTurn continuation env pending = do
+retryFailedTurn continuation =
+    retryFailedTurnWithCooldownRetry continuation True
+
+retryFailedTurnWithCooldownRetry
+    :: SessionContinuation
+    -> Bool
+    -> SessionEnv
+    -> PendingTurn
+    -> IO RunResult
+retryFailedTurnWithCooldownRetry
+    continuation allowCooldownRetry env pending = do
     writeIORef env.sessionPlanMode.planStateRef pending.pendingPlanState
     syncFullscreenPrompt env
     case env.sessionFullscreen of
@@ -113,7 +140,7 @@ retryFailedTurn continuation env pending = do
     -- the same prompt twice.
     result <- runPendingAttempt env pending
     finishTurnWithCooldownRetry
-        continuation True env pending.pendingExitAfter result
+        continuation allowCooldownRetry env pending.pendingExitAfter result
 
 runPendingTurnWithCooldownRetry
     :: SessionContinuation
@@ -192,16 +219,27 @@ finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \cas
         if shouldQuitAfterTurn env exitAfter
             then pure RunQuit
             else continuation.resumeSession env
-    TurnFailed message pending -> do
-        writeIORef env.sessionLastFailedTurn
-            (Just (setPendingExitAfter exitAfter pending))
+    TurnFailed message transportFailure pending -> do
+        let pending' = setPendingExitAfter exitAfter pending
+        writeIORef env.sessionLastFailedTurn (Just pending')
         if exitAfter
             then exitFailedTurn env.sessionBackground message
             else do
                 case env.sessionFullscreen of
                     Nothing -> putTrailingNewline env.sessionRender
                     Just _ -> pure ()
-                continueAfterTurn continuation env
+                case transportFailure of
+                    Just apiError
+                        | not env.sessionBackground -> do
+                            now <- getCurrentTime
+                            recoverFailedTurn
+                                continuation
+                                allowCooldownRetry
+                                env
+                                now
+                                apiError
+                                pending'
+                    _ -> continueAfterTurn continuation env
     TurnRestartRequested level pending -> do
         setSessionEffortText env level
         writeIORef env.sessionPlanMode.planStateRef pending.pendingPlanState
@@ -216,6 +254,13 @@ finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \cas
             continuation allowCooldownRetry env exitAfter result
     TurnProviderUnavailable apiError pending ->
         let pending' = setPendingExitAfter exitAfter pending
+            returnToPrompt = do
+                notifyAttention
+                    env.sessionRender.renderStderr
+                    InputRequested
+                continuation.resumeSessionWithDraft
+                    env
+                    pending.pendingPromptText
         in do
             now <- getCurrentTime
             case providerRecoveryPreference
@@ -255,13 +300,79 @@ finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \cas
                                         else exitFailure
                                 else if env.sessionBackground
                                     then pure RunQuit
-                                    else do
-                                        notifyAttention
-                                            env.sessionRender.renderStderr
-                                            InputRequested
-                                        continuation.resumeSessionWithDraft
-                                            env
-                                            pending.pendingPromptText
+                                    else case usageLimitResumeAt now apiError of
+                                        -- Nothing was committed for this
+                                        -- turn, so resuming means submitting
+                                        -- the original prompt again.
+                                        Just resumeAt ->
+                                            waitAndResumeAfterUsageLimit
+                                                returnToPrompt
+                                                (runPendingTurnWithCooldownRetry
+                                                    continuation
+                                                    True
+                                                    RestartPendingTurn
+                                                    env
+                                                    pending')
+                                                env
+                                                resumeAt
+                                        Nothing -> returnToPrompt
+
+-- | Automatic recovery for a turn whose provider request failed after earlier
+-- steps were already committed. The transcript holds the checkpointed turn,
+-- so a brief cooldown retries it in place, while a longer usage-window reset
+-- resumes with an explicit continuation prompt. Cancelling either wait
+-- returns to the prompt with the failed turn still available for @/retry@.
+recoverFailedTurn
+    :: SessionContinuation
+    -> Bool
+    -> SessionEnv
+    -> UTCTime
+    -> ApiError
+    -> PendingTurn
+    -> IO RunResult
+recoverFailedTurn continuation allowCooldownRetry env now apiError pending =
+    case providerRecoveryPreference allowCooldownRetry now apiError of
+        RetryCurrentProviderAfter delay ->
+            waitAndRetryPendingTurn
+                (const returnToPrompt)
+                (retryFailedTurnWithCooldownRetry continuation False env)
+                env
+                delay
+                pending
+        TryProviderFallback ->
+            case usageLimitResumeAt now apiError of
+                Just resumeAt ->
+                    waitAndResumeAfterUsageLimit
+                        returnToPrompt
+                        (submitUsageLimitContinuation continuation env)
+                        env
+                        resumeAt
+                Nothing -> returnToPrompt
+  where
+    returnToPrompt = continueAfterTurn continuation env
+
+-- | Submit the continuation prompt as a real user turn once the usage window
+-- has reset. The interrupted turn is already checkpointed in the transcript,
+-- so the model sees its partial work followed by this request to continue.
+submitUsageLimitContinuation
+    :: SessionContinuation
+    -> SessionEnv
+    -> IO RunResult
+submitUsageLimitContinuation continuation env = do
+    let message = usageLimitResumeMessage
+    case env.sessionFullscreen of
+        Just runtime -> emitUiEvent runtime (UiUserSubmitted message)
+        Nothing -> do
+            let output = env.sessionRender.renderStdout
+            color <- resolveColor output
+            putTextLn output
+                (beginBackground color userBackground
+                    <> rolePrompt color "λ "
+                    <> message
+                    <> endBackground color)
+    resetRenderPrintedText env.sessionRender
+    result <- runOneTurn env message [UserMessage message]
+    finishTurnWithCooldownRetry continuation True env False result
 
 -- | One-shot and in-process background turns must not fall through to the
 -- interactive REPL. Background sessions share the parent's stdin, so a stray

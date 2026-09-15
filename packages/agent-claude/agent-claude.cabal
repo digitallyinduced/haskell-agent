@@ -65,6 +65,7 @@ library
                     , process               >= 1.6.26
                     , safe-exceptions
                     , text
+                    , time
                     , uuid-types
 
 test-suite agent-claude-test
@@ -92,4 +93,5 @@ test-suite agent-claude-test
                     , hspec
                     , safe-exceptions
                     , text
+                    , time
                     , unix

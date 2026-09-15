@@ -5,6 +5,7 @@ import Agent.Claude.LoopBackend
     , claudeCodeOneShotBackend
     , emptyClaudeEventState
     , sdkErrorToApiError
+    , sdkErrorToApiErrorAt
     , streamClaudeProgress
     , withClaudeCodeBackend
     )
@@ -19,6 +20,7 @@ import Agent.Claude.Options
     )
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Cancel (newCancelFlag, requestCancel)
+import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import qualified Agent.Loop as Loop
 import Agent.Tools.Types (mkToolRegistry)
 import Agent.Json (rawJsonBytes, rawJsonFromEncoding)
@@ -154,6 +156,66 @@ spec = do
                     (Just "Failed to authenticate: OAuth session expired and could not be refreshed"))
                 `shouldSatisfy` \case
                     ProviderError{errorType = AuthenticationError} -> True
+                    _ -> False
+        it "classifies a subscription usage limit ahead of its generic 429 status" do
+            sdkErrorToApiError
+                (ResultError
+                    "success"
+                    (Just 429)
+                    []
+                    (Just "Claude AI usage limit reached|1789999200"))
+                `shouldSatisfy` \case
+                    ProviderError
+                        { errorType = UsageLimitReached
+                        , retryAfter = Nothing
+                        } -> True
+                    _ -> False
+            sdkErrorToApiError
+                (ResultError "error" Nothing ["You've hit your limit"] Nothing)
+                `shouldSatisfy` \case
+                    ProviderError{errorType = UsageLimitReached} -> True
+                    _ -> False
+
+    describe "sdkErrorToApiErrorAt" do
+        let resetAt = posixSecondsToUTCTime 1789999200
+            exhausted =
+                ResultError
+                    "success"
+                    (Just 429)
+                    []
+                    (Just "Claude AI usage limit reached|1789999200")
+        it "exposes the usage-window reset as the remaining wait" do
+            sdkErrorToApiErrorAt (posixSecondsToUTCTime 1789995600) exhausted
+                `shouldSatisfy` \case
+                    ProviderError
+                        { errorType = UsageLimitReached
+                        , retryAfter = Just 3600
+                        } -> True
+                    _ -> False
+        it "never reports a wait shorter than one second" do
+            sdkErrorToApiErrorAt (posixSecondsToUTCTime 1790000000) exhausted
+                `shouldSatisfy` \case
+                    ProviderError{retryAfter = Just 1} -> True
+                    _ -> False
+        it "leaves a usage limit without a reset timestamp for manual retry" do
+            sdkErrorToApiErrorAt
+                resetAt
+                (ResultError "error" Nothing ["Claude AI usage limit reached"] Nothing)
+                `shouldSatisfy` \case
+                    ProviderError
+                        { errorType = UsageLimitReached
+                        , retryAfter = Nothing
+                        } -> True
+                    _ -> False
+        it "does not change unrelated failures" do
+            sdkErrorToApiErrorAt
+                resetAt
+                (ResultError "permission_error" (Just 403) ["forbidden"] Nothing)
+                `shouldSatisfy` \case
+                    ProviderError
+                        { errorType = PermissionError
+                        , retryAfter = Nothing
+                        } -> True
                     _ -> False
 
     describe "streamClaudeProgress" do

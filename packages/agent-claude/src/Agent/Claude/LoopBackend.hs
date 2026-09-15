@@ -6,6 +6,7 @@ module Agent.Claude.LoopBackend
     , claudeCodeOneShotBackend
     , appendHostTranscript
     , sdkErrorToApiError
+    , sdkErrorToApiErrorAt
     , emptyClaudeEventState
     , streamClaudeProgress
     ) where
@@ -111,16 +112,26 @@ import Data.IORef
     , readIORef
     , writeIORef
     )
-import Data.Maybe (catMaybes, fromMaybe, isJust, maybeToList)
+import Data.Maybe
+    ( catMaybes
+    , fromMaybe
+    , isJust
+    , listToMaybe
+    , mapMaybe
+    , maybeToList
+    )
 import Data.List (groupBy, intersperse)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
+import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
+import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import qualified Data.UUID.Types as UUID
 import qualified System.Directory as Directory
 import System.FilePath (takeExtension)
 import System.IO (hClose, openBinaryTempFile)
+import Text.Read (readMaybe)
 import Claude.Agent.SDK.Errors
     ( ClaudeSDKError(..)
     , renderClaudeSDKError
@@ -142,7 +153,7 @@ import Claude.Agent.SDK.Types
     , messageHasParentToolUseId
     )
 import Control.Exception.Safe (bracket, finally, mask, tryAny)
-import Control.Monad (forM_, void)
+import Control.Monad (forM_, guard, void)
 
 claudeProviderNamespace :: Text
 claudeProviderNamespace = "anthropic.claude-code"
@@ -475,7 +486,8 @@ submitClaudeCodeTurn
                                             history
                                             finalEventState
                                             onEvent
-                pure (either (Left . sdkErrorToApiError) Right result)
+                now <- getCurrentTime
+                pure (either (Left . sdkErrorToApiErrorAt now) Right result)
   where
     snd3 (_, _, c) = c
 
@@ -951,9 +963,48 @@ sdkErrorToApiError = \case
     sdkError ->
         ConnectionError (renderClaudeSDKError sdkError)
 
+-- | Like 'sdkErrorToApiError', but when Claude Code reports a usage-window
+-- exhaustion together with its reset timestamp, classify it as a usage limit
+-- and expose the remaining wait so the session can resume automatically once
+-- the window resets.
+sdkErrorToApiErrorAt :: UTCTime -> ClaudeSDKError -> ApiError
+sdkErrorToApiErrorAt now sdkError =
+    case (sdkErrorToApiError sdkError, usageLimitResetTime sdkError) of
+        (ProviderError{errorType, message}, Just resetAt)
+            | errorType `elem` [RateLimitError, UsageLimitReached] ->
+                ProviderError
+                    { errorType = UsageLimitReached
+                    , message
+                    , retryAfter =
+                        Just (max 1 (ceiling (diffUTCTime resetAt now)))
+                    }
+        (apiError, _) -> apiError
+
+-- | Claude Code reports subscription exhaustion as
+-- @Claude AI usage limit reached|<unix seconds>@, where the suffix is the
+-- reset time of the exhausted window.
+usageLimitResetTime :: ClaudeSDKError -> Maybe UTCTime
+usageLimitResetTime = \case
+    ResultError{errors, result} ->
+        listToMaybe (mapMaybe resetTimestamp (errors <> maybeToList result))
+    _ -> Nothing
+  where
+    marker = "limit reached|"
+    resetTimestamp message = do
+        let (_, tagged) = Text.breakOn marker (Text.toLower message)
+        guard (not (Text.null tagged))
+        let digits =
+                Text.takeWhile Char.isDigit (Text.drop (Text.length marker) tagged)
+        guard (not (Text.null digits))
+        seconds <- readMaybe (Text.unpack digits)
+        pure (posixSecondsToUTCTime (fromInteger seconds))
+
 classifyResultError :: ClaudeSDKError -> ErrorType
-classifyResultError ResultError{subtype, apiErrorStatus, errors, result} =
-    case apiErrorStatus of
+classifyResultError ResultError{subtype, apiErrorStatus, errors, result}
+    -- Usage-window exhaustion may arrive with a generic 429 status; the
+    -- message is the only place that names the exhausted subscription window.
+    | isUsageLimitMessage lowered = UsageLimitReached
+    | otherwise = case apiErrorStatus of
         Just 401 -> AuthenticationError
         Just 403 -> PermissionError
         Just 404 -> NotFoundError
@@ -966,14 +1017,19 @@ classifyResultError ResultError{subtype, apiErrorStatus, errors, result} =
         _ ->
             let bySubtype = errorTypeFromText (Text.toLower subtype)
             in case bySubtype of
-                UnknownErrorType _ ->
-                    classifyResultMessage
-                        (Text.toLower (Text.intercalate " " (errors <> maybeToList result)))
+                UnknownErrorType _ -> classifyResultMessage lowered
                 other -> other
+  where
+    lowered = Text.toLower (Text.intercalate " " (errors <> maybeToList result))
 classifyResultError _ = ApiErrorType
+
+isUsageLimitMessage :: Text -> Bool
+isUsageLimitMessage message =
+    any (`Text.isInfixOf` message) ["usage limit", "hit your limit"]
 
 classifyResultMessage :: Text -> ErrorType
 classifyResultMessage message
+    | isUsageLimitMessage message = UsageLimitReached
     | any (`Text.isInfixOf` message)
         [ "authentication"
         , "failed to authenticate"
