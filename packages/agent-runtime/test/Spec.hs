@@ -37,6 +37,7 @@ import qualified Agent.Runtime.GatewayClientSpec as GatewayClientSpec
 import qualified Agent.Runtime.ManagedTurnSpec as ManagedTurnSpec
 import qualified Agent.Runtime.ModelConfigSpec as ModelConfigSpec
 import qualified Agent.Runtime.ModelsSpec as ModelsSpec
+import qualified Agent.Runtime.TitleModelSpec as TitleModelSpec
 import qualified Agent.Runtime.NativeProcessSpec as NativeProcessSpec
 import qualified Agent.Runtime.SessionSpec as SessionSpec
 import qualified Agent.Runtime.Session.ResourcesSpec as SessionResources
@@ -124,6 +125,7 @@ main = hspec do
     ManagedTurnSpec.spec
     ModelConfigSpec.spec
     ModelsSpec.spec
+    TitleModelSpec.spec
     NativeProcessSpec.spec
     SessionSpec.spec
     SessionResources.spec

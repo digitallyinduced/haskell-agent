@@ -120,6 +120,9 @@ data SelectionAction
     | ReplToggleFast
     | ReplShowModel
     | ReplSetModel Text
+    | ReplShowTitleModel
+    | ReplSetTitleModel Text
+    | ReplClearTitleModel
     | ReplShowTheme
     | ReplSetTheme Text
     deriving (Eq, Show)

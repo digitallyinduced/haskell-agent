@@ -342,6 +342,7 @@ parseSpecializedSlashCommand catalog raw spec args commandTail =
         "find" -> ReplFind (nonEmptyText commandTail)
         "effort" -> parseEffortCommand args
         "model" -> parseModelCommand args
+        "title-model" -> parseTitleModelCommand args
         "theme" -> parseThemeCommand args
         "plan" -> parseOptionalTextCommand ReplPlan commandTail
         "queue" ->
@@ -691,6 +692,16 @@ parseModelCommand = \case
             ReplCommandError "usage: /model [NAME]"
         | otherwise -> ReplSelection (ReplSetModel name)
     _ -> ReplCommandError "usage: /model [NAME]"
+
+parseTitleModelCommand :: [Text] -> ReplAction
+parseTitleModelCommand = \case
+    [] -> ReplSelection ReplShowTitleModel
+    ["--auto"] -> ReplSelection ReplClearTitleModel
+    [name]
+        | Text.null (Text.strip name) ->
+            ReplCommandError "usage: /title-model [NAME|--auto]"
+        | otherwise -> ReplSelection (ReplSetTitleModel name)
+    _ -> ReplCommandError "usage: /title-model [NAME|--auto]"
 
 parseThemeCommand :: [Text] -> ReplAction
 parseThemeCommand = \case

@@ -112,6 +112,7 @@ library
                     , Agent.Runtime.Session.Request
                     , Agent.Runtime.Session.StoreCodec
                     , Agent.Runtime.Session.Threads
+                    , Agent.Runtime.Session.TitleModel
                     , Agent.Runtime.Session.TitlePolicy
                     , Agent.Runtime.Session.TurnRecord
                     , Agent.Runtime.Session.Types
@@ -264,6 +265,7 @@ test-suite agent-runtime-test
                     , Agent.Runtime.ManagedTurnSpec
                     , Agent.Runtime.ModelConfigSpec
                     , Agent.Runtime.ModelsSpec
+                    , Agent.Runtime.TitleModelSpec
                     , Agent.Runtime.NativeProcessSpec
                     , Agent.Runtime.SessionActivitySpec
                     , Agent.Runtime.SessionObservationSpec

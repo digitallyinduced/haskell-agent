@@ -7,7 +7,8 @@ import Agent.CLI.Command
     ( ReplAction(ReplSelection, ReplSetShell, ReplToggleComputerUse, ReplSetComputerUse,
                  ReplToggleAlwaysApprove, ReplSetAgentLimit,
                  ReplEnableCodeMode, ReplSkills)
-    , SelectionAction(ReplSetEffort, ReplToggleFast, ReplSetModel)
+    , SelectionAction(ReplSetEffort, ReplToggleFast, ReplSetModel,
+                      ReplSetTitleModel, ReplClearTitleModel)
     , SlashCatalog
     , parseReplLineWithCatalog
     )
@@ -403,6 +404,8 @@ safeMetaSessionAction = \case
     ReplSelection ReplSetEffort{} -> True
     ReplSelection ReplToggleFast -> True
     ReplSelection ReplSetModel{} -> True
+    ReplSelection ReplSetTitleModel{} -> True
+    ReplSelection ReplClearTitleModel -> True
     ReplSetShell{} -> True
     ReplToggleComputerUse -> True
     ReplSetComputerUse{} -> True

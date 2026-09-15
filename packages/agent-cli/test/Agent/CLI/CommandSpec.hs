@@ -464,6 +464,17 @@ spec = do
             parseReplLine "/model openai/gpt-5.1"
                 `shouldBe` ReplSelection (ReplSetModel "openai/gpt-5.1")
 
+        it "selects or clears the session title model" do
+            parseReplLine "/title-model"
+                `shouldBe` ReplSelection ReplShowTitleModel
+            parseReplLine "/title-model haiku"
+                `shouldBe` ReplSelection (ReplSetTitleModel "haiku")
+            parseReplLine "/title-model --auto"
+                `shouldBe` ReplSelection ReplClearTitleModel
+            parseReplLine "/title-model haiku extra"
+                `shouldBe` ReplCommandError
+                    "usage: /title-model [NAME|--auto]"
+
         it "opens and selects a theme" do
             parseReplLine "/theme" `shouldBe` ReplSelection ReplShowTheme
             parseReplLine "/t" `shouldBe` ReplSelection ReplShowTheme
@@ -630,6 +641,7 @@ spec = do
                     , "find"
                     , "permissions"
                     , "model"
+                    , "title-model"
                     , "theme"
                     , "effort"
                     , "fast"
@@ -781,7 +793,7 @@ spec = do
                         (("/" <>) . (.slashName))
                         defaultSlashCatalog.slashCatalogCommands
             displays "/mo" 3
-                `shouldBe` ["/model", "/codemod", "/permissions"]
+                `shouldBe` ["/model", "/codemod", "/title-model", "/permissions"]
             displays "/ra" 3 `shouldSatisfy` ("/reload-auth" `elem`)
             displays "look at /mo" 11 `shouldBe` []
 
@@ -839,6 +851,7 @@ spec = do
         it "renders /help with usage and summary" do
             let listing = Text.unpack (formatSlashHelp False Nothing)
             listing `shouldSatisfy` ("/model [NAME]" `isInfixOf`)
+            listing `shouldSatisfy` ("/title-model [NAME|--auto]" `isInfixOf`)
             listing `shouldSatisfy` ("Open the model picker" `isInfixOf`)
             listing `shouldSatisfy` ("preview it in the terminal" `isInfixOf`)
             listing `shouldSatisfy` ("(/m)" `isInfixOf`)

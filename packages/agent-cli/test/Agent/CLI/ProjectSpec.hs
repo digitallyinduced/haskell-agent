@@ -185,6 +185,32 @@ spec = describe "Agent.CLI.Project" do
                 projectModelFor OpenAIProvider updated
                     `shouldBe` Just "gpt-project"
 
+        it "round-trips a user title model without resetting last-model" $
+            withTempDir "agent-project-" \root -> do
+                saveProjectModel root
+                    (target OpenAIProvider "openai"
+                        "gpt-project" "gpt-project" CodexDialect)
+                saveUserTitleModel root
+                    (Just
+                        (target ClaudeCodeProvider "claude-code"
+                            "haiku" "haiku" ClaudeCodeDialect))
+                settings <- loadProjectSettings root
+                settings.settingsLastModel `shouldBe` Just ProjectModel
+                    { projectModelTarget =
+                        target OpenAIProvider "openai"
+                            "gpt-project" "gpt-project" CodexDialect
+                    }
+                settings.settingsTitleModel `shouldBe` Just ProjectModel
+                    { projectModelTarget =
+                        target ClaudeCodeProvider "claude-code"
+                            "haiku" "haiku" ClaudeCodeDialect
+                    }
+                saveUserTitleModel root Nothing
+                cleared <- loadProjectSettings root
+                cleared.settingsTitleModel `shouldBe` Nothing
+                projectModelFor OpenAIProvider cleared
+                    `shouldBe` Just "gpt-project"
+
         it "round-trips an organization gateway model dialect" $
             withTempDir "agent-project-" \root -> do
                 let gatewayTarget =

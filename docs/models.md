@@ -96,3 +96,14 @@ advertises the same alias.
 The built-in `add-model` skill handles requests such as “use the model running
 at this URL”, “add this OpenRouter model”, or “OpenAI released a new model”.
 Invoke it with `/add-model`, `$add-model`, or a natural-language request.
+
+## Session title model
+
+Automatic session titles are generated with a cheap auxiliary model, not the
+live coding model. Claude sessions default to `haiku`, OpenAI to
+`gpt-5.6-luna`, Gemini to `gemini-3.5-flash-lite`, and OpenRouter to
+`stealth/ox-alpha`. Pin a specific catalog model with `/title-model NAME`, or
+restore the automatic choice with `/title-model --auto`. The selection is stored
+as `titleModel` in `~/.haskell-agent/settings.json`. A pinned model is used
+only while its provider matches the current session; otherwise the cheap
+automatic choice for the active provider is used.
