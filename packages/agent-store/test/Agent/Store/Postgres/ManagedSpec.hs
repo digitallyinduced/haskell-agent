@@ -1,11 +1,13 @@
 {-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE FieldSelectors #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Agent.Store.Postgres.ManagedSpec (spec) where
 
-import Control.Concurrent.Async (cancel, withAsync)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (cancel, wait, withAsync)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception.Safe (finally, throwIO)
 import Control.Monad (void)
@@ -25,11 +27,14 @@ import Test.Hspec
 
 import Agent.Store.Postgres
 import Agent.Store.Postgres.Connection
-    ( closeStorePool
+    ( PoolConfig(..)
+    , ReconnectionPolicy(..)
+    , closeStorePool
     , defaultPoolConfig
     , openStorePool
-    , withStorePool
     , withSession
+    , withSessionSingleAttempt
+    , withStorePool
     )
 import qualified Agent.Store.Postgres.ModelCatalogCache as ModelCatalogCache
 import Agent.Store.Postgres.Config (postgresSocketPath)
@@ -262,6 +267,93 @@ spec =
                             Right () ->
                                 expectationFailure
                                     "mismatched cluster unexpectedly opened"
+                    ) `finally` cleanup
+
+        it "waits for the managed server to restart before failing a pooled session" $
+            withSystemTempDirectory "ha" \stateDirectory -> do
+                let
+                    config = defaultManagedPostgresConfig stateDirectory ""
+                    probe = Session.statement () probeStatement
+                    cleanup = void (stopManagedPostgres config)
+                (do
+                    ensureManagedPostgres config
+                        >>= (`shouldSatisfy` isRight)
+                    withStorePool config defaultPoolConfig (\pool -> do
+                        -- Establish a pooled connection that the restart
+                        -- will close.
+                        withSession pool probe `shouldReturn` Right True
+                        stopManagedPostgres config `shouldReturn` Right ()
+                        -- Without a reconnection policy both the stale pooled
+                        -- connection and the missing socket fail at once.
+                        withSessionSingleAttempt pool probe
+                            >>= (`shouldSatisfy` isLeft)
+                        withSessionSingleAttempt pool probe
+                            >>= (`shouldSatisfy` isLeft)
+                        withAsync
+                            (do
+                                threadDelay 2_000_000
+                                ensureManagedPostgres config)
+                            \restart -> do
+                                timeout 60_000_000 (withSession pool probe)
+                                    `shouldReturn` Just (Right True)
+                                wait restart >>= (`shouldSatisfy` isRight)
+                        pure (Right ()))
+                        `shouldReturn` Right ()
+                    ) `finally` cleanup
+
+        it "retries a pooled connection that a fast shutdown closed" $
+            withSystemTempDirectory "ha" \stateDirectory -> do
+                let
+                    config = defaultManagedPostgresConfig stateDirectory ""
+                    probe = Session.statement () probeStatement
+                    cleanup = void (stopManagedPostgres config)
+                (do
+                    ensureManagedPostgres config
+                        >>= (`shouldSatisfy` isRight)
+                    withStorePool config defaultPoolConfig (\pool -> do
+                        withSession pool probe `shouldReturn` Right True
+                        stopManagedPostgres config `shouldReturn` Right ()
+                        ensureManagedPostgres config
+                            >>= (`shouldSatisfy` isRight)
+                        -- The pool still holds the connection the shutdown
+                        -- closed, and Hasql reports the first statement on it
+                        -- as a decoding failure rather than a lost connection.
+                        withSession pool probe `shouldReturn` Right True
+                        pure (Right ()))
+                        `shouldReturn` Right ()
+                    ) `finally` cleanup
+
+        it "reports the connection failure once the reconnection policy is exhausted" $
+            withSystemTempDirectory "ha" \stateDirectory -> do
+                let
+                    config = defaultManagedPostgresConfig stateDirectory ""
+                    probe = Session.statement () probeStatement
+                    briefPolicy = ReconnectionPolicy
+                        { reconnectionDelays = [100_000, 100_000]
+                        }
+                    cleanup = void (stopManagedPostgres config)
+                (do
+                    ensureManagedPostgres config
+                        >>= (`shouldSatisfy` isRight)
+                    withStorePool
+                        config
+                        defaultPoolConfig { poolReconnectionPolicy = briefPolicy }
+                        (\pool -> do
+                            withSession pool probe `shouldReturn` Right True
+                            stopManagedPostgres config `shouldReturn` Right ()
+                            -- The stale pooled connection is discarded on the
+                            -- first retry, so the reported error is the
+                            -- failed connection attempt to the absent socket.
+                            withSession pool probe >>= \case
+                                Left (StoreConnectionError message) ->
+                                    message `shouldSatisfy`
+                                        Text.isInfixOf "ConnectionUsageError"
+                                other ->
+                                    expectationFailure $
+                                        "expected a connection failure, got: "
+                                            <> show other
+                            pure (Right ()))
+                        `shouldReturn` Right ()
                     ) `finally` cleanup
 
         it "ignores an unrelated migration 11 from another worktree" $
@@ -747,6 +839,13 @@ serverStatement = Statement.preparable
             <*> Decoders.column (Decoders.nonNullable Decoders.bool)
             <*> Decoders.column (Decoders.nonNullable Decoders.bool)
             <*> Decoders.column (Decoders.nonNullable Decoders.bool))
+
+probeStatement :: Statement () Bool
+probeStatement = Statement.preparable
+    "SELECT TRUE"
+    Encoders.noParams
+    (Decoders.singleRow $
+        Decoders.column (Decoders.nonNullable Decoders.bool))
 
 providerTelemetryColumnStatement :: Statement () Bool
 providerTelemetryColumnStatement = Statement.preparable

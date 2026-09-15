@@ -23,10 +23,17 @@ module Agent.Store.Postgres.Connection
     , withConnectionSession
     , withStorePool
     , withSession
+    , withSessionSingleAttempt
     , runSession
     , runTransaction
+    , ReconnectionPolicy(..)
+    , defaultReconnectionPolicy
+    , noReconnectionPolicy
+    , isTransientUsageError
+    , retryTransientUsageErrors
     ) where
 
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
     ( newEmptyMVar
     , putMVar
@@ -41,12 +48,14 @@ import Control.Exception.Safe
     , onException
     , tryAny
     )
+import Control.Monad.Except (catchError, throwError)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (DiffTime)
 import GHC.Conc (threadWaitReadSTM)
 import qualified Hasql.Connection as Connection
 import qualified Hasql.Connection.Settings as ConnectionSettings
+import qualified Hasql.Errors as Errors
 import qualified Hasql.Pool as Pool
 import qualified Hasql.Pool.Config as PoolConfig
 import qualified Hasql.Session as Session
@@ -62,6 +71,7 @@ data StorePool = StorePool
     { storePoolInternal :: !Pool.Pool
     , storePoolConnectionSettings :: !ConnectionSettings.Settings
     , storePoolServerTurnActionLockDirectoryInternal :: !FilePath
+    , storePoolReconnectionPolicy :: !ReconnectionPolicy
     }
 
 storePool :: StorePool -> Pool.Pool
@@ -81,6 +91,7 @@ data PoolConfig = PoolConfig
     , poolAcquisitionTimeout :: !DiffTime
     , poolAgingTimeout :: !DiffTime
     , poolIdlenessTimeout :: !DiffTime
+    , poolReconnectionPolicy :: !ReconnectionPolicy
     }
     deriving (Eq, Show)
 
@@ -90,7 +101,37 @@ defaultPoolConfig = PoolConfig
     , poolAcquisitionTimeout = 10
     , poolAgingTimeout = 60 * 60
     , poolIdlenessTimeout = 60
+    , poolReconnectionPolicy = defaultReconnectionPolicy
     }
+
+{- | Delays, in microseconds, between successive attempts to run a pooled
+session after an attempt failed before the server could act on it.
+
+The policy is exhausted together with the list: an empty list permits exactly
+one attempt.
+-}
+newtype ReconnectionPolicy = ReconnectionPolicy
+    { reconnectionDelays :: [Int]
+    }
+    deriving (Eq, Show)
+
+{- | Wait out a routine PostgreSQL restart.
+
+The first retries follow closely so a fast restart costs little; later ones
+are spaced further apart. The attempts span about one minute in total, after
+which the last transient error is reported to the caller.
+-}
+defaultReconnectionPolicy :: ReconnectionPolicy
+defaultReconnectionPolicy = ReconnectionPolicy
+    { reconnectionDelays = map seconds ([1, 2, 3, 4] <> replicate 10 5)
+    }
+  where
+    seconds :: Int -> Int
+    seconds = (* 1000000)
+
+-- | Report the first failure immediately.
+noReconnectionPolicy :: ReconnectionPolicy
+noReconnectionPolicy = ReconnectionPolicy { reconnectionDelays = [] }
 
 connectionSettingsForRole
     :: ManagedPostgresConfig
@@ -180,6 +221,7 @@ openRoleStorePoolWithConnectionTimeout
             , storePoolConnectionSettings = settings
             , storePoolServerTurnActionLockDirectoryInternal =
                 serverTurnActionLockDirectory config
+            , storePoolReconnectionPolicy = options.poolReconnectionPolicy
             }
 
 closeStorePool :: StorePool -> IO ()
@@ -312,17 +354,112 @@ withStorePool config options action =
         (either (const (pure ())) closeStorePool)
         (either (pure . Left) action)
 
--- | Check out a pooled connection for one Hasql session and return it
--- automatically when the session finishes or fails.
+{- | Check out a pooled connection for one Hasql session and return it
+automatically when the session finishes or fails.
+
+A failure to reach the server, or a connection that the server closed, is
+retried under the pool's 'ReconnectionPolicy' so that a routine PostgreSQL
+restart stalls the caller instead of failing it. Only errors that Hasql
+classifies as transient are retried; server-side statement errors and pool
+acquisition timeouts are reported at once.
+-}
 withSession
     :: StorePool
     -> Session.Session a
     -> IO (Either StoreError a)
-withSession pool session =
-    Pool.use (storePool pool) session >>= \case
+withSession pool = withSessionUnderPolicy pool.storePoolReconnectionPolicy pool
+
+{- | Run one pooled session without waiting for the server to return.
+
+Use this where a failure must be reported promptly, such as the warm-start
+probe that falls back to lifecycle management.
+-}
+withSessionSingleAttempt
+    :: StorePool
+    -> Session.Session a
+    -> IO (Either StoreError a)
+withSessionSingleAttempt = withSessionUnderPolicy noReconnectionPolicy
+
+withSessionUnderPolicy
+    :: ReconnectionPolicy
+    -> StorePool
+    -> Session.Session a
+    -> IO (Either StoreError a)
+withSessionUnderPolicy policy pool session =
+    retryTransientUsageErrors policy discardIdleConnectionsAndWait attempt >>= \case
         Left err -> pure $ Left $ StoreConnectionError $
             "PostgreSQL session failed: " <> Text.pack (show err)
         Right value -> pure (Right value)
+  where
+    attempt =
+        Pool.use (storePool pool) (verifyConnectionAfterFailure session)
+    -- A restarted server closed every connection established before the
+    -- failure. Discarding the idle ones lets the retry connect afresh instead
+    -- of failing once per stale pooled connection; the pool stays usable.
+    discardIdleConnectionsAndWait delay = do
+        Pool.release (storePool pool)
+        threadDelay delay
+
+{- | Distinguish a rejected statement from a connection the server closed.
+
+A fast shutdown leaves a termination notice on every open connection. Hasql
+reports the statement that first reads that notice as a decoding failure or
+as an empty server error rather than as a connection loss, so the pool would
+return the dead connection for reuse and the caller would see a permanent
+failure. After any failure that Hasql does not already consider transient, a
+probe on the same connection settles the question: a probe the connection
+cannot deliver replaces the original error, so the pool discards the
+connection and the reconnection policy retries the session. Otherwise the
+original error stands.
+-}
+verifyConnectionAfterFailure :: Session.Session a -> Session.Session a
+verifyConnectionAfterFailure session =
+    session `catchError` \sessionError ->
+        if Errors.isTransient sessionError
+            then throwError sessionError
+            else do
+                probeOutcome <-
+                    (Right <$> Session.script "SELECT 1")
+                        `catchError` (pure . Left)
+                throwError case probeOutcome of
+                    Left probeError
+                        | Errors.isTransient probeError -> probeError
+                    _ -> sessionError
+
+{- | Whether a pool usage error permits running the same session again.
+
+Hasql marks an error transient when the operation can be retried on a new
+connection: the server could not be reached, or the connection was lost. Such
+failures precede any effect of the session on the server, or reach a session
+whose open transaction the server rolled back with the connection.
+-}
+isTransientUsageError :: Pool.UsageError -> Bool
+isTransientUsageError = \case
+    Pool.ConnectionUsageError err -> Errors.isTransient err
+    Pool.SessionUsageError err -> Errors.isTransient err
+    Pool.AcquisitionTimeoutUsageError -> False
+
+{- | Repeat an attempt while it fails transiently and the policy has delays
+left. The supplied action receives each scheduled delay, in microseconds,
+before the corresponding retry. The last transient error is returned when the
+policy is exhausted.
+-}
+retryTransientUsageErrors
+    :: ReconnectionPolicy
+    -> (Int -> IO ())
+    -> IO (Either Pool.UsageError a)
+    -> IO (Either Pool.UsageError a)
+retryTransientUsageErrors policy beforeRetry attempt =
+    go policy.reconnectionDelays
+  where
+    go delays =
+        attempt >>= \case
+            Left err
+                | isTransientUsageError err
+                , delay : remaining <- delays -> do
+                    beforeRetry delay
+                    go remaining
+            result -> pure result
 
 -- | Backwards-compatible name for 'withSession'.
 runSession

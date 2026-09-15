@@ -106,6 +106,7 @@ library
                     , hasql
                     , hasql-pool
                     , hasql-transaction
+                    , mtl
                     , pqi
                     , pqi-ffi
                     , process
@@ -210,6 +211,7 @@ test-suite agent-store-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.Store.Postgres.ConfigSpec
+                    , Agent.Store.Postgres.ConnectionSpec
                     , Agent.Store.Postgres.CustomSpec
                     , Agent.Store.Postgres.ManagedSpec
                     , Agent.Store.PoolCacheSpec
@@ -225,6 +227,7 @@ test-suite agent-store-test
                     , bytestring
                     , hspec
                     , hasql
+                    , hasql-pool
                     , safe-exceptions
                     , temporary
                     , text
