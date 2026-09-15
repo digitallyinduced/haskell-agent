@@ -793,7 +793,7 @@ spec = do
                         (("/" <>) . (.slashName))
                         defaultSlashCatalog.slashCatalogCommands
             displays "/mo" 3
-                `shouldBe` ["/model", "/codemod", "/permissions"]
+                `shouldBe` ["/model", "/codemod", "/title-model", "/permissions"]
             displays "/ra" 3 `shouldSatisfy` ("/reload-auth" `elem`)
             displays "look at /mo" 11 `shouldBe` []
 
