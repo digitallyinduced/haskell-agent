@@ -106,6 +106,21 @@ sameServerConfigs left right =
 mcpFleetTools :: McpFleet -> [AppTool]
 mcpFleetTools = map (.mcpRegistrationTool) . (.mcpFleetRegistrations)
 
+-- | Read the current catalog, including tools discovered after progressive
+-- startup. Unlike 'mcpFleetRegistrations', this is not a startup snapshot.
+mcpFleetCurrentRegistrations :: McpFleet -> IO [McpToolRegistration]
+mcpFleetCurrentRegistrations fleet = do
+    entries <- Map.elems <$> readTVarIO fleet.mcpFleetCatalog
+    pure [registrationFor entry.catalogClient entry.catalogTool | entry <- entries]
+
+registrationFor :: McpClient -> McpTool -> McpToolRegistration
+registrationFor client tool = McpToolRegistration
+    { mcpRegistrationServer = client.clientConfig.mcpServerName
+    , mcpRegistrationTool = appToolFor client tool
+    , mcpRegistrationToolForArtifactDirectory =
+        \directory -> appToolForArtifactDirectory directory client tool
+    }
+
 mcpFleetToolsForArtifactDirectory
     :: Maybe FilePath
     -> McpFleet
@@ -421,15 +436,6 @@ startMcpFleetWithInMemory hooks reportActive external inMemory = mask \restore -
                 Left err -> throwIO (userError (Text.unpack err))
                 Right (tools, warnings) ->
                     pure (client, tools, warnings)
-
-    registrationFor :: McpClient -> McpTool -> McpToolRegistration
-    registrationFor client tool = McpToolRegistration
-        { mcpRegistrationServer = client.clientConfig.mcpServerName
-        , mcpRegistrationTool = appToolFor client tool
-        , mcpRegistrationToolForArtifactDirectory =
-            \directory ->
-                appToolForArtifactDirectory directory client tool
-        }
 
     startupWarningFromText :: McpServerConfig -> Text -> Text
     startupWarningFromText config err =

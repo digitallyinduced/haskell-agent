@@ -19,6 +19,7 @@ import Agent.Runtime.Config
     , loadHarnessConfigSnapshot
     , modifyHarnessConfig
     )
+import qualified Agent.MCP as MCP
 import Agent.CLI.McpAdd
     ( mcpServerForTarget
     , parseMcpAddName
@@ -88,8 +89,9 @@ runFullscreenMcpManager
     -> OsPath
     -> [McpToolRegistration]
     -> [Text]
+    -> [MCP.McpServerStatus]
     -> IO Bool
-runFullscreenMcpManager runtime home registrations warnings =
+runFullscreenMcpManager runtime home registrations warnings statuses =
     loadHarnessConfigSnapshot home >>= \case
         Left err -> do
             _ <-
@@ -352,6 +354,7 @@ runFullscreenMcpManager runtime home registrations warnings =
             snapshot.snapshotConfig
             registrations
             warnings
+            statuses
             snapshot.snapshotPending
             snapshot.snapshotAuthorized
             (noticeText notice)
@@ -517,6 +520,7 @@ statusLabel = \case
     McpDisabled -> "disabled"
     McpPendingRestart -> "restart pending"
     McpNeedsAuth -> "needs auth"
+    McpConnecting -> "connecting"
     McpReady count ->
         "ready · " <> Text.pack (show count)
             <> if count == 1 then " tool" else " tools"
