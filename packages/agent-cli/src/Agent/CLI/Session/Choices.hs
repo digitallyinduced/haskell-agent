@@ -148,7 +148,7 @@ titleModelChoice fullscreen color setting providerChoice = do
                     [ [ (if index == selected then rolePrompt color "› " else "  ")
                             <> label
                             <> if index == initial then " ✓" else ""
-                      , "    " <> roleMuted color (displayTerminalText detail)
+                      , "    " <> roleMuted color (Text.replace "\n" "↵" (displayTerminalText detail))
                       ]
                     | (index, (label, detail)) <- zip [0..] rows
                     ]
