@@ -49,7 +49,6 @@ import Control.Concurrent.STM
     , readTQueue
     , readTVar
     , readTVarIO
-    , registerDelay
     , writeTQueue
     , writeTVar
     )
@@ -84,6 +83,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import System.Directory (getCurrentDirectory)
+import System.Timeout (timeout)
 
 resolveEffectiveCwds :: [McpServerConfig] -> IO [McpServerConfig]
 resolveEffectiveCwds configs = do
@@ -862,14 +862,14 @@ refreshServerTools fleet client expectedRevision =
                                         (Map.delete serverName)
                                     pure False
         when retryNeeded do
-            elapsed <- registerDelay delay
-            stillCurrent <- atomically do
-                current <- refreshIsCurrent
-                if current
-                    then readTVar elapsed >>= check >> pure True
-                    else pure False
-            when stillCurrent $
-                retryRefresh lock (min 30000000 (delay * 2))
+            -- Unlike registerDelay, timeout also works with a non-threaded
+            -- RTS. The STM wait retires superseded workers immediately, and
+            -- timeout scopes its timer to this fleet-owned worker.
+            retired <- timeout delay $
+                atomically (refreshIsCurrent >>= check . not)
+            case retired of
+                Just () -> pure ()
+                Nothing -> retryRefresh lock (min 30000000 (delay * 2))
 
     refreshIsCurrent = do
         clients <- readTVar fleet.mcpFleetClients
