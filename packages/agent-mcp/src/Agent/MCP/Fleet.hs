@@ -49,6 +49,7 @@ import Control.Concurrent.STM
     , readTQueue
     , readTVar
     , readTVarIO
+    , registerDelay
     , writeTQueue
     , writeTVar
     )
@@ -237,12 +238,16 @@ withFleetClient fleet server action = do
 
 -- | Snapshot server status without triggering initialization or other I/O.
 mcpFleetStatuses :: McpFleet -> IO [McpServerStatus]
-mcpFleetStatuses fleet = do
-    clients <- Map.elems <$> readTVarIO fleet.mcpFleetClients
-    clientStatuses <- mapM mcpClientStatus clients
+mcpFleetStatuses = atomically . mcpFleetStatusesSTM
+
+mcpFleetStatusesSTM :: McpFleet -> STM [McpServerStatus]
+mcpFleetStatusesSTM fleet = do
+    clients <- Map.elems <$> readTVar fleet.mcpFleetClients
+    clientStatuses <- mapM mcpClientStatusSTM clients
+    refreshStates <- readTVar fleet.mcpFleetCatalogRefreshStates
     let byName =
             Map.fromList
-                [ (status.mcpStatusName, status)
+                [ (status.mcpStatusName, refreshStatus refreshStates status)
                 | status <- clientStatuses
                 ]
     pure
@@ -257,6 +262,36 @@ mcpFleetStatuses fleet = do
                 }
         | name <- fleet.mcpFleetServerOrder
         ]
+  where
+    refreshStatus refreshStates status =
+        case (status.mcpStatusState, Map.lookup status.mcpStatusName refreshStates) of
+            (McpReady, Just failure) ->
+                status
+                    { mcpStatusState = maybe McpInitializing McpFailed failure
+                    , mcpStatusToolCount = 0
+                    }
+            _ -> status
+
+-- | Current discovery diagnostics, including progressive initialization and
+-- tool-list refreshes. The historical 'mcpFleetWarnings' field is only a
+-- startup snapshot and must not be used for a live management view.
+mcpFleetCurrentWarnings :: McpFleet -> IO [Text]
+mcpFleetCurrentWarnings fleet = atomically do
+    clients <- readTVar fleet.mcpFleetClients
+    discoveryWarnings <- fmap concat $ forM fleet.mcpFleetServerOrder \name ->
+        case Map.lookup name clients of
+            Nothing -> pure []
+            Just client ->
+                readTVar client.clientLifecycle >>= \case
+                    ClientReady _ warnings -> pure warnings
+                    _ -> readTVar client.clientInitializationWarnings
+    statuses <- mcpFleetStatusesSTM fleet
+    pure $
+        discoveryWarnings <>
+            [ "MCP server " <> status.mcpStatusName <> " failed: " <> err
+            | status <- statuses
+            , McpFailed err <- [status.mcpStatusState]
+            ]
 
 -- | Start every server independently. Ordinary server failures become
 -- warnings so one unavailable integration does not disable healthy servers.
@@ -320,6 +355,7 @@ startMcpFleetWithInMemory hooks reportActive external inMemory = mask \restore -
             , let registration = registrationFor client tool
             ]
     catalogRevisions <- newTVarIO Map.empty
+    catalogRefreshStates <- newTVarIO Map.empty
     approvedCalls <- newTVarIO Map.empty
     catalogGeneration <- newTVarIO 1
     clientsVar <- newTVarIO $
@@ -343,6 +379,7 @@ startMcpFleetWithInMemory hooks reportActive external inMemory = mask \restore -
             , mcpFleetFailures = failures
             , mcpFleetCatalog = catalog
             , mcpFleetCatalogRevisions = catalogRevisions
+            , mcpFleetCatalogRefreshStates = catalogRefreshStates
             , mcpFleetApprovedCalls = approvedCalls
             , mcpFleetNextCatalogGeneration = catalogGeneration
             , mcpFleetReconnects = reconnects
@@ -509,6 +546,7 @@ startMcpFleetProgressiveWithInMemoryHooks
     workers <- newMVar []
     catalog <- newTVarIO Map.empty
     catalogRevisions <- newTVarIO Map.empty
+    catalogRefreshStates <- newTVarIO Map.empty
     approvedCalls <- newTVarIO Map.empty
     catalogGeneration <- newTVarIO 0
     ownedClients <- newIORef []
@@ -555,6 +593,7 @@ startMcpFleetProgressiveWithInMemoryHooks
             , mcpFleetFailures = failures
             , mcpFleetCatalog = catalog
             , mcpFleetCatalogRevisions = catalogRevisions
+            , mcpFleetCatalogRefreshStates = catalogRefreshStates
             , mcpFleetApprovedCalls = approvedCalls
             , mcpFleetNextCatalogGeneration = catalogGeneration
             , mcpFleetReconnects = reconnects
@@ -724,6 +763,9 @@ attachFleetEvents fleet client = do
                                 shouldRefresh <-
                                     readTVar client.clientLifecycle >>= \case
                                         ClientReady _ warnings -> do
+                                            modifyTVar'
+                                                fleet.mcpFleetCatalogRefreshStates
+                                                (Map.insert serverName Nothing)
                                             writeTVar
                                                 client.clientLifecycle
                                                 (ClientReady [] warnings)
@@ -772,43 +814,74 @@ spawnFleetWorker fleet action =
                 pure (worker : live)
 
 -- | Re-list a server's tools after @notifications/tools/list_changed@ and
--- replace its catalog entries. Statically registered tools keep working for
--- as long as the server still offers them.
+-- replace its catalog entries. Failures remain visible while a fleet-owned
+-- worker retries, with an exponential delay capped at 30 seconds. Neither the
+-- delay nor an obsolete worker holds the reconnection lock.
 refreshServerTools :: McpFleet -> McpClient -> Integer -> IO ()
 refreshServerTools fleet client expectedRevision =
     forM_ (Map.lookup serverName fleet.mcpFleetReconnects) \lock ->
-        withMVar lock \_ -> do
-            current <- Map.lookup serverName <$> readTVarIO fleet.mcpFleetClients
-            when (maybe False (sameClient client) current) do
-                expectedClientRevision <-
-                    readTVarIO client.clientToolsRevision
-                tryAny (discoverMcpTools client) >>= \case
-                    Left _ -> pure ()
-                    Right (tools, warnings) -> atomically do
-                        revisions <-
-                            readTVar fleet.mcpFleetCatalogRevisions
-                        clientRevision <-
-                            readTVar client.clientToolsRevision
-                        when
-                            (Map.lookup serverName revisions
-                                == Just expectedRevision
-                                && clientRevision == expectedClientRevision)
-                            do
-                                publishCatalogEntries
-                                    fleet.mcpFleetCatalog
-                                    fleet.mcpFleetNextCatalogGeneration
-                                    client
-                                    tools
-                                readTVar client.clientLifecycle >>= \case
-                                    ClientReady _ _ ->
-                                        do
-                                            writeTVar
-                                                client.clientReadyToolsRevision
-                                                (Just clientRevision)
-                                            writeTVar client.clientLifecycle
-                                                (ClientReady tools warnings)
-                                    _ -> pure ()
+        retryRefresh lock 250000
   where
+    retryRefresh lock delay = do
+        retryNeeded <- withMVar lock \_ -> do
+            eligible <- atomically refreshIsCurrent
+            if not eligible
+                then pure False
+                else do
+                    expectedClientRevision <- readTVarIO client.clientToolsRevision
+                    result <- tryAny (discoverMcpTools client)
+                    atomically do
+                        current <- refreshIsCurrent
+                        clientRevision <- readTVar client.clientToolsRevision
+                        if not current || clientRevision /= expectedClientRevision
+                            then pure False
+                            else case result of
+                                Left exception -> do
+                                    let err = "tool discovery failed: "
+                                            <> redactConfiguredValues
+                                                client.clientConfig
+                                                (exceptionSummary exception)
+                                    modifyTVar'
+                                        fleet.mcpFleetCatalogRefreshStates
+                                        (Map.insert serverName (Just err))
+                                    pure True
+                                Right (tools, warnings) -> do
+                                    initializationWarnings <-
+                                        readTVar client.clientInitializationWarnings
+                                    publishCatalogEntries
+                                        fleet.mcpFleetCatalog
+                                        fleet.mcpFleetNextCatalogGeneration
+                                        client
+                                        tools
+                                    writeTVar client.clientReadyToolsRevision
+                                        (Just clientRevision)
+                                    writeTVar client.clientLifecycle
+                                        (ClientReady tools (warnings <> initializationWarnings))
+                                    modifyTVar'
+                                        fleet.mcpFleetCatalogRefreshStates
+                                        (Map.delete serverName)
+                                    pure False
+        when retryNeeded do
+            elapsed <- registerDelay delay
+            stillCurrent <- atomically do
+                current <- refreshIsCurrent
+                if current
+                    then readTVar elapsed >>= check >> pure True
+                    else pure False
+            when stillCurrent $
+                retryRefresh lock (min 30000000 (delay * 2))
+
+    refreshIsCurrent = do
+        clients <- readTVar fleet.mcpFleetClients
+        revisions <- readTVar fleet.mcpFleetCatalogRevisions
+        lifecycle <- readTVar client.clientLifecycle
+        transportFailure <- readTVar client.clientFailure
+        pure $
+            maybe False (sameClient client) (Map.lookup serverName clients)
+                && Map.lookup serverName revisions == Just expectedRevision
+                && case (lifecycle, transportFailure) of
+                    (ClientReady _ _, Nothing) -> True
+                    _ -> False
     serverName = client.clientConfig.mcpServerName
     sameClient :: McpClient -> McpClient -> Bool
     sameClient left right =
@@ -1438,6 +1511,9 @@ reconnectCatalogEntry fleet qualifiedName failedEntry =
                                                 serverName
                                                 replacementClient
                                                 clients)
+                                        modifyTVar'
+                                            fleet.mcpFleetCatalogRefreshStates
+                                            (Map.delete serverName)
                                         writeTVar fleet.mcpFleetCatalog
                                             ( replacementEntries
                                                 <> withoutServer
