@@ -85,6 +85,7 @@ module Agent.MCP
     , mcpFleetToolsForArtifactDirectory
     , mcpFleetRegistrationsForArtifactDirectory
     , mcpFleetCurrentRegistrations
+    , mcpFleetCurrentWarnings
     , mcpFleetMetaTools
     , mcpFleetMetaToolsForArtifactDirectory
     , McpToolDiscovery
@@ -138,6 +139,7 @@ import Agent.MCP.InProcess
 import Agent.MCP.Fleet
     ( McpToolDiscovery
     , mcpFleetCurrentRegistrations
+    , mcpFleetCurrentWarnings
     , newMcpToolDiscovery
     , mcpFleetCodexToolsForArtifactDirectory
     , startMcpFleetWithInMemory

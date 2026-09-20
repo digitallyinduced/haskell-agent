@@ -253,6 +253,7 @@ newClientRecord hooks eraHint config transport = do
     lifecycle <- newTVarIO ClientPending
     serverInfo <- newTVarIO Nothing
     discoveredSkills <- newTVarIO []
+    initializationWarnings <- newTVarIO []
     toolsRevision <- newTVarIO 0
     readyToolsRevision <- newTVarIO Nothing
     resourceSubscriptionsRequested <- newTVarIO Set.empty
@@ -272,6 +273,7 @@ newClientRecord hooks eraHint config transport = do
         , clientLifecycle = lifecycle
         , clientServerInfo = serverInfo
         , clientDiscoveredSkills = discoveredSkills
+        , clientInitializationWarnings = initializationWarnings
         , clientToolsRevision = toolsRevision
         , clientReadyToolsRevision = readyToolsRevision
         , clientResourceSubscriptionsRequested = resourceSubscriptionsRequested
@@ -352,6 +354,9 @@ ensureMcpClientReadyWith publishReady client = mask \restore -> do
                     forM_ info (client.clientHooks.mcpHostServerInfo client.clientConfig)
                     loggingWarnings <- configureLegacyLogging client
                     skillWarnings <- discoverMcpSkills client
+                    atomically $
+                        writeTVar client.clientInitializationWarnings
+                            (skillWarnings <> loggingWarnings)
                     startSubscriptions client
                     discoverStableTools
                         (skillWarnings <> loggingWarnings)
@@ -436,9 +441,12 @@ maximumInitializationRelists :: Int
 maximumInitializationRelists = 8
 
 mcpClientStatus :: McpClient -> IO McpServerStatus
-mcpClientStatus client = do
-    state <- readTVarIO client.clientLifecycle
-    transportFailure <- readTVarIO client.clientFailure
+mcpClientStatus = atomically . mcpClientStatusSTM
+
+mcpClientStatusSTM :: McpClient -> STM McpServerStatus
+mcpClientStatusSTM client = do
+    state <- readTVar client.clientLifecycle
+    transportFailure <- readTVar client.clientFailure
     pure McpServerStatus
         { mcpStatusName = client.clientConfig.mcpServerName
         , mcpStatusState = case (state, transportFailure) of

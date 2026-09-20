@@ -654,6 +654,8 @@ data McpFleet = McpFleet
     { mcpFleetRegistrations :: ![McpToolRegistration]
     , mcpFleetSkills :: !(TVar [McpSkillRegistration])
     , mcpFleetWarnings :: ![Text]
+    -- ^ Historical startup snapshot. Use mcpFleetCurrentWarnings for live
+    -- diagnostics, especially when startup is progressive.
     , mcpFleetClients :: !(TVar (Map.Map Text McpClient))
     , mcpFleetServerOrder :: ![Text]
     , mcpFleetFailures :: !(Map.Map Text Text)
@@ -662,6 +664,9 @@ data McpFleet = McpFleet
     , mcpFleetCatalogRevisions :: !(TVar (Map.Map Text Integer))
     -- ^ Per-server invalidation revisions. A stale refresh may never
     -- republish entries after a newer list-change notification.
+    , mcpFleetCatalogRefreshStates :: !(TVar (Map.Map Text (Maybe Text)))
+    -- ^ Present while the catalog is invalidated: Nothing while fetching,
+    -- or the latest failure while awaiting an automatic retry.
     , mcpFleetApprovedCalls ::
         !(TVar (Map.Map (Text, Text) McpApprovedCall))
     -- ^ Approval-time snapshots keyed by @(call id, meta-tool name)@. The
@@ -786,6 +791,8 @@ data McpClient = McpClient
     , clientServerInfo :: !(TVar (Maybe McpServerInfo))
     -- ^ Set once the protocol era has been negotiated.
     , clientDiscoveredSkills :: !(TVar [McpSkillEntry])
+    , clientInitializationWarnings :: !(TVar [Text])
+    -- ^ Skill and logging warnings retained across subsequent tool re-lists.
     , clientToolsRevision :: !(TVar Integer)
     -- ^ Incremented synchronously for every tools/list_changed notification.
     -- Initialization and refresh only publish a catalog discovered at a

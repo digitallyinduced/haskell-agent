@@ -107,6 +107,7 @@ import Control.Exception (MaskingState(MaskedUninterruptible), getMaskingState)
 import Control.Concurrent
     ( newEmptyMVar
     , putMVar
+    , readMVar
     , takeMVar
     , threadDelay
     , tryPutMVar
@@ -1743,6 +1744,130 @@ spec = describe "Agent.MCP" do
                 hung.output `shouldSatisfy` Text.isInfixOf "timed out"
                 waitForLog log "cancelled"
 
+    describe "live fleet discovery diagnostics" do
+        it "exposes tool rejection warnings discovered after progressive HTTP startup" $
+            Socket.withSocketsDo $
+                bracket
+                    (Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol)
+                    Socket.close
+                    \listener -> do
+                        Socket.bind listener
+                            (Socket.SockAddrInet 0 (Socket.tupleToHostAddress (127, 0, 0, 1)))
+                        Socket.listen listener 2
+                        Socket.SockAddrInet port _ <- Socket.getSocketName listener
+                        let readHeaders handle = do
+                                line <- BS8.hGetLine handle
+                                if line == "\r"
+                                    then pure []
+                                    else (line :) <$> readHeaders handle
+                            responses =
+                                [ "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"supportedVersions\":[\"2026-07-28\"],\"capabilities\":{\"tools\":{}}}}"
+                                , "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"invalid\",\"inputSchema\":{\"type\":\"object\",\"x-mcp-header\":\"Invalid\"}}]}}"
+                                ]
+                            serve = forM_ responses \body ->
+                                bracket
+                                    (Socket.accept listener >>= \(connection, _) ->
+                                        Socket.socketToHandle connection ReadWriteMode)
+                                    hClose
+                                    \handle -> do
+                                        headers <- readHeaders handle
+                                        case find (BS8.isPrefixOf "Content-Length: ") headers of
+                                            Just header | Just (size, _) <- BS8.readInt (BS8.drop 16 header) ->
+                                                void (BS.hGet handle size)
+                                            _ -> fail "expected Content-Length"
+                                        BS8.hPutStr handle $
+                                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                                                <> BS8.pack (show (BS.length body))
+                                                <> "\r\nConnection: close\r\n\r\n" <> body
+                                        hFlush handle
+                            config = workerClientConfig
+                                { mcpServerName = "rejected"
+                                , mcpServerUrl = Just
+                                    ("http://127.0.0.1:" <> Text.pack (show port) <> "/mcp")
+                                }
+                        withAsync serve \server ->
+                            bracket
+                                (startMcpFleetProgressive (const (pure ())) [config])
+                                closeMcpFleet
+                                \fleet -> do
+                                    waitForServerReady fleet "rejected"
+                                    warnings <- mcpFleetCurrentWarnings fleet
+                                    warnings `shouldSatisfy`
+                                        any (Text.isInfixOf "tool invalid was rejected")
+                                    length fleet.mcpFleetWarnings `shouldBe` 0
+                                    wait server
+
+        it "retains progressive skill warnings after recovering a failed tool-list refresh" $
+            withCountingServer retryingToolListServer \script log ->
+                bracket
+                    (startMcpFleetProgressive (const (pure ()))
+                        [(baseConfig "refresh" script) { mcpServerArgs = [log] }])
+                    closeMcpFleet
+                    \fleet -> do
+                        waitForServerReady fleet "refresh"
+                        fleet.mcpFleetWarnings `shouldBe` []
+                        let skillWarning =
+                                "MCP server refresh returned invalid skills/list entry"
+                        mcpFleetCurrentWarnings fleet `shouldReturn` [skillWarning]
+                        result <- dispatchApprovedTool (mcpFleetMetaTools fleet)
+                            (functionToolCall "trigger" "mcp_call"
+                                "{\"name\":\"refresh__trigger\",\"arguments\":{}}")
+                        result.output `shouldBe` "changed"
+                        waitForServerFailure fleet "refresh"
+                        registrations <- mcpFleetCurrentRegistrations fleet
+                        length registrations `shouldBe` 0
+                        warnings <- mcpFleetCurrentWarnings fleet
+                        warnings `shouldContain` [skillWarning]
+                        warnings `shouldSatisfy`
+                            any (Text.isInfixOf "temporary catalog failure")
+                        -- Recovery requires no second list-change notification.
+                        appendFile log "recover\n"
+                        waitForCatalogEntry fleet "refresh__replacement"
+                        mcpFleetStatuses fleet `shouldReturn`
+                            [McpServerStatus "refresh" McpReady 1]
+                        mcpFleetCurrentWarnings fleet `shouldReturn` [skillWarning]
+                        countLogEntries log "notification" `shouldReturn` 1
+                        listCount <- countLogEntries log "list"
+                        listCount `shouldSatisfy` (>= 3)
+
+        it "retires a failed tool-list retry when a newer notification supersedes it" $
+            withCountingServer retryingToolListServer \script log ->
+                bracket
+                    (startMcpFleet
+                        [(baseConfig "refresh" script) { mcpServerArgs = [log] }])
+                    closeMcpFleet
+                    \fleet -> do
+                        void (callFleetTool fleet "refresh__trigger" "{}")
+                        waitForServerFailure fleet "refresh"
+                        workers <- readMVar fleet.mcpFleetWorkers
+                        Just client <- Map.lookup "refresh" <$> readTVarIO fleet.mcpFleetClients
+                        handler <- readIORef client.clientEventHandler
+                        handler McpToolsListChanged
+                        completed <- timeout 1000000 (mapM waitCatch workers)
+                        completed `shouldSatisfy` (not . isNothing)
+                        appendFile log "recover\n"
+                        waitForCatalogEntry fleet "refresh__replacement"
+                        mcpFleetStatuses fleet `shouldReturn`
+                            [McpServerStatus "refresh" McpReady 1]
+
+        it "cancels and joins a failed tool-list retry when its fleet closes" $
+            withCountingServer retryingToolListServer \script log ->
+                bracket
+                    (startMcpFleet
+                        [(baseConfig "refresh" script) { mcpServerArgs = [log] }])
+                    closeMcpFleet
+                    \fleet -> do
+                        void (callFleetTool fleet "refresh__trigger" "{}")
+                        waitForServerFailure fleet "refresh"
+                        workers <- readMVar fleet.mcpFleetWorkers
+                        length workers `shouldSatisfy` (> 0)
+                        timeout 1000000 (closeMcpFleet fleet)
+                            `shouldReturn` Just ()
+                        completed <- mapM poll workers
+                        completed `shouldSatisfy` all (not . isNothing)
+                        mcpFleetStatuses fleet `shouldReturn`
+                            [McpServerStatus "refresh" McpClosed 0]
+
     it "re-lists a tool invalidated during blocking startup before publishing a static handler" $
         withCountingServer initializationListChangedServer \script log -> do
             fleet <- startMcpFleet
@@ -2777,6 +2902,39 @@ escalatingReconnectServer =
     \        printf 'replacement-call\\n' >> \"$log\"\n\
     \        printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"must not run\"}]}}'\n\
     \      fi\n\
+    \      ;;\n\
+    \  esac\n\
+    \done\n"
+
+retryingToolListServer :: LBS.ByteString
+retryingToolListServer =
+    "#!/bin/sh\n\
+    \log=\"$1\"\n\
+    \changed=0\n\
+    \while IFS= read -r line; do\n\
+    \  id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9][0-9]*\\).*/\\1/p')\n\
+    \  case \"$line\" in\n\
+    \    *'\"method\":\"server/discover\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"supportedVersions\":[\"2026-07-28\"],\"capabilities\":{\"tools\":{},\"extensions\":{\"io.modelcontextprotocol/skills\":{}}}}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"skills/list\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"skills\":[{}]}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"tools/list\"'*)\n\
+    \      printf 'list\\n' >> \"$log\"\n\
+    \      if [ \"$changed\" -eq 0 ]; then\n\
+    \        printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"tools\":[{\"name\":\"trigger\",\"inputSchema\":{\"type\":\"object\"},\"annotations\":{\"readOnlyHint\":true}}]}}'\n\
+    \      elif grep -q '^recover$' \"$log\"; then\n\
+    \        printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"tools\":[{\"name\":\"replacement\",\"inputSchema\":{\"type\":\"object\"},\"annotations\":{\"readOnlyHint\":true}}]}}'\n\
+    \      else\n\
+    \        printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"error\":{\"code\":-32000,\"message\":\"temporary catalog failure\"}}'\n\
+    \      fi\n\
+    \      ;;\n\
+    \    *'\"method\":\"tools/call\"'*)\n\
+    \      changed=1\n\
+    \      printf 'notification\\n' >> \"$log\"\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}'\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"changed\"}]}}'\n\
     \      ;;\n\
     \  esac\n\
     \done\n"
