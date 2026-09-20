@@ -8,6 +8,9 @@ import Agent.CLI.WindowTitle
     , oscWindowTitleBytes
     )
 import Agent.TUI.Motion (MotionMode(..))
+import Control.Concurrent (newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent.Async (withAsync)
+import Control.Exception.Safe (bracket_)
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import System.OsPath (unsafeEncodeUtf)
 import qualified Data.ByteString as ByteString
@@ -180,6 +183,29 @@ spec = do
                 , firstFrame <> " initial"
                 , "initial"
                 ]
+
+        it "restores the title when a background waiting scope is cancelled" do
+            written <- newIORef []
+            started <- newEmptyMVar
+            stopped <- newEmptyMVar
+            controller <- newWindowTitleController
+                MotionOff "initial" id
+                (\title -> modifyIORef' written (<> [title]))
+            withAsync
+                (bracket_
+                    controller.windowTitleBeginBusy
+                    controller.windowTitleEndBusy
+                    (putMVar started () >> takeMVar stopped))
+                \_ -> do
+                    takeMVar started
+                    controller.windowTitleBeginBusy
+                    controller.windowTitleEndBusy
+                    actual <- readIORef written
+                    length actual `shouldBe` 1
+                    actual `shouldSatisfy` all (/= "initial")
+            actual <- readIORef written
+            last actual `shouldBe` "initial"
+            length actual `shouldBe` 2
 
         it "keeps reduced-motion busy titles static" do
             written <- newIORef []

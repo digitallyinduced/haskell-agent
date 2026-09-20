@@ -106,6 +106,7 @@ import Agent.CLI.TUI.Types
     , PendingDialog(..)
     , ResumeActions(..)
     , ResumeOverlay(..)
+    , TerminalFocus(..)
     , TextInputMode(..)
     , TextOverlay(..)
     )
@@ -3243,18 +3244,45 @@ spec = do
                     , uiDraft = "follow-up message"
                     , uiCursor = 17
                     , uiBackgroundTaskStatus =
-                        [ "◌ 1 background task · 4m 32s · Release build"
+                        [ "Waiting for 1 background task · 4m 32s · Release build"
                         , "  Agent will resume when a shell task finishes."
                         ]
                     }
                 rendered ui = renderedAppText (100, 24) (base { appUi = ui })
             rendered idle `shouldSatisfy` Text.isInfixOf "1 background task"
+            rendered idle `shouldSatisfy` Text.isInfixOf "Waiting for"
             rendered idle `shouldSatisfy` Text.isInfixOf "follow-up message"
             rendered idle `shouldSatisfy` Text.isInfixOf "Agent will resume"
             rendered (idle { uiRunning = True })
                 `shouldNotSatisfy` Text.isInfixOf "1 background task"
             rendered (idle { uiBackgroundTaskStatus = [] })
                 `shouldNotSatisfy` Text.isInfixOf "1 background task"
+
+        it "animates the background task indicator and respects reduced motion and terminal focus" do
+            runtime <- newScriptRuntime initialUiState
+            let base = (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    { appUi = initialUiState
+                        { uiAwaitingInput = True
+                        , uiBackgroundTaskStatus = ["Waiting for 1 background task"]
+                        }
+                    }
+                status mode focus elapsed =
+                    filter (Text.isInfixOf "Waiting for") $
+                        Text.lines $
+                            renderedAppText (100, 24)
+                                (base
+                                    { appRuntime = runtime { runtimeMotionMode = mode }
+                                    , appTerminalFocus = focus
+                                    , appMotionElapsedMillis = elapsed
+                                    })
+            status MotionFull TerminalFocused 0
+                `shouldNotBe` status MotionFull TerminalFocused 160
+            status MotionReduced TerminalFocused 0
+                `shouldBe` status MotionReduced TerminalFocused 160
+            status MotionOff TerminalFocused 0
+                `shouldBe` status MotionOff TerminalFocused 160
+            status MotionFull TerminalUnfocused 0
+                `shouldBe` status MotionFull TerminalUnfocused 160
 
     describe "conversation scrollbar" do
         it "uses a visible trough that repaints old thumb cells" do

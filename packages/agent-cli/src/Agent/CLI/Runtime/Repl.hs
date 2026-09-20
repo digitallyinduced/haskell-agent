@@ -113,10 +113,10 @@ import Agent.Tools.PlanMode
 import Agent.Runtime.Session.Inbox (releaseInboxPending)
 import Control.Concurrent.Async ( race, withAsync )
 import Control.Concurrent (threadDelay)
-import Control.Exception.Safe (finally)
+import Control.Exception.Safe (bracket_, finally)
 import Control.Concurrent.MVar ( withMVar )
 import Control.Concurrent.STM (atomically, orElse, retry, takeTMVar, tryTakeTMVar)
-import Control.Monad ( when, forM_ )
+import Control.Monad ( when, forM_, unless )
 import Data.IORef ( atomicModifyIORef', readIORef, writeIORef )
 import Data.Maybe ( fromMaybe, isJust )
 import Data.Text ( Text )
@@ -425,16 +425,32 @@ readFullscreenPrompt
 -- | Scoped to the idle prompt, so elapsed time remains live without keeping a
 -- permanent polling worker or allowing a late update after a turn starts.
 refreshBackgroundTaskStatus :: SessionEnv -> FullscreenRuntime -> Bool -> IO ()
-refreshBackgroundTaskStatus env runtime canResume = refresh Nothing
+refreshBackgroundTaskStatus env runtime canResume = refreshIdle Nothing
   where
-    refresh previous = do
+    sample previous = do
         tasks <- env.sessionReadBackgroundTasks
         now <- getCurrentTime
         let rows = formatBackgroundTaskStatus now canResume tasks
         when (previous /= Just rows) $
             emitUiEvent runtime (UiSetBackgroundTaskStatus rows)
+        pure rows
+    refreshIdle previous = do
+        rows <- sample previous
+        if null rows
+            then threadDelay 1000000 >> refreshIdle (Just rows)
+            else do
+                -- The composer remains editable, but running background work
+                -- is not an idle session. Scope its title activity separately
+                -- from model turns, including cancellation on prompt exit.
+                bracket_
+                    env.sessionBeginWindowTitleBusy
+                    env.sessionEndWindowTitleBusy
+                    (refreshActive rows)
+                refreshIdle (Just [])
+    refreshActive previous = do
         threadDelay 1000000
-        refresh (Just rows)
+        rows <- sample (Just previous)
+        unless (null rows) (refreshActive rows)
 
 refreshPromptAccountLimit
     :: SessionEnv

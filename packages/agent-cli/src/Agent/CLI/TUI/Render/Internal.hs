@@ -264,7 +264,7 @@ drawMain state =
                 , Composer.drawSlashMenu state
                 , drawLiveTodos (activeConversationUi state)
                 , drawPromptActivity state
-                , Composer.drawBackgroundTaskStatus state.appUi
+                , Composer.drawBackgroundTaskStatus state
                 , case textOverlay state of
                     Just prompt
                         | prompt.textInputMode == TextInputPlanning ->

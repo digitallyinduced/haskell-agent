@@ -71,7 +71,8 @@ motionDemandFor mode waitingForUser backgroundActive completionFlashing ui =
         MotionFull ->
             maximum
                 [ semanticDemand
-                , if not waitingForUser && ui.uiRunning
+                , if not waitingForUser
+                    && (ui.uiRunning || not (null ui.uiBackgroundTaskStatus))
                     then MotionFast
                     else MotionNone
                 , if waitingForUser
