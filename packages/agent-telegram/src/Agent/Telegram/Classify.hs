@@ -2,6 +2,7 @@
 module Agent.Telegram.Classify
     ( TelegramUpdateAction(..)
     , storeUpdateAction
+    , updateAlreadyStored
     , checkpointPendingVoiceTranscript
     , nextPendingAction
     , ambientGroupPrompt
@@ -40,6 +41,7 @@ import Text.Read (readMaybe)
 
 data TelegramUpdateAction
     = IgnoreUpdate
+    | InterruptTurn !Integer !TelegramChatKey
     | QueueTurn !Integer !TelegramChatKey !Text !(Maybe TelegramVoice)
     | QueueMediaTurn !TelegramPendingMediaTurn
     | QueueCallback !TelegramPendingCallback
@@ -60,6 +62,7 @@ storeUpdateAction updateId action current
     | otherwise =
         advanceOffset case action of
             IgnoreUpdate -> current
+            InterruptTurn _ _ -> current
             ReviewGroupJoin _ _ -> current
             AuthorizeGroupChat chatId ->
                 current
@@ -538,6 +541,7 @@ classifyMessageLike edited bot sender respondToAllGroupMessages message =
         }
 
     classifyPrivateMessage
+        | isInterruptMessage = InterruptTurn message.messageId key
         | Just voice <- message.messageVoice =
             queueVoice "[Voice message]" voice
         | hasTelegramMedia message =
@@ -569,6 +573,14 @@ classifyMessageLike edited bot sender respondToAllGroupMessages message =
         , Just target <- explicitCommandTarget (Text.strip rawText)
         , not (botUsernameMatches bot target) =
             IgnoreUpdate
+        | isInterruptMessage
+        , messageRepliesToBot bot message
+            || respondToAllGroupMessages
+            || maybe False
+                (\text -> telegramCommand text == Just "stop"
+                    || maybe False isStopText (groupTextForBot bot text))
+                message.messageText =
+            InterruptTurn message.messageId key
         | Just rawText <- messageContentText message
         , telegramCommand rawText /= Nothing =
             if hasTelegramMedia message
@@ -584,6 +596,26 @@ classifyMessageLike edited bot sender respondToAllGroupMessages message =
         | respondToAllGroupMessages =
             queueAmbientGroupMessage
         | otherwise = IgnoreUpdate
+
+    -- Interpret control input before reply context and sender attribution are
+    -- added. Quoted, forwarded, edited, and caption text are not control input.
+    isInterruptMessage =
+        not edited
+            && message.messageForwardOrigin == Nothing
+            && message.messageVoice == Nothing
+            && not (hasTelegramMedia message)
+            && maybe False
+                (\text ->
+                    maybe True (botUsernameMatches bot)
+                        (explicitCommandTarget (Text.strip text))
+                    && (isStopText text
+                        || maybe False isStopText (groupTextForBot bot text)))
+                message.messageText
+
+    isStopText text =
+        Text.toCaseFold (Text.strip text) == "stop"
+            || (telegramCommand text == Just "stop"
+                && Text.null (telegramCommandArguments text))
 
     queueGroupReply =
         case message.messageVoice of

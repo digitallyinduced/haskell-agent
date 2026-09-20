@@ -19,6 +19,7 @@ module Agent.CLI.Interrupt
     ) where
 
 import Agent.Cancel (CancelFlag, isCancelled, requestCancel, resetCancel)
+import Agent.Runtime.AgentSessions.Process (withManagedTurnCancellation)
 import Control.Concurrent (ThreadId, myThreadId, throwTo)
 import Control.Exception
     ( AsyncException(UserInterrupt)
@@ -146,7 +147,7 @@ withTurnCancel state cancel action =
             writeIORef state.interruptActiveCancel (Just cancel)
             pure previous)
         (writeIORef state.interruptActiveCancel)
-        (const action)
+        (const (withManagedTurnCancellation cancel action))
 
 -- | Apply idle Ctrl-C policy from the inline editor.
 noteIdleCtrlC :: InterruptState -> IO IdleCtrlCResult

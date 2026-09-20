@@ -143,6 +143,7 @@ runTelegramWithStore store home config token = do
     stateVar <- newMVar state
     workQueue <- newChan
     scheduled <- newMVar Set.empty
+    activeTurns <- newMVar mempty
     manager <- HttpTls.newTlsManager
     let client = TelegramClient token manager
     bot <- TelegramClient.getTelegramBot client
@@ -163,6 +164,7 @@ runTelegramWithStore store home config token = do
                     , runtimeStateVar = stateVar
                     , runtimeWorkQueue = workQueue
                     , runtimeScheduled = scheduled
+                    , runtimeActiveTurns = activeTurns
                     , runtimeProcessManager = processManager
                     , runtimeTarget = target
                     , runtimeCwd = cwd

@@ -43,6 +43,10 @@ module Agent.Telegram
     , TelegramUserResolution(..)
     , transcribeWithXAI
     , downloadTelegramMediaAttachmentsWith
+    , TelegramTurnResponse(..)
+    , withTelegramTurnCancellationUsing
+    , interruptTelegramTurnUsing
+    , prepareTelegramTurn
     ) where
 
 import Agent.Telegram.Internal.App
@@ -50,7 +54,11 @@ import Agent.Telegram.Internal.Support (withTelegramProgressUsing)
 import Agent.Telegram.Internal.Text (parseAllowedUsers, splitTelegramText)
 import Agent.Telegram.Internal.Turn
     ( downloadTelegramMediaAttachmentsWith
+    , TelegramTurnResponse(..)
+    , withTelegramTurnCancellationUsing
+    , interruptTelegramTurnUsing
     , telegramAgentPrompt
+    , prepareTelegramTurn
     )
 import Agent.Telegram.Markdown (markdownToTelegramHtml)
 import Agent.Telegram.Types

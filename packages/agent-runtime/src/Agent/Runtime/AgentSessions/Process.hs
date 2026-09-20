@@ -5,12 +5,15 @@ module Agent.Runtime.AgentSessions.Process
     , closeSessionProcessManager
     , launchManagedTurn
     , launchManagedTurnBounded
+    , launchManagedTurnCancellable
     , launchSessionTurn
     , newSessionProcessManager
     , newSessionProcessManagerWithLifetime
     , sessionProcessStatus
     , signalManagedSessionReady
     , waitForManagedSessionReadyWith
+    , withManagedTurnCancellation
+    , withManagedTurnCancellationFile
     ) where
 
 import Agent.Runtime.Error (formatException)
@@ -25,6 +28,7 @@ import Agent.Runtime.SessionLock
     , sessionLockPath
     )
 import Agent.Concurrent (forConcurrentlyBounded_)
+import Agent.Cancel (CancelFlag, requestCancel, waitCancel)
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Process
     ( terminateProcessGroupWith
@@ -32,6 +36,7 @@ import Agent.Process
     )
 import Agent.Tools.IO (sessionTempProcessEnv)
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (link, withAsync)
 import Control.Concurrent.MVar
     ( MVar
     , modifyMVar
@@ -43,7 +48,9 @@ import Control.Concurrent.MVar
     )
 import Control.Exception.Safe
     ( SomeException
+    , bracket
     , finally
+    , onException
     , try
     )
 import Control.Monad (void)
@@ -144,6 +151,7 @@ launchSessionTurn manager background policy ghciEnabled bashEnabled handle messa
         ghciEnabled
         bashEnabled
         Nothing
+        Nothing
         handle
         (ManagedTextInput message)
 
@@ -158,11 +166,12 @@ launchSessionTurnInput
     -> Bool
     -> Bool
     -> Maybe Int
+    -> Maybe FilePath
     -> SessionHandle
     -> ManagedTurnInput
     -> IO (Either Text Text)
 launchSessionTurnInput
-        manager background policy ghciEnabled bashEnabled turnTimeout handle input =
+        manager background policy ghciEnabled bashEnabled turnTimeout cancellationPath handle input =
     resolveAgentExecutable >>= \case
         Left err -> pure (Left err)
         Right executable -> do
@@ -270,10 +279,12 @@ launchSessionTurnInput
         setFileMode readyPath 0o600
         let childEnv =
                 (managedSessionReadyEnv, readyPath)
-                    : sessionTempProcessEnv handle.sessionTempDir
+                    : maybe [] (\path -> [(managedTurnCancellationEnv, path)]) cancellationPath
+                    <> sessionTempProcessEnv handle.sessionTempDir
                         (filter
                             (\(name, _) ->
                                 name /= managedSessionReadyEnv
+                                    && name /= managedTurnCancellationEnv
                                     && name `notElem` gatewayOnlyEnv)
                             parentEnv)
             logPath = unsafeToFilePath handle.sessionDir FilePath.</> "agent.log"
@@ -380,8 +391,64 @@ launchManagedTurnBounded
         ghciEnabled
         bashEnabled
         turnTimeout
+        Nothing
         handle
         (ManagedRequestInput request)
+
+-- | A foreground managed turn with the same cooperative cancellation latch
+-- used by the terminal. Each launch owns a private control file, so a late
+-- request cannot cancel a subsequent turn in the same session.
+launchManagedTurnCancellable
+    :: CancelFlag
+    -> SessionProcessManager
+    -> ApprovalPolicy
+    -> Bool
+    -> Bool
+    -> Maybe Int
+    -> SessionHandle
+    -> ManagedTurnRequest
+    -> IO (Either Text Text)
+launchManagedTurnCancellable cancel manager policy ghciEnabled bashEnabled turnTimeout handle request =
+    bracket createCancellationFile removePrivateFile \path ->
+        withAsync (waitCancel cancel >> TextIO.writeFile path "cancel\n") \writer -> do
+            link writer
+            launchSessionTurnInput manager False policy ghciEnabled bashEnabled
+                turnTimeout (Just path) handle (ManagedRequestInput request)
+  where
+    createCancellationFile = do
+        (path, fileHandle) <- openTempFile
+            (unsafeToFilePath handle.sessionTempDir) ".agent-cancellation-"
+        (hClose fileHandle >> setFileMode path 0o600)
+            `onException` removePrivateFile path
+        pure path
+
+-- | Scope the managed-process control reader to an active turn. The watcher
+-- never throws an interrupt into the main thread: it latches requestCancel,
+-- allowing normal tool cleanup and transcript persistence.
+withManagedTurnCancellation :: CancelFlag -> IO a -> IO a
+withManagedTurnCancellation cancel action =
+    lookupEnv managedTurnCancellationEnv >>= \case
+        Nothing -> action
+        Just path -> withManagedTurnCancellationFile path cancel action
+
+withManagedTurnCancellationFile :: FilePath -> CancelFlag -> IO a -> IO a
+withManagedTurnCancellationFile path cancel action = do
+    requested <- check
+    if requested
+        then action
+        else withAsync watch \reader -> link reader >> action
+  where
+    check = do
+        contents <- TextIO.readFile path
+        if contents == "cancel\n"
+            then requestCancel cancel >> pure True
+            else pure False
+    watch = do
+        requested <- check
+        if requested then pure () else threadDelay 50_000 >> watch
+
+managedTurnCancellationEnv :: String
+managedTurnCancellationEnv = "HASKELL_AGENT_MANAGED_TURN_CANCELLATION"
 
 forgetSession :: SessionProcessManager -> Text -> Int -> IO ()
 forgetSession manager sessionId token =
