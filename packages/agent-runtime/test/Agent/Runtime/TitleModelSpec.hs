@@ -44,6 +44,16 @@ spec = do
                 `shouldBe` "grok-4.6"
 
     describe "resolveTitleModel" do
+        mapM_ (\provider ->
+            it ("defaults to Apple without a manual override for " <> show provider) do
+                let resolved = resolveTitleModel catalog provider Nothing True
+                resolved.titleModelId `shouldBe` appleFoundationTitleModelId
+                resolved.titleUsesAppleFoundation `shouldBe` True
+                resolved.titlePinned `shouldBe` False)
+            [ OpenAIProvider, ClaudeCodeProvider, GeminiProvider
+            , OpenRouterProvider, XAIProvider
+            ]
+
         it "uses the cheap Claude model when no title model is pinned" do
             let resolved =
                     resolveTitleModel catalog ClaudeCodeProvider Nothing False

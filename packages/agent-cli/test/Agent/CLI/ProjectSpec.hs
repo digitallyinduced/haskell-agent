@@ -185,6 +185,16 @@ spec = describe "Agent.CLI.Project" do
                 projectModelFor OpenAIProvider updated
                     `shouldBe` Just "gpt-project"
 
+        it "leaves title selection automatic until the user overrides it" $
+            withTempDir "agent-project-" \root -> do
+                initial <- loadUserSettings root
+                initial.settingsTitleModel `shouldBe` Nothing
+                saveProjectModel root
+                    (target OpenAIProvider "openai"
+                        "gpt-project" "gpt-project" CodexDialect)
+                updated <- loadUserSettings root
+                updated.settingsTitleModel `shouldBe` Nothing
+
         it "round-trips a user title model without resetting last-model" $
             withTempDir "agent-project-" \root -> do
                 saveProjectModel root

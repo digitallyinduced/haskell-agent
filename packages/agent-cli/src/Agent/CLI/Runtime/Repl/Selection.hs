@@ -75,7 +75,7 @@ import Agent.CLI.ProviderTransition
 import Agent.CLI.Render ( clearThinking, renderEvent )
 import Agent.CLI.Runtime.Types ( RunResult(..) )
 import Agent.CLI.Session.Choices
-    ( atMay, effortChoice, modelChoice, modelChoiceWithEffort )
+    ( atMay, effortChoice, modelChoice, modelChoiceWithEffort, titleModelChoice )
 import Agent.CLI.ModelPicker
     ( ModelPickerSelection(modelPickerEffort, modelPickerOption) )
 import Agent.CLI.Session.Interaction ( setSessionEffort )
@@ -642,25 +642,22 @@ chooseTitleModel env@SessionEnv
                 Just (TitleModelPinned target) -> target
                 _ ->
                     (cheapTitleModel catalog provider).modelTarget
-    modelChoice
-        catalog
-        gatewayAccess
-        fullscreen
-        color
-        currentTarget.targetConnectionId
-        currentTarget.targetProvider
-        currentTarget.targetModelId
-        currentTarget.targetDialect >>= \case
+    titleModelChoice fullscreen color settings.settingsTitleModel
+        (modelChoice
+            catalog
+            gatewayAccess
+            fullscreen
+            color
+            currentTarget.targetConnectionId
+            currentTarget.targetProvider
+            currentTarget.targetModelId
+            currentTarget.targetDialect) >>= \case
         Left err -> do
             selectionError env err $
                 Text.hPutStrLn stderr (roleError color err)
             next
         Right Nothing -> next
-        Right (Just choice) ->
-            persistTitleModel
-                env
-                (Just (TitleModelPinned choice.modelTarget))
-                next
+        Right (Just setting) -> persistTitleModel env setting next
 
 setTitleModelByName
     :: SessionEnv -> Text -> IO RunResult -> IO RunResult
