@@ -13,6 +13,7 @@ module Agent.CLI.McpManager
     , initialMcpManagerState
     , refreshMcpManagerState
     , mcpEntryTransport
+    , mcpEntryDiagnosticWarnings
     , parseMcpCommand
     , pendingHttpAuthorizationUrl
     , renderMcpManagerFrame
@@ -712,10 +713,22 @@ renderDetails color entry =
                   ]
     warningLines =
         [ roleWarn color ("    warning: " <> warningSummary warning)
-        | warning <- entry.mcpEntryWarnings
-        , not (" failed to start:" `Text.isInfixOf` warning)
-        , not (" failed:" `Text.isInfixOf` warning)
+        | warning <- mcpEntryDiagnosticWarnings entry
         ]
+
+-- | Hide only the exact top-level failure already shown in the status.
+-- Nested catalog failures and warnings not represented by the status remain visible.
+mcpEntryDiagnosticWarnings :: McpEntry -> [Text]
+mcpEntryDiagnosticWarnings entry =
+    filter (not . duplicateFailure) entry.mcpEntryWarnings
+  where
+    duplicateFailure warning = case entry.mcpEntryStatus of
+        McpUnavailable reason ->
+            warning `elem`
+                [ "MCP server " <> entry.mcpEntryName <> marker <> reason
+                | marker <- [" failed: ", " failed to start: "]
+                ]
+        _ -> False
 
 renderCommand :: McpServerConfig -> Text
 renderCommand server =

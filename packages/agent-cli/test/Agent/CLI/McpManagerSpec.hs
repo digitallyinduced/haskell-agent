@@ -278,6 +278,31 @@ spec = describe "Agent.CLI.McpManager" do
                 ["connection refused", "DNS lookup failed", "request timed out"]
             entryStatus (state "HTTP 401 Unauthorized") `shouldBe` [McpNeedsAuth]
 
+        it "preserves nested failures and non-duplicate top-level warnings in both renderers" do
+            let diagnostics =
+                    [ "MCP server posthog skills/list failed: catalog unavailable"
+                    , "MCP server posthog prompts/list failed to start: catalog unavailable"
+                    , "MCP server posthog failed: earlier failure"
+                    ]
+            mapM_ (\current -> do
+                let state = (manager current 1 True Set.empty diagnostics)
+                        { mcpManagerExpanded = Just "posthog" }
+                    frames = renderMcpManagerFrame False state
+                        : map (mcpServerMenuBody Nothing) state.mcpManagerEntries
+                mapM_ (\warning ->
+                    frames `shouldSatisfy` all (Text.isInfixOf warning)) diagnostics)
+                [MCP.McpReady, MCP.McpFailed "connection refused"]
+
+        it "suppresses only matching current or legacy top-level failures" do
+            mapM_ (\marker -> do
+                let state = (manager (MCP.McpFailed "connection refused") 0 True Set.empty
+                        ["MCP server posthog" <> marker <> "connection refused"])
+                        { mcpManagerExpanded = Just "posthog" }
+                    frames = renderMcpManagerFrame False state
+                        : map (mcpServerMenuBody Nothing) state.mcpManagerEntries
+                map (Text.count "connection refused") frames `shouldBe` [1, 1])
+                [" failed: ", " failed to start: "]
+
         it "refreshes runtime entries without resetting interaction state" do
             let config = defaultHarnessConfig
                     { configMcpServers = Map.fromList

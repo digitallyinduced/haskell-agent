@@ -33,6 +33,7 @@ import Agent.CLI.McpManager
     , authorizedMcpUrls
     , initialMcpManagerState
     , mcpEntryTransport
+    , mcpEntryDiagnosticWarnings
     , pendingHttpAuthorizationUrl
     )
 import Agent.Runtime.Browser (openBrowser)
@@ -518,9 +519,7 @@ mcpServerMenuBody notice entry =
                    ]
     warningSection =
         [ "Warning: " <> markdownText 120 (warningSummary warning)
-        | warning <- entry.mcpEntryWarnings
-        , not (" failed to start:" `Text.isInfixOf` warning)
-        , not (" failed:" `Text.isInfixOf` warning)
+        | warning <- mcpEntryDiagnosticWarnings entry
         ]
 
 statusLabel :: McpEntryStatus -> Text
