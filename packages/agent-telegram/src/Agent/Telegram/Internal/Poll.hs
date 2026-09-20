@@ -69,6 +69,8 @@ import Agent.Telegram.Internal.Turn
     , pendingRetryKey
     , recordPendingFailure
     , runAgentTurn
+    , prepareTelegramTurn
+    , withTelegramTurnCancellation
     , runQueuedMediaTurn
     , telegramTurnUserId
     , transcribeTelegramVoice
@@ -484,18 +486,20 @@ runQueuedTurn runtime pending =
             describeTelegramAllowlist runtime pending.pendingTurnChat.chatId
         Just command -> withoutProgress $
             pure ("Unknown command: /" <> command)
-        Nothing -> do
+        Nothing -> withTelegramTurnCancellation runtime pending.pendingTurnChat \cancellation -> do
             userId <- telegramTurnUserId runtime pending.pendingTurnChat
             case pending.pendingTurnVoice of
                 Nothing ->
                     runAgentTurn
+                        cancellation
                         runtime
                         pending.pendingTurnChat
                         userId
                         (Just pending.pendingTurnMessageId)
                         pending.pendingTurnText
                 Just voice ->
-                    tryAny (transcribeTelegramVoice runtime pending voice) >>= \case
+                    prepareTelegramTurn cancellation
+                      (tryAny (transcribeTelegramVoice runtime pending voice)) \case
                         Left err -> do
                             logTelegramEvent "voice_transcription_failed"
                                 [ "update_id" .= pending.pendingTurnUpdateId
@@ -517,6 +521,7 @@ runQueuedTurn runtime pending =
                                     | otherwise = prompt
                             checkpointVoiceTranscript runtime pending deliveredPrompt
                             runAgentTurn
+                                cancellation
                                 runtime
                                 pending.pendingTurnChat
                                 userId

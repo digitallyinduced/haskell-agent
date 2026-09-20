@@ -123,6 +123,21 @@ interruptTelegramTurnUsing activeTurns key =
                 requestCancel cancellation
                 pure (active, True)
 
+-- Preparation (including voice download/transcription) belongs to the same
+-- turn as model execution. Let its resource cleanup finish, then honor any
+-- stop received during preparation before submitting work to the model.
+prepareTelegramTurn
+    :: CancelFlag
+    -> IO a
+    -> (a -> IO TelegramTurnResponse)
+    -> IO TelegramTurnResponse
+prepareTelegramTurn cancellation prepare continue = do
+    prepared <- prepare
+    cancelled <- isCancelled cancellation
+    if cancelled
+        then pure (TelegramTurnResponse "Stopped." Nothing)
+        else continue prepared
+
 runQueuedMediaTurn
     :: TelegramRuntime
     -> TelegramPendingMediaTurn
@@ -534,16 +549,18 @@ pendingActionChatLocal = \case
     LeaveUnauthorizedChat pending -> pending.pendingLeaveChat
 
 runAgentTurn
-    :: TelegramRuntime
+    :: CancelFlag
+    -> TelegramRuntime
     -> TelegramChatKey
     -> Integer
     -> Maybe Integer
     -> Text
     -> IO TelegramTurnResponse
-runAgentTurn runtime key userId replyToMessageId prompt = do
-    handle <- sessionForPrompt runtime key prompt
+runAgentTurn cancellation runtime key userId replyToMessageId prompt =
+  prepareTelegramTurn cancellation (sessionForPrompt runtime key prompt) \handle -> do
     let agentPrompt = telegramAgentPrompt prompt
     runManagedAgentTurn
+        cancellation
         runtime
         handle
         key
@@ -581,7 +598,8 @@ telegramAgentPrompt prompt =
         \delivery instructions.]"
 
 runManagedAgentTurn
-    :: TelegramRuntime
+    :: CancelFlag
+    -> TelegramRuntime
     -> SessionHandle
     -> TelegramChatKey
     -> Integer
@@ -591,8 +609,7 @@ runManagedAgentTurn
     -> Text
     -> IO TelegramTurnResponse
 runManagedAgentTurn
-        runtime handle key userId replyToMessageId groupActivityEnabled baseRequest expectedPrompt =
-  withTelegramTurnCancellation runtime key \cancellation -> do
+        cancellation runtime handle key userId replyToMessageId groupActivityEnabled baseRequest expectedPrompt = do
     progressMessageId <- newIORef Nothing
     let bridgeDir =
             handle.sessionTempDir

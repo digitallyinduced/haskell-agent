@@ -46,6 +46,7 @@ module Agent.Telegram
     , TelegramTurnResponse(..)
     , withTelegramTurnCancellationUsing
     , interruptTelegramTurnUsing
+    , prepareTelegramTurn
     ) where
 
 import Agent.Telegram.Internal.App
@@ -57,6 +58,7 @@ import Agent.Telegram.Internal.Turn
     , withTelegramTurnCancellationUsing
     , interruptTelegramTurnUsing
     , telegramAgentPrompt
+    , prepareTelegramTurn
     )
 import Agent.Telegram.Markdown (markdownToTelegramHtml)
 import Agent.Telegram.Types

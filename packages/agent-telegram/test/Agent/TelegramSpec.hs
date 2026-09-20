@@ -63,6 +63,35 @@ decodeWith decoder =
 spec :: Spec
 spec = describe "Agent.Telegram" do
     describe "Telegram turn cancellation" do
+        it "accepts stop during voice preparation and never submits its transcript" do
+            active <- newMVar Map.empty
+            submitted <- newIORef False
+            cleaned <- newIORef False
+            let key = TelegramChatKey 123 Nothing
+            response <- withTelegramTurnCancellationUsing active key \cancellation ->
+                prepareTelegramTurn cancellation
+                    ((do
+                        interruptTelegramTurnUsing active key `shouldReturn` True
+                        pure ("voice transcript" :: Text.Text))
+                     `finally` modifyIORef' cleaned (const True))
+                    (\_ -> do
+                        modifyIORef' submitted (const True)
+                        pure (TelegramTurnResponse "submitted" Nothing))
+            response.telegramTurnText `shouldBe` "Stopped."
+            readIORef submitted `shouldReturn` False
+            readIORef cleaned `shouldReturn` True
+            Map.null <$> readMVar active `shouldReturn` True
+
+        it "retains the same cancellation registration after voice preparation" do
+            active <- newMVar Map.empty
+            let key = TelegramChatKey 123 Nothing
+            _ <- withTelegramTurnCancellationUsing active key \cancellation ->
+                prepareTelegramTurn cancellation (pure ()) \_ -> do
+                    interruptTelegramTurnUsing active key `shouldReturn` True
+                    isCancelled cancellation `shouldReturn` True
+                    pure (TelegramTurnResponse "Stopped." Nothing)
+            Map.null <$> readMVar active `shouldReturn` True
+
         it "isolates chats and forum topics and accepts repeated stop requests" do
             active <- newMVar Map.empty
             let first = TelegramChatKey 123 (Just 7)
