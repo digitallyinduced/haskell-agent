@@ -58,7 +58,8 @@ disables terminal echo and stores the token in a private gateway file.
 
 9. Tell the user to open their new bot and send `/start`. The bot supports
    `/new` for a fresh agent session, `/session` for the current session ID,
-   `/status` for queue/retry state, `/retry` for the latest failed turn, and
+   `/status` for queue/retry state, `/retry` for the latest failed turn,
+   `stop` or `/stop` to interrupt the current turn without shutting down the bot, and
    `/allow` / `/deny` / `/users` to manage who may talk to it. To use it in a
    group, an allowlisted Telegram administrator of that group must add the bot.
    If anyone else adds it, the bot leaves. Then mention its `@username`, reply

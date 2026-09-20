@@ -1,7 +1,8 @@
 module Agent.Telegram.Internal.Turn where
 
 
-import Agent.Runtime.AgentSessions.Process (launchManagedTurnBounded)
+import Agent.Runtime.AgentSessions.Process (launchManagedTurnCancellable)
+import Agent.Cancel (CancelFlag, isCancelled, newCancelFlag, requestCancel)
 import Agent.Runtime.ManagedTurn
     ( ManagedTurnMedia(..)
     , ManagedTurnContext(..)
@@ -27,7 +28,8 @@ import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.OsPath (unsafeToFilePath)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
-    ( modifyMVar
+    ( MVar
+    , modifyMVar
     , modifyMVar_
     , newMVar
     , readMVar
@@ -37,6 +39,7 @@ import Control.Exception.Safe
     , bracket_
     , onException
     , tryAny
+    , throwIO
     )
 import Control.Monad (void, when)
 import Data.IORef (newIORef, readIORef)
@@ -71,20 +74,70 @@ data TelegramTurnResponse = TelegramTurnResponse
     , telegramTurnProgressMessageId :: !(Maybe Integer)
     }
 
+-- The polling thread signals this latch directly, never queues cancellation
+-- behind the turn it needs to interrupt. A fresh latch prevents a late stop
+-- from affecting the next turn in the conversation.
+withTelegramTurnCancellation
+    :: TelegramRuntime
+    -> TelegramChatKey
+    -> (CancelFlag -> IO TelegramTurnResponse)
+    -> IO TelegramTurnResponse
+withTelegramTurnCancellation runtime =
+    withTelegramTurnCancellationUsing runtime.runtimeActiveTurns
+
+withTelegramTurnCancellationUsing
+    :: MVar (Map.Map TelegramChatKey CancelFlag)
+    -> TelegramChatKey
+    -> (CancelFlag -> IO TelegramTurnResponse)
+    -> IO TelegramTurnResponse
+withTelegramTurnCancellationUsing activeTurns key action =
+    bracket
+        (do
+            cancellation <- newCancelFlag
+            modifyMVar_ activeTurns
+                (pure . Map.insert key cancellation)
+            pure cancellation)
+        (const (modifyMVar_ activeTurns (pure . Map.delete key)))
+        \cancellation -> do
+            result <- tryAny (action cancellation)
+            cancelled <- isCancelled cancellation
+            case result of
+                Right response -> pure response
+                Left exception
+                    | cancelled -> pure (TelegramTurnResponse "Stopped." Nothing)
+                    | otherwise -> throwIO exception
+
+interruptTelegramTurn :: TelegramRuntime -> TelegramChatKey -> IO Bool
+interruptTelegramTurn runtime =
+    interruptTelegramTurnUsing runtime.runtimeActiveTurns
+
+interruptTelegramTurnUsing
+    :: MVar (Map.Map TelegramChatKey CancelFlag)
+    -> TelegramChatKey
+    -> IO Bool
+interruptTelegramTurnUsing activeTurns key =
+    modifyMVar activeTurns \active ->
+        case Map.lookup key active of
+            Nothing -> pure (active, False)
+            Just cancellation -> do
+                requestCancel cancellation
+                pure (active, True)
+
 runQueuedMediaTurn
     :: TelegramRuntime
     -> TelegramPendingMediaTurn
     -> IO TelegramTurnResponse
-runQueuedMediaTurn runtime pending = do
+runQueuedMediaTurn runtime pending =
+  withTelegramTurnCancellation runtime pending.pendingMediaChat \cancellation -> do
     progressMessageId <- newIORef Nothing
     handle <- sessionForPrompt runtime pending.pendingMediaChat pending.pendingMediaText
     let agentPrompt = telegramAgentPrompt pending.pendingMediaText
     bracket
         (downloadTelegramMediaAttachments runtime handle pending)
         (cleanupManagedTurnMedia . map snd)
-        (runWithAttachments progressMessageId handle agentPrompt)
+        (runWithAttachments cancellation progressMessageId handle agentPrompt)
   where
-   runWithAttachments progressMessageId handle agentPrompt attachments = do
+   runWithAttachments cancellation progressMessageId handle agentPrompt attachments = do
     let imageAttachments =
             [ media
             | (TelegramMediaPhoto, media) <- attachments
@@ -136,9 +189,8 @@ runQueuedMediaTurn runtime pending = do
           priorTurnIndex <-
               latestPersistedTurnIndex runtime handle.sessionMeta.metaId
           result <- withTelegramBridge bridgeEnv $
-            launchManagedTurnBounded
+            launchManagedTurnCancellable cancellation
                 runtime.runtimeProcessManager
-                False
                 runtime.runtimePolicy
                 True
                 False
@@ -539,7 +591,8 @@ runManagedAgentTurn
     -> Text
     -> IO TelegramTurnResponse
 runManagedAgentTurn
-        runtime handle key userId replyToMessageId groupActivityEnabled baseRequest expectedPrompt = do
+        runtime handle key userId replyToMessageId groupActivityEnabled baseRequest expectedPrompt =
+  withTelegramTurnCancellation runtime key \cancellation -> do
     progressMessageId <- newIORef Nothing
     let bridgeDir =
             handle.sessionTempDir
@@ -572,9 +625,8 @@ runManagedAgentTurn
       priorTurnIndex <-
           latestPersistedTurnIndex runtime handle.sessionMeta.metaId
       result <- withTelegramBridge bridgeEnv $
-        launchManagedTurnBounded
+        launchManagedTurnCancellable cancellation
             runtime.runtimeProcessManager
-            False
             runtime.runtimePolicy
             True
             False

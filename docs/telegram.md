@@ -38,6 +38,12 @@ Each private chat, group, and forum topic maps to a persisted session under
 `~/.haskell-agent`. `/new` starts a fresh session, `/session` shows its ID,
 `/status` reports work, and `/retry` requeues the latest failed turn.
 
+Send `stop` (case-insensitive, with optional surrounding whitespace) or `/stop`
+to interrupt the current turn, like the first Ctrl-C in the CLI. In groups,
+reply `stop` to the bot or address `/stop@your_bot_username`. Cancellation is
+scoped to the current chat or forum topic; the bot remains running and the
+session can be continued with another message.
+
 Mutating tools request approval through inline buttons by default.
 `--deny-mutations` disables them and `--yolo` auto-approves them. Callbacks are
 scoped to the originating conversation and allowlisted user.

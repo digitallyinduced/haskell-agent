@@ -1,6 +1,12 @@
 module Agent.Runtime.ManagedTurnSpec (spec) where
 
-import Agent.Runtime.AgentSessions.Process (waitForManagedSessionReadyWith)
+import Agent.Runtime.AgentSessions.Process
+    ( waitForManagedSessionReadyWith
+    , withManagedTurnCancellationFile
+    )
+import Agent.Cancel (isCancelled, newCancelFlag, waitCancel)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (concurrently)
 import Agent.Runtime.ManagedTurn
     ( ManagedTurnMedia(..)
     , ManagedTurnRequest(..)
@@ -24,16 +30,72 @@ import System.Directory
     ( createDirectoryIfMissing
     , getTemporaryDirectory
     , removePathForcibly
+    , renameFile
     )
 import System.FilePath ((</>))
 import Control.Exception.Safe (finally)
 import Data.Unique (newUnique, hashUnique)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import System.Exit (ExitCode(..))
+import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.Runtime.ManagedTurn" do
+    describe "managed turn cancellation" do
+        it "stops an active turn through its cooperative cancellation flag" $
+            withManagedTempDir \dir -> do
+                let path = dir </> "cancellation"
+                    marker = dir </> "cancellation-request"
+                Text.writeFile path ""
+                Text.writeFile marker "cancel\n"
+                cancel <- newCancelFlag
+                timeout 1_000_000
+                    (withManagedTurnCancellationFile path cancel do
+                        renameFile marker path
+                        waitCancel cancel)
+                    `shouldReturn` Just ()
+
+        it "latches cancellation requested before the child turn starts" $
+            withManagedTempDir \dir -> do
+                let path = dir </> "cancellation"
+                Text.writeFile path "cancel\n"
+                cancel <- newCancelFlag
+                timeout 1_000_000
+                    (withManagedTurnCancellationFile path cancel do
+                        isCancelled cancel `shouldReturn` True
+                        waitCancel cancel)
+                    `shouldReturn` Just ()
+                isCancelled cancel `shouldReturn` True
+
+        it "does not cancel a different managed turn" $
+            withManagedTempDir \dir -> do
+                let requestedPath = dir </> "requested"
+                    otherPath = dir </> "other"
+                Text.writeFile requestedPath "cancel\n"
+                Text.writeFile otherPath ""
+                requested <- newCancelFlag
+                other <- newCancelFlag
+                timeout 1_000_000
+                    (concurrently
+                        (withManagedTurnCancellationFile requestedPath requested
+                            (waitCancel requested))
+                        (withManagedTurnCancellationFile otherPath other
+                            (threadDelay 100_000)))
+                    `shouldReturn` Just ((), ())
+                isCancelled requested `shouldReturn` True
+                isCancelled other `shouldReturn` False
+
+        it "joins the reader when the turn finishes" $
+            withManagedTempDir \dir -> do
+                let path = dir </> "cancellation"
+                Text.writeFile path ""
+                cancel <- newCancelFlag
+                withManagedTurnCancellationFile path cancel (pure ())
+                Text.writeFile path "cancel\n"
+                threadDelay 100_000
+                isCancelled cancel `shouldReturn` False
+
     describe "managed session readiness" do
         let observeExit finalContents exitCode = do
                 contents <- newIORef Nothing

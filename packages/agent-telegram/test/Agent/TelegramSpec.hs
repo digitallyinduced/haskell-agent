@@ -1,6 +1,7 @@
 module Agent.TelegramSpec (spec) where
 
 import Agent.Telegram
+import Agent.Cancel (isCancelled)
 import Agent.OsPath (unsafeToFilePath)
 import qualified Agent.Telegram.Bridge as Bridge
 import Agent.Telegram.Types
@@ -24,6 +25,8 @@ import Agent.Telegram.Types
 import Data.List (sort)
 import Control.Concurrent
     ( newEmptyMVar
+    , newMVar
+    , readMVar
     , putMVar
     , takeMVar
     , threadDelay
@@ -59,6 +62,47 @@ decodeWith decoder =
 
 spec :: Spec
 spec = describe "Agent.Telegram" do
+    describe "Telegram turn cancellation" do
+        it "isolates chats and forum topics and accepts repeated stop requests" do
+            active <- newMVar Map.empty
+            let first = TelegramChatKey 123 (Just 7)
+                second = TelegramChatKey 123 (Just 8)
+                otherChat = TelegramChatKey 456 (Just 7)
+                completed = TelegramTurnResponse "completed" Nothing
+            _ <- withTelegramTurnCancellationUsing active first \firstCancellation ->
+                withTelegramTurnCancellationUsing active second \secondCancellation -> do
+                    interruptTelegramTurnUsing active otherChat `shouldReturn` False
+                    interruptTelegramTurnUsing active first `shouldReturn` True
+                    interruptTelegramTurnUsing active first `shouldReturn` True
+                    isCancelled firstCancellation `shouldReturn` True
+                    isCancelled secondCancellation `shouldReturn` False
+                    pure completed
+            Map.null <$> readMVar active `shouldReturn` True
+
+        it "does not carry an idle or previous turn stop into the next turn" do
+            active <- newMVar Map.empty
+            let key = TelegramChatKey 123 Nothing
+                completed = TelegramTurnResponse "completed" Nothing
+            interruptTelegramTurnUsing active key `shouldReturn` False
+            _ <- withTelegramTurnCancellationUsing active key \cancellation -> do
+                interruptTelegramTurnUsing active key `shouldReturn` True
+                isCancelled cancellation `shouldReturn` True
+                pure completed
+            interruptTelegramTurnUsing active key `shouldReturn` False
+            _ <- withTelegramTurnCancellationUsing active key \cancellation -> do
+                isCancelled cancellation `shouldReturn` False
+                pure completed
+            Map.null <$> readMVar active `shouldReturn` True
+
+        it "completes a cancelled failure without retaining a running turn" do
+            active <- newMVar Map.empty
+            let key = TelegramChatKey 123 Nothing
+            response <- withTelegramTurnCancellationUsing active key \_ -> do
+                interruptTelegramTurnUsing active key `shouldReturn` True
+                fail "interrupted operation"
+            response.telegramTurnText `shouldBe` "Stopped."
+            Map.null <$> readMVar active `shouldReturn` True
+
     describe "telegramAgentPrompt" do
         it "injects Telegram streaming and brevity guidance" do
             let prompt = telegramAgentPrompt "Inspect the failing tests"
@@ -522,6 +566,85 @@ spec = describe "Agent.Telegram" do
                             && voice.voiceFileSize == Just 1024
                     Nothing -> False
                 Left _ -> False
+
+    describe "Telegram stop control" do
+        let bot = TelegramUser 999 True (Just "Harness") Nothing (Just "HarnessBot")
+            classifyStop chatType sender respondToAll text extra = do
+                let chat = object ["id" .= (-1001 :: Integer), "type" .= (chatType :: Text.Text)]
+                    message = object $
+                        [ "message_id" .= (90 :: Integer)
+                        , "message_thread_id" .= (7 :: Integer)
+                        , "from" .= object ["id" .= (sender :: Integer)]
+                        , "chat" .= chat
+                        , "text" .= (text :: Text.Text)
+                        ] <> extra
+                update <- decodeWith telegramUpdateDecoder
+                    (encode (object ["update_id" .= (31 :: Integer), "message" .= message]))
+                    `shouldReturnRight` "stop update should decode"
+                pure (classifyTelegramUpdateWithMode bot (Set.singleton 456)
+                    (Set.singleton (-1001)) respondToAll update)
+            expected = InterruptTurn 90 (TelegramChatKey (-1001) (Just 7))
+            reply = "reply_to_message" .= object
+                [ "message_id" .= (77 :: Integer)
+                , "from" .= object ["id" .= (999 :: Integer), "is_bot" .= True]
+                , "chat" .= object ["id" .= (-1001 :: Integer), "type" .= ("supergroup" :: Text.Text)]
+                , "text" .= ("Working on your request" :: Text.Text)
+                ]
+
+        it "recognizes private stop and slash commands with case and whitespace normalization" do
+            mapM_ (\text ->
+                classifyStop "private" 456 False text [] `shouldReturn` expected)
+                ["stop", " STOP \n", "/stop", "/STOP@HarnessBot"]
+
+        it "recognizes a group reply before reply context and attribution are added" do
+            classifyStop "supergroup" 456 False "stop" [reply] `shouldReturn` expected
+
+        it "recognizes addressed group controls and respond-to-all input" do
+            classifyStop "supergroup" 456 False "@HarnessBot stop" [] `shouldReturn` expected
+            classifyStop "supergroup" 456 False "/stop@HarnessBot" [] `shouldReturn` expected
+            classifyStop "supergroup" 456 True "stop" [] `shouldReturn` expected
+
+        it "does not interrupt for unrelated group conversations or other bots" do
+            classifyStop "supergroup" 456 False "stop" [] `shouldReturn` IgnoreUpdate
+            classifyStop "supergroup" 456 True "/stop@OtherBot" [reply] `shouldReturn` IgnoreUpdate
+
+        it "does not accept controls from unauthorized senders" do
+            classifyStop "private" 789 False "stop" [] `shouldReturn` IgnoreUpdate
+            classifyStop "supergroup" 789 False "stop" [reply] `shouldReturn` IgnoreUpdate
+
+        it "keeps longer messages and command arguments as ordinary input" do
+            mapM_ (\text -> do
+                action <- classifyStop "private" 456 False text []
+                action `shouldNotBe` expected)
+                ["stop now", "do not stop", "/stop later"]
+
+        it "does not interpret forwarded or caption text as a stop control" do
+            forwarded <- classifyStop "private" 456 False "stop"
+                ["forward_origin" .= object ["type" .= ("hidden_user" :: Text.Text),
+                    "date" .= (1 :: Integer), "sender_user_name" .= ("Alice" :: Text.Text)]]
+            forwarded `shouldNotBe` expected
+            caption <- classifyStop "private" 456 False "stop"
+                ["photo" .= [object ["file_id" .= ("photo" :: Text.Text),
+                    "width" .= (10 :: Int), "height" .= (10 :: Int)]]]
+            caption `shouldNotBe` expected
+
+        it "does not interrupt when an existing message is edited to stop" do
+            update <- decodeWith telegramUpdateDecoder
+                "{\"update_id\":31,\"edited_message\":{\
+                \\"message_id\":90,\"message_thread_id\":7,\"from\":{\"id\":456},\
+                \\"chat\":{\"id\":-1001,\"type\":\"private\"},\"text\":\"stop\"}}"
+                `shouldReturnRight` "edited stop update should decode"
+            classifyTelegramUpdate bot (Set.singleton 456) update `shouldSatisfy` \case
+                QueueMediaTurn pending -> pending.pendingMediaEdited
+                _ -> False
+
+        it "checkpoints a control without adding a model turn or changing other work" do
+            let key = TelegramChatKey (-1001) (Just 7)
+                initial = storeUpdateAction 30 (QueueTurn 89 key "work" Nothing) emptyTelegramState
+                stored = storeUpdateAction 31 expected initial
+            stored.pendingQueues `shouldBe` initial.pendingQueues
+            stored.nextUpdateId `shouldBe` Just 32
+            storeUpdateAction 31 expected stored `shouldBe` stored
 
     describe "Telegram media messages" do
         let bot = TelegramUser

@@ -24,6 +24,7 @@ import Agent.Telegram.Classify
     , groupJoinAuthorized
     , isAnonymousAdmin
     , isAmbientGroupPrompt
+    , updateAlreadyStored
     , recordLatestInboundMessage
     , recordSeenTelegramUsers
     , storeUpdateAction
@@ -61,6 +62,7 @@ import Agent.Telegram.Internal.Turn
     ( TelegramTurnResponse(..)
     , checkpointVoiceTranscript
     , completePendingAction
+    , interruptTelegramTurn
     , nextChatAction
     , pendingActionChatLocal
     , pendingActionUpdateIdLocal
@@ -143,7 +145,27 @@ processUpdate runtime update = do
         modifyState runtime
             (recordLatestInboundMessage update . recordSeenTelegramUsers update)
         action <- classifyUpdate runtime update
-        modifyState runtime (storeUpdateAction update.updateId action)
+        case action of
+            InterruptTurn messageId key ->
+                modifyMVar_ runtime.runtimeStateVar \state ->
+                    if updateAlreadyStored update.updateId state
+                        then pure state
+                        else do
+                            interrupted <- interruptTelegramTurn runtime key
+                            let acknowledgement =
+                                    if interrupted
+                                        then "Stop requested for the current turn."
+                                        else "No turn is running in this conversation."
+                                next =
+                                    enqueuePendingAction
+                                        (DeliverReply
+                                            (TelegramPendingReply
+                                                update.updateId key (Just messageId)
+                                                Nothing acknowledgement))
+                                        (storeUpdateAction update.updateId action state)
+                            saveTelegramState runtime.runtimeStatePath next
+                            pure next
+            _ -> modifyState runtime (storeUpdateAction update.updateId action)
     case handled of
         Left err ->
             logTelegramEvent "update_persist_failed"
@@ -421,6 +443,7 @@ runQueuedTurn runtime pending =
     case telegramCommand pending.pendingTurnText of
         Just "start" -> withoutProgress $ pure
             "Send a message to start or continue an agent session. \
+            \Send stop or /stop to interrupt the current turn. \
             \Use /new for a fresh session, /session for its ID, and /allow \
             \in a group to accept another member by name or by replying to them."
         Just "new" -> withoutProgress do
