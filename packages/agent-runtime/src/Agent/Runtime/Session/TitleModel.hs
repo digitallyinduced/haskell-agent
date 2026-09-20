@@ -33,6 +33,7 @@ data TitleModelSetting
 -- session. On macOS, auto prefers on-device Apple Intelligence when available.
 data TitleModelResolution = TitleModelResolution
     { titleModelId :: !Text
+    , titleProvider :: !Provider
     , titleWireModelId :: !Text
     , titleContextWindow :: !(Maybe Int)
     , titleReasoningEffort :: !Text
@@ -101,6 +102,7 @@ appleFoundationResolution :: Bool -> ModelOption -> TitleModelResolution
 appleFoundationResolution pinned fallback =
     TitleModelResolution
         { titleModelId = appleFoundationTitleModelId
+        , titleProvider = fallback.modelTarget.targetProvider
         , titleWireModelId = fallback.modelTarget.targetWireModelId
         , titleContextWindow = Just appleFoundationTitleContextWindow
         , titleReasoningEffort =
@@ -118,6 +120,7 @@ resolutionFromPinned catalog target =
         _ ->
             TitleModelResolution
                 { titleModelId = target.targetModelId
+                , titleProvider = target.targetProvider
                 , titleWireModelId = target.targetWireModelId
                 , titleContextWindow = Nothing
                 , titleReasoningEffort =
@@ -130,6 +133,7 @@ resolutionFromOption :: Bool -> ModelOption -> TitleModelResolution
 resolutionFromOption pinned option =
     TitleModelResolution
         { titleModelId = option.modelTarget.targetModelId
+        , titleProvider = option.modelTarget.targetProvider
         , titleWireModelId = option.modelTarget.targetWireModelId
         , titleContextWindow = option.modelContextWindow
         , titleReasoningEffort =

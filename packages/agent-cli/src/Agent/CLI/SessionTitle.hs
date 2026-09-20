@@ -15,7 +15,10 @@ module Agent.CLI.SessionTitle
     ) where
 
 import Agent.CLI.Btw (BtwBackendFactory)
+import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
+import Agent.Provider (Provider(OpenAIProvider))
 import Agent.Runtime.Error (formatApiErrorInline)
+import Agent.Runtime.ProviderRequest (setRequestModel)
 import Agent.Runtime.Session.TitleModel
     ( TitleModelResolution(..)
     , titleSourceCharBudget
@@ -293,7 +296,7 @@ generateProviderTitle manager resolution excerpt = do
 titleRequestParams
     :: TitleModelResolution -> ResponseCreateParams -> ResponseCreateParams
 titleRequestParams resolution ResponseCreateParams{..} =
-    ResponseCreateParams
+    applyTitleDialect $ ResponseCreateParams
         { input = Nothing
         , previousResponseId = Nothing
         , instructions = Just
@@ -307,6 +310,15 @@ titleRequestParams resolution ResponseCreateParams{..} =
         -- Codex WebSocket transport rejects an explicit max_output_tokens.
         , ..
         }
+  where
+    -- Rebuild the private request's Lite prefix after discarding the session
+    -- input. Setting only the wire model leaves conventional request fields
+    -- and omits the required all-turns reasoning context.
+    applyTitleDialect
+        | resolution.titleProvider == OpenAIProvider
+        , isCodexResponsesLiteModel resolution.titleWireModelId =
+            setRequestModel resolution.titleProvider resolution.titleWireModelId
+        | otherwise = id
 
 titleReasoning :: Text -> ReasoningConfig
 titleReasoning effort =

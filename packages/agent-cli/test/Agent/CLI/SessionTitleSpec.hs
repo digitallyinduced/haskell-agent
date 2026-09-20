@@ -1,6 +1,7 @@
 module Agent.CLI.SessionTitleSpec (spec) where
 
 import Agent.CLI.SessionTitle
+import Agent.Provider (Provider(..))
 import Agent.Runtime.Session.TitleModel (TitleModelResolution(..))
 import Agent.Loop
     ( Backend(..)
@@ -89,6 +90,7 @@ spec = describe "Agent.CLI.SessionTitle" do
         sent.maxOutputTokens `shouldBe` Nothing
         sent.model `shouldBe` Just "title-model"
         fmap (.effort) sent.reasoning `shouldBe` Just (Just "low")
+        fmap (.context) sent.reasoning `shouldBe` Just Nothing
         [UserMessage titleInput] <- readIORef seenInputs
         titleInput `shouldSatisfy` Text.isInfixOf "User:\nFix auth"
         titleInput `shouldSatisfy`
@@ -118,6 +120,53 @@ spec = describe "Agent.CLI.SessionTitle" do
         Just sent <- readIORef seenParams
         sent.model `shouldBe` Just "gpt-5.6-luna"
         fmap (.effort) sent.reasoning `shouldBe` Just (Just "high")
+        fmap (.context) sent.reasoning `shouldBe` Just (Just "all_turns")
+        sent.instructions `shouldBe` Nothing
+        sent.tools `shouldBe` Nothing
+        sent.toolChoice `shouldBe` Just (ToolChoiceMode ToolChoiceNone)
+        sent.parallelToolCalls `shouldBe` Just False
+        sent.previousResponseId `shouldBe` Nothing
+        sent.maxOutputTokens `shouldBe` Nothing
+        fmap (.verbosity) sent.text `shouldBe` Just (Just "low")
+        case sent.input of
+            Just (ResponseInputItems [AdditionalToolsItemValue additional, MessageItem instruction]) -> do
+                additional.tools `shouldBe` []
+                instruction.role `shouldBe` RoleDeveloper
+                instruction.content `shouldBe` MessageContentParts
+                    [InputTextPart "Generate a short, distinctive session title. Output only the title." Nothing]
+            _ -> expectationFailure "expected the private Responses Lite title prefix"
+
+    it "keeps an OpenRouter title with an OpenAI wire ID conventional" do
+        seenParams <- newIORef Nothing
+        let backendFactory privateParams =
+                Backend \state _ _ _ -> do
+                    writeIORef seenParams (Just privateParams)
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "title-response" [] (Just "Custom title")
+                        , backendState = state
+                        }
+            customTitle = testTitleModel
+                { titleProvider = OpenRouterProvider
+                , titleModelId = "custom-title"
+                , titleWireModelId = "gpt-5.6-luna"
+                , titlePinned = True
+                }
+        withSessionTitleManager backendFactory (pure defaultResponseCreateParams)
+            (pure customTitle) Nothing (\_ -> pure ()) \manager -> do
+            requestSessionTitle manager "session-1" 1 "conversation"
+            results <- waitForResults manager 100
+            map (.resultTitle) results `shouldBe` ["Custom title"]
+        Just sent <- readIORef seenParams
+        sent.model `shouldBe` Just "gpt-5.6-luna"
+        sent.input `shouldBe` Nothing
+        sent.instructions `shouldBe` Just
+            "Generate a short, distinctive session title. Output only the title."
+        sent.tools `shouldBe` Just []
+        sent.toolChoice `shouldBe` Just (ToolChoiceMode ToolChoiceNone)
+        sent.parallelToolCalls `shouldBe` Just False
+        fmap (.context) sent.reasoning `shouldBe` Just Nothing
+        sent.text `shouldBe` Nothing
 
     it "caps the title prompt for a 4K-token on-device window" do
         seenInputs <- newIORef []
@@ -377,6 +426,7 @@ spec = describe "Agent.CLI.SessionTitle" do
 testTitleModel :: TitleModelResolution
 testTitleModel = TitleModelResolution
     { titleModelId = "title-model"
+    , titleProvider = OpenAIProvider
     , titleWireModelId = "title-model"
     , titleContextWindow = Nothing
     , titleReasoningEffort = "low"

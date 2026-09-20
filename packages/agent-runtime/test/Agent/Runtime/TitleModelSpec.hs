@@ -58,6 +58,7 @@ spec = do
             let resolved =
                     resolveTitleModel catalog ClaudeCodeProvider Nothing False
             resolved.titleModelId `shouldBe` "haiku"
+            resolved.titleProvider `shouldBe` ClaudeCodeProvider
             resolved.titleWireModelId `shouldBe` "haiku"
             resolved.titleReasoningEffort `shouldBe` "low"
             resolved.titlePinned `shouldBe` False
@@ -67,6 +68,7 @@ spec = do
             let resolved =
                     resolveTitleModel catalog ClaudeCodeProvider Nothing True
             resolved.titleModelId `shouldBe` appleFoundationTitleModelId
+            resolved.titleProvider `shouldBe` ClaudeCodeProvider
             resolved.titleWireModelId `shouldBe` "haiku"
             resolved.titleContextWindow `shouldBe` Just 4096
             resolved.titleUsesAppleFoundation `shouldBe` True
@@ -88,6 +90,7 @@ spec = do
             let resolved =
                     resolveTitleModel catalog OpenAIProvider Nothing False
             resolved.titleModelId `shouldBe` "gpt-5.6-luna"
+            resolved.titleProvider `shouldBe` OpenAIProvider
             resolved.titleReasoningEffort `shouldBe` "high"
 
         it "keeps Luna as the Apple auto fallback on OpenAI" do
@@ -132,6 +135,20 @@ spec = do
             resolved.titlePinned `shouldBe` True
             resolved.titleUsesAppleFoundation `shouldBe` False
 
+        it "preserves a custom pinned provider despite an OpenAI wire ID" do
+            let pinned = ModelTarget
+                    { targetProvider = OpenRouterProvider
+                    , targetConnectionId = "openrouter"
+                    , targetModelId = "custom-title"
+                    , targetWireModelId = "gpt-5.6-luna"
+                    , targetDialect = CodexDialect
+                    }
+                resolved = resolveTitleModel catalog OpenRouterProvider
+                    (Just (TitleModelPinned pinned)) False
+            resolved.titleProvider `shouldBe` OpenRouterProvider
+            resolved.titleWireModelId `shouldBe` "gpt-5.6-luna"
+            resolved.titlePinned `shouldBe` True
+
         it "ignores a pinned model from another provider" do
             let pinned = ModelTarget
                     { targetProvider = OpenAIProvider
@@ -172,6 +189,7 @@ spec = do
         it "keeps 4K on-device windows inside a small prompt" do
             titleSourceCharBudget TitleModelResolution
                 { titleModelId = "apple"
+                , titleProvider = ClaudeCodeProvider
                 , titleWireModelId = "apple"
                 , titleContextWindow = Just 4096
                 , titleReasoningEffort = "low"
@@ -183,6 +201,7 @@ spec = do
         it "allows a larger excerpt for ordinary catalog models" do
             titleSourceCharBudget TitleModelResolution
                 { titleModelId = "haiku"
+                , titleProvider = ClaudeCodeProvider
                 , titleWireModelId = "haiku"
                 , titleContextWindow = Nothing
                 , titleReasoningEffort = "low"
