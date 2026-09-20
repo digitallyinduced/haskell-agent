@@ -50,6 +50,25 @@ spec = do
             motionDemandFor MotionOff False False False running
                 `shouldBe` MotionSlow
 
+        it "animates managed background tasks without marking the prompt as a running turn" do
+            let idle = reduceUi (UiUserSubmitted "done") initialUiState
+                active = reduceUi
+                    (UiSetBackgroundTaskStatus ["Waiting for 1 background task"])
+                    idle
+                completed = reduceUi (UiSetBackgroundTaskStatus []) active
+            active.uiRunning `shouldBe` False
+            motionDemandFor MotionFull False False False active
+                `shouldBe` MotionFast
+            motionDemandFor MotionReduced False False False active
+                `shouldBe` MotionNone
+            motionDemandFor MotionOff False False False active
+                `shouldBe` MotionNone
+            motionDemandForTerminalFocus
+                TerminalUnfocused MotionFull False False False active
+                `shouldBe` MotionNone
+            motionDemandFor MotionFull False False False completed
+                `shouldBe` MotionNone
+
         it "keeps semantic countdown updates active in every motion mode" do
             let countdown =
                     reduceUi

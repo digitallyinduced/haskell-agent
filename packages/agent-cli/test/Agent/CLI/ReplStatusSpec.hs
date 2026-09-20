@@ -289,22 +289,22 @@ spec = do
         it "shows the task count, elapsed time, and registered continuation" do
             formatBackgroundTaskStatus (addUTCTime 272 started) True [task]
                 `shouldBe`
-                    [ "◌ 1 background task · 4m 32s · Release build"
+                    [ "Waiting for 1 background task · 4m 32s · Release build"
                     , "  Agent will resume when a shell task finishes."
                     ]
         it "does not promise continuation when retry is required" do
             formatBackgroundTaskStatus started False [task]
-                `shouldBe` ["◌ 1 background task · 0s · Release build"]
+                `shouldBe` ["1 background task running · 0s · Release build"]
         it "does not promise continuation for unregistered tasks" do
             formatBackgroundTaskStatus started True [task { taskAutoResume = False }]
-                `shouldBe` ["◌ 1 background task · 0s · Release build"]
+                `shouldBe` ["1 background task running · 0s · Release build"]
         it "counts multiple tasks and normalizes multiline command labels" do
             let multiline = task { taskLabel = "release\n  build\tvalidation" }
             formatBackgroundTaskStatus started False [multiline, task]
-                `shouldBe` ["◌ 2 background tasks · 0s · release build validation"]
+                `shouldBe` ["2 background tasks running · 0s · release build validation"]
         it "clamps clock adjustments to zero elapsed time" do
             formatBackgroundTaskStatus (addUTCTime (-1) started) False [task]
-                `shouldBe` ["◌ 1 background task · 0s · Release build"]
+                `shouldBe` ["1 background task running · 0s · Release build"]
         it "does not expose terminal controls from command labels" do
             let unsafeTask = task { taskLabel = "\ESC[2Jbuild\BEL\DEL" }
                 rows = formatBackgroundTaskStatus started False [unsafeTask]
@@ -314,12 +314,12 @@ spec = do
             let longTask = task { taskLabel = Text.replicate 200 "x" }
             formatBackgroundTaskStatus started False [longTask]
                 `shouldBe`
-                    ["◌ 1 background task · 0s · " <> Text.replicate 99 "x" <> "…"]
+                    ["1 background task running · 0s · " <> Text.replicate 99 "x" <> "…"]
         it "limits continuation wording to shell tasks in a mixed snapshot" do
             let cell = task { taskKey = "cell:1", taskLabel = "JavaScript cell", taskAutoResume = False }
             formatBackgroundTaskStatus started True [cell, task]
                 `shouldBe`
-                    [ "◌ 2 background tasks · 0s · JavaScript cell"
+                    [ "Waiting for 2 background tasks · 0s · JavaScript cell"
                     , "  Agent will resume when a shell task finishes."
                     ]
 

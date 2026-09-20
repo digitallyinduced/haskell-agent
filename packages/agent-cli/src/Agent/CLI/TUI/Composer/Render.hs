@@ -16,11 +16,14 @@ import Agent.CLI.Command
     , slashCommandHighlightToken
     )
 import Agent.CLI.Input (truncateDisplayText, displayEditorText)
+import Agent.CLI.Style (motionGlyphSet)
 import Agent.CLI.TUI.Composer.Edit (draftWindowStart, wrapDraftWindow)
 import Agent.CLI.TUI.Composer.Logic (currentSlashMenu)
 import Agent.CLI.TUI.History (HistoryWindow, historyWindowHasBlocks)
+import Agent.CLI.TUI.Motion (motionModeForTerminalFocus)
 import Agent.CLI.TUI.Types
 import Agent.TUI.Model
+import Agent.TUI.Motion (foregroundIndicator)
 import Agent.TUI.TextWidth (terminalTextImage)
 import qualified Agent.TUI.Theme as Theme
 import Brick
@@ -134,16 +137,29 @@ queuePreview text =
 
 -- | Keep managed work visible without taking focus from the editable prompt.
 -- A new model turn uses the usual activity indicator instead.
-drawBackgroundTaskStatus :: UiState -> Widget Name
+drawBackgroundTaskStatus :: AppState -> Widget Name
 drawBackgroundTaskStatus state
-    | state.uiRunning = emptyWidget
+    | state.appUi.uiRunning = emptyWidget
     | otherwise =
-        padLeftRight 2 $
-            vBox
-                [ withAttr Theme.mutedAttr $
-                    vLimit 1 (terminalTxt row)
-                | row <- state.uiBackgroundTaskStatus
-                ]
+        case state.appUi.uiBackgroundTaskStatus of
+            [] -> emptyWidget
+            heading : details ->
+                padLeftRight 2 $
+                    vBox $
+                        withAttr Theme.headerAttr
+                            (vLimit 1 (terminalTxt (indicator <> " " <> heading)))
+                        : [ withAttr Theme.mutedAttr $
+                                vLimit 1 (terminalTxt row)
+                          | row <- details
+                          ]
+  where
+    indicator =
+        foregroundIndicator
+            motionGlyphSet
+            (motionModeForTerminalFocus
+                state.appTerminalFocus
+                state.appRuntime.runtimeMotionMode)
+            state.appMotionElapsedMillis
 
 drawComposer :: AppState -> Widget Name
 drawComposer appState =

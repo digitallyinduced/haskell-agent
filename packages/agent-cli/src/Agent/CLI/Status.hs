@@ -42,14 +42,17 @@ import qualified Data.Text as Text
 formatBackgroundTaskStatus :: UTCTime -> Bool -> [BackgroundTaskStatus] -> [Text]
 formatBackgroundTaskStatus _ _ [] = []
 formatBackgroundTaskStatus now canResume tasks@(first : _) =
-    [ "◌ " <> Text.pack (show (length tasks))
+    [ (if willResume then "Waiting for " else "")
+        <> Text.pack (show (length tasks))
         <> (if length tasks == 1 then " background task" else " background tasks")
+        <> (if willResume then "" else " running")
         <> " · " <> elapsed <> " · " <> label
     ]
     <> [ "  Agent will resume when a shell task finishes."
-       | canResume && any (.taskAutoResume) tasks
+       | willResume
        ]
   where
+    willResume = canResume && any (.taskAutoResume) tasks
     label = truncateDisplayText 100 $
         Text.unwords (Text.words first.taskLabel)
     seconds = max 0 (floor (diffUTCTime now first.taskStartedAt) :: Integer)
