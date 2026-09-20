@@ -53,6 +53,7 @@ import Agent.CLI.Style
     , roleWarn
     )
 import Agent.MCP (McpToolRegistration(..))
+import qualified Agent.MCP as MCP
 import Agent.Tools.Types (AppTool(..))
 import Data.Char (isAlphaNum, isPrint)
 import Data.List (find)
@@ -76,6 +77,7 @@ data McpEntryStatus
     = McpDisabled
     | McpPendingRestart
     | McpNeedsAuth
+    | McpConnecting
     | McpReady !Int
     | McpUnavailable !Text
     deriving (Eq, Show)
@@ -137,11 +139,12 @@ initialMcpManagerState
     :: HarnessConfig
     -> [McpToolRegistration]
     -> [Text]
+    -> [MCP.McpServerStatus]
     -> Set Text
     -> Set Text
     -> Maybe (Bool, Text)
     -> McpManagerState
-initialMcpManagerState config registrations warnings pending authorized notice =
+initialMcpManagerState config registrations warnings statuses pending authorized notice =
     McpManagerState
         { mcpManagerEntries =
             [ entryFor label server
@@ -169,14 +172,24 @@ initialMcpManagerState config registrations warnings pending authorized notice =
     entryFor label server =
         let entryWarnings = warningsFor label warnings
             tools = Map.findWithDefault [] label toolsByServer
-            failed =
-                find (Text.isInfixOf " failed to start:") entryWarnings
+            current = find ((== label) . (.mcpStatusName)) statuses
+            failed = case current of
+                Just live -> case live.mcpStatusState of
+                    MCP.McpFailed reason -> Just reason
+                    _ -> Nothing
+                Nothing -> find (Text.isInfixOf " failed to start:") entryWarnings
             status
                 | not server.mcpEnabled = McpDisabled
                 | label `Set.member` pending = McpPendingRestart
                 | needsAuthorization server failed = McpNeedsAuth
                 | Just warning <- failed =
                     McpUnavailable (failureSummary warning)
+                | Just live <- current = case live.mcpStatusState of
+                    MCP.McpPending -> McpConnecting
+                    MCP.McpInitializing -> McpConnecting
+                    MCP.McpReady -> McpReady live.mcpStatusToolCount
+                    MCP.McpClosed -> McpUnavailable "connection closed"
+                    MCP.McpFailed reason -> McpUnavailable reason
                 | otherwise = McpReady (length tools)
         in McpEntry
             { mcpEntryName = label
@@ -459,8 +472,9 @@ runMcpManager
     -> OsPath
     -> [McpToolRegistration]
     -> [Text]
+    -> [MCP.McpServerStatus]
     -> IO Bool
-runMcpManager color home registrations warnings = do
+runMcpManager color home registrations warnings statuses = do
     loadHarnessConfigSnapshot home >>= \case
         Left err -> do
             Text.hPutStrLn stderr (roleError color err)
@@ -473,7 +487,7 @@ runMcpManager color home registrations warnings = do
                     Text.hPutStrLn stderr $
                         renderMcpManagerFrame color
                             (initialMcpManagerState
-                                config registrations warnings Set.empty
+                                config registrations warnings statuses Set.empty
                                 authorized Nothing)
                     hFlush stderr
                     pure False
@@ -482,7 +496,7 @@ runMcpManager color home registrations warnings = do
     loop revision config pending changed authorized notice = do
         let state =
                 initialMcpManagerState
-                    config registrations warnings pending authorized notice
+                    config registrations warnings statuses pending authorized notice
         runOverlayWithDecoder
             decodeMcpManagerKey
             (renderMcpManagerFrame color)
@@ -631,6 +645,7 @@ renderStatus color = \case
     McpDisabled -> roleMuted color "[disabled]"
     McpPendingRestart -> roleWarn color "[restart pending]"
     McpNeedsAuth -> roleWarn color "[needs auth]"
+    McpConnecting -> roleMuted color "[connecting]"
     McpReady count ->
         roleSuccess color "[ready]"
             <> roleMuted color

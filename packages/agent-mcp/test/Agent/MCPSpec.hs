@@ -972,6 +972,16 @@ spec = describe "Agent.MCP" do
                 early.output `shouldSatisfy`
                     Text.isInfixOf "still connecting"
                 waitUntilReady fleet
+                -- Progressive startup retains an empty initial registration
+                -- list; management screens must read the live catalog.
+                length fleet.mcpFleetRegistrations `shouldBe` 0
+                registrations <- mcpFleetCurrentRegistrations fleet
+                map (\registration ->
+                    ( registration.mcpRegistrationServer
+                    , registration.mcpRegistrationTool.appToolName
+                    , registration.mcpRegistrationTool.appToolDescription
+                    )) registrations
+                    `shouldBe` [("slow", "slow__delayed_read", "Delayed read.")]
                 searched <- dispatch "search" "mcp_search"
                     "{\"query\":\"delayed\"}"
                 searched.output `shouldBe` Text.intercalate "\n"

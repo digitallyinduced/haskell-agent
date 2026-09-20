@@ -5,6 +5,7 @@ import Agent.CLI.McpAdd
 import Agent.CLI.McpManager
 import Agent.CLI.McpManager.Fullscreen
 import Agent.CLI.Picker (PickerKey(..))
+import qualified Agent.MCP as MCP
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as Text
@@ -85,6 +86,7 @@ spec = describe "Agent.CLI.McpManager" do
                                 , ("remote", remote)
                                 ]
                         }
+                    []
                     []
                     []
                     Set.empty
@@ -172,6 +174,7 @@ spec = describe "Agent.CLI.McpManager" do
                         []
                         [ "MCP server remote failed to start: MCP server requires OAuth authorization; run `agent mcp login <url>`"
                         ]
+                        []
                         Set.empty
                         Set.empty
                         Nothing)
@@ -198,6 +201,60 @@ spec = describe "Agent.CLI.McpManager" do
             frame `shouldSatisfy` Text.isInfixOf "Auto generated"
             frame `shouldSatisfy` Text.isInfixOf "Tab/Shift+Tab field"
 
+    describe "live server status" do
+        let manager current count enabled pending warnings =
+                initialMcpManagerState
+                    defaultHarnessConfig
+                        { configMcpServers =
+                            Map.singleton "posthog"
+                                ((httpServer "https://mcp.posthog.com/mcp")
+                                    { mcpEnabled = enabled })
+                        }
+                    []
+                    warnings
+                    [MCP.McpServerStatus "posthog" current count]
+                    pending
+                    (Set.singleton "https://mcp.posthog.com/mcp")
+                    Nothing
+            entryStatus state = map (.mcpEntryStatus) state.mcpManagerEntries
+
+        it "uses the live tool count even when the startup registrations are empty" do
+            let state = manager MCP.McpReady 2 True Set.empty []
+            entryStatus state `shouldBe` [McpReady 2]
+            renderMcpManagerFrame False state
+                `shouldSatisfy` Text.isInfixOf "[ready] · 2 tools"
+            map (snd . snd) (mcpDashboardEntries state)
+                `shouldSatisfy` any (Text.isInfixOf "ready · 2 tools")
+
+        it "does not describe pending or initializing servers as ready with zero tools" do
+            mapM_ (\current -> do
+                let state = manager current 0 True Set.empty []
+                entryStatus state `shouldBe` [McpConnecting]
+                renderMcpManagerFrame False state
+                    `shouldSatisfy` Text.isInfixOf "[connecting]")
+                [MCP.McpPending, MCP.McpInitializing]
+
+        it "reports failures and closed connections from the live state" do
+            entryStatus (manager (MCP.McpFailed "connection refused") 0 True Set.empty [])
+                `shouldBe` [McpUnavailable "connection refused"]
+            entryStatus (manager MCP.McpClosed 0 True Set.empty [])
+                `shouldBe` [McpUnavailable "connection closed"]
+
+        it "retains OAuth guidance for authorization failures" do
+            entryStatus (manager (MCP.McpFailed "MCP server requires OAuth authorization") 0 True Set.empty [])
+                `shouldBe` [McpNeedsAuth]
+
+        it "prefers current readiness to obsolete startup failure warnings" do
+            entryStatus (manager MCP.McpReady 1 True Set.empty
+                ["MCP server posthog failed to start: connection refused"])
+                `shouldBe` [McpReady 1]
+
+        it "keeps configuration changes ahead of live runtime status" do
+            entryStatus (manager MCP.McpReady 1 False Set.empty [])
+                `shouldBe` [McpDisabled]
+            entryStatus (manager MCP.McpReady 1 True (Set.singleton "posthog") [])
+                `shouldBe` [McpPendingRestart]
+
     describe "fullscreen dashboard" do
         it "offers add, restart when pending, and per-server actions including auth for HTTP" do
             let pending =
@@ -207,6 +264,7 @@ spec = describe "Agent.CLI.McpManager" do
                                 Map.singleton "remote"
                                     (httpServer "https://mcp.example.test/mcp")
                             }
+                        []
                         []
                         []
                         (Set.singleton "remote")
