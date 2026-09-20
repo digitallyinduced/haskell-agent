@@ -793,6 +793,25 @@ spec = do
             fmap (.dialogOverlay.choiceTitle) updated.appChoice
                 `shouldBe` Just "MCP servers"
 
+        it "refreshes a choice in place and ignores updates from an earlier dialog" do
+            runtime <- newScriptRuntime initialUiState
+            previous <- newEmptyTMVarIO
+            current <- newEmptyTMVarIO
+            let initial = initialFullscreenAppState runtime [] AgentRoot [] 0
+                rows = [("first", "connecting"), ("second", "connecting")]
+                updatedRows = [("first", "ready"), ("second", "unavailable")]
+            (_, updated) <- runFullscreenScriptWithState initial
+                [ FullscreenScriptApp
+                    (AppAskChoice ChoiceDialog "MCP servers" "Before" 0 rows current)
+                , FullscreenScriptVty (V.EvKey V.KDown [])
+                , FullscreenScriptApp (AppUpdateChoice current "After" updatedRows)
+                , FullscreenScriptApp (AppUpdateChoice previous "Stale" [])
+                , FullscreenScriptHalt
+                ]
+            fmap (.dialogOverlay.choiceIndex) updated.appChoice `shouldBe` Just 1
+            fmap (.dialogOverlay.choiceBody) updated.appChoice `shouldBe` Just "After"
+            fmap (.dialogOverlay.choiceRows) updated.appChoice `shouldBe` Just updatedRows
+
     describe "durable chart previews" do
         it "queues history charts without rasterizing on reset or page load" do
             runtime <- newScriptRuntime initialUiState

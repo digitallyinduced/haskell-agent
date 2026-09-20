@@ -244,6 +244,90 @@ spec = describe "Agent.CLI.McpManager" do
             entryStatus (manager (MCP.McpFailed "MCP server requires OAuth authorization") 0 True Set.empty [])
                 `shouldBe` [McpNeedsAuth]
 
+        it "renders live failures once while retaining discovery diagnostics" do
+            let state = (manager (MCP.McpFailed "connection refused") 0 True Set.empty
+                    [ "MCP server posthog failed: connection refused"
+                    , "MCP server posthog skipped rejected tool"
+                    ]) { mcpManagerExpanded = Just "posthog" }
+                frame = renderMcpManagerFrame False state
+            Text.count "connection refused" frame `shouldBe` 1
+            frame `shouldSatisfy` Text.isInfixOf "skipped rejected tool"
+            map (Text.count "connection refused" . mcpServerMenuBody Nothing)
+                state.mcpManagerEntries `shouldBe` [1]
+            map (mcpServerMenuBody Nothing) state.mcpManagerEntries
+                `shouldSatisfy` all (Text.isInfixOf "skipped rejected tool")
+
+        it "shows discovery diagnostics for ready servers" do
+            let state = (manager MCP.McpReady 1 True Set.empty
+                    ["MCP server posthog skipped rejected tool"])
+                    { mcpManagerExpanded = Just "posthog" }
+            renderMcpManagerFrame False state
+                `shouldSatisfy` Text.isInfixOf "skipped rejected tool"
+            map (mcpServerMenuBody Nothing) state.mcpManagerEntries
+                `shouldSatisfy` all (Text.isInfixOf "skipped rejected tool")
+
+        it "does not infer OAuth from a missing token for network failures" do
+            let config = defaultHarnessConfig
+                    { configMcpServers = Map.singleton "public"
+                        (httpServer "https://public.example.test/mcp") }
+                state reason = initialMcpManagerState config [] []
+                    [MCP.McpServerStatus "public" (MCP.McpFailed reason) 0]
+                    Set.empty Set.empty Nothing
+            mapM_ (\reason ->
+                entryStatus (state reason) `shouldBe` [McpUnavailable reason])
+                ["connection refused", "DNS lookup failed", "request timed out"]
+            entryStatus (state "HTTP 401 Unauthorized") `shouldBe` [McpNeedsAuth]
+
+        it "preserves nested failures and non-duplicate top-level warnings in both renderers" do
+            let diagnostics =
+                    [ "MCP server posthog skills/list failed: catalog unavailable"
+                    , "MCP server posthog prompts/list failed to start: catalog unavailable"
+                    , "MCP server posthog failed: earlier failure"
+                    ]
+            mapM_ (\current -> do
+                let state = (manager current 1 True Set.empty diagnostics)
+                        { mcpManagerExpanded = Just "posthog" }
+                    frames = renderMcpManagerFrame False state
+                        : map (mcpServerMenuBody Nothing) state.mcpManagerEntries
+                mapM_ (\warning ->
+                    frames `shouldSatisfy` all (Text.isInfixOf warning)) diagnostics)
+                [MCP.McpReady, MCP.McpFailed "connection refused"]
+
+        it "suppresses only matching current or legacy top-level failures" do
+            mapM_ (\marker -> do
+                let state = (manager (MCP.McpFailed "connection refused") 0 True Set.empty
+                        ["MCP server posthog" <> marker <> "connection refused"])
+                        { mcpManagerExpanded = Just "posthog" }
+                    frames = renderMcpManagerFrame False state
+                        : map (mcpServerMenuBody Nothing) state.mcpManagerEntries
+                map (Text.count "connection refused") frames `shouldBe` [1, 1])
+                [" failed: ", " failed to start: "]
+
+        it "refreshes runtime entries without resetting interaction state" do
+            let config = defaultHarnessConfig
+                    { configMcpServers = Map.fromList
+                        [ ("pending", server True "server")
+                        , ("posthog", httpServer "https://mcp.posthog.com/mcp")
+                        ] }
+                pending = Set.singleton "pending"
+                initial = (initialMcpManagerState config [] []
+                    [MCP.McpServerStatus "posthog" MCP.McpInitializing 0]
+                    pending Set.empty (Just (True, "Saved")))
+                    { mcpManagerIndex = 1
+                    , mcpManagerExpanded = Just "posthog"
+                    , mcpManagerAddForm = Just emptyMcpAddForm
+                        { mcpAddTarget = "https://partial", mcpAddTargetCursor = 15 }
+                    , mcpManagerConfirmRemove = Just "posthog"
+                    }
+                updated = refreshMcpManagerState config pending Set.empty
+                    ([], ["MCP server posthog skipped rejected tool"],
+                        [MCP.McpServerStatus "posthog" MCP.McpReady 2]) initial
+            entryStatus updated `shouldBe` [McpPendingRestart, McpReady 2]
+            map (.mcpEntryWarnings) updated.mcpManagerEntries
+                `shouldBe` [[], ["MCP server posthog skipped rejected tool"]]
+            updated { mcpManagerEntries = initial.mcpManagerEntries }
+                `shouldBe` initial
+
         it "prefers current readiness to obsolete startup failure warnings" do
             entryStatus (manager MCP.McpReady 1 True Set.empty
                 ["MCP server posthog failed to start: connection refused"])

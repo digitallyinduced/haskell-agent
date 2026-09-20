@@ -11,7 +11,9 @@ module Agent.CLI.McpManager
     , decodeMcpManagerKey
     , emptyMcpAddForm
     , initialMcpManagerState
+    , refreshMcpManagerState
     , mcpEntryTransport
+    , mcpEntryDiagnosticWarnings
     , parseMcpCommand
     , pendingHttpAuthorizationUrl
     , renderMcpManagerFrame
@@ -43,7 +45,7 @@ import Agent.Runtime.McpOAuthStore (mcpOAuthStorePath)
 import Agent.CLI.Picker
     ( PickerKey(..)
     , decodePickerKey
-    , runOverlayWithDecoder
+    , runOverlayWithDecoderAndUpdates
     )
 import Agent.CLI.Style
     ( roleError
@@ -58,7 +60,7 @@ import Agent.Tools.Types (AppTool(..))
 import Data.Char (isAlphaNum, isPrint)
 import Data.List (find)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (isJust)
+import Control.Concurrent (threadDelay)
 import qualified Data.Set as Set
 import Data.Set (Set)
 import Data.Text (Text)
@@ -144,7 +146,7 @@ initialMcpManagerState
     -> Set Text
     -> Maybe (Bool, Text)
     -> McpManagerState
-initialMcpManagerState config registrations warnings statuses pending authorized notice =
+initialMcpManagerState config registrations warnings statuses pending _authorized notice =
     McpManagerState
         { mcpManagerEntries =
             [ entryFor label server
@@ -200,9 +202,23 @@ initialMcpManagerState config registrations warnings statuses pending authorized
             }
     needsAuthorization server failed = case server.mcpUrl of
         Nothing -> False
-        Just url ->
-            maybe False isAuthFailure failed
-                || (Set.notMember url authorized && isJust failed)
+        Just _ -> maybe False isAuthFailure failed
+
+-- | Replace runtime-derived entries without disturbing input, selection,
+-- expanded details, or configuration changes awaiting a restart.
+refreshMcpManagerState
+    :: HarnessConfig
+    -> Set Text
+    -> Set Text
+    -> ([McpToolRegistration], [Text], [MCP.McpServerStatus])
+    -> McpManagerState
+    -> McpManagerState
+refreshMcpManagerState config pending authorized (registrations, warnings, statuses) state =
+    state
+        { mcpManagerEntries =
+            (initialMcpManagerState config registrations warnings statuses
+                pending authorized state.mcpManagerNotice).mcpManagerEntries
+        }
 
 -- | HTTP servers that are not yet covered by a saved OAuth token record.
 pendingHttpAuthorizationUrl :: Set Text -> McpServerConfig -> Maybe Text
@@ -470,11 +486,9 @@ insertCursor color focused value cursor
 runMcpManager
     :: Bool
     -> OsPath
-    -> [McpToolRegistration]
-    -> [Text]
-    -> [MCP.McpServerStatus]
+    -> IO ([McpToolRegistration], [Text], [MCP.McpServerStatus])
     -> IO Bool
-runMcpManager color home registrations warnings statuses = do
+runMcpManager color home readRuntime = do
     loadHarnessConfigSnapshot home >>= \case
         Left err -> do
             Text.hPutStrLn stderr (roleError color err)
@@ -484,6 +498,7 @@ runMcpManager color home registrations warnings statuses = do
             authorized <- authorizedMcpUrls home config
             if not tty
                 then do
+                    (registrations, warnings, statuses) <- readRuntime
                     Text.hPutStrLn stderr $
                         renderMcpManagerFrame color
                             (initialMcpManagerState
@@ -494,14 +509,17 @@ runMcpManager color home registrations warnings statuses = do
                 else loop revision config Set.empty False authorized Nothing
   where
     loop revision config pending changed authorized notice = do
+        (registrations, warnings, statuses) <- readRuntime
         let state =
                 initialMcpManagerState
                     config registrations warnings statuses pending authorized notice
-        runOverlayWithDecoder
+        fmap (fmap fst) (runOverlayWithDecoderAndUpdates
             decodeMcpManagerKey
             (renderMcpManagerFrame color)
             applyMcpManagerKey
-            state
+            (threadDelay 250000 >> readRuntime)
+            (refreshMcpManagerState config pending authorized)
+            state)
             >>= \case
                 Nothing -> pure changed
                 Just McpManagerClose -> pure changed
@@ -695,9 +713,22 @@ renderDetails color entry =
                   ]
     warningLines =
         [ roleWarn color ("    warning: " <> warningSummary warning)
-        | warning <- entry.mcpEntryWarnings
-        , not (" failed to start:" `Text.isInfixOf` warning)
+        | warning <- mcpEntryDiagnosticWarnings entry
         ]
+
+-- | Hide only the exact top-level failure already shown in the status.
+-- Nested catalog failures and warnings not represented by the status remain visible.
+mcpEntryDiagnosticWarnings :: McpEntry -> [Text]
+mcpEntryDiagnosticWarnings entry =
+    filter (not . duplicateFailure) entry.mcpEntryWarnings
+  where
+    duplicateFailure warning = case entry.mcpEntryStatus of
+        McpUnavailable reason ->
+            warning `elem`
+                [ "MCP server " <> entry.mcpEntryName <> marker <> reason
+                | marker <- [" failed: ", " failed to start: "]
+                ]
+        _ -> False
 
 renderCommand :: McpServerConfig -> Text
 renderCommand server =

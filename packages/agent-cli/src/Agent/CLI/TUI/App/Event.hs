@@ -481,6 +481,21 @@ handleAppEvent = \case
             _ -> state
     AppCloseChoice reply ->
         handleCloseChoiceEvent reply
+    AppUpdateChoice reply body rows ->
+        modify' \state -> case state.appChoice of
+            Just pending
+                | Just (ChoiceReply token) <- pending.dialogOverlay.choiceReply
+                , token == reply ->
+                    state { appChoice = Just pending
+                        { dialogOverlay = pending.dialogOverlay
+                            { choiceBody = body
+                            , choiceRows = rows
+                            , choiceIndex = min pending.dialogOverlay.choiceIndex
+                                (max 0 (length rows - 1))
+                            }
+                        }
+                    }
+            _ -> state
     AppAskDynamicAdjustableFilterChoice title body initial rows reply -> do
         state <- get
         liftIO (dismissPendingChoice state)

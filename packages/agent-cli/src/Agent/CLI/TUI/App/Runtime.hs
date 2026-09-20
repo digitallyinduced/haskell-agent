@@ -982,6 +982,29 @@ requestFullscreenPermissionOnce runtime workspace call = do
         Just 0 -> PermissionAllowOnce
         _ -> PermissionDeny
 
+-- | Refresh the contents of a dialog without replacing its selection or
+-- viewport. Callers must preserve row identity and ordering until dismissal.
+-- The updater is scoped to the request and stale events are token-checked.
+requestFullscreenChoiceWithUpdates
+    :: FullscreenRuntime
+    -> Text
+    -> Int
+    -> IO (Text, [(Text, Text)])
+    -> IO (Maybe Int)
+requestFullscreenChoiceWithUpdates runtime title initial readContents = do
+    (body, rows) <- readContents
+    reply <- newEmptyTMVarIO
+    let refresh previous = do
+            threadDelay 250000
+            contents@(nextBody, nextRows) <- readContents
+            when (contents /= previous) $
+                enqueueAppEvent runtime (AppUpdateChoice reply nextBody nextRows)
+            refresh contents
+    withFullscreenChoiceRequest runtime reply
+        (AppAskChoice ChoiceDialog title body initial rows reply) do
+            result <- race (atomically (readTMVar reply)) (refresh (body, rows))
+            pure $ either id (const Nothing) result
+
 -- | Updates belong to this reply token, never to whichever dialog happens to
 -- be open later. The refresh worker is cancelled and joined when it closes.
 requestFullscreenDynamicAdjustableFilterChoice
