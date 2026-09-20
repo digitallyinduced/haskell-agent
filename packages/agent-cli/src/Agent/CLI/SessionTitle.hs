@@ -315,8 +315,9 @@ titleRequestParams resolution ResponseCreateParams{..} =
     -- input. Setting only the wire model leaves conventional request fields
     -- and omits the required all-turns reasoning context.
     applyTitleDialect
-        | isCodexResponsesLiteModel resolution.titleWireModelId =
-            setRequestModel OpenAIProvider resolution.titleWireModelId
+        | resolution.titleProvider == OpenAIProvider
+        , isCodexResponsesLiteModel resolution.titleWireModelId =
+            setRequestModel resolution.titleProvider resolution.titleWireModelId
         | otherwise = id
 
 titleReasoning :: Text -> ReasoningConfig
