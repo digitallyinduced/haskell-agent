@@ -89,6 +89,7 @@ spec = describe "Agent.CLI.SessionTitle" do
         sent.maxOutputTokens `shouldBe` Nothing
         sent.model `shouldBe` Just "title-model"
         fmap (.effort) sent.reasoning `shouldBe` Just (Just "low")
+        fmap (.context) sent.reasoning `shouldBe` Just Nothing
         [UserMessage titleInput] <- readIORef seenInputs
         titleInput `shouldSatisfy` Text.isInfixOf "User:\nFix auth"
         titleInput `shouldSatisfy`
@@ -118,6 +119,21 @@ spec = describe "Agent.CLI.SessionTitle" do
         Just sent <- readIORef seenParams
         sent.model `shouldBe` Just "gpt-5.6-luna"
         fmap (.effort) sent.reasoning `shouldBe` Just (Just "high")
+        fmap (.context) sent.reasoning `shouldBe` Just (Just "all_turns")
+        sent.instructions `shouldBe` Nothing
+        sent.tools `shouldBe` Nothing
+        sent.toolChoice `shouldBe` Just (ToolChoiceMode ToolChoiceNone)
+        sent.parallelToolCalls `shouldBe` Just False
+        sent.previousResponseId `shouldBe` Nothing
+        sent.maxOutputTokens `shouldBe` Nothing
+        fmap (.verbosity) sent.text `shouldBe` Just (Just "low")
+        case sent.input of
+            Just (ResponseInputItems [AdditionalToolsItemValue additional, MessageItem instruction]) -> do
+                additional.tools `shouldBe` []
+                instruction.role `shouldBe` RoleDeveloper
+                instruction.content `shouldBe` MessageContentParts
+                    [InputTextPart "Generate a short, distinctive session title. Output only the title." Nothing]
+            _ -> expectationFailure "expected the private Responses Lite title prefix"
 
     it "caps the title prompt for a 4K-token on-device window" do
         seenInputs <- newIORef []
