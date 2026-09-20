@@ -1,6 +1,13 @@
 module Agent.CLI.ModelPickerSpec (spec) where
 
 import Agent.CLI.ModelPicker
+import Agent.CLI.Session.Choices
+    ( resolveTitleModelChoice
+    , titleModelChoice
+    , titleModelChoiceIndex
+    , titleModelChoiceRows
+    )
+import Agent.Runtime.Session.TitleModel (TitleModelSetting(..))
 import Agent.Runtime.Models
 import Agent.Runtime.ModelConfig
     ( ModelCatalog
@@ -42,6 +49,59 @@ captureNonTtyPicker action =
 spec :: Spec
 spec = do
     catalog <- runIO readPackagedCatalog
+    describe "title model picker" do
+        let option = rawModelOption OpenAIProvider "gpt-5.6-luna"
+            unusedProviderChoice = fail "provider picker must not run"
+
+        it "offers automatic, local Apple, and provider choices" do
+            map fst (titleModelChoiceRows Nothing)
+                `shouldBe` ["Auto (default)", "Apple Foundation", "Provider model…"]
+
+        it "selects automatic by default and retains manual selections" do
+            titleModelChoiceIndex Nothing `shouldBe` 0
+            titleModelChoiceIndex (Just TitleModelAppleFoundation) `shouldBe` 1
+            titleModelChoiceIndex (Just (TitleModelPinned option.modelTarget))
+                `shouldBe` 2
+
+        it "restores automatic selection without opening the provider picker" do
+            resolveTitleModelChoice unusedProviderChoice (Just 0)
+                `shouldReturn` Right (Just Nothing)
+
+        it "selects Apple independently of provider catalog availability" do
+            resolveTitleModelChoice unusedProviderChoice (Just 1)
+                `shouldReturn` Right (Just (Just TitleModelAppleFoundation))
+
+        it "does not change the setting on cancellation" do
+            resolveTitleModelChoice unusedProviderChoice Nothing
+                `shouldReturn` Right Nothing
+
+        it "persists a confirmed provider selection" do
+            resolveTitleModelChoice (pure (Right (Just option))) (Just 2)
+                `shouldReturn` Right (Just (Just (TitleModelPinned option.modelTarget)))
+
+        it "does not reset a setting when the provider picker is cancelled" do
+            resolveTitleModelChoice (pure (Right Nothing)) (Just 2)
+                `shouldReturn` Right Nothing
+
+        it "retains provider selection errors" do
+            resolveTitleModelChoice (pure (Left "catalog unavailable")) (Just 2)
+                `shouldReturn` Left "catalog unavailable"
+
+        it "shows Apple and the default without mutating settings on non-TTY input" do
+            (result, output) <- captureNonTtyPicker $
+                titleModelChoice Nothing False Nothing unusedProviderChoice
+            result `shouldBe` Right Nothing
+            output `shouldSatisfy` Text.isInfixOf "Apple Foundation"
+            output `shouldSatisfy` Text.isInfixOf "Auto (default) ✓"
+
+        it "escapes control characters in the current provider model" do
+            let target = option.modelTarget { targetModelId = "model\n\ESC[31m" }
+            (_, output) <- captureNonTtyPicker $
+                titleModelChoice Nothing False (Just (TitleModelPinned target))
+                    unusedProviderChoice
+            output `shouldSatisfy` Text.isInfixOf "model↵"
+            output `shouldSatisfy` (not . Text.isInfixOf "\ESC")
+
     describe "model picker refresh" do
         let models = initialPickerState catalog "xai" XAIProvider "grok-4.6" GrokBuildDialect
             initial = (models, Map.empty, "Loading models…")

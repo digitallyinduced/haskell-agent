@@ -99,8 +99,8 @@ Invoke it with `/add-model`, `$add-model`, or a natural-language request.
 
 ## Session title model
 
-Automatic session titles are generated with a cheap auxiliary model, not the
-live coding model. On macOS, auto uses on-device Apple Intelligence
+Without a manual override, session titles default to automatic selection,
+independently of the live coding model. On macOS, auto uses on-device Apple Intelligence
 (`apple-foundationmodel`) through a bundled Swift helper when Apple
 Intelligence reports as available, and falls back to the provider cheap model
 if that helper is missing or fails. The helper is `apple-session-title`; the
@@ -108,7 +108,8 @@ CLI builds it from source with Xcode on first use, or uses a copy already on
 `PATH` / `HASKELL_AGENT_APPLE_SESSION_TITLE`.
 Otherwise Claude sessions default to `haiku`, OpenAI to `gpt-5.6-luna`,
 Gemini to `gemini-3.5-flash-lite`, and OpenRouter to `stealth/ox-alpha`.
-Pin a specific catalog model with `/title-model NAME`, pin Apple Intelligence
+Use `/title-model` to pick automatic selection, Apple Foundation, or a provider
+model. Pin a specific catalog model with `/title-model NAME`, pin Apple Intelligence
 with `/title-model apple-foundationmodel`, or restore the automatic choice
 with `/title-model --auto`. The selection is stored as `titleModel` in
 `~/.haskell-agent/settings.json`. A pinned provider model is used only while

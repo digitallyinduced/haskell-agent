@@ -6,9 +6,16 @@ module Agent.CLI.Session.Choices
     , modelChoice
     , modelChoiceWithEffort
     , showAccountUsage
+    , titleModelChoice
+    , titleModelChoiceIndex
+    , titleModelChoiceRows
+    , resolveTitleModelChoice
     ) where
 
 import Agent.Runtime.Error (formatApiErrorInlineAt)
+import Agent.Runtime.Session.TitleModel (TitleModelSetting(..))
+import Agent.CLI.Picker (PickerKey(..), runOverlay)
+import Agent.TUI.TextWidth (displayTerminalText)
 import Agent.Runtime.GatewayClient
     ( GatewayModelAccess
     , cachedGatewayModels
@@ -49,6 +56,7 @@ import Agent.ReasoningEffort
 import Agent.CLI.Style
     ( roleError
     , roleMuted
+    , rolePrompt
     )
 import Agent.CLI.Terminal (resolveColor)
 import Agent.CLI.TUI.App
@@ -83,7 +91,7 @@ import Agent.Provider
     )
 import Control.Concurrent.Async (concurrently_)
 import Control.Concurrent.MVar (modifyMVar_, newMVar, readMVar)
-import Control.Monad (unless, void)
+import Control.Monad (join, unless, void)
 import Data.IORef (atomicModifyIORef', modifyIORef', newIORef, readIORef)
 import Data.List (elemIndex)
 import qualified Data.Map.Strict as Map
@@ -92,8 +100,74 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Clock (getCurrentTime)
-import System.IO (stdout)
+import System.IO (hIsTerminalDevice, stdin, stderr, stdout)
 import System.Timeout (timeout)
+
+-- | The local Apple helper is a title backend, not a provider wire model.
+-- Keep it outside the ordinary model catalog and gateway validation path.
+titleModelChoiceRows :: Maybe TitleModelSetting -> [(Text, Text)]
+titleModelChoiceRows setting =
+    [ ("Auto (default)", "Prefer Apple Foundation; fall back to a low-cost provider model")
+    , ("Apple Foundation", "On-device Apple Intelligence · requires availability on this Mac")
+    , ("Provider model…", case setting of
+            Just (TitleModelPinned target) -> "Current: " <> target.targetModelId
+            _ -> "Choose a model from your configured providers")
+    ]
+
+titleModelChoiceIndex :: Maybe TitleModelSetting -> Int
+titleModelChoiceIndex = \case
+    Nothing -> 0
+    Just TitleModelAppleFoundation -> 1
+    Just TitleModelPinned{} -> 2
+
+-- | Outer Nothing means cancellation; inner Nothing restores automatic choice.
+resolveTitleModelChoice
+    :: IO (Either Text (Maybe ModelOption))
+    -> Maybe Int
+    -> IO (Either Text (Maybe (Maybe TitleModelSetting)))
+resolveTitleModelChoice providerChoice = \case
+    Just 0 -> pure (Right (Just Nothing))
+    Just 1 -> pure (Right (Just (Just TitleModelAppleFoundation)))
+    Just 2 ->
+        fmap (fmap (fmap (Just . TitleModelPinned . (.modelTarget))))
+            providerChoice
+    _ -> pure (Right Nothing)
+
+titleModelChoice
+    :: Maybe FullscreenRuntime
+    -> Bool
+    -> Maybe TitleModelSetting
+    -> IO (Either Text (Maybe ModelOption))
+    -> IO (Either Text (Maybe (Maybe TitleModelSetting)))
+titleModelChoice fullscreen color setting providerChoice = do
+    let rows = titleModelChoiceRows setting
+        initial = titleModelChoiceIndex setting
+        render selected = Text.unlines $
+            [rolePrompt color "Session title model", ""]
+                <> concat
+                    [ [ (if index == selected then rolePrompt color "› " else "  ")
+                            <> label
+                            <> if index == initial then " ✓" else ""
+                      , "    " <> roleMuted color (displayTerminalText detail)
+                      ]
+                    | (index, (label, detail)) <- zip [0..] rows
+                    ]
+                <> ["", roleMuted color "↑/↓ move · Enter select · Esc cancel"]
+        step key selected = case key of
+            PickerKeyUp -> Right (max 0 (selected - 1))
+            PickerKeyDown -> Right (min (length rows - 1) (selected + 1))
+            PickerKeyConfirm -> Left (Just selected)
+            PickerKeyCancel -> Left Nothing
+            _ -> Right selected
+    selected <- case fullscreen of
+        Nothing -> do
+            interactive <- (&&) <$> hIsTerminalDevice stdin <*> hIsTerminalDevice stderr
+            if interactive
+                then join <$> runOverlay render step initial
+                else Text.hPutStrLn stderr (render initial) >> pure Nothing
+        Just runtime ->
+            requestFullscreenChoice runtime "Session title model" initial rows
+    resolveTitleModelChoice providerChoice selected
 
 modelChoice
     :: ModelCatalog
