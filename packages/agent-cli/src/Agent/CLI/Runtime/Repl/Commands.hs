@@ -584,32 +584,29 @@ chooseAgent env next =
 
 manageMcpServers :: ReplHandlerContext -> IO RunResult -> IO RunResult
 manageMcpServers handlerContext next = do
-        (registrations, warnings, statuses) <- case env.sessionMcpFleet of
-            Nothing -> pure (env.sessionMcpRegistrations, env.sessionMcpWarnings, [])
-            Just fleet -> do
-                currentStatuses <- MCP.mcpFleetStatuses fleet
-                currentRegistrations <- MCP.mcpFleetCurrentRegistrations fleet
-                pure (currentRegistrations, fleet.mcpFleetWarnings, currentStatuses)
         restart <- case fullscreen of
             Just runtime ->
                 runFullscreenMcpManager
                     runtime
                     env.sessionWorkspace.home
-                    registrations
-                    warnings
-                    statuses
+                    readRuntime
             Nothing -> do
                 color <- resolveColor stderr
                 runMcpManager
                     color
                     env.sessionWorkspace.home
-                    registrations
-                    warnings
-                    statuses
+                    readRuntime
         if restart
             then requestMcpRestart fullscreen persist
             else next
   where
+    readRuntime = case env.sessionMcpFleet of
+        Nothing -> pure (env.sessionMcpRegistrations, env.sessionMcpWarnings, [])
+        Just fleet -> do
+            currentStatuses <- MCP.mcpFleetStatuses fleet
+            currentRegistrations <- MCP.mcpFleetCurrentRegistrations fleet
+            currentWarnings <- MCP.mcpFleetCurrentWarnings fleet
+            pure (currentRegistrations, currentWarnings, currentStatuses)
     env = handlerContext.handlerSessionEnv
     fullscreen = env.sessionFullscreen
     persist = env.sessionPersist

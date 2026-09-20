@@ -47,12 +47,14 @@ import Agent.CLI.TUI.App
     , emitUiEvent
     , requestFullscreenChoiceUntil
     , requestFullscreenChoiceWithBody
+    , requestFullscreenChoiceWithUpdates
     , requestFullscreenText
     )
 import Agent.MCP (McpToolRegistration)
 import Agent.TUI.Model (UiEvent(UiSetNotice), progressNotice)
 import System.Timeout (timeout)
 import Data.Char (isControl)
+import Data.List (find)
 import Data.Maybe (catMaybes)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -87,11 +89,9 @@ data ManagerSnapshot = ManagerSnapshot
 runFullscreenMcpManager
     :: FullscreenRuntime
     -> OsPath
-    -> [McpToolRegistration]
-    -> [Text]
-    -> [MCP.McpServerStatus]
+    -> IO ([McpToolRegistration], [Text], [MCP.McpServerStatus])
     -> IO Bool
-runFullscreenMcpManager runtime home registrations warnings statuses =
+runFullscreenMcpManager runtime home readRuntime =
     loadHarnessConfigSnapshot home >>= \case
         Left err -> do
             _ <-
@@ -115,15 +115,17 @@ runFullscreenMcpManager runtime home registrations warnings statuses =
                     }
   where
     dashboard notice revision snapshot = do
-        let state = managerState snapshot notice
-            entries = mcpDashboardEntries state
+        state <- managerState snapshot notice
+        let entries = mcpDashboardEntries state
         choice <-
-            requestFullscreenChoiceWithBody
+            requestFullscreenChoiceWithUpdates
                 runtime
                 "MCP servers"
-                (mcpDashboardBody notice state)
                 0
-                (map snd entries)
+                (do
+                    current <- managerState snapshot notice
+                    pure (mcpDashboardBody notice current,
+                        map snd (mcpDashboardEntries current)))
         case choice >>= (`atIndex` entries) of
             Nothing -> pure snapshot.snapshotChanged
             Just (McpDashboardAdd, _) ->
@@ -216,12 +218,16 @@ runFullscreenMcpManager runtime home registrations warnings statuses =
     serverMenu notice revision snapshot entry = do
         let actions = mcpServerMenuEntries entry
         choice <-
-            requestFullscreenChoiceWithBody
+            requestFullscreenChoiceWithUpdates
                 runtime
                 entry.mcpEntryName
-                (mcpServerMenuBody notice entry)
                 0
-                (map snd actions)
+                (do
+                    current <- managerState snapshot notice
+                    let updated = maybe entry id $
+                            find ((== entry.mcpEntryName) . (.mcpEntryName))
+                                current.mcpManagerEntries
+                    pure (mcpServerMenuBody notice updated, map snd actions))
         case choice >>= (`atIndex` actions) of
             Nothing -> dashboard notice revision snapshot
             Just (McpServerBack, _) -> dashboard notice revision snapshot
@@ -349,8 +355,9 @@ runFullscreenMcpManager runtime home registrations warnings statuses =
                 ]
         pure (choice == Just 0)
 
-    managerState snapshot notice =
-        initialMcpManagerState
+    managerState snapshot notice = do
+        (registrations, warnings, statuses) <- readRuntime
+        pure $ initialMcpManagerState
             snapshot.snapshotConfig
             registrations
             warnings
@@ -513,6 +520,7 @@ mcpServerMenuBody notice entry =
         [ "Warning: " <> markdownText 120 (warningSummary warning)
         | warning <- entry.mcpEntryWarnings
         , not (" failed to start:" `Text.isInfixOf` warning)
+        , not (" failed:" `Text.isInfixOf` warning)
         ]
 
 statusLabel :: McpEntryStatus -> Text

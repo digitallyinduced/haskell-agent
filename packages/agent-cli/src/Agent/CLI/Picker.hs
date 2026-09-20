@@ -258,7 +258,13 @@ runOverlayInternal decodeKey render step updates state0 =
     loop terminal h state drawnLines frame top = do
         event <- case updates of
             Nothing -> Left <$> readPickerInput
-            Just (awaitUpdate, _) -> race readPickerInput awaitUpdate
+            Just (awaitUpdate, _) -> do
+                -- Race readiness, not the consuming decoder: cancelling after
+                -- ESC would otherwise lose a partially read key sequence.
+                ready <- race (tryIO (hWaitForInput stdin (-1))) awaitUpdate
+                case ready of
+                    Left _ -> Left <$> readPickerInput
+                    Right update -> pure (Right update)
         case event of
             Left Nothing -> do
                 withSynchronizedOutput terminal h (clearDrawn h drawnLines)
@@ -274,10 +280,13 @@ runOverlayInternal decodeKey render step updates state0 =
                     let state' = applyUpdate update state
                         frame' = render state'
                         n = frameLineCount frame'
-                    withSynchronizedOutput terminal h
-                        (redraw h drawnLines frame')
-                    top' <- frameTop h n
-                    loop terminal h state' n frame' top'
+                    if frame' == frame
+                        then loop terminal h state' drawnLines frame top
+                        else do
+                            withSynchronizedOutput terminal h
+                                (redraw h drawnLines frame')
+                            top' <- frameTop h n
+                            loop terminal h state' n frame' top'
 
     applyKeys terminal h state drawnLines frame top = \case
         [] -> loop terminal h state drawnLines frame top

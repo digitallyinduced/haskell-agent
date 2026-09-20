@@ -185,6 +185,10 @@ data AppEvent
         !(TMVar (Maybe (Text, Int)))
     | AppCloseChoice
         !(TMVar (Maybe Int))
+    | AppUpdateChoice
+        !(TMVar (Maybe Int))
+        !Text
+        ![(Text, Text)]
     | AppAskText
         !TextInputMode
         !Text
