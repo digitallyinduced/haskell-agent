@@ -73,7 +73,7 @@ import Agent.CLI.TUI.Types
                          ChoiceTheme, ChoicePlanning),
       AppState(appRuntime,
                appDictation, appTextPrompt, appMetaConsole,
-               appMotionElapsedMillis, appUi, appTerminalFocus),
+               appMotionElapsedMillis, appUi, appTerminalFocus, appMouseCapture),
       activeTheme,
       FullscreenRuntime(runtimeMotionMode, runtimeColor, runtimeWaveTrough),
       Name(ChoiceRow, PermissionRow, ResumeViewport,
@@ -243,8 +243,11 @@ drawFooter :: AppState -> Widget Name
 drawFooter state =
     withAttr Theme.footerAttr $
         padLeftRight 2 $
-            txt footer
+            txt (mouseHint <> footer)
   where
+    mouseHint
+        | state.appMouseCapture = ""
+        | otherwise = "mouse off · /mouse on  │  "
     footer = case
         ( state.appDictation
         , state.appTextPrompt

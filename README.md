@@ -17,6 +17,14 @@ Use `/steer <prompt>` to do this explicitly, or `/queue <prompt>` to wait
 until the current turn finishes. Bare `/queue` lists waiting prompts.
 When idle, either prompt command starts a new turn.
 
+## Terminal mouse capture
+
+In the fullscreen terminal UI, `/mouse off` releases mouse capture for native
+text selection. Wheel scrolling and application clicks are disabled until
+`/mouse on` restores capture; keyboard navigation remains available. Bare
+`/mouse` toggles capture. The preference is saved for future sessions and
+preserved when returning from an external editor.
+
 ## Supported LLM Providers
 
 - OpenAI (Subscription)

@@ -21,6 +21,7 @@ module Agent.Runtime.Project
     , resolvePrimaryProjectRoot
     , resolveProjectRoot
     , saveProjectAutoApprove
+    , saveMouseCapture
     , saveProjectMaxConcurrentAgents
     , saveProjectAccount
     , saveProjectModel
@@ -109,6 +110,7 @@ data ProjectAccount = ProjectAccount
 data ProjectSettings = ProjectSettings
     { settingsVersion :: !Int
     , settingsAutoApprove :: !Bool
+    , settingsMouseCapture :: !Bool
     , settingsLastModel :: !(Maybe ProjectModel)
     , settingsTitleModel :: !(Maybe TitleModelSetting)
     , settingsLastAccounts :: ![ProjectAccount]
@@ -119,6 +121,7 @@ defaultProjectSettings :: ProjectSettings
 defaultProjectSettings = ProjectSettings
     { settingsVersion = settingsSchemaVersion
     , settingsAutoApprove = False
+    , settingsMouseCapture = True
     , settingsLastModel = Nothing
     , settingsTitleModel = Nothing
     , settingsLastAccounts = []
@@ -201,6 +204,7 @@ instance ToJSON ProjectSettings where
     toJSON settings = object
         [ "version" .= settings.settingsVersion
         , "autoApprove" .= settings.settingsAutoApprove
+        , "mouseCapture" .= settings.settingsMouseCapture
         , "lastModel" .= settings.settingsLastModel
         , "titleModel" .= titleModelSettingJson settings.settingsTitleModel
         , "lastAccounts" .= settings.settingsLastAccounts
@@ -219,6 +223,7 @@ projectSettingsDecoder :: Hermes.Decoder ProjectSettings
 projectSettingsDecoder = Hermes.object do
         version <- defaultKey settingsSchemaVersion "version" Hermes.int
         autoApprove <- defaultKey False "autoApprove" Hermes.bool
+        mouseCapture <- defaultKey True "mouseCapture" Hermes.bool
         lastModelValue <- optionalKey "lastModel" (lenient projectModelDecoder)
         titleModelValue <- optionalKey "titleModel" (lenient titleModelSettingDecoder)
         lastAccountsValue <- defaultKey [] "lastAccounts"
@@ -227,6 +232,7 @@ projectSettingsDecoder = Hermes.object do
         pure ProjectSettings
             { settingsVersion = version
             , settingsAutoApprove = autoApprove
+            , settingsMouseCapture = mouseCapture
             -- A malformed or obsolete model selection should not discard
             -- unrelated project settings such as auto-approve.
             , settingsLastModel = lastModelValue >>= id
@@ -355,6 +361,13 @@ saveProjectAutoApprove :: OsPath -> Bool -> IO ()
 saveProjectAutoApprove projectRoot autoApprove =
     updateProjectSettings projectRoot \settings ->
         settings { settingsAutoApprove = autoApprove }
+
+-- | Persist the fullscreen mouse-capture preference. Pass the user home
+-- directory to store it as a user-level terminal preference.
+saveMouseCapture :: OsPath -> Bool -> IO ()
+saveMouseCapture directory captured =
+    updateProjectSettings directory \settings ->
+        settings { settingsMouseCapture = captured }
 
 -- | Persist the project's concurrent subagent cap.
 saveProjectMaxConcurrentAgents :: OsPath -> Int -> IO ()

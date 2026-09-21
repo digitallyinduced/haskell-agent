@@ -18,6 +18,7 @@ import Agent.CLI.Clipboard ( loadImagesFromPastedText )
 import Agent.CLI.Command
     ( AttachmentAction(ReplRemoveAttachment),
       formatSlashHelpWithCatalog,
+      nextMouseCapture,
       parseReplLineWithCatalog,
       ReplAction(..),
       ShellMode(ShellNone, ShellGhci, ShellBash, ShellBoth),
@@ -59,6 +60,7 @@ import Agent.CLI.McpManager.Fullscreen ( runFullscreenMcpManager )
 import Agent.CLI.Options
     ( ApprovalPolicy(..), gatewayRoutingChanged )
 import Agent.CLI.Permission ( approvalPolicyOptions )
+import Agent.CLI.Project ( saveMouseCapture )
 import Agent.CLI.Provider.Switch
     ( reloadAuth,
       reportProviderUnavailable,
@@ -149,7 +151,7 @@ import Agent.CLI.TUI.App
       setFullscreenImagePreviews )
 import Agent.CLI.TUI.SessionHistory ( sessionHistoryTurn )
 import Agent.CLI.TUI.Types
-    ( FullscreenRuntime(runtimeInput)
+    ( FullscreenRuntime(runtimeInput, runtimeMouseCapture, runtimeSetMouseCapture)
     , HistoryCommit(..)
     )
 import Agent.CLI.Terminal
@@ -454,6 +456,8 @@ submitReplLine handlerContext finishTurn retryPendingTurn slashCatalog skillInvo
                         requestCodeModeRestart fullscreen persist
                     ReplToggleAlwaysApprove ->
                         toggleApprovalMode handlerContext continue
+                    ReplMouseCapture target ->
+                        setMouseCapture handlerContext continue color target
                     ReplCompact focus ->
                         compactContext handlerContext continue focus
                     ReplViewPlan ->
@@ -513,6 +517,34 @@ submitReplLine handlerContext finishTurn retryPendingTurn slashCatalog skillInvo
                 stdoutColor
                 False)
     displayInfo = displayReplInfo handlerContext
+
+setMouseCapture :: ReplHandlerContext -> IO RunResult -> Bool -> Maybe Bool -> IO RunResult
+setMouseCapture handlerContext next color target = do
+    case env.sessionFullscreen of
+        Nothing -> do
+            let message = "/mouse requires the fullscreen TUI"
+            displayReplError handlerContext message $
+                Text.hPutStrLn stderr (roleError color message)
+        Just runtime -> do
+            current <- readIORef runtime.runtimeMouseCapture
+            let captured = nextMouseCapture current target
+                message
+                    | captured = "mouse capture enabled · wheel scrolling and clicks active"
+                    | otherwise = "mouse capture disabled · native text selection enabled; "
+                        <> "wheel scrolling and clicks inactive (/mouse on to restore)"
+            runtime.runtimeSetMouseCapture captured
+            displayReplInfo handlerContext message $
+                Text.putStrLn (roleMuted color (glyphOk <> message))
+            tryIO (saveMouseCapture env.sessionWorkspace.home captured) >>= \case
+                Right () -> pure ()
+                Left err -> do
+                    let warning = "Could not save mouse capture preference: "
+                            <> Text.pack (displayException err)
+                    displayReplError handlerContext warning $
+                        Text.hPutStrLn stderr (roleError color warning)
+    next
+  where
+    env = handlerContext.handlerSessionEnv
 
 showShellMode :: ReplHandlerContext -> IO RunResult -> Bool -> IO RunResult
 showShellMode handlerContext next color = do

@@ -222,6 +222,7 @@ data AppEvent
     | AppDictationFinished !(Either Text Text)
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
     | AppSetWindowTitle !Text
+    | AppSetMouseCapture !Bool
     | AppSetPullRequestURL !HistoryGeneration !(Maybe Text)
     | AppSyntaxHighlighterChanged
     | AppHistoryReset !HistoryPage
@@ -432,6 +433,8 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeCopy :: !(Text -> IO Bool)
     , runtimeSetWindowTitle :: !(Text -> IO ())
     , runtimeWindowTitle :: !(IORef (Maybe Text))
+    , runtimeMouseCapture :: !(IORef Bool)
+    , runtimeSetMouseCapture :: !(Bool -> IO ())
     , runtimeNativeProgress :: !(Bool -> IO ())
     , runtimeAgentSnapshot :: !(IO (AgentTarget, [AgentEntry]))
     , runtimeAgentSelect :: !(AgentTarget -> IO ())
@@ -576,6 +579,7 @@ data AppState = AppState
     , appLastTurnCompletedAt :: !(Maybe Word64)
     , appConversationReflowQueued :: !Bool
     , appWindowTitle :: !(Maybe Text)
+    , appMouseCapture :: !Bool
     , appMotionElapsedMillis :: !Int
     , appCompletionFlashes :: !(Map.Map BlockId Int)
     , appMotionScheduleReset :: !Bool

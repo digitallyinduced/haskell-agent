@@ -188,6 +188,8 @@ fullscreenApp = App
     , appHandleEvent = handleEvent
     , appStartEvent = do
         state <- get
+        captured <- liftIO (readIORef state.appRuntime.runtimeMouseCapture)
+        modify' \current -> current { appMouseCapture = captured }
         liftIO state.appRuntime.runtimeFirstFrame
         vScrollToEnd (viewportScroll ConversationViewport)
     , appAttrMap = \state ->
@@ -434,6 +436,10 @@ handleAppEvent = \case
         handleDictationFinishedEvent result
     AppSetWindowTitle title ->
         handleSetWindowTitleEvent title
+    AppSetMouseCapture captured -> do
+        vty <- getVtyHandle
+        liftIO (applyMouseCaptureToOutput (V.outputIface vty) captured)
+        modify' \state -> state { appMouseCapture = captured }
     AppSyntaxHighlighterChanged ->
         handleSyntaxHighlighterChangedEvent
     AppSetPullRequestURL generation url -> do

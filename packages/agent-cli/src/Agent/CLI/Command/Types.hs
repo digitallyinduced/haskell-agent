@@ -52,6 +52,7 @@ data ReplAction
     | ReplPermissions
     | ReplEnableCodeMode
     | ReplToggleAlwaysApprove
+    | ReplMouseCapture !(Maybe Bool)
     | ReplPlan (Maybe Text)
     -- ^ Enter plan mode. @Just@ starts a turn with that description.
     | ReplViewPlan

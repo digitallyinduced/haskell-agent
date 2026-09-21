@@ -116,6 +116,7 @@ import Agent.CLI.Session.Runtime.Types
                      startupSyntaxLoadDuration, startupFinished,
                      startupNativeHooks) )
 import Agent.CLI.SessionAdmin ( managedPostgresConfigForHome )
+import Agent.CLI.Project ( loadUserSettings, ProjectSettings(settingsMouseCapture) )
 import Agent.Runtime.SessionLock
     ( acquireSessionLock, releaseSessionLock, SessionLock )
 import Agent.CLI.SessionState ( SessionState(..), newSessionState )
@@ -139,6 +140,7 @@ import Agent.CLI.Terminal
       reportTerminalCwd,
       resolveColor,
       TerminalCapabilities(terminalNativeProgress) )
+import Agent.CLI.TUI.Types ( FullscreenRuntime(runtimeSetMouseCapture) )
 import Agent.CLI.Worktree
     ( createManagedWorktreeFromConfigWithProgress, worktreeProgressMessage
     , restoreManagedWorktree, worktreeRoot )
@@ -1021,6 +1023,12 @@ prepareAgentIterationInterface request bootstrap = do
                     useColor
                     initialFullscreenState
             | otherwise -> pure Nothing
+    -- Initialize only a new renderer; a reused renderer already holds the
+    -- current preference, including changes that could not be persisted.
+    when (isNothing request.iterationActiveFullscreen) $
+        forM_ fullscreen \runtime -> do
+            settings <- loadUserSettings bootstrap.iterationHome
+            runtime.runtimeSetMouseCapture settings.settingsMouseCapture
     -- A reused fullscreen must not retain its prior transcript while resumed
     -- history is revalidated and installed for this preparation snapshot.
     forM_ fullscreen clearFullscreenHistorySource
