@@ -2717,6 +2717,94 @@ spec = do
                 `shouldSatisfy`
                     any (ByteString.isInfixOf (ByteString.pack [0xE2, 0xA0, 0x8B]))
 
+    describe "fullscreen mouse capture" do
+        it "defaults to capture and retains explicit changes" do
+            runtime <- newScriptRuntime initialUiState
+            readIORef runtime.runtimeMouseCapture `shouldReturn` True
+            runtime.runtimeSetMouseCapture False
+            readIORef runtime.runtimeMouseCapture `shouldReturn` False
+            runtime.runtimeSetMouseCapture True
+            readIORef runtime.runtimeMouseCapture `shouldReturn` True
+
+        it "reapplies the preference to replacement terminal outputs" do
+            runtime <- newScriptRuntime initialUiState
+            (_, output) <- VMock.mockTerminal (80, 24)
+            changes <- newIORef []
+            let trackedOutput = output
+                    { V.supportsMode = (== V.Mouse)
+                    , V.setMode = \mode enabled ->
+                        modifyIORef' changes (<> [(mode, enabled)])
+                    }
+            runtime.runtimeSetMouseCapture False
+            Runtime.applyStoredMouseCapture runtime trackedOutput
+            Runtime.applyStoredMouseCapture runtime trackedOutput
+            runtime.runtimeSetMouseCapture True
+            Runtime.applyStoredMouseCapture runtime trackedOutput
+            readIORef changes `shouldReturn`
+                [(V.Mouse, False), (V.Mouse, False), (V.Mouse, True)]
+
+        it "does not set unsupported terminal mouse modes" do
+            (_, output) <- VMock.mockTerminal (80, 24)
+            let unsupportedOutput = output
+                    { V.supportsMode = const False
+                    , V.setMode = \_ _ ->
+                        expectationFailure "setMode called for unsupported mouse mode"
+                    }
+            Runtime.applyMouseCaptureToOutput unsupportedOutput False
+            Runtime.applyMouseCaptureToOutput unsupportedOutput True
+
+        it "applies mouse events to the active Vty even while unfocused" do
+            runtime <- newScriptRuntime initialUiState
+            changes <- newIORef []
+            let initial = initialFullscreenAppState runtime [] AgentRoot [] 0
+                observeModes output = output
+                    { V.supportsMode = (== V.Mouse)
+                    , V.setMode = \mode enabled ->
+                        modifyIORef' changes (<> [(mode, enabled)])
+                    }
+            _ <- runFullscreenScriptDetailedWithOutputAt (80, 24) observeModes initial
+                [ FullscreenScriptVty V.EvLostFocus
+                , FullscreenScriptApp (AppSetMouseCapture False)
+                , FullscreenScriptApp (AppSetMouseCapture True)
+                , FullscreenScriptHalt
+                ]
+            readIORef changes `shouldReturn` [(V.Mouse, False), (V.Mouse, True)]
+
+        it "initializes and updates the retained display preference" do
+            runtime <- newScriptRuntime initialUiState
+            runtime.runtimeSetMouseCapture False
+            let initial = initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, disabled) <- runFullscreenScriptWithState initial
+                [FullscreenScriptHalt]
+            disabled.appMouseCapture `shouldBe` False
+            renderedAppText (120, 40) disabled `shouldSatisfy`
+                Text.isInfixOf "mouse off · /mouse on"
+            (_, enabled) <- runFullscreenScriptWithState initial
+                [ FullscreenScriptApp (AppSetMouseCapture True)
+                , FullscreenScriptHalt
+                ]
+            enabled.appMouseCapture `shouldBe` True
+            renderedAppText (120, 40) enabled `shouldSatisfy`
+                (not . Text.isInfixOf "mouse off · /mouse on")
+
+        it "does not overwrite the latest retained preference with an older queued event" do
+            runtime <- newScriptRuntime initialUiState
+            runtime.runtimeSetMouseCapture False
+            runtime.runtimeSetMouseCapture True
+            let initial = initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, previous) <- runFullscreenScriptWithState initial
+                [ FullscreenScriptApp (AppSetMouseCapture False)
+                , FullscreenScriptHalt
+                ]
+            previous.appMouseCapture `shouldBe` False
+            readIORef runtime.runtimeMouseCapture `shouldReturn` True
+            (_, resumed) <- runFullscreenScriptWithState previous
+                [ FullscreenScriptApp (AppSetMouseCapture True)
+                , FullscreenScriptHalt
+                ]
+            resumed.appMouseCapture `shouldBe` True
+            readIORef runtime.runtimeMouseCapture `shouldReturn` True
+
     describe "fullscreen Vty ownership" do
         it "shuts down the rebuilt Vty when exit follows suspension" do
             shutdowns <- newIORef ([] :: [String])
@@ -4183,7 +4271,16 @@ runFullscreenScriptDetailedAt
     -> AppState
     -> [FullscreenScriptEvent]
     -> IO (ByteString.ByteString, [V.Picture], AppState)
-runFullscreenScriptDetailedAt bounds initialState script = do
+runFullscreenScriptDetailedAt bounds =
+    runFullscreenScriptDetailedWithOutputAt bounds id
+
+runFullscreenScriptDetailedWithOutputAt
+    :: (Int, Int)
+    -> (V.Output -> V.Output)
+    -> AppState
+    -> [FullscreenScriptEvent]
+    -> IO (ByteString.ByteString, [V.Picture], AppState)
+runFullscreenScriptDetailedWithOutputAt bounds configureOutput initialState script = do
     let scriptedApp = App
             { appDraw = fullscreenApp.appDraw
             , appChooseCursor = fullscreenApp.appChooseCursor
@@ -4229,7 +4326,7 @@ runFullscreenScriptDetailedAt bounds initialState script = do
     (_, mockOutput) <- VMock.mockTerminal bounds
     outputBytes <- newIORef ByteString.empty
     renderedFrames <- newIORef []
-    let output = mockOutput
+    let output = (configureOutput mockOutput)
             { V.outputByteBuffer = \bytes ->
                 modifyIORef' outputBytes (<> bytes)
             }

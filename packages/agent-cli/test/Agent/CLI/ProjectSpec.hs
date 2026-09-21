@@ -45,6 +45,37 @@ target provider connection model wireModel dialect = ModelTarget
 
 spec :: Spec
 spec = describe "Agent.CLI.Project" do
+    describe "mouse capture preference" do
+        it "defaults to enabled for missing settings" do
+            withTempDir "agent-mouse-settings-" \root -> do
+                settings <- loadUserSettings root
+                settings.settingsMouseCapture `shouldBe` True
+
+        it "defaults to enabled for existing settings without the preference" do
+            withTempDir "agent-mouse-settings-" \root -> do
+                createDirectoryIfMissing True (root </> unsafeEncodeUtf ".haskell-agent")
+                LBS8.writeFile (toFilePath (userSettingsPath root))
+                    "{\"version\":1,\"autoApprove\":true}"
+                settings <- loadUserSettings root
+                settings.settingsMouseCapture `shouldBe` True
+                settings.settingsAutoApprove `shouldBe` True
+
+        it "persists both states without replacing unrelated settings" do
+            withTempDir "agent-mouse-settings-" \root -> do
+                saveProjectAutoApprove root True
+                saveMouseCapture root False
+                disabled <- loadUserSettings root
+                disabled.settingsMouseCapture `shouldBe` False
+                disabled.settingsAutoApprove `shouldBe` True
+                saveProjectMaxConcurrentAgents root 4
+                preserved <- loadUserSettings root
+                preserved.settingsMouseCapture `shouldBe` False
+                saveMouseCapture root True
+                enabled <- loadUserSettings root
+                enabled.settingsMouseCapture `shouldBe` True
+                enabled.settingsAutoApprove `shouldBe` True
+                enabled.settingsMaxConcurrentAgents `shouldBe` Just 4
+
     describe "projectSettingsPath" do
         it "is <project>/.haskell-agent/settings.json" do
             projectSettingsPath (fromFilePath "/tmp/repo")

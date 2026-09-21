@@ -230,8 +230,7 @@ runFullscreen runtime workerAction = do
                     -- that we can classify.
                     when (V.supportsMode output V.BracketedPaste) $
                         V.setMode output V.BracketedPaste True
-                    when (V.supportsMode output V.Mouse) $
-                        V.setMode output V.Mouse True
+                    applyStoredMouseCapture runtime output
                     when (V.supportsMode output V.Focus) $
                         V.setMode output V.Focus True
                     -- Vty deliberately leaves OSC 8 output disabled by
@@ -499,6 +498,7 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appLastTurnCompletedAt = Nothing
         , appConversationReflowQueued = False
         , appWindowTitle = Nothing
+        , appMouseCapture = True
         , appMotionElapsedMillis = 0
         , appCompletionFlashes = Map.empty
         , appMotionScheduleReset = False

@@ -320,6 +320,7 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
         colorFgBg <- lookupEnv "COLORFGBG"
         themeRef <- newIORef theme
         windowTitle <- newIORef Nothing
+        mouseCapture <- newIORef True
         sessionActions <- newIORef FullscreenSessionActions
             { sessionDictationTarget = Nothing
             , sessionCancel = cancelAction
@@ -332,8 +333,7 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
             , sessionAgentSnapshot = agentSnapshot
             , sessionAgentSelect = agentSelect
             }
-        pure FullscreenRuntime
-            { runtimeEvents = events
+        let runtime = FullscreenRuntime { runtimeEvents = events
             , runtimeMailbox = mailbox
             , runtimeInput = inputBuffer
             , runtimeCancel =
@@ -357,6 +357,10 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
             , runtimeCopy = copyAction
             , runtimeSetWindowTitle = setWindowTitle
             , runtimeWindowTitle = windowTitle
+            , runtimeMouseCapture = mouseCapture
+            , runtimeSetMouseCapture = \captured -> do
+                writeIORef mouseCapture captured
+                enqueueAppEvent runtime (AppSetMouseCapture captured)
             , runtimeNativeProgress = nativeProgress
             , runtimeAgentSnapshot =
                 readIORef sessionActions >>= (.sessionAgentSnapshot)
@@ -391,6 +395,18 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
             , runtimeHistoryGeneration = historyGeneration
             , runtimeDictationJobs = dictationJobs
             }
+        pure runtime
+
+-- | Reapply the retained preference whenever Brick recreates Vty, including
+-- after suspending the fullscreen application.
+applyStoredMouseCapture :: FullscreenRuntime -> V.Output -> IO ()
+applyStoredMouseCapture runtime output =
+    readIORef runtime.runtimeMouseCapture >>= applyMouseCaptureToOutput output
+
+applyMouseCaptureToOutput :: V.Output -> Bool -> IO ()
+applyMouseCaptureToOutput output captured =
+    when (V.supportsMode output V.Mouse) $
+        V.setMode output V.Mouse captured
 
 setFullscreenSessionActions
     :: FullscreenRuntime

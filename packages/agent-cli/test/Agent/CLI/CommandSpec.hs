@@ -36,6 +36,24 @@ baselineNameCompletion catalog word =
 
 spec :: Spec
 spec = do
+    describe "/mouse" do
+        it "toggles capture or selects an explicit state" do
+            parseReplLine "/mouse" `shouldBe` ReplMouseCapture Nothing
+            parseReplLine "/mouse on" `shouldBe` ReplMouseCapture (Just True)
+            parseReplLine "/mouse off" `shouldBe` ReplMouseCapture (Just False)
+
+        it "rejects unsupported arguments" do
+            forM_ ["/mouse enable", "/mouse on off"] \input ->
+                parseReplLine input
+                    `shouldBe` ReplCommandError "usage: /mouse [on|off]"
+
+        it "only toggles when no explicit state was supplied" do
+            nextMouseCapture True Nothing `shouldBe` False
+            nextMouseCapture False Nothing `shouldBe` True
+            forM_ [False, True] \current -> do
+                nextMouseCapture current (Just True) `shouldBe` True
+                nextMouseCapture current (Just False) `shouldBe` False
+
     describe "command completion index" do
         it "does not force derived indexes when comparing catalogs" do
             let catalog = defaultSlashCatalog
@@ -646,6 +664,7 @@ spec = do
                     , "model"
                     , "title-model"
                     , "theme"
+                    , "mouse"
                     , "effort"
                     , "fast"
                     , "plan"
@@ -744,7 +763,7 @@ spec = do
                         && "/btw" `elem` xs
                         && "/rewind" `elem` xs
                         && "/undo" `elem` xs)
-            slashCompletionCandidates "" "/mo" `shouldBe` ["/model"]
+            slashCompletionCandidates "" "/mo" `shouldBe` ["/model", "/mouse"]
             slashCompletionCandidates "ledom/" "high" `shouldBe` []
 
         it "completes effort and model arguments" do
@@ -796,7 +815,7 @@ spec = do
                         (("/" <>) . (.slashName))
                         defaultSlashCatalog.slashCatalogCommands
             displays "/mo" 3
-                `shouldBe` ["/model", "/codemod", "/title-model", "/permissions"]
+                `shouldBe` ["/model", "/mouse", "/codemod", "/title-model", "/permissions"]
             displays "/ra" 3 `shouldSatisfy` ("/reload-auth" `elem`)
             displays "look at /mo" 11 `shouldBe` []
 

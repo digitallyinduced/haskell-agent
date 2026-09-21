@@ -30,6 +30,7 @@ module Agent.CLI.Command
     , parseReplLine
     , parseReplLineWithCatalog
     , parseReplLineWithSkills
+    , nextMouseCapture
     , setModel
     , setReasoningEffort
     , slashCommands
@@ -266,6 +267,10 @@ parseSlash catalog raw line = case Text.words line of
                         args
                         (slashCommandTail command line)
 
+-- | Toggle capture when no explicit state was supplied.
+nextMouseCapture :: Bool -> Maybe Bool -> Bool
+nextMouseCapture current = fromMaybe (not current)
+
 simpleSlashCommands :: Map Text ReplAction
 simpleSlashCommands =
     Map.fromList
@@ -344,6 +349,11 @@ parseSpecializedSlashCommand catalog raw spec args commandTail =
         "model" -> parseModelCommand args
         "title-model" -> parseTitleModelCommand args
         "theme" -> parseThemeCommand args
+        "mouse" -> case args of
+            [] -> ReplMouseCapture Nothing
+            ["on"] -> ReplMouseCapture (Just True)
+            ["off"] -> ReplMouseCapture (Just False)
+            _ -> slashUsageError spec
         "plan" -> parseOptionalTextCommand ReplPlan commandTail
         "queue" ->
             if Text.null commandTail
