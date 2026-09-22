@@ -10,9 +10,7 @@ struct TitlePayload: Encodable {
     var title: String
 }
 
-#if !APPLE_SESSION_TITLE_TESTING
 @main
-#endif
 struct AppleSessionTitle {
     static func main() async {
         do {
@@ -72,29 +70,7 @@ struct AppleSessionTitle {
         let response = try await session.respond(
             to: prompt,
             options: options)
-        guard let title = validatedTitle(response.content) else {
-            throw NSError(
-                domain: "apple-session-title",
-                code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Apple Intelligence returned no usable title"])
-        }
-        try writeJSON(TitlePayload(title: title))
-    }
-
-    static func validatedTitle(_ response: String) -> String? {
-        let title = response.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalized = title.lowercased().replacingOccurrences(of: "’", with: "'")
-        // The permissive mode can return a refusal as ordinary text. These
-        // prefixes cover common English refusals, not every possible language.
-        let refusalPrefixes = [
-            "i'm sorry", "i am sorry", "sorry,", "sorry.",
-            "i cannot", "i can't", "i am unable", "i'm unable",
-            "as an llm", "as an ai", "as a language model",
-        ]
-        guard !title.isEmpty,
-            !refusalPrefixes.contains(where: { normalized.hasPrefix($0) })
-        else { return nil }
-        return title
+        try writeJSON(TitlePayload(title: response.content))
     }
 
     static func writeJSON<T: Encodable>(_ value: T) throws {
