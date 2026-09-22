@@ -17,6 +17,7 @@ module Agent.CLI.Resume
     , insertResumeSearch
     , loadResumeEntry
     , loadLatestResumeSession
+    , loadLatestResumeSessionWithCanonicalize
     , ResumeSelection(..)
     , resumeEntryFromPage
     , moveResumeBrowser
@@ -104,9 +105,13 @@ data ResumeSelection = InteractiveSessions | AllSessions
 -- parent directories nor another worktree of the same repository qualify.
 -- Pages are already ordered by conversation activity and session key.
 loadLatestResumeSession :: StorePool -> OsPath -> Maybe Text -> ResumeSelection -> IO (Either Text Text)
-loadLatestResumeSession pool cwd gatewayIdentity selection = do
+loadLatestResumeSession = loadLatestResumeSessionWithCanonicalize canonicalizePath
+
+-- | Supply directory resolution explicitly so filesystem failures can be tested.
+loadLatestResumeSessionWithCanonicalize :: (OsPath -> IO OsPath) -> StorePool -> OsPath -> Maybe Text -> ResumeSelection -> IO (Either Text Text)
+loadLatestResumeSessionWithCanonicalize resolveDirectory pool cwd gatewayIdentity selection = do
     result <- try @IO @IOException do
-        canonicalCwd <- canonicalizePath cwd
+        canonicalCwd <- resolveDirectory cwd
         search canonicalCwd Nothing
     pure $ case result of
         Left err -> Left ("could not resolve resume directory: " <> Text.pack (displayException err))
@@ -125,13 +130,13 @@ loadLatestResumeSession pool cwd gatewayIdentity selection = do
             if selection == InteractiveSessions && stored.sessionMetadataHeadless
                 then inspect canonicalCwd page rest
                 else do
-                    storedCwd <- canonicalizePath (fromText stored.sessionMetadataCwd)
-                    if storedCwd /= canonicalCwd
-                        then inspect canonicalCwd page rest
-                        else pure do
+                    storedCwd <- try @IO @IOException (resolveDirectory (fromText stored.sessionMetadataCwd))
+                    case storedCwd of
+                        Right resolved | resolved == canonicalCwd -> pure do
                             meta <- decodeListedSessionMeta stored
                             validateResumeMetaForBoundary gatewayIdentity meta
                             Right meta.metaId
+                        _ -> inspect canonicalCwd page rest
 
 data ResumeEntry = ResumeEntry
     { resumeId :: !Text

@@ -31,6 +31,7 @@ import Data.Either (isLeft)
 import Data.Maybe (fromMaybe)
 import System.Environment (lookupEnv)
 import qualified System.Directory as Directory
+import qualified System.Directory.OsPath as OsDirectory
 import qualified System.FilePath as FilePath
 import System.Posix.Temp (mkdtemp)
 import Data.IORef (newIORef, readIORef, writeIORef)
@@ -115,6 +116,13 @@ spec = do
                             forM_ [1 .. 101 :: Int] \index ->
                                 insert (metadata ("sibling-" <> Text.pack (show index)) sibling 70)
                             insert ((metadata "headless" project 100) { Store.sessionMetadataHeadless = True })
+                            let unreadable = base FilePath.</> "unreadable"
+                                resolveDirectory path
+                                    | path == fromFilePath unreadable = ioError (userError "directory unavailable")
+                                    | otherwise = OsDirectory.canonicalizePath path
+                            insert (metadata "unreadable-directory" unreadable 150)
+                            loadLatestResumeSessionWithCanonicalize resolveDirectory pool cwd Nothing InteractiveSessions `shouldReturn` Right "newest-a"
+                            loadLatestResumeSessionWithCanonicalize resolveDirectory pool (fromFilePath unreadable) Nothing InteractiveSessions >>= (`shouldSatisfy` isLeft)
                             loadLatestResumeSession pool cwd Nothing InteractiveSessions `shouldReturn` Right "newest-a"
                             loadLatestResumeSession pool cwd Nothing AllSessions `shouldReturn` Right "headless"
                             loadLatestResumeSession pool (fromFilePath alias) Nothing InteractiveSessions `shouldReturn` Right "newest-a"
