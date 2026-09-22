@@ -4,6 +4,7 @@ module Agent.Runtime.Session
     , SessionMeta(..)
     , SessionPromptSnapshot(..)
     , sessionMetaDecoder
+    , decodeListedSessionMeta
     , LegacySubagentTarget(..)
     , TranscriptEffect(..)
     , SessionTurn(..)
@@ -130,6 +131,7 @@ import Agent.Runtime.Session.Types
     )
 import Agent.Runtime.Session.Storage
     ( deleteSession
+    , decodeListedSessionMeta
     , listArchivedSessionIds
     , listSessions
     , loadActiveSession
@@ -765,6 +767,7 @@ createReservedSessionWithHandoff
                 , metaLastTurnSummary = Nothing
                 , metaLastRecapMainTurns = 0
                 , metaPromptSnapshot = promptSnapshot
+                , metaHeadless = spec.createHeadless
                 }
             meta = fromMaybe generatedMeta recoveredMeta
             handle = SessionHandle

@@ -131,7 +131,7 @@ spec = do
                     , optPromptFile = Just (fromFilePath "/tmp/prompt")
                     , optManagedTurnFile =
                         Just (fromFilePath "/tmp/managed")
-                    , optResume = Just "old-session"
+                    , optResume = Just (ResumeSession "old-session")
                     }
                 fresh = freshSessionOptions previous cwd
             fresh.optProvider `shouldBe` Nothing
@@ -449,7 +449,7 @@ spec = do
         it "parses --resume and --save-session" do
             parseArgs ["--resume", "2026-08-19-abcd1234"]
                 `shouldBe` Right (RunAgent defaultCliOptions
-                    { optResume = Just "2026-08-19-abcd1234" })
+                    { optResume = Just (ResumeSession "2026-08-19-abcd1234") })
             parseArgs ["-p", "hi", "--save-session"]
                 `shouldBe` Right (RunAgent defaultCliOptions
                     { optPrompt = Just "hi"
@@ -458,6 +458,57 @@ spec = do
 
         it "rejects --resume with --worktree" do
             parseArgs ["--resume", "abc", "--worktree"] `shouldSatisfy` isLeft
+            parseArgs ["--resume", "--worktree"] `shouldSatisfy` isLeft
+
+        it "resumes the latest session when --resume has no ID" do
+            parseArgs ["--resume"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optResume = Just ResumeLatest })
+            parseArgs ["--resume", "--cwd", "/project", "-p", "continue"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optResume = Just ResumeLatest
+                    , optCwd = Just (fromFilePath "/project")
+                    , optPrompt = Just "continue"
+                    })
+            parseArgs ["--resume", "--model", "example-model"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optResume = Just ResumeLatest
+                    , optModel = Just "example-model"
+                    })
+
+        it "accepts an attached resume ID" do
+            parseArgs ["--resume=session-1"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optResume = Just (ResumeSession "session-1") })
+
+        it "uses the last resume target when repeated" do
+            parseArgs ["--resume", "session-1", "--resume"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optResume = Just ResumeLatest })
+            parseArgs ["--resume", "--resume", "session-2"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optResume = Just (ResumeSession "session-2") })
+            parseArgs ["--resume", "--model", "example-model", "--resume", "session-2"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optResume = Just (ResumeSession "session-2")
+                    , optModel = Just "example-model"
+                    })
+
+        it "does not interpret resume text inside another option value" do
+            parseArgs ["--resume", "-p", "--resume"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optResume = Just ResumeLatest
+                    , optPrompt = Just "--resume"
+                    })
+            parseArgs ["--resume", "-p", "--resume=session-1"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optResume = Just ResumeLatest
+                    , optPrompt = Just "--resume=session-1"
+                    })
+
+        it "rejects a stray resume ID after another option" do
+            parseArgs ["--resume", "--model", "example-model", "session-1"]
+                `shouldSatisfy` isLeft
 
         it "parses --agents-md and --no-agents-md" do
             parseArgs ["--no-agents-md", "-p", "hi"]

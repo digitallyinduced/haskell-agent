@@ -12,7 +12,7 @@ module Agent.CLI.ProviderTransition
     ) where
 
 import Agent.Runtime.Models (ModelTarget(..))
-import Agent.CLI.Options (CliOptions(..))
+import Agent.CLI.Options (CliOptions(..), ResumeTarget(..))
 import Agent.ReasoningEffort (ReasoningEffort)
 import Agent.Error (ApiError)
 import Agent.Loop (TurnInput)
@@ -76,7 +76,7 @@ applyProviderTransition options transition =
         , optCwd = Nothing
         , optWorktree = False
         , optEffort = transition.transitionEffort
-        , optResume = transition.transitionSessionId <|> options.optResume
+        , optResume = (ResumeSession <$> transition.transitionSessionId) <|> options.optResume
         }
 
 setPendingExitAfter :: Bool -> PendingTurn -> PendingTurn

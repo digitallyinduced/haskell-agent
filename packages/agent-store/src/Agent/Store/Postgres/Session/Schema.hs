@@ -21,6 +21,7 @@ sessionSchemaStatements =
       \ session_schema_version integer NOT NULL CHECK (session_schema_version > 0),\
       \ created_at timestamptz NOT NULL,\
       \ updated_at timestamptz NOT NULL,\
+      \ headless boolean NOT NULL DEFAULT false,\
       \ provider text NOT NULL CHECK (length(btrim(provider)) > 0),\
       \ connection_id text NOT NULL CHECK (length(btrim(connection_id)) > 0),\
       \ gateway_identity text,\

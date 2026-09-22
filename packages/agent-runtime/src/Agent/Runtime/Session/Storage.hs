@@ -20,6 +20,7 @@ module Agent.Runtime.Session.Storage
     , renameSession
     , setSessionArchived
     , listSessions
+    , decodeListedSessionMeta
     , listArchivedSessionIds
     , writeSessionMeta
     ) where

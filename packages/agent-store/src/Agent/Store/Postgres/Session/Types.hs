@@ -18,6 +18,8 @@ module Agent.Store.Postgres.Session.Types
     , SessionListCursor(..)
     , SessionListEntry(..)
     , SessionListPage(..)
+    , SessionResumeCursor(..)
+    , SessionResumePage(..)
     , SessionArchiveFilter(..)
     , SessionHistorySnapshot(..)
     , SessionResumeStats(..)
@@ -38,6 +40,20 @@ data SessionTaskPlanStatus
     = SessionTaskPlanPending
     | SessionTaskPlanInProgress
     | SessionTaskPlanCompleted
+    deriving (Eq, Show)
+
+-- | Resume selection has its own cursor: metadata updates do not advance
+-- conversation activity.
+data SessionResumeCursor = SessionResumeCursor
+    { sessionResumeCursorActivityAt :: !UTCTime
+    , sessionResumeCursorKey :: !Text
+    }
+    deriving (Eq, Show)
+
+data SessionResumePage = SessionResumePage
+    { sessionResumePageSessions :: ![SessionListEntry]
+    , sessionResumePageNextCursor :: !(Maybe SessionResumeCursor)
+    }
     deriving (Eq, Show)
 
 data SessionTaskPlanItem = SessionTaskPlanItem
@@ -197,6 +213,7 @@ data SessionMetadata = SessionMetadata
     , sessionMetadataLastRecap :: !(Maybe Text)
     , sessionMetadataLastTurnSummary :: !(Maybe Text)
     , sessionMetadataLastRecapMainTurns :: !Int64
+    , sessionMetadataHeadless :: !Bool
     }
     deriving (Eq, Show)
 

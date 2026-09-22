@@ -21,6 +21,18 @@ import Agent.Responses.Types
     , ResponseRole(..)
     )
 import Agent.Store.Postgres.Session (ConversationSearchResult(..))
+import qualified Agent.Store.Postgres.Session as Store
+import Agent.Store.Postgres (openStore, closeStore, trustedPool, storeConfig, defaultManagedPostgresConfig)
+import Agent.Store.Postgres.Managed (stopManagedPostgres)
+import Agent.Store.Types (renderStoreError)
+import Control.Exception.Safe (bracket)
+import Control.Monad (forM_, void)
+import Data.Either (isLeft)
+import Data.Maybe (fromMaybe)
+import System.Environment (lookupEnv)
+import qualified System.Directory as Directory
+import qualified System.FilePath as FilePath
+import System.Posix.Temp (mkdtemp)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Time.Clock (addUTCTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
@@ -32,6 +44,86 @@ fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = do
+    describe "loadLatestResumeSession" do
+        it "selects an exact canonical directory across pages, excluding archived and deleted sessions" do
+            temporary <- Directory.getTemporaryDirectory
+            bracket
+                (mkdtemp (temporary FilePath.</> "rs"))
+                Directory.removeDirectoryRecursive
+                \base -> do
+                    postgresBin <- fromMaybe "" <$> lookupEnv "AGENT_POSTGRES_BIN"
+                    let project = base FilePath.</> "project"
+                        sibling = base FilePath.</> "project-other"
+                        alias = base FilePath.</> "alias"
+                        child = project FilePath.</> "child"
+                        cwd = fromFilePath project
+                        config = defaultManagedPostgresConfig (base FilePath.</> "db") postgresBin
+                        timestamp = posixSecondsToUTCTime 1000
+                        metadata key path age = Store.SessionMetadata
+                            { sessionMetadataKey = key
+                            , sessionMetadataVersion = 1
+                            , sessionMetadataCreatedAt = timestamp
+                            , sessionMetadataUpdatedAt = addUTCTime age timestamp
+                            , sessionMetadataProvider = "xai"
+                            , sessionMetadataConnection = "xai"
+                            , sessionMetadataGatewayIdentity = Nothing
+                            , sessionMetadataModel = "grok-4.6"
+                            , sessionMetadataTransportModel = Just "grok-4.6"
+                            , sessionMetadataDialect = "grok-build"
+                            , sessionMetadataLegacyTarget = Nothing
+                            , sessionMetadataCwd = Text.pack path
+                            , sessionMetadataEffort = "medium"
+                            , sessionMetadataTitle = key
+                            , sessionMetadataTitleIsManual = False
+                            , sessionMetadataTitleRefreshIndex = 0
+                            , sessionMetadataTitleUserTurns = 0
+                            , sessionMetadataLastResponseId = Nothing
+                            , sessionMetadataInputTokens = 0
+                            , sessionMetadataOutputTokens = 0
+                            , sessionMetadataCachedTokens = 0
+                            , sessionMetadataLastRecap = Nothing
+                            , sessionMetadataLastTurnSummary = Nothing
+                            , sessionMetadataLastRecapMainTurns = 0
+                            , sessionMetadataHeadless = False
+                            }
+                    mapM_ (Directory.createDirectoryIfMissing True) [project, sibling, child]
+                    Directory.createDirectoryLink project alias
+                    bracket
+                        (openStore config >>= either (fail . Text.unpack . renderStoreError) pure)
+                        (\store -> closeStore store >> void (stopManagedPostgres (storeConfig store)))
+                        \store -> do
+                            let pool = trustedPool store
+                                insert meta = Store.createSession pool meta
+                                    `shouldReturn` Right True
+                            loadLatestResumeSession pool cwd Nothing InteractiveSessions >>= (`shouldSatisfy` isLeft)
+                            insert ((metadata "headless-only" base 100) { Store.sessionMetadataHeadless = True })
+                            loadLatestResumeSession pool (fromFilePath base) Nothing InteractiveSessions >>= (`shouldSatisfy` isLeft)
+                            loadLatestResumeSession pool (fromFilePath base) Nothing AllSessions `shouldReturn` Right "headless-only"
+                            insert (metadata "older" project 0)
+                            insert (metadata "newest-b" project 10)
+                            insert ((metadata "newest-a" project 10)
+                                { Store.sessionMetadataConnection = "organization-gateway"
+                                , Store.sessionMetadataGatewayIdentity = Just "another-identity"
+                                })
+                            insert (metadata "archived" project 40)
+                            Store.setSessionArchived pool "archived" True (addUTCTime 100 timestamp) `shouldReturn` Right True
+                            insert (metadata "deleted" project 50)
+                            Store.deleteSession pool "deleted" (addUTCTime 100 timestamp) `shouldReturn` Right True
+                            insert (metadata "child" child 60)
+                            -- More than one page of newer conversations from a
+                            -- similarly named sibling must not displace the match.
+                            forM_ [1 .. 101 :: Int] \index ->
+                                insert (metadata ("sibling-" <> Text.pack (show index)) sibling 70)
+                            insert ((metadata "headless" project 100) { Store.sessionMetadataHeadless = True })
+                            loadLatestResumeSession pool cwd Nothing InteractiveSessions `shouldReturn` Right "newest-a"
+                            loadLatestResumeSession pool cwd Nothing AllSessions `shouldReturn` Right "headless"
+                            loadLatestResumeSession pool (fromFilePath alias) Nothing InteractiveSessions `shouldReturn` Right "newest-a"
+                            loadLatestResumeSession pool (fromFilePath base) Nothing InteractiveSessions >>= (`shouldSatisfy` isLeft)
+                            loadLatestResumeSession pool cwd (Just "current-identity") InteractiveSessions `shouldReturn` Right "newest-a"
+                            insert ((metadata "unsupported" project 200) { Store.sessionMetadataVersion = 999 })
+                            loadLatestResumeSession pool cwd Nothing InteractiveSessions
+                                `shouldReturn` Left "unsupported session schema version 999 for session unsupported (expected 1)"
+
     describe "publishResumeHistoryAfterBoundary" do
         it "does not publish fullscreen history across a gateway boundary" do
             published <- newIORef False
@@ -513,4 +605,5 @@ sampleMeta sid title =
         , metaLastTurnSummary = Nothing
         , metaLastRecapMainTurns = 0
         , metaPromptSnapshot = Nothing
+        , metaHeadless = False
         }

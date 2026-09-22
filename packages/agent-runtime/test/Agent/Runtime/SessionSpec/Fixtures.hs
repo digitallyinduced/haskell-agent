@@ -91,6 +91,7 @@ testCreate pool root = SessionCreate
     , createEffort = "low"
     , createTitleHint = Nothing
     , createTitleIsManual = False
+    , createHeadless = False
     }
 
 testMeta :: Text.Text -> SessionMeta
@@ -115,6 +116,7 @@ testMeta sessionId = SessionMeta
     , metaEffort = "low"
     , metaTitle = "legacy"
     , metaTitleIsManual = False
+    , metaHeadless = False
     , metaTitleRefreshIndex = 0
     , metaTitleUserTurns = 0
     , metaLastResponseId = Nothing

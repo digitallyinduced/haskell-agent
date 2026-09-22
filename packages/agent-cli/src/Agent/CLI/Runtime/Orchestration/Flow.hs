@@ -35,6 +35,7 @@ import Agent.CLI.Options
     ( defaultEffortFor,
       freshSessionOptions,
       gatewayRoutingChanged,
+      ResumeTarget(..),
       isOneShot,
       CliOptions(optMotionMode, optManagedTurnFile, optScreenMode,
                  optProvider, optModel, optWorktree, optEffort, optPrompt,
@@ -52,7 +53,7 @@ import Agent.CLI.ProviderTransition
                          transitionSessionId, transitionEffort),
       TransitionCause(AutomaticFallback, ManualTransition) )
 import Agent.CLI.Render ( putTextLn )
-import Agent.CLI.Resume ( validateResumeMetaForBoundary )
+import Agent.CLI.Resume ( ResumeSelection(..), loadLatestResumeSession, validateResumeMetaForBoundary )
 import Agent.CLI.Runtime.Orchestration.Initialized
     ( PreparedStartupAuthWorker
     , runAgentInitialized
@@ -96,7 +97,7 @@ import Agent.Runtime.Session
       loadSessionMeta,
       sessionDirForId,
       sessionsRoot,
-      SessionMeta(metaCwd),
+      SessionMeta(metaCwd, metaId),
       SessionTurn )
 import Agent.CLI.ModelPicker
     ( ModelPickerSelection(modelPickerEffort, modelPickerOption) )
@@ -215,7 +216,7 @@ runAgentWithRuntime processRuntime runMode options = do
                             , optEffort = Nothing
                             , optPrompt = Nothing
                             , optPromptFile = Nothing
-                            , optResume = Just sessionId
+                            , optResume = Just (ResumeSession sessionId)
                             }
                         Nothing
             RunForkSession sessionId directive ->
@@ -230,7 +231,7 @@ runAgentWithRuntime processRuntime runMode options = do
                             , optEffort = Nothing
                             , optPrompt = Nothing
                             , optPromptFile = Nothing
-                            , optResume = Just sessionId
+                            , optResume = Just (ResumeSession sessionId)
                             }
                         Nothing
             RunFreshSession cwd -> do
@@ -427,8 +428,12 @@ runAgent
     -> IO RunResult
 runAgent
         processRuntime runMode fullscreenInputs sessionState options transition = do
+    -- Retain a resolved latest-session target through fullscreen startup
+    -- recovery. Retrying credentials must not select a different conversation.
+    latestResumeIdRef <- newIORef Nothing
     prepared <-
         prepareAgentIteration
+            latestResumeIdRef
             processRuntime
             runMode
             fullscreenInputs
@@ -439,7 +444,12 @@ runAgent
     let runPrepared = case prepared.preparedFullscreen of
             Nothing -> prepared.preparedRun
             Just runtime ->
-                let chooseRecoveryModel nextOptions nextTransition = do
+                let chooseRecoveryModel requestedOptions nextTransition = do
+                        resolvedId <- readIORef latestResumeIdRef
+                        let nextOptions = case (requestedOptions.optResume, resolvedId) of
+                                (Just ResumeLatest, Just sessionId) ->
+                                    requestedOptions { optResume = Just (ResumeSession sessionId) }
+                                _ -> requestedOptions
                         home <-
                             maybe
                                 getHomeDirectory
@@ -521,7 +531,9 @@ runAgent
                                     , transitionEffort = Just selectedEffort
                                     , transitionAccountSelectionId = Nothing
                                     , transitionAccountId = Nothing
-                                    , transitionSessionId = nextOptions.optResume
+                                    , transitionSessionId = case nextOptions.optResume of
+                                        Just (ResumeSession sessionId) -> Just sessionId
+                                        _ -> Nothing
                                     , transitionPendingTurn = Nothing
                                     , transitionUnavailableProviders = Set.empty
                                     , transitionCause = ManualTransition
@@ -530,6 +542,7 @@ runAgent
                         { restartPrepare =
                             \nextOptions nextTransition ->
                                 prepareAgentIteration
+                                    latestResumeIdRef
                                     processRuntime
                                     runMode
                                     fullscreenInputs
@@ -598,7 +611,8 @@ runAgent
 -- alternate screen until the whole provider-restart chain finishes. Session
 -- resumes still return to 'runAgentWithRestarts' and start a fresh UI.
 prepareAgentIteration
-    :: AgentProcessRuntime
+    :: IORef (Maybe Text)
+    -> AgentProcessRuntime
     -> AgentRunMode
     -> FullscreenInputBuffer
     -> SessionState
@@ -607,11 +621,12 @@ prepareAgentIteration
     -> Maybe ProviderTransition
     -> IO PreparedAgent
 prepareAgentIteration
-        processRuntime runMode
+        latestResumeIdRef processRuntime runMode
         fullscreenInputs sessionState activeFullscreen options transition = do
     resumeLockRef <- newIORef (Nothing :: Maybe SessionLock)
     databaseStoreRef <- newIORef (Nothing :: Maybe Store)
     prepareAgentIterationTracked
+        latestResumeIdRef
         resumeLockRef
         databaseStoreRef
         processRuntime
@@ -625,7 +640,8 @@ prepareAgentIteration
             releasePreparationResources resumeLockRef databaseStoreRef
 
 data AgentIterationRequest = AgentIterationRequest
-    { iterationResumeLockRef :: IORef (Maybe SessionLock)
+    { iterationLatestResumeIdRef :: IORef (Maybe Text)
+    , iterationResumeLockRef :: IORef (Maybe SessionLock)
     , iterationDatabaseStoreRef :: IORef (Maybe Store)
     , iterationProcessRuntime :: AgentProcessRuntime
     , iterationRunMode :: AgentRunMode
@@ -670,7 +686,8 @@ data AgentIterationInterface = AgentIterationInterface
     }
 
 prepareAgentIterationTracked
-    :: IORef (Maybe SessionLock)
+    :: IORef (Maybe Text)
+    -> IORef (Maybe SessionLock)
     -> IORef (Maybe Store)
     -> AgentProcessRuntime
     -> AgentRunMode
@@ -681,11 +698,12 @@ prepareAgentIterationTracked
     -> Maybe ProviderTransition
     -> IO PreparedAgent
 prepareAgentIterationTracked
-        resumeLockRef databaseStoreRef
+        latestResumeIdRef resumeLockRef databaseStoreRef
         processRuntime runMode
         fullscreenInputs sessionState activeFullscreen options transition =
     prepareTrackedAgentIteration AgentIterationRequest
-        { iterationResumeLockRef = resumeLockRef
+        { iterationLatestResumeIdRef = latestResumeIdRef
+        , iterationResumeLockRef = resumeLockRef
         , iterationDatabaseStoreRef = databaseStoreRef
         , iterationProcessRuntime = processRuntime
         , iterationRunMode = runMode
@@ -807,6 +825,7 @@ prepareAgentIterationResources request bootstrap = do
             root
             databaseStore
             connectedGatewayIdentity
+            bootstrap.iterationInitialSource
     recordStage "resume"
     source <- case request.iterationOptions.optCwd of
         Just requestedCwd -> makeAbsolute requestedCwd
@@ -837,12 +856,27 @@ loadAgentIterationResume
     -> OsPath
     -> Store
     -> Maybe Text
+    -> OsPath
     -> IO (Maybe (SessionMeta, [SessionTurn]))
-loadAgentIterationResume request root databaseStore connectedGatewayIdentity =
+loadAgentIterationResume request root databaseStore connectedGatewayIdentity initialSource =
     case request.iterationOptions.optResume of
         Nothing -> pure Nothing
-        Just sessionId -> do
+        Just target -> do
             let sessionPool = trustedPool databaseStore
+            sessionId <- case target of
+                ResumeSession explicitId -> pure explicitId
+                ResumeLatest ->
+                    readIORef request.iterationLatestResumeIdRef >>= \case
+                        Just selectedId -> pure selectedId
+                        Nothing ->
+                            loadLatestResumeSession sessionPool initialSource connectedGatewayIdentity
+                                (if isOneShot request.iterationOptions then AllSessions else InteractiveSessions) >>= \case
+                                Left err -> do
+                                    signalAgentIterationReady request (Left err)
+                                    failAgentIterationPreparation request err
+                                Right selectedId -> do
+                                    writeIORef request.iterationLatestResumeIdRef (Just selectedId)
+                                    pure selectedId
             dir <- either
                 (\err -> do
                     signalAgentIterationReady request (Left err)
@@ -1157,7 +1191,10 @@ runPreparedAgentIteration
     runAgentInitialized
         (runAgentWithRuntime request.iterationProcessRuntime)
         request.iterationProcessRuntime
-        request.iterationOptions
+        (case resources.iterationResumed of
+            Nothing -> request.iterationOptions
+            Just (meta, _) -> request.iterationOptions
+                { optResume = Just (ResumeSession meta.metaId) })
         request.iterationTransition
         resources.iterationBootstrap.iterationHome
         resources.iterationBootstrap.iterationRoot
@@ -1296,5 +1333,5 @@ restartSessionOptions options sessionId =
         , optPrompt = Nothing
         , optPromptFile = Nothing
         , optManagedTurnFile = Nothing
-        , optResume = Just sessionId
+        , optResume = Just (ResumeSession sessionId)
         }

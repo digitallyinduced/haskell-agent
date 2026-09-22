@@ -105,6 +105,7 @@ data SessionMeta = SessionMeta
     , metaLastTurnSummary :: !(Maybe Text)
     , metaLastRecapMainTurns :: !Int
     , metaPromptSnapshot :: !(Maybe SessionPromptSnapshot)
+    , metaHeadless :: !Bool
     } deriving (Eq, Show)
 
 -- | Immutable provider-visible prefix for the latest prompt epoch.
@@ -322,6 +323,7 @@ instance ToJSON SessionMeta where
         , "lastTurnSummary" .= meta.metaLastTurnSummary
         , "lastRecapMainTurns" .= meta.metaLastRecapMainTurns
         , "promptSnapshot" .= meta.metaPromptSnapshot
+        , "headless" .= meta.metaHeadless
         ]
 
 sessionMetaDecoder :: Hermes.Decoder SessionMeta
@@ -374,6 +376,7 @@ sessionMetaDecoder = Hermes.object do
             <*> optionalKey "lastTurnSummary" Hermes.text
             <*> Hermes.defaultKey 0 "lastRecapMainTurns" Hermes.int
             <*> optionalKey "promptSnapshot" sessionPromptSnapshotDecoder
+            <*> Hermes.defaultKey False "headless" Hermes.bool
 
 data SessionTurn = SessionTurn
     { turnAt :: !UTCTime
@@ -596,6 +599,7 @@ data SessionCreate = SessionCreate
     , createEffort :: !Text
     , createTitleHint :: !(Maybe Text)
     , createTitleIsManual :: !Bool
+    , createHeadless :: !Bool
     }
 
 -- | Whether conversation state is persisted.

@@ -31,6 +31,7 @@ module Agent.Store.Postgres.Session.Read
     , loadSessionResumeStats
     , loadSessionEvents
     , listSessionMetadata
+    , listActiveSessionMetadataPage
     , listSessionMetadataForBoundary
     , listSessionArchiveKeys
     , searchConversationTurns
@@ -445,6 +446,47 @@ listSessionMetadata pool =
     withSession pool $
         Transactions.transaction Transactions.RepeatableRead Transactions.Read $
             Transaction.statement () listMetadataStatement
+
+-- | Page through active local conversations, independently of their original
+-- provider route. Conversation history can be resumed on another route.
+-- Activity means user or assistant content, not metadata writes or standalone
+-- compaction checkpoints. Completed model responses may replace the transcript
+-- after automatic compaction; their response identifier distinguishes them from
+-- those checkpoints. Legacy rows without activity retain their metadata time.
+listActiveSessionMetadataPage
+    :: StorePool
+    -> Maybe SessionResumeCursor
+    -> Int
+    -> IO (Either StoreError SessionResumePage)
+listActiveSessionMetadataPage pool cursor requestedLimit =
+    let limit = max 1 (min 100 requestedLimit)
+    in fmap (fmap (toSessionResumePage limit)) $
+        withSession pool $
+            Transactions.transaction Transactions.RepeatableRead Transactions.Read $
+                Transaction.statement
+                    ( (.sessionResumeCursorActivityAt) <$> cursor
+                    , (.sessionResumeCursorKey) <$> cursor
+                    , fromIntegral (limit + 1)
+                    )
+                    listActiveMetadataPageStatement
+
+toSessionResumePage :: Int -> [(SessionListEntry, UTCTime)] -> SessionResumePage
+toSessionResumePage limit rows =
+    let
+        sessions = take limit rows
+        nextCursor
+            | length rows <= limit = Nothing
+            | otherwise = case reverse sessions of
+                [] -> Nothing
+                (entry, activityAt) : _ -> Just SessionResumeCursor
+                    { sessionResumeCursorActivityAt = activityAt
+                    , sessionResumeCursorKey =
+                        entry.sessionListEntryMetadata.sessionMetadataKey
+                    }
+    in SessionResumePage
+        { sessionResumePageSessions = map fst sessions
+        , sessionResumePageNextCursor = nextCursor
+        }
 
 -- | List sessions inside the caller's direct or organization-gateway route.
 --
@@ -863,6 +905,42 @@ listMetadataStatement = mkStatement
     (Decoders.rowList metadataRow)
     True
 
+listActiveMetadataPageStatement
+    :: Statement (Maybe UTCTime, Maybe Text, Int64) [(SessionListEntry, UTCTime)]
+listActiveMetadataPageStatement = mkStatement
+    ("SELECT " <> metadataSelectColumnsSql
+        <> ", archived_at IS NOT NULL, activity_at\
+           \ FROM harness.sessions\
+           \ CROSS JOIN LATERAL (\
+           \   SELECT COALESCE(MAX(t.occurred_at), sessions.updated_at) AS activity_at\
+           \   FROM harness.session_turns t\
+           \   WHERE t.session_id = sessions.session_id\
+           \     AND (t.transcript_effect = 'append'\
+           \       OR (t.transcript_effect = 'replace' AND t.response_id IS NOT NULL))\
+           \     AND (t.user_text <> '' OR COALESCE(t.assistant_text, '') <> ''\
+           \       OR EXISTS (\
+           \         SELECT 1 FROM harness.session_response_items item\
+           \         JOIN harness.session_messages message\
+           \           ON message.response_item_id = item.response_item_id\
+           \         WHERE item.turn_id = t.turn_id\
+           \           AND message.role_name IN ('user', 'assistant')))\
+           \ ) activity\
+           \ WHERE deleted_at IS NULL AND archived_at IS NULL\
+           \ AND ($1 IS NULL OR activity_at < $1\
+           \   OR (activity_at = $1 AND session_key > $2))\
+           \ ORDER BY activity_at DESC, session_key ASC LIMIT $3")
+    ( ((\(value, _, _) -> value)
+        >$< Encoders.param (Encoders.nullable Encoders.timestamptz))
+        <> ((\(_, value, _) -> value)
+            >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> ((\(_, _, value) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    )
+    (Decoders.rowList $
+        (,) <$> sessionListEntryRow
+            <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz))
+    True
+
 listMetadataForBoundaryStatement
     :: Statement
         (Text, Maybe Text, Text, Maybe UTCTime, Maybe Text, Int64)
@@ -934,7 +1012,7 @@ metadataSelectColumnsSql =
     \ legacy_target_effective_model, legacy_target_dialect,\
     \ cwd, effort, title, title_is_manual, title_refresh_index,\
     \ title_user_turns, last_response_id, input_tokens, output_tokens,\
-    \ cached_tokens, last_recap, last_turn_summary, last_recap_main_turns"
+    \ cached_tokens, last_recap, last_turn_summary, last_recap_main_turns, headless"
 
 sessionListEntryRow :: Decoders.Row SessionListEntry
 sessionListEntryRow =
@@ -1348,6 +1426,7 @@ metadataRow =
         <*> Decoders.column (Decoders.nullable Decoders.text)
         <*> Decoders.column (Decoders.nullable Decoders.text)
         <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+        <*> Decoders.column (Decoders.nonNullable Decoders.bool)
 
 decodeLegacyTarget
     :: Maybe Text

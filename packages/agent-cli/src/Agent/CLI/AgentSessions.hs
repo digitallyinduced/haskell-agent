@@ -267,6 +267,7 @@ runCreateAgentSession env args
                         , createEffort =
                             fromMaybe env.toolsEffort args.reasoningEffort
                         , createTitleHint = Just title
+                        , createHeadless = True
                         , createTitleIsManual =
                             maybe False
                                 (not . Text.null . Text.strip)

@@ -237,6 +237,7 @@ spec = describe "Agent.CLI.AgentSessions" do
             message `shouldBe` "investigate this"
             handle.sessionMeta.metaTitle `shouldBe` "worker"
             handle.sessionMeta.metaTitleIsManual `shouldBe` True
+            handle.sessionMeta.metaHeadless `shouldBe` True
             handle.sessionMeta.metaModel `shouldBe` "model-2"
             handle.sessionMeta.metaDialect `shouldBe` GrokBuildDialect
             handle.sessionMeta.metaEffort `shouldBe` "high"
@@ -1066,6 +1067,7 @@ testCreate pool root = SessionCreate
     , createEffort = "low"
     , createTitleHint = Just "test"
     , createTitleIsManual = False
+    , createHeadless = False
     }
 
 testCreateAt :: StorePool -> OsPath -> OsPath -> SessionCreate

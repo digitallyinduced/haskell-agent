@@ -180,6 +180,7 @@ sampleMeta cwd updated =
         , metaEffort = "high"
         , metaTitle = ""
         , metaTitleIsManual = False
+        , metaHeadless = False
         , metaTitleRefreshIndex = 0
         , metaTitleUserTurns = 0
         , metaLastResponseId = Nothing

@@ -1028,6 +1028,7 @@ createSessionForBoundary environment boundary request =
                                                             reasoningEffortText effort
                                                         , createTitleHint =
                                                             request.createSessionTitle
+                                                        , createHeadless = False
                                                         , createTitleIsManual =
                                                             maybe
                                                                 False

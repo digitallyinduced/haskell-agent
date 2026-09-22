@@ -28,7 +28,7 @@ import System.IO.Temp (withSystemTempDirectory)
 import Agent.Runtime.GatewayClient (GatewayCredential(..))
 import Agent.CLI.IntegrationGateway (gatewayIntegrationMcpConfig)
 import Agent.CLI.Options
-    ( CliOptions(..), Override(..)
+    ( CliOptions(..), Override(..), ResumeTarget(..)
     , CodeModeOption(..)
     , ScreenMode(..)
     , defaultCliOptions
@@ -240,7 +240,7 @@ spec = describe "nativeTurnOptions" do
                 , nativeTurnShellMode = NativeShellBoth
                 }
         options <- shouldReturnRight (nativeTurnOptions request)
-        options.optResume `shouldBe` Just "session-123"
+        options.optResume `shouldBe` Just (ResumeSession "session-123")
         options.optGhci `shouldBe` True
         options.optBash `shouldBe` True
 
@@ -355,7 +355,7 @@ conflictingOptions = defaultCliOptions
     , optComputerUse = Explicit True
     , optCodeMode = CodeModeEnabled
     , optPrompt = Just "preserve supplied input"
-    , optResume = Just "preserve-session"
+    , optResume = Just (ResumeSession "preserve-session")
     }
 
 shouldReturnRight :: (Show err) => Either err value -> IO value

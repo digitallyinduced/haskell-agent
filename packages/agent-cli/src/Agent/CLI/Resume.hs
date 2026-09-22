@@ -16,6 +16,8 @@ module Agent.CLI.Resume
     , initialResumeState
     , insertResumeSearch
     , loadResumeEntry
+    , loadLatestResumeSession
+    , ResumeSelection(..)
     , resumeEntryFromPage
     , moveResumeBrowser
     , pickResumeEntries
@@ -52,6 +54,7 @@ import Agent.Runtime.Session
     , loadRecentSessionTurns
     , loadSessionMeta
     , loadSessionResumeStats
+    , decodeListedSessionMeta
     )
 import Agent.Runtime.Startup.Context
     ( SessionInitialContext(..), resolveSessionInitialContext
@@ -63,11 +66,14 @@ import Agent.CLI.TextLayout
     , clampSelectionIndex
     , renderSplitPaneFrame
     )
-import Agent.OsPath (toText)
+import Agent.OsPath (fromText, toText)
 import Agent.Provider (providerSlug)
 import Agent.Responses.Types (ResponseItem(..))
 import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Postgres.Session (ConversationSearchResult(..))
+import qualified Agent.Store.Postgres.Session as Store
+import Agent.Store.Types (renderStoreError)
+import Control.Exception.Safe (IOException, displayException, try)
 import Control.Monad (forM)
 import Control.Monad.Trans.Except (ExceptT(..), runExceptT)
 import Data.Char (isAlphaNum)
@@ -81,6 +87,7 @@ import qualified Data.Text.IO as Text
 import Data.Time.Clock (UTCTime, diffUTCTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import System.Console.ANSI (getTerminalSize)
+import System.Directory.OsPath (canonicalizePath)
 import System.OsPath (OsPath, takeDirectory, takeFileName)
 import System.IO (hFlush, hIsTerminalDevice, stderr, stdin)
 
@@ -88,6 +95,43 @@ data ResumeSourceFilter
     = ResumeAll
     | ResumeProvider !Text
     deriving (Eq, Show)
+
+-- | Interactive startup excludes sessions created by automated one-shot runs.
+data ResumeSelection = InteractiveSessions | AllSessions
+    deriving (Eq, Show)
+
+-- | Select only an exact canonical directory match. In particular, neither
+-- parent directories nor another worktree of the same repository qualify.
+-- Pages are already ordered by conversation activity and session key.
+loadLatestResumeSession :: StorePool -> OsPath -> Maybe Text -> ResumeSelection -> IO (Either Text Text)
+loadLatestResumeSession pool cwd gatewayIdentity selection = do
+    result <- try @IO @IOException do
+        canonicalCwd <- canonicalizePath cwd
+        search canonicalCwd Nothing
+    pure $ case result of
+        Left err -> Left ("could not resolve resume directory: " <> Text.pack (displayException err))
+        Right value -> value
+  where
+    search canonicalCwd cursor =
+        Store.listActiveSessionMetadataPage pool cursor 100 >>= \case
+            Left err -> pure (Left (renderStoreError err))
+            Right page -> inspect canonicalCwd page page.sessionResumePageSessions
+    inspect canonicalCwd page = \case
+        [] -> case page.sessionResumePageNextCursor of
+            Just cursor -> search canonicalCwd (Just cursor)
+            Nothing -> pure (Left ("no saved session for directory: " <> toText cwd))
+        entry : rest -> do
+            let stored = entry.sessionListEntryMetadata
+            if selection == InteractiveSessions && stored.sessionMetadataHeadless
+                then inspect canonicalCwd page rest
+                else do
+                    storedCwd <- canonicalizePath (fromText stored.sessionMetadataCwd)
+                    if storedCwd /= canonicalCwd
+                        then inspect canonicalCwd page rest
+                        else pure do
+                            meta <- decodeListedSessionMeta stored
+                            validateResumeMetaForBoundary gatewayIdentity meta
+                            Right meta.metaId
 
 data ResumeEntry = ResumeEntry
     { resumeId :: !Text

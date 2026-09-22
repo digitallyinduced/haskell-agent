@@ -4,7 +4,7 @@ module Agent.CLI.Runtime.Orchestration.Background
     ) where
 
 import Agent.CLI.Options
-    ( ApprovalPolicy, CliOptions(..), Override(..), ScreenMode(..)
+    ( ApprovalPolicy, CliOptions(..), Override(..), ResumeTarget(..), ScreenMode(..)
     , applyBackgroundApproval )
 import Agent.CLI.Runtime.Orchestration.Types ( AgentRunMode, backgroundRunMode )
 import Agent.CLI.Runtime.Types ( DevResult(..) )
@@ -50,7 +50,7 @@ runInProcessSessionTurn runAgent parentOptions policy ghciEnabled bashEnabled
                 , optPrompt = Just message
                 , optPromptFile = Nothing
                 , optManagedTurnFile = Nothing
-                , optResume = Just handle.sessionMeta.metaId
+                , optResume = Just (ResumeSession handle.sessionMeta.metaId)
                 , optSaveSession = True
                 , optGhci = ghciEnabled
                 , optBash = bashEnabled

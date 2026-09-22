@@ -58,9 +58,12 @@ module Agent.Store.Postgres.Session
     , loadSessionResumeStats
     , loadSessionEvents
     , listSessionMetadata
+    , listActiveSessionMetadataPage
     , SessionListCursor(..)
     , SessionListEntry(..)
     , SessionListPage(..)
+    , SessionResumeCursor(..)
+    , SessionResumePage(..)
     , SessionArchiveFilter(..)
     , listSessionMetadataForBoundary
     , listSessionArchiveKeys

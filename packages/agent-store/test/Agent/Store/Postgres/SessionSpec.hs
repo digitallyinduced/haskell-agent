@@ -967,6 +967,93 @@ spec = describe "PostgreSQL session schema" do
                         (closeStore store)
                 ) `finally` cleanup
 
+    it "pages resume candidates by conversation activity rather than metadata or compaction updates" $
+        withSystemTempDirectory "ha" \stateDirectory -> do
+            let config = sessionTestPostgresConfig stateDirectory
+                cleanup = stopManagedPostgres config >> pure ()
+            (openStore config >>= \case
+                Left err -> expectationFailure ("could not open store: " <> show err)
+                Right store -> finally
+                    (do
+                        let pool = trustedPool store
+                            now = read "2026-08-23 12:00:00 UTC"
+                            metadata key = (testMetadata now)
+                                { sessionMetadataKey = key
+                                , sessionMetadataUpdatedAt = addUTCTime 100 now
+                                , sessionMetadataHeadless = key == "recent-b"
+                                }
+                            append key seconds effect =
+                                appendSessionTurn pool
+                                    ((testTurn (addUTCTime seconds now))
+                                        { sessionTurnEffect = effect })
+                                    (metadata key)
+                                    `shouldReturn` Right True
+                            keys :: SessionResumePage -> [Text]
+                            keys page = map
+                                (.sessionListEntryMetadata.sessionMetadataKey)
+                                page.sessionResumePageSessions
+                        mapM_ (\key -> createSession pool (metadata key)
+                            `shouldReturn` Right True)
+                            ["older", "recent-a", "recent-b", "legacy"]
+                        append "older" 10 TranscriptAppend
+                        append "recent-a" 20 TranscriptReplace
+                        appendSessionTurn pool
+                            ((testTurn (addUTCTime 20 now))
+                                { sessionTurnEffect = TranscriptAppend
+                                , sessionTurnUserText = ""
+                                , sessionTurnAssistantText = Nothing
+                                , sessionTurnItems =
+                                    [StoredMessageItem StoredMessage
+                                        { storedMessageProviderItemId = Nothing
+                                        , storedMessageRole = "assistant"
+                                        , storedMessageContent = StoredMessageText "response"
+                                        , storedMessageStatus = Nothing
+                                        , storedMessagePhase = Nothing
+                                        , storedMessageExtraFields = emptyObject
+                                        }]
+                                })
+                            (metadata "recent-b")
+                            `shouldReturn` Right True
+                        loadSessionMetadata pool "recent-b"
+                            `shouldReturn` Right (Just (metadata "recent-b"))
+                        appendSessionTurn pool
+                            ((testTurn (addUTCTime 90 now))
+                                { sessionTurnEffect = TranscriptReplace
+                                , sessionTurnResponseId = Nothing
+                                })
+                            (metadata "older")
+                            `shouldReturn` Right True
+                        appendSessionTurn pool
+                            ((testTurn (addUTCTime 95 now))
+                                { sessionTurnEffect = TranscriptAppend
+                                , sessionTurnUserText = ""
+                                , sessionTurnAssistantText = Nothing
+                                , sessionTurnItems = []
+                                })
+                            (metadata "older")
+                            `shouldReturn` Right True
+                        replaceSessionMetadata pool "session.metadata.updated"
+                            ((metadata "older")
+                                { sessionMetadataUpdatedAt = addUTCTime 200 now })
+                            `shouldReturn` Right True
+                        first <- listActiveSessionMetadataPage pool Nothing 2
+                        case first of
+                            Left err -> expectationFailure (show err)
+                            Right page -> do
+                                keys page `shouldBe` ["legacy", "recent-a"]
+                                page.sessionResumePageNextCursor `shouldBe`
+                                    Just (SessionResumeCursor
+                                        (addUTCTime 20 now) "recent-a")
+                                second <- listActiveSessionMetadataPage pool
+                                    page.sessionResumePageNextCursor 2
+                                fmap keys second `shouldBe`
+                                    Right ["recent-b", "older"]
+                                fmap (.sessionResumePageNextCursor) second
+                                    `shouldBe` Right Nothing
+                    )
+                    (closeStore store)
+                ) `finally` cleanup
+
     it "keeps compaction as a model checkpoint while paging visual history across it" $
         withSystemTempDirectory "ha" \stateDirectory -> do
             let
@@ -1248,6 +1335,7 @@ testMetadata now = SessionMetadata
     , sessionMetadataLastRecap = Nothing
     , sessionMetadataLastTurnSummary = Nothing
     , sessionMetadataLastRecapMainTurns = 0
+    , sessionMetadataHeadless = False
     }
 
 testPromptSnapshot :: UTCTime -> SessionPromptSnapshot

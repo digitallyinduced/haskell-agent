@@ -36,6 +36,7 @@ persistenceRequest pool options root target gatewayIdentity retargetResumed
         , persistencePrompt = prompt
         , persistenceResumed = fst <$> resumed
         , persistenceEnabled = shouldPersist options
+        , persistenceHeadless = isOneShot options
         }
 
 announceResumedSession :: StartupRuntime -> SessionMeta -> IO ()
