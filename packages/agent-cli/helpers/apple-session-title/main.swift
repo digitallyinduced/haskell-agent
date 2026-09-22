@@ -39,7 +39,7 @@ struct AppleSessionTitle {
     }
 
     static func writeTitle() async throws {
-        let model = SystemLanguageModel.default
+        let model = SystemLanguageModel(guardrails: .permissiveContentTransformations)
         guard case .available = model.availability else {
             throw NSError(
                 domain: "apple-session-title",
@@ -64,26 +64,13 @@ struct AppleSessionTitle {
             Conversation:
             \(conversation)
             """
-        let titleSchema = DynamicGenerationSchema(
-            name: "SessionTitle",
-            description: "A short session title",
-            properties: [
-                DynamicGenerationSchema.Property(
-                    name: "title",
-                    description: "A 3-7 word session title that names the coding task",
-                    schema: DynamicGenerationSchema(type: String.self)
-                )
-            ]
-        )
-        let schema = try GenerationSchema(root: titleSchema, dependencies: [])
+        // Permissive content transformations apply only to String responses,
+        // not schema-guided generation. Encode the helper's JSON envelope ourselves.
         let options = GenerationOptions(samplingMode: .greedy, maximumResponseTokens: 40)
         let response = try await session.respond(
             to: prompt,
-            schema: schema,
-            includeSchemaInPrompt: false,
             options: options)
-        let title = try response.content.value(String.self, forProperty: "title")
-        try writeJSON(TitlePayload(title: title))
+        try writeJSON(TitlePayload(title: response.content))
     }
 
     static func writeJSON<T: Encodable>(_ value: T) throws {

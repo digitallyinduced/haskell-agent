@@ -106,6 +106,9 @@ Intelligence reports as available, and falls back to the provider cheap model
 if that helper is missing or fails. The helper is `apple-session-title`; the
 CLI builds it from source with Xcode on first use, or uses a copy already on
 `PATH` / `HASKELL_AGENT_APPLE_SESSION_TITLE`.
+The helper uses Apple's permissive content-transformation guardrails with plain-text
+generation, then encodes the title as JSON itself. Schema-guided generation does not
+benefit from this guardrail mode.
 Otherwise Claude sessions default to `haiku`, OpenAI to `gpt-5.6-luna`,
 Gemini to `gemini-3.5-flash-lite`, and OpenRouter to `stealth/ox-alpha`.
 Use `/title-model` to pick automatic selection, Apple Foundation, or a provider
