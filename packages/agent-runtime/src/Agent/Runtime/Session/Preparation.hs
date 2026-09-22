@@ -29,6 +29,7 @@ data PersistenceRequest = PersistenceRequest
     , persistencePrompt :: Maybe Text
     , persistenceResumed :: Maybe SessionMeta
     , persistenceEnabled :: Bool
+    , persistenceHeadless :: Bool
     }
 
 prepareSessionPersistence :: PersistenceRequest -> IO Persistence
@@ -43,6 +44,7 @@ prepareSessionPersistence PersistenceRequest
     , persistencePrompt = prompt
     , persistenceResumed = resumed
     , persistenceEnabled = enabled
+    , persistenceHeadless = headless
     } =
     case resumed of
         Just meta -> do
@@ -122,5 +124,6 @@ prepareSessionPersistence PersistenceRequest
                     , createEffort = effort
                     , createTitleHint = sessionTitleFromPrompt <$> prompt
                     , createTitleIsManual = False
+                    , createHeadless = headless
                     }
             | otherwise -> pure PersistenceDisabled

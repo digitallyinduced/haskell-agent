@@ -210,6 +210,24 @@ Start an interactive session:
 agent-cli
 ```
 
+Resume the most recently active session for the current working directory:
+
+```console
+agent-cli --resume
+agent-cli --cwd /path/to/project --resume
+```
+
+Use `agent-cli --resume ID` to select a particular session instead.
+Automatic selection excludes archived/deleted sessions and matches the exact
+directory (resolving symlinks), not other worktrees or parent directories.
+Sessions are ordered by their latest recorded conversation activity, falling
+back to the metadata update time when no conversation activity is available.
+Interactive startup excludes sessions recorded as headless; one-shot startup
+also considers headless sessions. Older sessions without this classification
+remain eligible. Explicit session IDs are not subject to this filter.
+If no session matches, it reports an error rather than starting a new session.
+Resume and `--worktree` cannot be combined.
+
 On Linux and macOS, supported OpenAI sessions can use the local desktop by
 default in an interactive terminal. One-shot and non-interactive runs keep the
 tool hidden unless `--computer-use` is supplied explicitly. Computer-use

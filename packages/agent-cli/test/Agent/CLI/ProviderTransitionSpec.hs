@@ -1,7 +1,7 @@
 module Agent.CLI.ProviderTransitionSpec (spec) where
 
 import Agent.Runtime.Models (ModelTarget(..))
-import Agent.CLI.Options (CliOptions(..), defaultCliOptions, isOneShot)
+import Agent.CLI.Options (CliOptions(..), ResumeTarget(..), defaultCliOptions, isOneShot)
 import Agent.CLI.ProviderTransition
 import Agent.Dialect (DialectId(..))
 import Agent.Provider (BillingMode(..), Provider(..))
@@ -32,7 +32,7 @@ spec = do
         it "uses a persisted session when one exists" do
             let transitioned = applyProviderTransition defaultCliOptions
                     (transition (Just "session-1") Nothing)
-            transitioned.optResume `shouldBe` Just "session-1"
+            transitioned.optResume `shouldBe` Just (ResumeSession "session-1")
 
         it "carries an effort selected with the target model" do
             let selected =

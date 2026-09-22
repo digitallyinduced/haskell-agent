@@ -21,6 +21,17 @@ import Test.Hspec
 spec :: Spec
 spec = do
     describe "json codec" do
+        it "round-trips headless classification and accepts unclassified legacy metadata" do
+            let meta = (testMeta "headless") { metaHeadless = True }
+            Hermes.decodeEither sessionMetaDecoder (LBS.toStrict (Aeson.encode meta))
+                `shouldBe` Right meta
+            fromStoredMetadata (toStoredMetadata meta) `shouldBe` Right meta
+            let legacy = case Aeson.toJSON meta of
+                    Aeson.Object object -> Aeson.Object (KeyMap.delete "headless" object)
+                    value -> value
+            Hermes.decodeEither sessionMetaDecoder (LBS.toStrict (Aeson.encode legacy))
+                `shouldBe` Right meta { metaHeadless = False }
+
         it "round-trips an optional current task plan and accepts older transfers" do
             let transfer = SessionTransfer
                     { transferMeta = testMeta "session-plan"

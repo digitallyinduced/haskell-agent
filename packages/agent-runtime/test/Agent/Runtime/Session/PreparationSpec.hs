@@ -35,8 +35,36 @@ spec = describe "session persistence preparation" do
                             create.createTarget `shouldBe` (testCreate (trustedPool store) root).createTarget
                             create.createTitleHint `shouldBe` Just "first prompt"
                             create.createTitleIsManual `shouldBe` False
+                            create.createHeadless `shouldBe` False
                             Directory.doesDirectoryExist (toFilePath temp) `shouldReturn` True
                         _ -> expectationFailure "new session materialized during preparation"
+
+    it "persists headless classification when a pending session is materialized" $
+        withTempStore \store root ->
+            bracket
+                (prepareSessionPersistence (request (trustedPool store) root)
+                    { persistenceHeadless = True })
+                cleanupPendingPersistence
+                \persistence -> do
+                    state <- persistenceState persistence
+                    case state of
+                        PersistencePending create _ _ -> do
+                            create.createHeadless `shouldBe` True
+                            handle <- createSession create
+                            handle.sessionMeta.metaHeadless `shouldBe` True
+                            loaded <- loadSessionMeta (trustedPool store) root handle.sessionMeta.metaId
+                            fmap (.metaHeadless) loaded `shouldBe` Right True
+                        _ -> expectationFailure "expected pending persistence"
+
+    it "preserves headless classification when explicitly resumed interactively" $
+        withTempStore \store root -> do
+            let meta = (testMeta "headless") { metaHeadless = True }
+            persistence <- prepareSessionPersistence (request (trustedPool store) root)
+                { persistenceResumed = Just meta
+                , persistenceHeadless = False
+                }
+            handle <- activeHandle persistence
+            handle.sessionMeta.metaHeadless `shouldBe` True
 
     it "retains an unchanged resumed session even when new persistence is disabled" $
         withTempStore \store root -> do
@@ -105,6 +133,7 @@ request pool root = PersistenceRequest
     , persistencePrompt = Just "first prompt"
     , persistenceResumed = Nothing
     , persistenceEnabled = True
+    , persistenceHeadless = False
     }
 
 unusedPool :: StorePool

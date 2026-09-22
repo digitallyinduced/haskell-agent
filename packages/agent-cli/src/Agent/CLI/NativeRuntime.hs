@@ -58,6 +58,7 @@ import Agent.CLI.Options
     ( Command(..)
     , CliOptions(..)
     , Override(..)
+    , ResumeTarget(..)
     , CodeModeOption(..)
     , ScreenMode(..)
     , defaultCliOptions
@@ -243,7 +244,7 @@ nativeTurnOptions request = do
             , optManagedTurnFile = Nothing
             , optResume = case request.nativeTurnSession of
                 NativeNewSession -> Nothing
-                NativeResumeSession sessionId -> Just sessionId
+                NativeResumeSession sessionId -> Just (ResumeSession sessionId)
             , optSaveSession = True
             , optGhci = nativeGhciEnabled request.nativeTurnShellMode
             , optBash = nativeBashEnabled request.nativeTurnShellMode

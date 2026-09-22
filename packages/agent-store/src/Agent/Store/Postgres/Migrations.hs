@@ -503,6 +503,14 @@ coreMigrations =
               \ ADD COLUMN IF NOT EXISTS input_text text NOT NULL DEFAULT ''"
             ]
         }
+    , Migration
+        { migrationVersion = 118
+        , migrationName = "session headless classification"
+        , migrationStatements =
+            [ "ALTER TABLE harness.sessions\
+              \ ADD COLUMN IF NOT EXISTS headless boolean NOT NULL DEFAULT false"
+            ]
+        }
     ]
 
 -- | Specialize all runtime grants for a validated cluster-global role.

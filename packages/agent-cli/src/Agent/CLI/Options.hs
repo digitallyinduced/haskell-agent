@@ -4,6 +4,7 @@ module Agent.CLI.Options
     , ApprovalPolicy(..)
     , CliOptions(..)
     , Override(..)
+    , ResumeTarget(..)
     , Command(..)
     , GatewayCommand(..)
     , McpAddCommand(..)
@@ -173,6 +174,9 @@ parseApprovalAnswer raw
 data Override a = Inherit | Explicit !a
     deriving (Eq, Show)
 
+data ResumeTarget = ResumeSession !Text | ResumeLatest
+    deriving (Eq, Show)
+
 data CliOptions = CliOptions
     { optProvider :: !(Maybe Provider)
     , optModel :: !(Maybe Text)
@@ -196,7 +200,7 @@ data CliOptions = CliOptions
     , optPrompt :: !(Maybe Text)
     , optPromptFile :: !(Maybe OsPath)
     , optManagedTurnFile :: !(Maybe OsPath)
-    , optResume :: !(Maybe Text)
+    , optResume :: !(Maybe ResumeTarget)
     , optSaveSession :: !Bool
     , optAgentsMd :: !Bool
       -- ^ Discover and inject AGENTS.md at session start (default: True).
@@ -631,8 +635,7 @@ optionUpdateParser = asum
         "Read an internal managed-turn request"
         pathReader
         (\value options -> options { optManagedTurnFile = Just value })
-    , optionUpdate "resume" "ID" "Resume a persisted session"
-        textReader (\value options -> options { optResume = Just value })
+    , resumeOptionUpdate
     , flagUpdate "save-session" "Persist a one-shot run as a session"
         (\options -> options { optSaveSession = True })
     , boolFlagUpdate "agents-md" True "Discover and inject AGENTS.md"
@@ -686,6 +689,21 @@ optionUpdate name metavar description reader update =
                 <> Options.metavar metavar
                 <> Options.help description
             )
+
+-- The flag branch handles an omitted ID; the option branch handles --resume=ID.
+-- Keeping both inside the repeated update parser preserves last-option-wins.
+resumeOptionUpdate :: Options.Parser OptionUpdate
+resumeOptionUpdate = asum
+    [ (\sessionId options ->
+            options { optResume = Just (maybe ResumeLatest ResumeSession sessionId) })
+        <$> (Options.flag' ()
+                (Options.long "resume"
+                    <> Options.help "Resume a session, or the latest for the working directory")
+                *> Options.optional
+                    (Options.argument textReader (Options.metavar "ID")))
+    , optionUpdate "resume" "ID" "Resume a persisted session by ID"
+        textReader (\value options -> options { optResume = Just (ResumeSession value) })
+    ]
 
 flagUpdate
     :: String
@@ -831,7 +849,7 @@ usage = unlines
     , "      --model NAME        Override the saved last model"
     , "      --cwd DIR           Working directory for tools (default: current)"
     , "      --worktree          Create a new git worktree under ~/.haskell-agent/worktrees"
-    , "      --resume ID         Resume a persisted session from ~/.haskell-agent/sessions"
+    , "      --resume [ID]       Resume ID, or the latest session for the working directory"
     , "      --save-session      Persist a one-shot (-p) run as a session"
     , "      --limit N           Bound JSON session transcript turns (max 500)"
     , "      --before INDEX      Load JSON turns older than a turn cursor"

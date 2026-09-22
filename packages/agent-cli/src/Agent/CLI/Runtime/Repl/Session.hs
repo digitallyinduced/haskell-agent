@@ -46,7 +46,7 @@ import Agent.Runtime.Session
       PersistenceState(PersistenceActive, PersistencePending),
       SessionCreate(createCwd, SessionCreate, createPool, createEffort,
                     createTarget, createGatewayIdentity, createTitleHint,
-                    createTitleIsManual, createRoot),
+                    createTitleIsManual, createRoot, createHeadless),
       SessionHandle(sessionMeta, sessionPool,
                     sessionTempDir, sessionDir),
       SessionMeta(metaTitle, metaLastResponseId,
@@ -1015,6 +1015,7 @@ handleNewAction runtime = do
                                 handle.sessionMeta.metaGatewayIdentity
                             , createCwd =
                                 handle.sessionMeta.metaCwd
+                            , createHeadless = False
                             , createEffort = effort
                             , createTitleHint = Nothing
                             , createTitleIsManual = False

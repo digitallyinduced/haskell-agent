@@ -122,6 +122,7 @@ sessionForPrompt runtime key prompt = do
                 , createEffort = runtime.runtimeEffort
                 , createTitleHint = Just (sessionTitleFromPrompt prompt)
                 , createTitleIsManual = False
+                , createHeadless = False
                 }
             modifyState runtime \current ->
                 current

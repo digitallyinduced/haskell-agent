@@ -150,6 +150,7 @@ disabledPersistence root = PersistenceRequest
     , persistencePrompt = Nothing
     , persistenceResumed = Nothing
     , persistenceEnabled = False
+    , persistenceHeadless = False
     }
   where
     unusedPool = error "disabled session resource preparation must not access the database"

@@ -180,6 +180,7 @@ seedBenchmarkSession store sessionKey turnCount activeTurns payloadBytes = do
             , sessionMetadataLastRecap = Nothing
             , sessionMetadataLastTurnSummary = Nothing
             , sessionMetadataLastRecapMainTurns = 0
+            , sessionMetadataHeadless = False
             }
         checkpoint = fromIntegral (turnCount - activeTurns)
         params = SeedParams

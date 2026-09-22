@@ -133,6 +133,7 @@ toStoredMetadata meta = Store.SessionMetadata
     , sessionMetadataLastTurnSummary = meta.metaLastTurnSummary
     , sessionMetadataLastRecapMainTurns =
         fromIntegral meta.metaLastRecapMainTurns
+    , sessionMetadataHeadless = meta.metaHeadless
     }
 
 toStoredPromptSnapshot
@@ -262,6 +263,7 @@ fromStoredMetadata stored = do
         , metaLastRecapMainTurns =
             fromIntegral stored.sessionMetadataLastRecapMainTurns
         , metaPromptSnapshot = Nothing
+        , metaHeadless = stored.sessionMetadataHeadless
         }
 
 toStoredLegacyTarget
