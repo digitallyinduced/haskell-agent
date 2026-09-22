@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="160" viewBox="0 0 1120 160" role="img" aria-labelledby="title description">
+  <title id="title">Captured login dashboard with no connected credentials</title>
+  <desc id="description">Actual agent-cli interactive output captured with tmux on September 22, 2026. The dashboard reports zero credentials and offers gateway login or adding a provider account. Trailing empty terminal rows are cropped.</desc>
+  <rect width="1120" height="160" rx="8" fill="#10141c"/>
+  <g font-family="Menlo,DejaVu Sans Mono,monospace" font-size="15" xml:space="preserve">
+    <text x="22" y="38" fill="#6ed7e0" font-weight="bold">credentials · 0 connected</text>
+    <text x="22" y="65" fill="#cdd6e4">No credentials found.</text>
+    <text x="22" y="92" fill="#cdd6e4">Press g to log in to platform.digitallyinduced.com, or a to connect a provider account.</text>
+    <text x="22" y="119" fill="#8995a9">↑↓/jk or scroll · click/enter refresh · a add · g gateway · i import · e enable/disable · d disconnect · esc/q</text>
+  </g>
+</svg>

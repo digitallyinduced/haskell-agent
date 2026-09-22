@@ -1500,6 +1500,35 @@
                 # same runtime tools as the native build. The native build
                 # remains available as `agent-cli`.
                 packages.default = agentCliStaticExecutable;
+                packages.docs = pkgs.haskell.lib.overrideCabal
+                    (pkgs.haskellPackages.callPackage ./docs/package.nix { })
+                    (_: {
+                        src = pkgs.lib.fileset.toSource {
+                            root = ./docs;
+                            fileset = pkgs.lib.fileset.unions [
+                                ./docs/haskell-agent-documentation.cabal
+                                ./docs/src/Documentation
+                                ./docs/app
+                                ./docs/test
+                                ./docs/public
+                            ];
+                        };
+                    });
+                apps.docs = flake-utils.lib.mkApp {
+                    drv = self.packages.${system}.docs;
+                    exePath = "/bin/documentation-server";
+                };
+                devShells.docs = pkgs.mkShell {
+                    packages = [
+                        (pkgs.haskellPackages.ghcWithPackages (haskell: with haskell; [
+                            blaze-html bytestring containers directory filepath
+                            hspec http-types ihp-hsx tagsoup text wai wai-extra warp
+                        ]))
+                        pkgs.cabal-install
+                        pkgs.cabal2nix
+                        pkgs.python3
+                    ];
+                };
                 packages.agent-cli-static = agentCliStaticExecutable;
                 packages.agent-cli = agentCliExecutable;
                 packages.agent-telegram = agentTelegramExecutable;
@@ -1650,6 +1679,7 @@
                 };
 
                 checks = {
+                    docs = self.packages.${system}.docs;
                     pdf-inspector = import ./nix/tests/pdf-inspector.nix { inherit pkgs; };
                     # The package check does not exercise the wrapped
                     # justStaticExecutables output or its requisite assertions.

@@ -1,0 +1,108 @@
+cabal-version: 3.0
+name: haskell-agent-documentation
+version: 0.1.0.0
+synopsis: Self-hosted Haskell Agent documentation
+license: MIT
+build-type: Simple
+data-files:
+    public/documentation.css
+    public/documentation.js
+    public/favicon.svg
+    public/terminal-overview.svg
+    public/terminal-overview.txt
+    public/login-dashboard.svg
+    public/provider-chooser.svg
+    public/interactive-terminal-captures.txt
+    public/HaskellAgentBridge.h
+    public/agent-server-openapi.json
+
+common shared
+    default-language: GHC2021
+    ghc-options: -Wall
+
+library
+    import: shared
+    hs-source-dirs: src
+    exposed-modules:
+        Documentation.Types
+        Documentation.Content
+        Documentation.Application
+        Documentation.Layout
+        Documentation.Pages.Approvals
+        Documentation.Pages.Authentication
+        Documentation.Pages.Commands
+        Documentation.Pages.Configuration
+        Documentation.Pages.Providers
+        Documentation.Pages.Tools
+        Documentation.Pages.Keybindings
+        Documentation.Pages.Installation
+        Documentation.Pages.Introduction
+        Documentation.Pages.Mcp
+        Documentation.Pages.Models
+        Documentation.Pages.ParallelAgents
+        Documentation.Pages.AgentLifecycle
+        Documentation.Pages.Projects
+        Documentation.Pages.Sessions
+        Documentation.Pages.Skills
+        Documentation.Pages.Terminal
+        Documentation.Pages.Troubleshooting
+        Documentation.Pages.LanguageServers
+        Documentation.Pages.WebAccess
+        Documentation.Pages.LearnedSkills
+        Documentation.Pages.Telegram
+        Documentation.Pages.Voice
+        Documentation.Pages.Tutorials
+        Documentation.Pages.LocalModelTutorial
+        Documentation.Pages.McpTutorial
+        Documentation.Pages.DocumentationSite
+        Documentation.Pages.Environment
+        Documentation.Pages.PersistedSettings
+        Documentation.Pages.BrowserControl
+        Documentation.Pages.Deployment
+        Documentation.Pages.NativeIntegration
+        Documentation.Pages.RuntimeDaemon
+        Documentation.Pages.ScheduledWork
+        Documentation.Pages.Server
+        Documentation.Pages.StructuredMemory
+        Documentation.Pages.ToolExecution
+    build-depends:
+        base >= 4.20 && < 5
+      , blaze-html
+      , bytestring
+      , containers
+      , filepath
+      , http-types
+      , ihp-hsx
+      , tagsoup
+      , text
+      , wai
+
+executable documentation-server
+    import: shared
+    hs-source-dirs: app
+    main-is: Main.hs
+    other-modules: Paths_haskell_agent_documentation
+    autogen-modules: Paths_haskell_agent_documentation
+    ghc-options: -threaded -rtsopts -with-rtsopts=-N2
+    build-depends:
+        base
+      , haskell-agent-documentation
+      , warp
+
+test-suite documentation-tests
+    import: shared
+    type: exitcode-stdio-1.0
+    hs-source-dirs: test
+    main-is: Main.hs
+    build-depends:
+        base
+      , blaze-html
+      , bytestring
+      , directory
+      , haskell-agent-documentation
+      , hspec
+      , http-types
+      , tagsoup
+      , text
+      , wai
+      , wai-extra

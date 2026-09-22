@@ -1,0 +1,62 @@
+Interactive terminal capture provenance
+=======================================
+
+Captured: 2026-09-22
+Platform: macOS Apple silicon
+Executable: Nix-installed agent-cli 0.1.0.0
+Version output: agent-cli 0.1.0.0 (commit 9a20f72, built 2026-09-15)
+Terminal: tmux, 110 columns by 32 rows, TERM=xterm-256color
+Isolation: fresh temporary HOME and cleared environment
+
+These SVG images render actual tmux pane text, not invented example screens.
+They are not desktop pixel screenshots. Terminal glyphs and ANSI colors are
+rendered using a documentation font/palette, and trailing empty rows are cropped.
+The capture version is older than the documentation checkout; newer versions
+may change the wording or presentation.
+
+No credentials were supplied, account connected, OAuth flow started, or model
+request submitted. The only interaction was pressing a in the empty credential
+dashboard, followed by Escape to dismiss the provider chooser.
+
+Screen 1: agent-cli login
+------------------------
+credentials · 0 connected
+No credentials found.
+Press g to log in to platform.digitallyinduced.com, or a to connect a provider account.
+↑↓/jk or scroll · click/enter refresh · a add · g gateway · i import · e enable/disable · d disconnect · esc/q
+
+Screen 2: press a
+-----------------
+connect account
+› openai
+  xai
+  openrouter
+  gemini
+  claude-code
+↑↓/jk or scroll · click/enter · esc/q
+
+Reproduction
+------------
+Use Nix-provided agent-cli and tmux. Create a fresh directory beneath TMPDIR,
+give the agent an empty HOME, and launch it in a private tmux server:
+
+capture_directory=$(mktemp -d "$TMPDIR/documentation-capture.XXXXXX")
+mkdir "$capture_directory/home"
+tmux -S "$capture_directory/terminal.sock" new-session -d \
+  -s documentation -x 110 -y 32 \
+  "env -i HOME='$capture_directory/home' PATH='$PATH' TERM=xterm-256color TMPDIR='$capture_directory' agent-cli login"
+
+Wait for the dashboard to appear, then capture the actual pane:
+
+tmux -S "$capture_directory/terminal.sock" capture-pane -p -t documentation
+tmux -S "$capture_directory/terminal.sock" send-keys -t documentation a
+
+Wait for the chooser to appear, then capture it:
+
+tmux -S "$capture_directory/terminal.sock" capture-pane -p -t documentation
+
+Use capture-pane -p -e to preserve ANSI attributes as well.
+Do not select a provider or enter a secret to reproduce these screens.
+Stop the private server when finished:
+
+tmux -S "$capture_directory/terminal.sock" kill-server
