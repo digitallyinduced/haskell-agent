@@ -33,6 +33,7 @@ import Control.Concurrent
     , threadDelay
     )
 import Control.Exception.Safe (finally)
+import Control.Monad (forM_)
 import qualified Agent.Json.Decode as Hermes
 import Data.Aeson (Value, encode, object, (.=))
 import qualified Data.ByteString.Lazy.Char8 as LBS
@@ -283,6 +284,24 @@ spec = describe "Agent.Telegram" do
             request.managedTurnFiles `shouldBe` [document]
             request.managedTurnText `shouldSatisfy` Text.isInfixOf "Investigate this recording"
             request.managedTurnText `shouldSatisfy` Text.isInfixOf "/session/video.mp4"
+
+        it "preserves literal Unicode and Windows paths inside unambiguous fences" do
+            let paths = ["/session/撮影/video.mp4", "C:\\Users\\René\\video.mp4", "/session/```/video.mp4"]
+            forM_ paths \path -> do
+                let media = ManagedTurnMedia (Text.unpack path) "video/mp4" Nothing
+                    request = telegramMediaTurnRequest "Review" [(TelegramMediaVideo, media)]
+                    fence = if "```" `Text.isInfixOf` path then "````" else "```"
+                request.managedTurnText `shouldSatisfy` Text.isInfixOf (fence <> "\n" <> path <> "\n" <> fence)
+                request.managedTurnFiles `shouldBe` []
+
+        it "recognizes common video document extensions without a MIME type" do
+            forM_ ["3gp", "3g2", "ogv", "wmv", "flv", "3GP", "OGV", "WMV", "FLV"] \extension -> do
+                let name = "recording." <> extension
+                    named = ManagedTurnMedia "/session/media.bin" "application/octet-stream" (Just name)
+                    unnamed = ManagedTurnMedia (Text.unpack ("/session/" <> name)) "application/octet-stream" Nothing
+                forM_ [named, unnamed] \media -> do
+                    telegramMediaUsesLocalPath TelegramMediaDocument media `shouldBe` True
+                    (telegramMediaTurnRequest "Review" [(TelegramMediaDocument, media)]).managedTurnFiles `shouldBe` []
 
         it "recognizes video notes, animations, and videos uploaded as documents" do
             let unnamed = ManagedTurnMedia "/session/media.bin" "application/octet-stream" Nothing

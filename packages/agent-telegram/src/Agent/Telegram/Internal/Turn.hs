@@ -312,7 +312,7 @@ telegramMediaUsesLocalPath kind media =
     kind `elem` [TelegramMediaVideo, TelegramMediaVideoNote, TelegramMediaAnimation]
         || (kind == TelegramMediaDocument
             && ("video/" `Text.isPrefixOf` Text.toLower media.managedTurnMediaMime
-                || extension `elem` [".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".mpeg", ".mpg"]))
+                || extension `elem` [".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".mpeg", ".mpg", ".3gp", ".3g2", ".ogv", ".wmv", ".flv"]))
   where
     extension = Text.toLower $ Text.pack $ takeExtension $
         maybe media.managedTurnMediaPath Text.unpack media.managedTurnMediaName
@@ -335,11 +335,15 @@ telegramMediaTurnRequest prompt attachments =
   where
     localReferences = Text.concat
         [ "\n\n[Video available as a local file]\n"
-            <> Text.pack (show media.managedTurnMediaPath)
+            <> renderLocalPath media.managedTurnMediaPath
             <> "\nUse local tools to inspect this file or extract frames/audio as needed."
         | (kind, media) <- attachments
         , telegramMediaUsesLocalPath kind media
         ]
+    renderLocalPath path =
+        let rawPath = Text.pack path
+            fence = Text.replicate (1 + maximum (2 : map Text.length (Text.split (/= '`') rawPath))) "`"
+        in fence <> "\n" <> rawPath <> "\n" <> fence
 
 -- Retained videos remain in the session workspace for subsequent tool calls,
 -- subject to its normal retention policy. Inline inputs can be removed after
