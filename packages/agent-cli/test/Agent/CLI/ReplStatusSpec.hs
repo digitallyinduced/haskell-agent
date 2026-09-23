@@ -135,7 +135,7 @@ spec = do
                         CodexDialect
                         XAIProvider
             target.modelTarget.targetProvider `shouldBe` XAIProvider
-            target.modelTarget.targetModelId `shouldBe` "grok-4.6"
+            target.modelTarget.targetModelId `shouldBe` "grok-4.7"
             target.modelTarget.targetDialect `shouldBe` GrokBuildDialect
 
         it "keeps the current model when only the account backend restarts" do
