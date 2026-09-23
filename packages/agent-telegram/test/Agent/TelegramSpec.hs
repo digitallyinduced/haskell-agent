@@ -3,6 +3,7 @@ module Agent.TelegramSpec (spec) where
 import Agent.Telegram
 import Agent.Cancel (isCancelled)
 import Agent.OsPath (unsafeToFilePath)
+import Agent.Runtime.ManagedTurn (ManagedTurnMedia(..), ManagedTurnRequest(..))
 import qualified Agent.Telegram.Bridge as Bridge
 import Agent.Telegram.Types
     ( TelegramApprovalMode(..)
@@ -45,7 +46,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as Text
 import Agent.Provider (Provider(..))
-import System.Directory (listDirectory)
+import System.Directory (doesFileExist, listDirectory)
 import System.IO.Temp (withSystemTempDirectory)
 import System.OsPath (unsafeEncodeUtf)
 import qualified System.Timeout as Timeout
@@ -272,6 +273,87 @@ spec = describe "Agent.Telegram" do
             decode (Just (65 :: Int)) `shouldSatisfy` isLeft
 
     describe "Telegram media downloads" do
+        it "passes videos as local paths while preserving photo and document attachments" do
+            let photo = ManagedTurnMedia "/session/photo.jpg" "image/jpeg" Nothing
+                document = ManagedTurnMedia "/session/report.pdf" "application/pdf" (Just "report.pdf")
+                video = ManagedTurnMedia "/session/video.mp4" "video/mp4" Nothing
+                request = telegramMediaTurnRequest "Investigate this recording"
+                    [(TelegramMediaPhoto, photo), (TelegramMediaVideo, video), (TelegramMediaDocument, document)]
+            request.managedTurnImages `shouldBe` [photo]
+            request.managedTurnFiles `shouldBe` [document]
+            request.managedTurnText `shouldSatisfy` Text.isInfixOf "Investigate this recording"
+            request.managedTurnText `shouldSatisfy` Text.isInfixOf "/session/video.mp4"
+
+        it "recognizes video notes, animations, and videos uploaded as documents" do
+            let unnamed = ManagedTurnMedia "/session/media.bin" "application/octet-stream" Nothing
+                byMime = unnamed { managedTurnMediaMime = "video/mp4" }
+                byName = unnamed { managedTurnMediaName = Just "Recording.MOV" }
+                attachments =
+                    [ (TelegramMediaVideo, unnamed)
+                    , (TelegramMediaVideoNote, unnamed)
+                    , (TelegramMediaAnimation, unnamed)
+                    , (TelegramMediaDocument, byMime)
+                    , (TelegramMediaDocument, byName)
+                    ]
+            map (uncurry telegramMediaUsesLocalPath) attachments `shouldBe` replicate 5 True
+            (telegramMediaTurnRequest "Review" attachments).managedTurnFiles `shouldBe` []
+            telegramMediaUsesLocalPath TelegramMediaDocument unnamed `shouldBe` False
+
+        it "retains downloaded videos after turn cleanup and reuses them on retry" $
+            withSystemTempDirectory "telegram-video-retention-" \directory -> do
+                downloads <- newIORef (0 :: Int)
+                let download remote local = do
+                        atomicModifyIORef' downloads (\count -> (count + 1, ()))
+                        writeFile (unsafeToFilePath local) remote
+                        pure local
+                    prepare = downloadTelegramMediaAttachmentsWith
+                        (pure . Text.unpack) download (unsafeEncodeUtf directory) 44
+                        [testMedia TelegramMediaVideo 1, testMedia TelegramMediaPhoto 2]
+                attachments <- prepare
+                cleanupTelegramMediaAttachments attachments
+                mapM (doesFileExist . (.managedTurnMediaPath) . snd) attachments
+                    `shouldReturn` [True, False]
+                retried <- prepare
+                retried `shouldBe` attachments
+                readIORef downloads `shouldReturn` 3
+                cleanupTelegramMediaAttachments retried
+
+        it "removes a partial video download so a retry downloads it again" $
+            withSystemTempDirectory "telegram-video-partial-" \directory -> do
+                downloadTelegramMediaAttachmentsWith
+                    (pure . Text.unpack)
+                    (\remote local -> writeFile (unsafeToFilePath local) remote >> fail "download failed")
+                    (unsafeEncodeUtf directory) 47
+                    [testMedia TelegramMediaVideo 1]
+                    `shouldThrow` anyException
+                listDirectory directory `shouldReturn` []
+
+        it "retains video paths after model failure" $
+            withSystemTempDirectory "telegram-video-model-failure-" \directory -> do
+                let download remote local = writeFile (unsafeToFilePath local) remote >> pure local
+                attachments <- downloadTelegramMediaAttachmentsWith
+                    (pure . Text.unpack) download (unsafeEncodeUtf directory) 45
+                    [testMedia TelegramMediaVideo 1]
+                ((fail "provider failed" :: IO ()) `finally` cleanupTelegramMediaAttachments attachments)
+                    `shouldThrow` anyException
+                mapM (doesFileExist . (.managedTurnMediaPath) . snd) attachments `shouldReturn` [True]
+
+        it "does not remove a retained video when another download fails on retry" $
+            withSystemTempDirectory "telegram-video-retry-failure-" \directory -> do
+                let download remote local = writeFile (unsafeToFilePath local) remote >> pure local
+                    prepare = downloadTelegramMediaAttachmentsWith
+                        (pure . Text.unpack) download (unsafeEncodeUtf directory) 46
+                retained <- prepare [testMedia TelegramMediaVideo 1]
+                cleanupTelegramMediaAttachments retained
+                downloadTelegramMediaAttachmentsWith
+                    (pure . Text.unpack)
+                    (\remote local -> download remote local >> fail "download failed")
+                    (unsafeEncodeUtf directory) 46
+                    [testMedia TelegramMediaVideo 1, testMedia TelegramMediaPhoto 2]
+                    `shouldThrow` anyException
+                mapM (doesFileExist . (.managedTurnMediaPath) . snd) retained `shouldReturn` [True]
+                length <$> listDirectory directory `shouldReturn` 1
+
         it "downloads concurrently with a bound and preserves attachment order" $
             withSystemTempDirectory "telegram-media-" \directory -> do
                 active <- newIORef (0 :: Int)
