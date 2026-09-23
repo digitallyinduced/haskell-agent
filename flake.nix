@@ -1521,12 +1521,13 @@
                 devShells.docs = pkgs.mkShell {
                     packages = [
                         (pkgs.haskellPackages.ghcWithPackages (haskell: with haskell; [
-                            blaze-html bytestring containers directory filepath
-                            hspec http-types ihp-hsx tagsoup text wai wai-extra warp
+                            aeson base64-bytestring blaze-html bytestring
+                            containers directory filepath hspec http-client http-client-tls
+                            http-types ihp-hsx network-uri process random regex-tdfa
+                            safe-exceptions tagsoup temporary text wai wai-extra warp websockets
                         ]))
                         pkgs.cabal-install
                         pkgs.cabal2nix
-                        pkgs.python3
                     ];
                 };
                 packages.agent-cli-static = agentCliStaticExecutable;

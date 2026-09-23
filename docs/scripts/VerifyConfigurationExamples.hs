@@ -3,7 +3,7 @@
 module VerifyConfigurationExamples (main, verifyExamples, selfTest) where
 
 -- Load alongside the runtime library, not the small documentation shell:
--- Reproducible static-library build runner: verify_configuration_examples.py
+-- Reproducible static-library build runner: RunConfigurationExamples.hs
 -- (see its module documentation for the Nix commands).
 --
 -- nix develop -c cabal repl agent-runtime:lib:agent-runtime
@@ -11,7 +11,7 @@ module VerifyConfigurationExamples (main, verifyExamples, selfTest) where
 -- VerifyConfigurationExamples.selfTest
 -- VerifyConfigurationExamples.verifyExamples "/path/under/TMPDIR/documentation-examples"
 --
--- The Python exporter supplies manifest.json and exact rendered JSON bytes.
+-- The Haskell exporter supplies manifest.json and exact rendered JSON bytes.
 -- No user's configuration, provider credentials or network service is used.
 -- Run from the repository root. Model examples are user overlays, merged with
 -- the checked-in defaults through the same public merge function as startup.

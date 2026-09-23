@@ -34,7 +34,7 @@ repeatable commands and individual rows for remaining acceptance boundaries.
 The conclusion and priorities below describe the pre-remediation audit. The
 individual matrices are being updated with source-backed remediation evidence;
 their current row statuses, rather than this historical summary, describe the
-remaining documentation gaps. Run `verify_audit.py` for current counts. Coverage
+remaining documentation gaps. Run `VerifyAudit.hs` for current counts. Coverage
 does not imply that account-dependent or destructive workflows were executed.
 
 **No: the website does not yet cover all implemented user-facing capabilities.**
@@ -192,7 +192,7 @@ Covered merely because a command name was added to a table.
 Run the artifact checker from the repository root:
 
 ```sh
-nix develop .#docs -c python3 docs/audit/verify_audit.py
+nix develop .#docs -c runghc docs/audit/VerifyAudit.hs
 ```
 
 It checks row identifiers, status presence, and repository line citations, and

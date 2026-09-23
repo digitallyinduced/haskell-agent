@@ -6,7 +6,7 @@
 installation and a separate Haskell Agent file-reading exercise. The server's
 wire protocol and the harness are separate verification targets.
 
-The optional `scripts/verify_local_model.py` checks a running loopback Ollama
+The optional `scripts/VerifyLocalModel.hs` checks a running loopback Ollama
 server with an already-downloaded model. It does not download weights or execute
 model-generated code. Its only function implementation returns a generated
 verification string. It checks:
@@ -19,8 +19,7 @@ verification string. It checks:
 Run from the repository root after the tutorial's server and download steps:
 
 ```sh
-nix shell github:NixOS/nixpkgs/afe3d8ac4395617bdcdac9f188ac8717a062e014#python3 \
-  -c python3 docs/scripts/verify_local_model.py
+nix develop .#docs -c runghc docs/scripts/VerifyLocalModel.hs
 ```
 
 This does **not** establish that Haskell Agent can use the model. The documented
@@ -45,7 +44,7 @@ fixture heading, rather than a prose claim to have read it.
   context limit 40,960. Server explicitly configured for 32,768.
 - The tutorial's exact curl generation request: passed with visible greeting
   and `response.completed`.
-- `verify_local_model.py`: passed streaming generation, function-call decoding,
+- The original Python verifier (now `VerifyLocalModel.hs`): passed streaming generation, function-call decoding,
   and stateless function-result replay with a newly generated verification value.
 - Cloud features disabled for the inference run with `OLLAMA_NO_CLOUD=1`.
 - Harness file-reading exercise: not executed; wire-protocol success alone is

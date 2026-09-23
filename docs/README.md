@@ -154,19 +154,18 @@ The Haskell suite verifies routing, HTTP methods, search, escaping, text exports
 assets, and internal links/anchors. The Nix package also runs this suite.
 
 For optional browser verification, start `nix run .#docs` in another terminal,
-then use Playwright from the pinned Nix package set with a local Chrome binary:
+then run the Haskell browser checker with a local Chrome binary:
 
 ```sh
 CHROME_EXECUTABLE='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' \
 DOCUMENTATION_SCREENSHOTS="$TMPDIR/documentation-screenshots" \
-nix shell --impure --expr 'let f = builtins.getFlake (toString ./.); p = import f.inputs.nixpkgs { system = builtins.currentSystem; }; in p.python3.withPackages (ps: [ ps.playwright ])' \
-  -c python3 docs/scripts/verify_documentation_browser.py
+nix develop .#docs -c env TMPDIR="$TMPDIR" runghc docs/scripts/VerifyDocumentationBrowser.hs
 ```
 
 Set `DOCUMENTATION_URL` to test another address. Tests use a fresh browser
 profile, exercise desktop/mobile layouts and interactions, and verify reading
-and searching with JavaScript disabled. Playwright is test-only tooling, not
-an application dependency.
+and searching with JavaScript disabled. The checker talks directly to Chrome's
+DevTools protocol; neither Python nor Playwright is required.
 
 ### Coverage regression checks
 
@@ -174,11 +173,20 @@ With the current documentation server running, compare published article text
 with the CLI registries and configuration decoders:
 
 ```sh
-nix develop .#docs -c python3 docs/scripts/verify_documentation_coverage.py --self-test
-nix develop .#docs -c env TMPDIR="$TMPDIR" python3 docs/scripts/verify_documentation_coverage.py \
+nix develop .#docs -c runghc docs/scripts/VerifyDocumentationCoverage.hs --self-test
+nix develop .#docs -c env TMPDIR="$TMPDIR" runghc docs/scripts/VerifyDocumentationCoverage.hs \
   --url http://127.0.0.1:4321 --export-examples "$TMPDIR/documentation-examples"
-nix develop .#docs -c python3 docs/audit/verify_audit.py
-nix develop .#docs -c python3 docs/scripts/export_interface_contracts.py --check
+nix develop .#docs -c runghc docs/audit/VerifyAudit.hs
+nix develop .#docs -c runghc docs/scripts/ExportInterfaceContracts.hs --check
+```
+
+The other script regression fixtures run without a browser or model server:
+
+```sh
+nix develop .#docs -c runghc docs/audit/VerifyAudit.hs --self-test
+nix develop .#docs -c runghc docs/scripts/MaterializeInterfaceAudit.hs --self-test
+nix develop .#docs -c runghc docs/scripts/RunConfigurationExamples.hs --self-test
+nix develop .#docs -c runghc docs/scripts/VerifyLocalModel.hs --self-test
 ```
 
 Preserving `TMPDIR` explicitly keeps the exported examples in the caller's
@@ -195,7 +203,7 @@ examples:
 
 ```sh
 runtime=$(nix build .#agent-runtime --no-link --print-out-paths)
-nix develop -c env TMPDIR="$TMPDIR" python3 docs/scripts/verify_configuration_examples.py \
+nix develop .#docs -c env TMPDIR="$TMPDIR" runghc docs/scripts/RunConfigurationExamples.hs \
   --runtime-package "$runtime" --examples "$TMPDIR/documentation-examples"
 ```
 
@@ -220,6 +228,7 @@ does not prove that an endpoint exists or that an executable is installed.
 The native header is linked directly from the source repository, not duplicated.
 The downloadable HTTP OpenAPI document is a verbatim copy of its repository
 contract. After reviewing a contract change, regenerate it
-with `python3 docs/scripts/export_interface_contracts.py`; `--check` detects drift.
+with `nix develop .#docs -c runghc docs/scripts/ExportInterfaceContracts.hs`;
+`--check` detects drift.
 These references preserve the source contract's limitations rather than claiming
 that loosely typed response objects have exhaustive schemas.
