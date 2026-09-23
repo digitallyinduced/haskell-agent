@@ -1736,7 +1736,7 @@
                     # verified available usage. Keep package/unit checks enabled.
                     # agent-cli-functional-xai-hello-world =
                     #     agentCliHelloWorldFunctional "xai"
-                    #         (functionalTestModel "XAI" "grok-4.6");
+                    #         (functionalTestModel "XAI" "grok-4.7");
                 };
 
                 formatter = pkgs.nixfmt-rfc-style;

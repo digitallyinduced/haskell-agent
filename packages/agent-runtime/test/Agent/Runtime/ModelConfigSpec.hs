@@ -29,13 +29,15 @@ spec = describe "Agent.Runtime.ModelConfig" do
         (catalogDefaultForProvider catalog OpenAIProvider).catalogModelId
             `shouldBe` "gpt-5.6-sol"
         (catalogDefaultForProvider catalog XAIProvider).catalogModelId
-            `shouldBe` "grok-4.6"
+            `shouldBe` "grok-4.7"
         (catalogDefaultForProvider catalog GeminiProvider).catalogModelId
             `shouldBe` "gemini-3.7-flash"
         (catalogDefaultForProvider catalog OpenRouterProvider).catalogModelId
             `shouldBe` "stealth/ox-alpha"
         (catalogDefaultForProvider catalog ClaudeCodeProvider).catalogModelId
             `shouldBe` "sonnet"
+        catalogContextWindowFor catalog "xai" "grok-4.7"
+            `shouldBe` Just 500_000
         catalogContextWindowFor catalog "xai" "grok-4.6"
             `shouldBe` Just 500_000
         map (catalogContextWindowFor catalog "gemini")
@@ -118,6 +120,22 @@ spec = describe "Agent.Runtime.ModelConfig" do
                     , False
                     , True
                     )
+        fmap
+            (\model ->
+                ( model.catalogModelReasoningEfforts
+                , model.catalogModelDefaultReasoningEffort
+                , model.catalogModelDefault
+                ))
+            (catalogModelById catalog "grok-4.7")
+            `shouldBe`
+                Just
+                    ( Just ["low", "medium", "high", "xhigh"]
+                    , Just "high"
+                    , True
+                    )
+        fmap (.catalogModelDefault)
+            (catalogModelById catalog "grok-4.6")
+            `shouldBe` Just False
         map
             (\model ->
                 (model.catalogModelId, model.catalogModelSupportsAsyncToolCalls))
@@ -157,6 +175,21 @@ spec = describe "Agent.Runtime.ModelConfig" do
         catalogModelsForConnection organizationGatewayConnectionId catalog
             `shouldBe`
                 [ CatalogModel
+                    { catalogModelId = "grok-4.7"
+                    , catalogModelConnectionId =
+                        organizationGatewayConnectionId
+                    , catalogModelWireId = "grok-4.7"
+                    , catalogModelDialect = GrokBuildDialect
+                    , catalogModelContextWindow = Just 500_000
+                    , catalogModelLabel = Nothing
+                    , catalogModelReasoningEfforts =
+                        Just ["low", "medium", "high", "xhigh"]
+                    , catalogModelDefaultReasoningEffort = Just "high"
+                    , catalogModelSupportsAsyncToolCalls = False
+                    , catalogModelDefault = False
+                    , catalogModelFallbackPriority = Nothing
+                    }
+                , CatalogModel
                     { catalogModelId = "grok-4.6"
                     , catalogModelConnectionId =
                         organizationGatewayConnectionId
