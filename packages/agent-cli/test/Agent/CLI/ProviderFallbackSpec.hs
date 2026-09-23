@@ -167,7 +167,7 @@ spec = do
                     , model.modelTarget.targetModelId
                     ))
                 (fallbackCandidates catalog Set.empty OpenAIProvider
-                    "gpt-5.6-sol" exhausted)
+                    "gpt-6-sol" exhausted)
                 `shouldBe`
                     [ (XAIProvider, "grok-4.6")
                     , (GeminiProvider, "gemini-3.7-flash")
@@ -180,7 +180,7 @@ spec = do
                 `shouldBe` []
             map (.modelTarget.targetProvider)
                 (fallbackCandidates catalog Set.empty OpenAIProvider
-                    "gpt-5.6-sol" exhausted)
+                    "gpt-6-sol" exhausted)
                 `shouldSatisfy` (ClaudeCodeProvider `notElem`)
 
         it "skips providers already found unavailable" do
@@ -218,12 +218,12 @@ spec = do
         it "can continue past a replacement provider with rejected auth" do
             map (.modelTarget.targetProvider)
                 (fallbackCandidates catalog (Set.singleton XAIProvider)
-                    OpenAIProvider "gpt-5.6-sol"
+                    OpenAIProvider "gpt-6-sol"
                     (ProviderError AuthenticationError "rejected" Nothing))
                 `shouldBe` [GeminiProvider, OpenRouterProvider]
             map (.modelTarget.targetProvider)
                 (fallbackCandidates catalog (Set.singleton XAIProvider)
-                    OpenAIProvider "gpt-5.6-sol"
+                    OpenAIProvider "gpt-6-sol"
                     (CredentialError "credential file is invalid"))
                 `shouldBe` [GeminiProvider, OpenRouterProvider]
 
@@ -233,8 +233,10 @@ spec = do
                     "gpt-6-astra"
                     (ProviderError PermissionError "not available" Nothing))
                 `shouldBe`
-                    [ "gpt-5.6-sol"
+                    [ "gpt-6-sol"
+                    , "gpt-5.6-sol"
                     , "gpt-5.6-terra"
+                    , "gpt-6-luna"
                     , "gpt-5.6-luna"
                     , "grok-4.6"
                     , "gemini-3.7-flash"
@@ -242,10 +244,12 @@ spec = do
                     ]
             map (.modelTarget.targetModelId)
                 (fallbackCandidates catalog Set.empty OpenAIProvider
-                    "gpt-5.6-sol"
+                    "gpt-6-sol"
                     (ProviderError PermissionError "not available" Nothing))
                 `shouldBe`
-                    [ "gpt-5.6-terra"
+                    [ "gpt-5.6-sol"
+                    , "gpt-5.6-terra"
+                    , "gpt-6-luna"
                     , "gpt-5.6-luna"
                     , "grok-4.6"
                     , "gemini-3.7-flash"
@@ -256,7 +260,8 @@ spec = do
                     "gpt-5.6-terra"
                     (ProviderError UsageNotIncluded "not included" Nothing))
                 `shouldBe`
-                    [ "gpt-5.6-luna"
+                    [ "gpt-6-luna"
+                    , "gpt-5.6-luna"
                     , "grok-4.6"
                     , "gemini-3.7-flash"
                     , "stealth/ox-alpha"
@@ -265,7 +270,7 @@ spec = do
         it "does not retry the same provider for untyped HTTP permission failures" do
             map (.modelTarget.targetProvider)
                 (fallbackCandidates catalog Set.empty OpenAIProvider
-                    "gpt-5.6-sol" (HttpError 403 "forbidden"))
+                    "gpt-6-sol" (HttpError 403 "forbidden"))
                 `shouldBe`
                     [XAIProvider, GeminiProvider, OpenRouterProvider]
 

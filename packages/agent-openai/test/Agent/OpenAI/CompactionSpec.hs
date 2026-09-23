@@ -1090,6 +1090,12 @@ spec = do
                     , modelAutoCompactTokenLimit = 244_800
                     }
             isCodexResponsesLiteModel "gpt-6-astra" `shouldBe` True
+            isCodexResponsesLiteModel "gpt-6-sol" `shouldBe` True
+            isCodexResponsesLiteModel "gpt-6-luna" `shouldBe` True
+            isCodexResponsesLiteModel "gpt-5.6-sol" `shouldBe` True
+            isCodexResponsesLiteModel "gpt-5.6-luna" `shouldBe` True
+            codexAutoCompactTokenLimitFor (Just "gpt-6-sol")
+                `shouldBe` 244_800
             codexAutoCompactTokenLimitFor (Just "gpt-5.6-sol")
                 `shouldBe` 244_800
 

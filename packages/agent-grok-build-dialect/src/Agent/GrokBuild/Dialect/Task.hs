@@ -84,7 +84,7 @@ knownSubagentTypes = ["general-purpose", "explore", "plan"]
 
 -- | OpenAI child slug allowed from a Grok root when OpenAI auth is present.
 lunaSubagentModel :: Text
-lunaSubagentModel = "gpt-5.6-luna"
+lunaSubagentModel = "gpt-6-luna"
 
 -- | Grok-root Luna children always run at high reasoning effort.
 lunaSubagentEffort :: Text
@@ -110,11 +110,15 @@ canonicalizeGrokChildModel raw =
         "grok-4-5" -> Just "grok-4.5"
         "grok4.5" -> Just "grok-4.5"
         "grok4-5" -> Just "grok-4.5"
+        "gpt-6-luna" -> Just lunaSubagentModel
+        "gpt6-luna" -> Just lunaSubagentModel
+        "gpt6luna" -> Just lunaSubagentModel
         "gpt-5.6-luna" -> Just lunaSubagentModel
         "gpt-5-6-luna" -> Just lunaSubagentModel
         "gpt5.6luna" -> Just lunaSubagentModel
         "gpt5-6luna" -> Just lunaSubagentModel
         "luna" -> Just lunaSubagentModel
+        "openai/gpt-6-luna" -> Just lunaSubagentModel
         "openai/gpt-5.6-luna" -> Just lunaSubagentModel
         "openai/gpt-5-6-luna" -> Just lunaSubagentModel
         _ -> Nothing

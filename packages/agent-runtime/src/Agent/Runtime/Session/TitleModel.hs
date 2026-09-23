@@ -56,7 +56,7 @@ isAppleFoundationTitleModelName name =
 -- | OpenAI's cheap title model. Token cost is low enough that a stronger
 -- reasoning setting is worth using for a better name.
 lunaTitleModelId :: Text
-lunaTitleModelId = "gpt-5.6-luna"
+lunaTitleModelId = "gpt-6-luna"
 
 -- | Conversation excerpt size that still fits a 4K-token on-device window
 -- after the title prompt and completion. Larger catalog windows keep more
@@ -147,7 +147,7 @@ resolutionFromOption pinned option =
 -- subscription turn.
 titleReasoningEffortFor :: Text -> Text
 titleReasoningEffortFor modelId
-    | modelId == lunaTitleModelId = "high"
+    | modelId == lunaTitleModelId || modelId == "gpt-5.6-luna" = "high"
     | otherwise = "low"
 
 isCheapAuxiliary :: ModelOption -> Bool

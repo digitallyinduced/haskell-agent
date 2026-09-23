@@ -226,7 +226,8 @@ spec = do
             frame `shouldSatisfy` Text.isInfixOf "xai"
             frame `shouldSatisfy` Text.isInfixOf "openai"
             frame `shouldSatisfy` Text.isInfixOf "openrouter"
-            frame `shouldSatisfy` Text.isInfixOf "claude-code"
+            frame `shouldSatisfy` Text.isInfixOf "all providers"
+            frame `shouldSatisfy` Text.isInfixOf "gpt-6-sol"
             defaultModelFor catalog XAIProvider
                 `shouldSatisfy` (\model -> Text.isInfixOf model frame)
             frame `shouldSatisfy` Text.isInfixOf "grok-4.6"
@@ -393,8 +394,10 @@ spec = do
                     OpenAIProvider
                     "gpt-5.6-sol"
                     CodexDialect
-            listing `shouldSatisfy` Text.isInfixOf "gpt-5.6-sol"
+            listing `shouldSatisfy` Text.isInfixOf "gpt-6-sol"
             listing `shouldSatisfy` Text.isInfixOf "gpt-6-astra"
+            listing `shouldSatisfy` Text.isInfixOf "gpt-6-luna"
+            listing `shouldSatisfy` Text.isInfixOf "gpt-5.6-sol"
             listing `shouldSatisfy` Text.isInfixOf "gpt-5.6-terra"
             listing `shouldSatisfy` Text.isInfixOf "gpt-5.6-luna"
             listing `shouldSatisfy` Text.isInfixOf "openai"

@@ -131,7 +131,7 @@ devArgs resumeId underWorktree = case resumeId of
         ]
     Nothing ->
         [ "--provider", "openai"
-        , "--model", "gpt-5.6-sol"
+        , "--model", "gpt-6-sol"
         , "--yolo"
         ]
             <> ["--worktree" | not underWorktree]

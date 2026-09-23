@@ -233,18 +233,18 @@ spec = do
             readIORef events `shouldReturn` ["target", "current"]
 
     describe "devArgs" do
-        it "starts fresh REPL sessions on gpt-5.6-sol in yolo mode" do
+        it "starts fresh REPL sessions on gpt-6-sol in yolo mode" do
             devArgs Nothing False
                 `shouldBe`
                     [ "--provider", "openai"
-                    , "--model", "gpt-5.6-sol"
+                    , "--model", "gpt-6-sol"
                     , "--yolo"
                     , "--worktree"
                     ]
             devArgs Nothing True
                 `shouldBe`
                     [ "--provider", "openai"
-                    , "--model", "gpt-5.6-sol"
+                    , "--model", "gpt-6-sol"
                     , "--yolo"
                     ]
 

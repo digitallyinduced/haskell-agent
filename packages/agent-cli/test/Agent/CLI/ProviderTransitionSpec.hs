@@ -27,7 +27,7 @@ spec = do
             transitioned.optPrompt `shouldBe` Just "hello"
             transitioned.optResume `shouldBe` Nothing
             transitioned.optProvider `shouldBe` Just OpenAIProvider
-            transitioned.optModel `shouldBe` Just "gpt-5.6-sol"
+            transitioned.optModel `shouldBe` Just "gpt-6-sol"
 
         it "uses a persisted session when one exists" do
             let transitioned = applyProviderTransition defaultCliOptions
@@ -101,8 +101,8 @@ transition sessionId pending = ProviderTransition
     { transitionTarget = ModelTarget
         { targetProvider = OpenAIProvider
         , targetConnectionId = "openai"
-        , targetModelId = "gpt-5.6-sol"
-        , targetWireModelId = "gpt-5.6-sol"
+        , targetModelId = "gpt-6-sol"
+        , targetWireModelId = "gpt-6-sol"
         , targetDialect = CodexDialect
         }
     , transitionEffort = Nothing

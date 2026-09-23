@@ -50,7 +50,7 @@ spec = describe "collaboration startup" do
                 resolveCollaborationModels XAIProvider Nothing available (pure Nothing)
         (policy False).childAllowedModels `shouldBe` Just ["grok-4.6", "grok-4.5"]
         (policy True).childAllowedModels
-            `shouldBe` Just ["grok-4.6", "grok-4.5", "gpt-5.6-luna"]
+            `shouldBe` Just ["grok-4.6", "grok-4.5", "gpt-6-luna"]
 
     it "uses gateway child restrictions instead of extending the Grok list" do
         let policy = resolveCollaborationModels XAIProvider (Just ["admitted"]) True

@@ -27,7 +27,7 @@ spec = describe "Agent.Runtime.ModelConfig" do
         let decoded = decodeModelConfig "models.default.json" bytes
         catalog <- expectRight decoded
         (catalogDefaultForProvider catalog OpenAIProvider).catalogModelId
-            `shouldBe` "gpt-5.6-sol"
+            `shouldBe` "gpt-6-sol"
         (catalogDefaultForProvider catalog XAIProvider).catalogModelId
             `shouldBe` "grok-4.6"
         (catalogDefaultForProvider catalog GeminiProvider).catalogModelId
@@ -51,9 +51,11 @@ spec = describe "Agent.Runtime.ModelConfig" do
         fmap (.catalogModelId)
             (catalogModelsForConnection "openai" catalog)
             `shouldBe`
-                [ "gpt-5.6-sol"
+                [ "gpt-6-sol"
                 , "gpt-6-astra"
                 , "gpt-5.6-terra"
+                , "gpt-6-luna"
+                , "gpt-5.6-sol"
                 , "gpt-5.6-luna"
                 ]
         fmap
@@ -63,10 +65,12 @@ spec = describe "Agent.Runtime.ModelConfig" do
                 ))
             (catalogModelsForConnection "openai" catalog)
             `shouldBe`
-                [ ("gpt-5.6-sol", Just 1)
+                [ ("gpt-6-sol", Just 1)
                 , ("gpt-6-astra", Just 0)
-                , ("gpt-5.6-terra", Just 2)
-                , ("gpt-5.6-luna", Just 3)
+                , ("gpt-5.6-terra", Just 3)
+                , ("gpt-6-luna", Just 4)
+                , ("gpt-5.6-sol", Just 2)
+                , ("gpt-5.6-luna", Just 5)
                 ]
         fmap (.catalogModelId)
             (catalogModelsForConnection "gemini" catalog)
@@ -96,13 +100,31 @@ spec = describe "Agent.Runtime.ModelConfig" do
             (\model ->
                 ( model.catalogModelReasoningEfforts
                 , model.catalogModelDefaultReasoningEffort
+                , model.catalogModelDefault
                 ))
-            (catalogModelById catalog "gpt-5.6-sol")
+            (catalogModelById catalog "gpt-6-sol")
             `shouldBe`
                 Just
                     ( Just ["low", "medium", "high", "xhigh", "max"]
                     , Just "low"
+                    , True
                     )
+        fmap
+            (\model ->
+                ( model.catalogModelReasoningEfforts
+                , model.catalogModelDefaultReasoningEffort
+                , model.catalogModelDefault
+                ))
+            (catalogModelById catalog "gpt-6-luna")
+            `shouldBe`
+                Just
+                    ( Just ["low", "medium", "high", "xhigh", "max"]
+                    , Just "medium"
+                    , False
+                    )
+        fmap (.catalogModelDefault)
+            (catalogModelById catalog "gpt-5.6-sol")
+            `shouldBe` Just False
         fmap
             (\model ->
                 ( model.catalogModelReasoningEfforts
@@ -123,9 +145,11 @@ spec = describe "Agent.Runtime.ModelConfig" do
                 (model.catalogModelId, model.catalogModelSupportsAsyncToolCalls))
             (catalogModelsForConnection "openai" catalog)
             `shouldBe`
-                [ ("gpt-5.6-sol", False)
+                [ ("gpt-6-sol", False)
                 , ("gpt-6-astra", True)
                 , ("gpt-5.6-terra", False)
+                , ("gpt-6-luna", False)
+                , ("gpt-5.6-sol", False)
                 , ("gpt-5.6-luna", False)
                 ]
         catalogSupportsAsyncToolCallsForTransport
@@ -320,9 +344,9 @@ spec = describe "Agent.Runtime.ModelConfig" do
                 [ "{"
                 , "  \"version\": 1,"
                 , "  \"models\": [{"
-                , "    \"id\": \"gpt-5.6-sol\","
+                , "    \"id\": \"gpt-6-sol\","
                 , "    \"connection\": \"openai\","
-                , "    \"model\": \"gpt-5.6-sol\","
+                , "    \"model\": \"gpt-6-sol\","
                 , "    \"dialect\": \"codex\","
                 , "    \"label\": \"overridden\","
                 , "    \"default\": true"
@@ -334,11 +358,11 @@ spec = describe "Agent.Runtime.ModelConfig" do
                 ("models.default.json", defaults)
                 (Just ("models.json", overlay)))
         let matching =
-                filter ((== "gpt-5.6-sol") . (.catalogModelId))
+                filter ((== "gpt-6-sol") . (.catalogModelId))
                     (catalogModels catalog)
         length matching `shouldBe` 1
         fmap (.catalogModelWireId) matching
-            `shouldBe` ["gpt-5.6-sol"]
+            `shouldBe` ["gpt-6-sol"]
         fmap (.catalogModelLabel) matching
             `shouldBe` [Just "overridden"]
 

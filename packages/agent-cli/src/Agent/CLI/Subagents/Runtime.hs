@@ -1323,7 +1323,7 @@ resolveChildModelAndEffort
         Nothing -> reasoningEffortText (defaultEffortFor provider)
     defaultChildEffort
         | provider == OpenAIProvider
-        , model == "gpt-5.6-luna"
+        , model == "gpt-6-luna" || model == "gpt-5.6-luna"
         , inheritedEffort `notElem` ["xhigh", "max"] = "high"
         | otherwise = inheritedEffort
 

@@ -77,6 +77,9 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         canonicalizeGrokChildModel "Grok 4.6" `shouldBe` Just "grok-4.6"
         canonicalizeGrokChildModel "grok-4-5" `shouldBe` Just "grok-4.5"
         canonicalizeGrokChildModel "luna" `shouldBe` Just lunaSubagentModel
+        canonicalizeGrokChildModel "gpt-6-luna" `shouldBe` Just lunaSubagentModel
+        canonicalizeGrokChildModel "openai/gpt-6-luna"
+            `shouldBe` Just lunaSubagentModel
         canonicalizeGrokChildModel "openai/gpt-5.6-luna"
             `shouldBe` Just lunaSubagentModel
         canonicalizeGrokChildModel "grok-4-1-fast" `shouldBe` Nothing
@@ -122,7 +125,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
                     Nothing
                 tool = taskTool cwd ctx typesRef
             tool.appToolDescription `shouldSatisfy`
-                Text.isInfixOf "gpt-5.6-luna"
+                Text.isInfixOf "gpt-6-luna"
             tool.appToolDescription `shouldSatisfy`
                 Text.isInfixOf "ONLY use model slugs"
             tool.appToolDescription `shouldSatisfy`
