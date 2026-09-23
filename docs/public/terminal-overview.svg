@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="610" viewBox="0 0 1100 610" role="img" aria-labelledby="title description">
+  <title id="title">Selected output from agent-cli --help</title>
+  <desc id="description">Actual command help captured in a terminal, typeset with three explanatory annotations: select the model and working directory, choose the rendering mode, and control tool approvals.</desc>
+  <rect width="1100" height="610" rx="12" fill="#111820"/>
+  <rect width="1100" height="54" rx="12" fill="#202b37"/>
+  <g fill="#eef3f8" font-family="monospace" font-size="17">
+    <text x="28" y="34">$ agent-cli --help</text>
+    <text x="28" y="94">Usage: agent-cli [OPTIONS]</text>
+    <text x="55" y="136">--model NAME        Override the saved last model</text>
+    <text x="55" y="164">--cwd DIR           Working directory for tools (default: current)</text>
+    <text x="55" y="192">--worktree          Create a new git worktree under ~/.haskell-agent/worktrees</text>
+    <text x="55" y="276">--fullscreen        Use the retained full-screen TUI</text>
+    <text x="55" y="304">--minimal           Use terminal-native append-only rendering</text>
+    <text x="55" y="388">--yolo              Auto-approve tools; computer use asks separately</text>
+    <text x="55" y="416">--no-yolo           Never auto-approve; deny mutating tools without a TTY</text>
+  </g>
+  <g fill="#a6dfc4" font-family="sans-serif" font-size="17">
+    <text x="55" y="227">1. Select the model and checkout before giving the agent a task.</text>
+    <text x="55" y="339">2. Choose fullscreen interaction or terminal-native output.</text>
+    <text x="55" y="451">3. Choose the approval policy deliberately; these flags have different effects.</text>
+  </g>
+  <g fill="#a6dfc4" font-family="sans-serif" font-size="16" font-weight="bold" text-anchor="middle">
+    <text x="28" y="136">1</text>
+    <text x="28" y="276">2</text>
+    <text x="28" y="388">3</text>
+  </g>
+  <path d="M28 486H1072" stroke="#354352"/>
+  <g fill="#aebdcb" font-family="sans-serif" font-size="16">
+    <text x="28" y="523">Selected terminal output, re-typeset with annotations. Not an interactive-session screenshot.</text>
+    <text x="28" y="553">Captured 22 September 2026 · agent-cli 0.1.0.0 · commit 9a20f72</text>
+    <text x="28" y="580">Run agent-cli --help for the full reference supplied by your installed version.</text>
+  </g>
+</svg>

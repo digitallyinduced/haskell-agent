@@ -1,0 +1,25 @@
+Terminal overview provenance
+
+Captured: 2026-09-22
+Executable: agent-cli 0.1.0.0 (commit 9a20f72, built 2026-09-15)
+Command: agent-cli --help
+Terminal: tmux, 110 columns by 36 rows
+
+The executable ran with HOME pointing to a fresh directory under TMPDIR.
+No model request, provider authentication, private session, or MCP operation
+was performed. The help output was captured with tmux capture-pane.
+
+terminal-overview.svg reproduces selected lines of that output, with additional
+numbered explanations. Omitted lines are not represented as contiguous output.
+It is an annotated, re-typeset terminal capture, not a pixel screenshot of the
+interactive interface. The source version and capture date are visible in it.
+
+Selected captured lines:
+Usage: agent-cli [OPTIONS]
+      --model NAME        Override the saved last model
+      --cwd DIR           Working directory for tools (default: current)
+      --worktree          Create a new git worktree under ~/.haskell-agent/worktrees
+      --fullscreen        Use the retained full-screen TUI
+      --minimal           Use terminal-native append-only rendering
+      --yolo              Auto-approve tools; computer use asks separately
+      --no-yolo           Never auto-approve; deny mutating tools without a TTY

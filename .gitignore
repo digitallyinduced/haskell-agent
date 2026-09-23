@@ -5,6 +5,10 @@
 /.haskell-agent/
 /result
 /result-*
+/docs/node_modules/
+/docs/dist/
+/docs/.astro/
+/docs/dist-newstyle/
 /eval-results/
 /.ghc.environment.*
 *.hi

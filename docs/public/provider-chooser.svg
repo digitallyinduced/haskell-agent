@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="240" viewBox="0 0 760 240" role="img" aria-labelledby="title description">
+  <title id="title">Captured provider account chooser</title>
+  <desc id="description">Actual agent-cli interactive output captured with tmux after pressing a in the login dashboard. OpenAI is selected, followed by xAI, OpenRouter, Gemini, and Claude Code. No account was connected.</desc>
+  <rect width="760" height="240" rx="8" fill="#10141c"/>
+  <g font-family="Menlo,DejaVu Sans Mono,monospace" font-size="17" xml:space="preserve">
+    <text x="22" y="36" fill="#6ed7e0" font-weight="bold">connect account</text>
+    <text x="22" y="63"><tspan fill="#e8c46a" font-weight="bold">› </tspan><tspan fill="#8995a9">openai</tspan></text>
+    <text x="22" y="90" fill="#8995a9">  xai</text>
+    <text x="22" y="117" fill="#8995a9">  openrouter</text>
+    <text x="22" y="144" fill="#8995a9">  gemini</text>
+    <text x="22" y="171" fill="#8995a9">  claude-code</text>
+    <text x="22" y="210" fill="#8995a9">↑↓/jk or scroll · click/enter · esc/q</text>
+  </g>
+</svg>
