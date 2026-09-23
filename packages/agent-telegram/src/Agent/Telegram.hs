@@ -43,6 +43,9 @@ module Agent.Telegram
     , TelegramUserResolution(..)
     , transcribeWithXAI
     , downloadTelegramMediaAttachmentsWith
+    , telegramMediaTurnRequest
+    , telegramMediaUsesLocalPath
+    , cleanupTelegramMediaAttachments
     , TelegramTurnResponse(..)
     , withTelegramTurnCancellationUsing
     , interruptTelegramTurnUsing
@@ -54,6 +57,9 @@ import Agent.Telegram.Internal.Support (withTelegramProgressUsing)
 import Agent.Telegram.Internal.Text (parseAllowedUsers, splitTelegramText)
 import Agent.Telegram.Internal.Turn
     ( downloadTelegramMediaAttachmentsWith
+    , telegramMediaTurnRequest
+    , telegramMediaUsesLocalPath
+    , cleanupTelegramMediaAttachments
     , TelegramTurnResponse(..)
     , withTelegramTurnCancellationUsing
     , interruptTelegramTurnUsing
