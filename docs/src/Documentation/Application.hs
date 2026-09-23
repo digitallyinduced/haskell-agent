@@ -33,7 +33,6 @@ loadApplication directory = do
         ,("/login-dashboard.svg", "image/svg+xml", "login-dashboard.svg")
         ,("/provider-chooser.svg", "image/svg+xml", "provider-chooser.svg")
         ,("/interactive-terminal-captures.txt", "text/plain; charset=utf-8", "interactive-terminal-captures.txt")
-        ,("/HaskellAgentBridge.h", "text/plain; charset=utf-8", "HaskellAgentBridge.h")
         ,("/agent-server-openapi.json", "application/json", "agent-server-openapi.json")]
     pure (application (Map.fromList assets))
   where

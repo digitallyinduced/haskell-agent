@@ -124,7 +124,7 @@ spec application = do
                 simpleStatus result `shouldBe` status200
                 lookup hContentType (simpleHeaders result) `shouldBe` Just contentType
                 simpleBody result `shouldSatisfy` (not . LazyByteString.null)
-        forM_ [("/HaskellAgentBridge.h", "text/plain; charset=utf-8"), ("/agent-server-openapi.json", "application/json")] $ \(path, contentType) ->
+        forM_ [("/agent-server-openapi.json", "application/json")] $ \(path, contentType) ->
             it ("serves the interface contract " <> show path) $ do
                 result <- fetch application methodGet path
                 simpleStatus result `shouldBe` status200
@@ -169,7 +169,7 @@ validateLinks page = do
         sidebarTags = takeWhile (/= TagClose "nav") $ dropWhile (not . isSidebar) (pageTags page)
         sidebarLinks = [value | TagOpen "a" attributes <- sidebarTags, ("href", value) <- attributes]
         available = map pagePath pages <> map textPath pages <> ["/llms.txt", "/search/", "/documentation.css", "/documentation.js", "/favicon.svg", "/terminal-overview.svg", "/terminal-overview.txt", "/login-dashboard.svg", "/provider-chooser.svg", "/interactive-terminal-captures.txt"]
-        interfaceAssets = ["/HaskellAgentBridge.h", "/agent-server-openapi.json"]
+        interfaceAssets = ["/agent-server-openapi.json"]
     nub ids `shouldBe` ids
     forM_ pages $ \target -> pagePath target `shouldSatisfy` (`elem` sidebarLinks)
     forM_ references $ \reference ->

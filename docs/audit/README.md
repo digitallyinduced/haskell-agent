@@ -22,8 +22,9 @@ host-specific evidence; this is not a claim of exhaustive end-to-end coverage.
 
 Validation includes 182 Haskell website tests, desktop/mobile browser checks,
 registry-derived presence checks, and 11 rendered configuration examples accepted
-by the actual product decoders with positive/negative fixtures. Bundled OpenAPI
-and native C contracts are checked byte-for-byte against repository sources.
+by the actual product decoders with positive/negative fixtures. The bundled OpenAPI
+contract is checked byte-for-byte against its repository source; the native C
+header is linked directly from the source repository rather than duplicated.
 These checks do not execute authenticated provider, deployment, native-host,
 database recovery or externally mutating workflows. See `docs/README.md` for
 repeatable commands and individual rows for remaining acceptance boundaries.

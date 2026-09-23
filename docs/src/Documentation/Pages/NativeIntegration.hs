@@ -34,10 +34,10 @@ page = Page
         return codes and operation-specific JSON schemas. Do not mix a newer header with
         an older library. The <code>agent-native-bridge-library</code> output is the Haskell
         package and is not interchangeable with a ready-made GUI app.</p>
-        <p><a href="/HaskellAgentBridge.h">Read or download the complete C ABI reference</a>,
-        bundled locally with this documentation. It includes every declaration and
+        <p><a href="https://github.com/digitallyinduced/haskell-agent/blob/master/packages/agent-native-bridge/include/HaskellAgentBridge.h">Read the complete C ABI reference in the source repository</a>.
+        Select the revision matching your library. It includes every declaration and
         contract comment, including callback schemas, result capacities and operation-specific
-        return values. This is a verbatim source export, not a hand-maintained subset.
+        return values. The documentation links to the source rather than maintaining a copy.
         Compare it with your installed distribution before compiling a consumer.</p>
         <ol>
             <li>Initialize the runtime, create an engine with a retained event callback,

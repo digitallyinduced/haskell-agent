@@ -150,6 +150,10 @@ The daemon command parser recognizes **6 commands**. The wire transport has 4 cl
 
 The native bridge has **109 `foreign export` declarations** in `packages/agent-native-bridge/ffi`. This is an implemented embedding interface, **not evidence that a complete macOS/iOS/Android/Windows application is shipped in this checkout**. The public contract is `packages/agent-native-bridge/include/HaskellAgentBridge.h`. The rows below group exports by user operation; lifecycle/helper exports remain in the corresponding family. These families are not a count of individual features.
 
+The documentation now links directly to the repository header. References below
+to a local or verbatim header describe the original audit evidence, not a bundled
+copy; no duplicate header is retained in the documentation assets.
+
 All families lack a website-native workflow or embedder guide. Some underlying CLI concepts are documented; that does not explain callback lifetime, result ownership, cancellation or native interaction behavior.
 
 | ID | Implemented operation family | Source | Website coverage | Required addition |

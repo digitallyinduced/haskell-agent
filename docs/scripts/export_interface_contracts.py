@@ -9,7 +9,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACTS = {
-    "HaskellAgentBridge.h": "packages/agent-native-bridge/include/HaskellAgentBridge.h",
     "agent-server-openapi.json": "packages/agent-server/openapi.json",
 }
 

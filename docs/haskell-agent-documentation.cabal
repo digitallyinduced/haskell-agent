@@ -13,7 +13,6 @@ data-files:
     public/login-dashboard.svg
     public/provider-chooser.svg
     public/interactive-terminal-captures.txt
-    public/HaskellAgentBridge.h
     public/agent-server-openapi.json
 
 common shared

@@ -217,8 +217,9 @@ Do not tag tool arguments or protocol messages as configuration. Keep examples
 self-contained, with placeholders instead of credentials; decoder acceptance
 does not prove that an endpoint exists or that an executable is installed.
 
-The downloadable native header and HTTP OpenAPI document are verbatim copies of
-the repository contracts. After reviewing a contract change, regenerate them
+The native header is linked directly from the source repository, not duplicated.
+The downloadable HTTP OpenAPI document is a verbatim copy of its repository
+contract. After reviewing a contract change, regenerate it
 with `python3 docs/scripts/export_interface_contracts.py`; `--check` detects drift.
 These references preserve the source contract's limitations rather than claiming
 that loosely typed response objects have exhaustive schemas.
