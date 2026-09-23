@@ -69,7 +69,7 @@ fixBug = Page
     }
 
 fixture :: Text
-fixture = "TUTORIAL_DIRECTORY=$(mktemp -d \"$TMPDIR/agent-documentation-tutorial.XXXXXX\")\n\
+fixture = "TUTORIAL_DIRECTORY=$(mktemp -d -t agent-documentation-tutorial.XXXXXX)\n\
     \cd \"$TUTORIAL_DIRECTORY\"\n\
     \cat > flake.nix <<'EOF'\n\
     \{\n\

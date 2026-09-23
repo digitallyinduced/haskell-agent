@@ -171,7 +171,7 @@ modelDownload = "export OLLAMA_HOST=127.0.0.1:11434\n\
     \ollama show qwen3:0.6b"
 
 toolFixture :: Text
-toolFixture = "verification_directory=$(mktemp -d \"${TMPDIR:?}/local-model-verification.XXXXXX\")\n\
+toolFixture = "verification_directory=$(mktemp -d -t local-model-verification.XXXXXX)\n\
     \printf '# Local model verification\\n\\nThis is a read-only connection test.\\n' > \"$verification_directory/README.md\"\n\
     \agent-cli --model local-coder --cwd \"$verification_directory\" \\\n\
     \  --no-skills --no-agents-md"
