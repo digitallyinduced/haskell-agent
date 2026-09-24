@@ -39,7 +39,7 @@ import Agent.CLI.Options
       isOneShot,
       CliOptions(optMotionMode, optManagedTurnFile, optScreenMode,
                  optProvider, optModel, optWorktree, optEffort, optPrompt,
-                 optPromptFile, optResume, optCwd, optCodeMode, optYolo), Override(..),
+                 optPromptFile, optResume, optCwd, optCodeMode),
       CodeModeOption(CodeModeEnabled),
       ScreenMode(ScreenMinimal) )
 import Agent.CLI.Provider.Switch
@@ -1141,13 +1141,9 @@ prepareAgentIterationAction request resources interface resumeLock
     , isNothing resources.iterationResumed
     , isNothing request.iterationTransition = do
         let options = request.iterationOptions
-            prepareAccountUsage =
-                options.optYolo == Explicit True
-                    || isNothing interface.iterationFullscreen
-                    || isJust options.optProvider
-                    || isJust options.optModel
+        -- Load credentials while workspace setup continues. Do not refresh
+        -- account usage here: that request must not delay session creation.
         withPreparedStartupAuth
-            prepareAccountUsage
             options.optProvider
             (runAction . Just)
     | otherwise = runAction Nothing

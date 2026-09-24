@@ -18,6 +18,7 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
+import qualified Network.HTTP.Client as HttpClient
 import Network.HTTP.Simple
 
 data UsageSnapshot = UsageSnapshot
@@ -89,9 +90,11 @@ optionalNullable key decoder =
 -- | Read current rate-limit usage for one ChatGPT account.
 --
 -- Uses the same endpoint and headers as @openai/codex@. The endpoint belongs
--- to the ChatGPT backend rather than the public OpenAI API, so callers should
--- treat failures as a health signal and keep normal request-side rate-limit
--- handling as a fallback.
+-- to the ChatGPT backend rather than the public OpenAI API. The result is
+-- advisory: authentication and quota enforcement happen on the model request.
+-- Callers that can proceed without a snapshot must not wait for this function.
+-- The timeout bounds display and cooldown-recheck callers so a stalled
+-- connection cannot hold them.
 fetchUsage :: Text -> Text -> IO (Either ApiError UsageSnapshot)
 fetchUsage accessToken accountId = tryAny requestUsage >>= \case
     Left exception -> pure $ Left $ ConnectionError
@@ -109,7 +112,14 @@ fetchUsage accessToken accountId = tryAny requestUsage >>= \case
         httpLBS
             $ setRequestHeader "Authorization" ["Bearer " <> Text.encodeUtf8 accessToken]
             $ setRequestHeader "ChatGPT-Account-ID" [Text.encodeUtf8 accountId]
-            $ setRequestHeader "Accept" ["application/json"] request
+            $ setRequestHeader "Accept" ["application/json"]
+            $ setRequestResponseTimeout
+                (HttpClient.responseTimeoutMicro advisoryUsageTimeoutMicroseconds)
+                request
+
+-- | Bound for the advisory ChatGPT usage probe, including connection setup.
+advisoryUsageTimeoutMicroseconds :: Int
+advisoryUsageTimeoutMicroseconds = 5 * 1_000_000
 
 decodeUsageResponse :: LBS.ByteString -> Either ApiError UsageSnapshot
 decodeUsageResponse body = case Json.decodeEither usageSnapshotDecoder (LBS.toStrict body) of

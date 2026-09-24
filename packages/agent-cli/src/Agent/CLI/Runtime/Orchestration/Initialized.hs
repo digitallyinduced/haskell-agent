@@ -13,12 +13,7 @@ import Agent.CLI.ActiveAccount
     , trackCredentialAccount
     )
 import Agent.CLI.AccountSelection
-    ( PreparedProviderAccounts,
-      SelectedAccount(..),
-      loadedAuthSupportsUsageAccountSelection,
-      prepareProviderAccounts,
-      selectPreparedProviderAccount,
-      selectProviderAccount )
+    ( loadedAuthSupportsUsageAccountSelection )
 import Agent.Accounts.Auth
     ( LoadedAuth(loadedAccountLabel, LoadedAuth, loadedOpenAiPool,
                  loadedProvider, loadedTokenProvider, loadedSelectionId),
@@ -137,7 +132,7 @@ import Agent.Skills ( SkillCatalog(..) )
 import Agent.Store.Postgres ( trustedPool )
 import Control.Applicative ( (<|>) )
 import Control.Concurrent.Async
-    ( Async, cancel, concurrently, poll, wait, withAsync )
+    ( Async, cancel, concurrently, wait, withAsync )
 import Control.Concurrent.MVar
     ( MVar
     , modifyMVar_
@@ -160,7 +155,6 @@ import qualified Data.Text as Text ( null, pack, unpack )
 
 data PreparedStartupAuth = PreparedStartupAuth
     { preparedAuthResult :: !(Either Text LoadedAuth)
-    , preparedAccountUsage :: !(Maybe PreparedProviderAccounts)
     }
 
 data PreparedStartupAuthWorker = PreparedStartupAuthWorker
@@ -208,14 +202,12 @@ data InitializedTargets = InitializedTargets
 data RoutedStartupAuth = RoutedStartupAuth
     { routedInitialLoaded :: LoadedAuth
     , routedLearnAboutUserRequested :: Bool
-    , routedPreparedAccountUsage :: Maybe PreparedProviderAccounts
     , routedCustomBearerToken :: Maybe Text
     }
 
 data InitializedAuth = InitializedAuth
     { initializedLoaded :: LoadedAuth
     , initializedLearnAboutUserRequested :: Bool
-    , initializedPreparedAccountUsage :: Maybe PreparedProviderAccounts
     , initializedCustomBearerToken :: Maybe Text
     , initializedStartupAccountIds :: Maybe (Text, Text)
     }
@@ -234,28 +226,21 @@ data InitializedHttpRuntime = InitializedHttpRuntime
         Text -> IO (Either ApiError Text)
     }
 
-prepareStartupAuth :: Bool -> Maybe Provider -> IO PreparedStartupAuth
-prepareStartupAuth prepareAccountUsage requestedProvider = do
+-- | Load provider credentials. Account usage is not part of this step.
+prepareStartupAuth :: Maybe Provider -> IO PreparedStartupAuth
+prepareStartupAuth requestedProvider = do
     authResult <- loadAuth requestedProvider
-    accountUsage <- case authResult of
-        Right loaded
-            | prepareAccountUsage
-            , loadedAuthSupportsUsageAccountSelection loaded ->
-                Just <$> prepareProviderAccounts loaded.loadedProvider Nothing
-        _ -> pure Nothing
     pure PreparedStartupAuth
         { preparedAuthResult = authResult
-        , preparedAccountUsage = accountUsage
         }
 
 withPreparedStartupAuth
-    :: Bool
-    -> Maybe Provider
+    :: Maybe Provider
     -> (PreparedStartupAuthWorker -> IO a)
     -> IO a
-withPreparedStartupAuth prepareAccountUsage requestedProvider action =
+withPreparedStartupAuth requestedProvider action =
     withAsync
-        (prepareStartupAuth prepareAccountUsage requestedProvider)
+        (prepareStartupAuth requestedProvider)
         \worker -> do
             retire <- newEmptyMVar
             withAsync
@@ -632,21 +617,17 @@ loadInitializedAuth request targets =
             pure RoutedStartupAuth
                 { routedInitialLoaded = exactLoaded
                 , routedLearnAboutUserRequested = False
-                , routedPreparedAccountUsage = Nothing
                 , routedCustomBearerToken = Nothing
                 }
         (Nothing, Nothing) -> do
-            (startupAuth, accountUsage) <- loadPreparedOrStartupAuth
+            startupAuth <- loadPreparedOrStartupAuth
                 request.initializedPreparedAuth
-                (options.optYolo == Explicit True
-                    && targets.initializedCheckStartupUsageInBackground)
                 startup
                 request.initializedTransition
                 requestedProvider
             pure RoutedStartupAuth
                 { routedInitialLoaded = fst startupAuth
                 , routedLearnAboutUserRequested = snd startupAuth
-                , routedPreparedAccountUsage = accountUsage
                 , routedCustomBearerToken = Nothing
                 }
         (Nothing, Just (connectionId, responses)) -> do
@@ -655,7 +636,6 @@ loadInitializedAuth request targets =
             pure RoutedStartupAuth
                 { routedInitialLoaded = loaded
                 , routedLearnAboutUserRequested = False
-                , routedPreparedAccountUsage = Nothing
                 , routedCustomBearerToken = bearerToken
                 }
         (Just _, Just _) ->
@@ -663,7 +643,6 @@ loadInitializedAuth request targets =
                 "gateway and custom connection routing cannot both be active"
   where
     startup = request.initializedStartup
-    options = request.initializedOptions
     requestedProvider = targets.initializedRequestedProvider
 
 loadCustomResponsesAuth
@@ -738,30 +717,24 @@ selectInitializedStartupAccount request workspace targets routed = do
                 | not
                     (loadedAuthSupportsUsageAccountSelection initialLoaded) ->
                         pure (initialLoaded, Nothing)
-                | targets.initializedCheckStartupUsageInBackground
-                , isNothing preparedAccountUsage ->
-                    selectRememberedAccount initialLoaded
                 | otherwise ->
-                    selectUsableAccount initialLoaded
+                    selectRememberedAccount initialLoaded
     pure InitializedAuth
         { initializedLoaded = loaded
         , initializedLearnAboutUserRequested =
             routed.routedLearnAboutUserRequested
-        , initializedPreparedAccountUsage = preparedAccountUsage
         , initializedCustomBearerToken =
             routed.routedCustomBearerToken
         , initializedStartupAccountIds = startupAccountIds
         }
   where
     initialLoaded = routed.routedInitialLoaded
-    preparedAccountUsage = routed.routedPreparedAccountUsage
     projectSettings = workspace.initializedProjectSettings
-    startup = request.initializedStartup
 
     selectRememberedAccount loaded = do
-        -- Make the remembered model/account usable immediately. The scoped
-        -- availability worker later checks the pool and triggers startup
-        -- fallback if every credential is exhausted.
+        -- Pin the remembered account without consulting usage. Quota
+        -- exhaustion is reported by the model request, which already
+        -- fails over to another credential.
         let provider = loaded.loadedProvider
         case projectAccountFor provider projectSettings of
             Nothing -> pure (loaded, Nothing)
@@ -779,43 +752,6 @@ selectInitializedStartupAccount request workspace targets routed = do
                                     , remembered.projectAccountId
                                     )
                                 )
-
-    selectUsableAccount loaded = do
-        let provider = loaded.loadedProvider
-            rememberedIds = fmap
-                (\account ->
-                    ( account.projectAccountSelectionId
-                    , account.projectAccountId
-                    ))
-                (projectAccountFor provider projectSettings)
-            selectStartupAccount = case preparedAccountUsage of
-                Just accountUsage ->
-                    pure $ selectPreparedProviderAccount
-                        rememberedIds
-                        accountUsage
-                Nothing ->
-                    selectProviderAccount
-                        provider
-                        Nothing
-                        rememberedIds
-        selectStartupAccount >>= \case
-            Left err ->
-                startupDie startup err
-            Right selected ->
-                loadSelectedAccountAuth
-                    provider
-                    selected.selectedSelectionId
-                    selected.selectedAccountId
-                    >>= either
-                        (startupDie startup)
-                        (\selectedLoaded ->
-                            pure
-                                ( selectedLoaded
-                                , Just
-                                    ( selected.selectedSelectionId
-                                    , selected.selectedAccountId
-                                    )
-                                ))
 
 validateInitializedAuth
     :: InitializedRequest
@@ -1206,7 +1142,6 @@ launchInitializedTools request workspace targets auth refs httpRuntime =
         , gatewayIdentity = targets.initializedGatewayIdentity
         , checkStartupUsageInBackground =
             targets.initializedCheckStartupUsageInBackground
-                && isNothing auth.initializedPreparedAccountUsage
         , configuredOptionTarget = targets.initializedConfiguredTarget
         , customResponses = targets.initializedCustomResponses
         , cwd = request.initializedCwd
@@ -1260,49 +1195,31 @@ launchInitializedTools request workspace targets auth refs httpRuntime =
 
 loadPreparedOrStartupAuth
     :: Maybe PreparedStartupAuthWorker
-    -> Bool
     -> StartupRuntime
     -> Maybe ProviderTransition
     -> Maybe Provider
-    -> IO ((LoadedAuth, Bool), Maybe PreparedProviderAccounts)
+    -> IO (LoadedAuth, Bool)
 loadPreparedOrStartupAuth
     prepared
-    usePreparedOnlyIfReady
     startup
     transition
     requestedProvider =
     case prepared of
         Nothing -> loadFallback
         Just preparedWorker -> do
-            let worker = preparedWorker.preparedStartupAsync
-            preparedResult <-
-                if usePreparedOnlyIfReady
-                    then
-                        poll worker >>= \case
-                            Nothing -> do
-                                -- Some HTTP clients take time to acknowledge
-                                -- async cancellation. Ask the scoped retirement
-                                -- worker to handle that wait so startup can
-                                -- continue to the post-prompt availability
-                                -- probe.
-                                preparedWorker.retirePreparedStartup
-                                pure Nothing
-                            Just _ -> Just <$> wait worker
-                    else Just <$> wait worker
-            case preparedResult of
-                Just result
-                    | Right loaded <- result.preparedAuthResult
-                    , maybe True (== loaded.loadedProvider) requestedProvider ->
-                        (, result.preparedAccountUsage)
-                            <$> loadStartupAuthFromResult
-                                startup
-                                transition
-                                requestedProvider
-                                result.preparedAuthResult
+            result <- wait preparedWorker.preparedStartupAsync
+            case result.preparedAuthResult of
+                Right loaded
+                    | maybe True (== loaded.loadedProvider) requestedProvider ->
+                        loadStartupAuthFromResult
+                            startup
+                            transition
+                            requestedProvider
+                            result.preparedAuthResult
                 _ -> loadFallback
   where
     loadFallback =
-        (, Nothing) <$> loadStartupAuth startup transition requestedProvider
+        loadStartupAuth startup transition requestedProvider
 
 loadGatewayModelAccess
     :: Maybe GatewayCredential

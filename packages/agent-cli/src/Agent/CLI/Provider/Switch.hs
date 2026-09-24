@@ -22,8 +22,6 @@ import Agent.Runtime.Session.Request
     )
 import Agent.CLI.AccountSelection
     ( SelectedAccount(..)
-    , providerSupportsUsageAccountSelection
-    , selectProviderAccount
     )
 import Agent.Runtime.Session.History
     ( LiveConversation
@@ -61,10 +59,6 @@ import Agent.CLI.Project
     , projectAccountFor
     , resolveProjectRoot
     , persistModelSwitch
-    )
-import Agent.CLI.ProviderAvailability
-    ( probeLoadedAutomaticAvailability
-    , probeLoadedAvailability
     )
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
@@ -448,23 +442,14 @@ validateSelectedAccountTarget provider selectionId accountId =
                     <> providerSlug provider
                     <> " account: "
                     <> err
-        Right loaded ->
-            probeLoadedAvailability loaded >>= \case
-                Left err -> do
-                    now <- getCurrentTime
-                    pure $ Left $
-                        "cannot switch to "
-                            <> providerSlug provider
-                            <> " account: "
-                            <> formatApiErrorInlineAt now err
-                Right usable
-                    | usable.loadedProvider /= provider ->
-                        pure $ Left $
-                            "cannot switch to "
-                                <> providerSlug provider
-                                <> " account: auth resolved "
-                                <> providerSlug usable.loadedProvider
-                    | otherwise -> pure (Right ())
+        Right loaded
+            | loaded.loadedProvider /= provider ->
+                pure $ Left $
+                    "cannot switch to "
+                        <> providerSlug provider
+                        <> " account: auth resolved "
+                        <> providerSlug loaded.loadedProvider
+            | otherwise -> pure (Right ())
 
 requestAutomaticProviderFallback
     :: SessionEnv
@@ -722,7 +707,7 @@ validateProviderTarget choice =
             [OpenAIProvider, XAIProvider, OpenRouterProvider, GeminiProvider]
     then pure (Right ())
     else fmap (() <$) $
-        loadValidatedProviderTarget probeLoadedAvailability choice
+        loadValidatedProviderTarget choice
 
 validateAutomaticProviderTarget
     :: OsPath
@@ -731,58 +716,67 @@ validateAutomaticProviderTarget
     -> IO (Either Text (Maybe SelectedAccount))
 validateAutomaticProviderTarget cwd sourceBilling choice = do
     let provider = choice.modelTarget.targetProvider
-    if not (providerSupportsUsageAccountSelection provider)
-        then fmap (Nothing <$) $
-            loadValidatedProviderTarget
-                probeLoadedAutomaticAvailability
-                choice
-        else do
-            settings <- resolveProjectRoot cwd >>= loadProjectSettings
-            let rememberedIds = fmap
-                    (\account ->
-                        ( account.projectAccountSelectionId
-                        , account.projectAccountId
-                        ))
-                    (projectAccountFor provider settings)
-                requiredBilling = case sourceBilling of
-                    SubscriptionBilled -> Just SubscriptionBilled
-                    ApiBilled -> Nothing
-            selectProviderAccount
+    settings <- resolveProjectRoot cwd >>= loadProjectSettings
+    let remembered = projectAccountFor provider settings
+    rememberedLoaded <- case remembered of
+        Nothing -> pure Nothing
+        Just account ->
+            loadSelectedAccountAuth
                 provider
-                requiredBilling
-                rememberedIds >>= \case
-                    Left err -> pure (Left err)
-                    Right selected ->
-                        loadSelectedAccountAuth
-                            provider
-                            selected.selectedSelectionId
-                            selected.selectedAccountId >>= \case
-                                Left err -> pure (Left err)
-                                Right loaded ->
-                                    probeLoadedAutomaticAvailability loaded >>= \case
-                                        Left err -> do
-                                            now <- getCurrentTime
-                                            pure $ Left $
-                                                "cannot switch to "
-                                                    <> providerSlug provider
-                                                    <> ": "
-                                                    <> formatApiErrorInlineAt now err
-                                        Right usable
-                                            | allowsAutomaticBillingFallback
-                                                sourceBilling
-                                                (tokenProviderBillingMode
-                                                    usable.loadedTokenProvider) ->
-                                                    pure (Right (Just selected))
-                                            | otherwise ->
-                                                pure $ Left
-                                                    "automatic fallback from subscription \
-                                                    \billing to API credits is disabled"
+                account.projectAccountSelectionId
+                account.projectAccountId >>= \case
+                    Right loaded
+                        | loaded.loadedProvider == provider
+                        , allowsAutomaticBillingFallback
+                            sourceBilling
+                            (tokenProviderBillingMode
+                                loaded.loadedTokenProvider) ->
+                            pure (Just (account, loaded))
+                        | otherwise -> pure Nothing
+                    Left _ -> pure Nothing
+    case rememberedLoaded of
+        Just (account, loaded) ->
+            pure (Right (Just (rememberedSelection provider account loaded)))
+        Nothing ->
+            loadAuth (Just provider) >>= \case
+                Left err ->
+                    pure $ Left $
+                        "cannot switch to "
+                            <> providerSlug provider
+                            <> ": "
+                            <> err
+                Right loaded
+                    | loaded.loadedProvider /= provider ->
+                        pure $ Left $
+                            "cannot switch to "
+                                <> providerSlug provider
+                                <> ": auth resolved "
+                                <> providerSlug loaded.loadedProvider
+                    | not
+                        (allowsAutomaticBillingFallback
+                            sourceBilling
+                            (tokenProviderBillingMode
+                                loaded.loadedTokenProvider)) ->
+                        pure $ Left
+                            "automatic fallback from subscription \
+                            \billing to API credits is disabled"
+                    | otherwise -> pure (Right Nothing)
+  where
+    rememberedSelection provider account loaded = SelectedAccount
+        { selectedProvider = provider
+        , selectedSelectionId = account.projectAccountSelectionId
+        , selectedAccountId = account.projectAccountId
+        , selectedBillingMode =
+            tokenProviderBillingMode loaded.loadedTokenProvider
+        , selectedLabel = account.projectAccountId
+        }
 
+-- | Confirm the target provider's credentials. Usage is not consulted;
+-- the model request reports exhaustion.
 loadValidatedProviderTarget
-    :: (LoadedAuth -> IO (Either ApiError LoadedAuth))
-    -> ModelOption
+    :: ModelOption
     -> IO (Either Text LoadedAuth)
-loadValidatedProviderTarget probeAvailability choice =
+loadValidatedProviderTarget choice =
     if not
         (connectionSupportsDialect
             choice.modelTarget.targetConnectionId
@@ -800,23 +794,14 @@ loadValidatedProviderTarget probeAvailability choice =
                 <> providerSlug choice.modelTarget.targetProvider
                 <> ": "
                 <> err
-        Right loaded ->
-            probeAvailability loaded >>= \case
-                Left err -> do
-                    now <- getCurrentTime
-                    pure $ Left $
-                        "cannot switch to "
-                            <> providerSlug choice.modelTarget.targetProvider
-                            <> ": "
-                            <> formatApiErrorInlineAt now err
-                Right usable
-                    | usable.loadedProvider /= choice.modelTarget.targetProvider ->
-                        pure $ Left $
-                            "cannot switch to "
-                                <> providerSlug choice.modelTarget.targetProvider
-                                <> ": auth resolved "
-                                <> providerSlug usable.loadedProvider
-                    | otherwise -> pure (Right usable)
+        Right loaded
+            | loaded.loadedProvider /= choice.modelTarget.targetProvider ->
+                pure $ Left $
+                    "cannot switch to "
+                        <> providerSlug choice.modelTarget.targetProvider
+                        <> ": auth resolved "
+                        <> providerSlug loaded.loadedProvider
+            | otherwise -> pure (Right loaded)
 
 ensureTransitionSessionId
     :: Persistence
