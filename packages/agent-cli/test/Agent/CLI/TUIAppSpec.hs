@@ -2422,12 +2422,11 @@ spec = do
             let hide = "\ESC[?25l"
                 showCursor = "\ESC[?25h"
                 disableBlink = "\ESC[?12l"
-                place column row =
-                    "\ESC[" <> ByteString.pack (show row <> ";" <> show column) <> "H"
-                caret = place 4 2
+                caret = "\ESC[2;4H"
+                movedCaret = "\ESC[2;5H"
                 idle = hide <> disableBlink <> showCursor <> caret
                 changed = hide <> "cells" <> disableBlink <> showCursor <> caret
-                moved = hide <> disableBlink <> showCursor <> place 5 2
+                moved = hide <> disableBlink <> showCursor <> movedCaret
                 synchronize payload =
                     "\ESC[?2026h" <> payload <> "\ESC[?2026l"
                 step state bytes = preserveCursorFrame state bytes
@@ -2446,7 +2445,7 @@ spec = do
             step visible changed
                 `shouldBe` (synchronize ("cells" <> caret), visible)
             let (relocated, relocatedState) = step visible moved
-            relocated `shouldBe` synchronize (place 5 2)
+            relocated `shouldBe` synchronize movedCaret
             relocatedState `shouldBe` CursorVisible 5 2
             step relocatedState (hide <> "kept \ESC[?12l")
                 `shouldBe`
