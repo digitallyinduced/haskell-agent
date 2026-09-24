@@ -6,10 +6,6 @@ import Agent.CLI.TUI.App.Mailbox
     ( appEventChannelCapacity
     , enqueueAppEvent
     )
-import Agent.CLI.RepositoryDelivery
-    ( RepositoryPullRequest(..)
-    , pullRequestByURL
-    )
 
 import Agent.CLI.Clipboard ( formatImageSize )
 import Agent.CLI.Dictation ( DictationControl(..)
@@ -133,6 +129,7 @@ import Agent.Syntax ( SyntaxHighlighter , loadSyntaxLanguage , newSyntaxHighligh
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import qualified Agent.CLI.TUI.Transcript as Transcript
 import Agent.CLI.TUI.Types
+import Agent.Runtime.Session.PullRequest (pullRequestURLs)
 import Agent.TUI.Model
 import Agent.TUI.Theme (ThemeKind(..))
 import Agent.TUI.Motion ( MotionDemand(..)
@@ -166,6 +163,11 @@ import Agent.CLI.Recap ( autoRecapAwayThreshold , autoRecapIdleThreshold , autoR
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
 import Control.Exception.Safe (bracket_, finally, mask, onException, throwIO, tryAny, tryIO)
+import Data.Aeson ((.:), (.:?), (.!=))
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Types as AesonTypes
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS8
 import Control.Exception (AsyncException(UserInterrupt))
 import Data.Char (isControl, isSpace)
 import Data.Foldable (toList)
@@ -187,12 +189,13 @@ import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
 import qualified Graphics.Vty as V
 import qualified Graphics.Vty.CrossPlatform as Vty
-import System.Directory (getCurrentDirectory)
 import System.Environment (lookupEnv)
+import System.Exit (ExitCode(..))
 import System.Info (os)
 import System.IO (stderr, stdout)
 import System.Posix.Process (getProcessID)
-import System.Process (callProcess)
+import System.Process (callProcess, readProcessWithExitCode)
+import System.Timeout (timeout)
 
 newFullscreenInputBuffer :: IO FullscreenInputBuffer
 newFullscreenInputBuffer = Composer.newFullscreenInputBuffer
@@ -484,15 +487,13 @@ refreshPullRequestChecks runtime (generation, url) = do
     if currentGeneration /= generation
         then pure pullRequestChecksRetryMicros
         else do
-            cwd <- getCurrentDirectory
-            fetched <- tryIO (pullRequestByURL cwd url)
+            fetched <- lookupPullRequestChecks url
             stillCurrent <- atomically do
                 pending <- readTVar runtime.runtimePullRequestPoll
                 pure (pending == Just (generation, url))
             case fetched of
-                Right (Right pr)
+                Just checks
                     | stillCurrent -> do
-                        let checks = pullRequestChecksFromCode pr.repositoryPullRequestCI
                         enqueueAppEvent runtime
                             (AppSetPullRequestCI generation url checks)
                         pure (pullRequestChecksIntervalMicros checks)
@@ -519,6 +520,85 @@ pullRequestChecksIntervalMicros = \case
     PullRequestChecksPending -> pullRequestChecksRetryMicros
     PullRequestChecksUnknown -> pullRequestChecksRetryMicros
     _ -> 45_000_000
+
+lookupPullRequestChecks :: Text -> IO (Maybe PullRequestChecks)
+lookupPullRequestChecks url =
+    case pullRequestViewArguments url of
+        Nothing -> pure Nothing
+        Just arguments -> do
+            result <- timeout 15_000_000 $
+                tryIO (readProcessWithExitCode "gh" arguments "")
+            pure $ case result of
+                Just (Right (ExitSuccess, output, _)) ->
+                    parsePullRequestChecksJSON (TextEncoding.encodeUtf8 (Text.pack output))
+                _ ->
+                    Nothing
+
+pullRequestViewArguments :: Text -> Maybe [String]
+pullRequestViewArguments url
+    | pullRequestURLs url == [url]
+    , [owner, repo, "pull", number] <- Text.splitOn "/" (Text.drop 19 url)
+    = Just
+        [ "pr", "view", Text.unpack number
+        , "--repo", Text.unpack (owner <> "/" <> repo)
+        , "--json", "statusCheckRollup"
+        ]
+    | otherwise = Nothing
+
+parsePullRequestChecksJSON :: BS.ByteString -> Maybe PullRequestChecks
+parsePullRequestChecksJSON bytes =
+    Aeson.decodeStrict' bytes >>= AesonTypes.parseMaybe parsePullRequestChecksRollup
+
+parsePullRequestChecksRollup :: Aeson.Value -> AesonTypes.Parser PullRequestChecks
+parsePullRequestChecksRollup = Aeson.withObject "pull request" \object -> do
+    checks <- object .:? "statusCheckRollup" .!= []
+    statuses <- traverse parsePullRequestCheck checks
+    pure (rollupPullRequestChecks statuses)
+  where
+    rollupPullRequestChecks statuses
+        | null statuses = PullRequestChecksNone
+        | PullRequestChecksFailed `elem` statuses = PullRequestChecksFailed
+        | PullRequestChecksPending `elem` statuses = PullRequestChecksPending
+        | PullRequestChecksUnknown `elem` statuses = PullRequestChecksUnknown
+        | otherwise = PullRequestChecksPassed
+
+parsePullRequestCheck :: Aeson.Value -> AesonTypes.Parser PullRequestChecks
+parsePullRequestCheck = Aeson.withObject "check" \object -> do
+    kind <- object .: "__typename" :: AesonTypes.Parser Text
+    case kind of
+        "CheckRun" -> do
+            status <- object .: "status" :: AesonTypes.Parser Text
+            conclusion <- object .:? "conclusion" .!= ""
+            pure $
+                if status `elem`
+                    ["QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED"]
+                    then PullRequestChecksPending
+                    else if status /= "COMPLETED"
+                        then PullRequestChecksUnknown
+                        else classifyPullRequestCheck conclusion
+        "StatusContext" ->
+            classifyPullRequestCheck <$> object .: "state"
+        _ ->
+            pure PullRequestChecksUnknown
+
+classifyPullRequestCheck :: Text -> PullRequestChecks
+classifyPullRequestCheck value
+    | value `elem` ["SUCCESS", "NEUTRAL", "SKIPPED"] =
+        PullRequestChecksPassed
+    | value `elem`
+        [ "FAILURE"
+        , "ERROR"
+        , "TIMED_OUT"
+        , "CANCELLED"
+        , "ACTION_REQUIRED"
+        , "STARTUP_FAILURE"
+        , "STALE"
+        ] =
+        PullRequestChecksFailed
+    | value `elem` ["PENDING", "EXPECTED"] =
+        PullRequestChecksPending
+    | otherwise =
+        PullRequestChecksUnknown
 
 setFullscreenHistorySource
     :: FullscreenRuntime

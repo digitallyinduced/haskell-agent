@@ -3,17 +3,17 @@
 , agent-core, agent-external-session, agent-gemini
 , agent-grok-build-dialect, agent-integration-api, agent-json
 , agent-mcp, agent-openai, agent-openrouter, agent-process
-, agent-repository, agent-responses, agent-responses-types
-, agent-runtime, agent-store, agent-syntax, agent-tools, agent-tui
-, agent-webrtc, agent-xai, ansi-terminal, async, base
-, base64-bytestring, brick, bytestring, colour, containers, crypton
-, crypton-connection, deepseq, directory, entropy, filelock
-, filepath, haskeline, hasql-pool, hspec, http-client
-, http-client-tls, http-types, JuicyPixels, lib, memory, mtl
-, network, network-uri, optparse-applicative, process, QuickCheck
-, resourcet, retry, safe-exceptions, scientific, stm, temporary
-, terminfo, text, time, tls, transformers, unix, vector, vty
-, vty-crossplatform, vty-unix, wai, warp
+, agent-responses, agent-responses-types, agent-runtime
+, agent-store, agent-syntax, agent-tools, agent-tui, agent-webrtc
+, agent-xai, ansi-terminal, async, base, base64-bytestring, brick
+, bytestring, colour, containers, crypton, crypton-connection
+, deepseq, directory, entropy, filelock, filepath, haskeline
+, hasql-pool, hspec, http-client, http-client-tls, http-types
+, JuicyPixels, lib, memory, mtl, network, network-uri
+, optparse-applicative, process, QuickCheck, resourcet, retry
+, safe-exceptions, scientific, stm, temporary, terminfo, text, time
+, tls, transformers, unix, vector, vty, vty-crossplatform, vty-unix
+, wai, warp
 }:
 mkDerivation {
   pname = "agent-cli";
@@ -27,7 +27,7 @@ mkDerivation {
     agent-computer-use agent-connectivity agent-core
     agent-external-session agent-gemini agent-grok-build-dialect
     agent-integration-api agent-json agent-mcp agent-openai
-    agent-openrouter agent-process agent-repository agent-responses
+    agent-openrouter agent-process agent-responses
     agent-responses-types agent-runtime agent-store agent-syntax
     agent-tools agent-tui agent-webrtc agent-xai ansi-terminal async
     base base64-bytestring brick bytestring colour containers crypton

@@ -107,6 +107,7 @@ module Agent.CLI.TUI.App
     , setFullscreenPullRequestURL
     , syncPullRequestChecksPoll
     , runPullRequestChecksWorker
+    , parsePullRequestChecksJSON
     , setFullscreenSessionActions
     , fullscreenBounds
     , fullscreenVtyConfig

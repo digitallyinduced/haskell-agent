@@ -50,6 +50,7 @@ import Agent.CLI.TUI.App
     , fullscreenSurface
     , fullscreenApp
     , appMotionDemand
+    , parsePullRequestChecksJSON
     , initialFullscreenAppState
     , isCommandPaletteKey
     , isMetaConsoleToggle
@@ -3173,6 +3174,35 @@ spec = do
             pullRequestChecksFromCode 2 `shouldBe` PullRequestChecksPending
             pullRequestChecksFromCode 1 `shouldBe` PullRequestChecksNone
             pullRequestChecksFromCode 0 `shouldBe` PullRequestChecksUnknown
+            let rollup checks =
+                    parsePullRequestChecksJSON
+                        (TextEncoding.encodeUtf8
+                            ("{\"statusCheckRollup\":" <> checks <> "}"))
+                check status conclusion =
+                    "{\"__typename\":\"CheckRun\",\"status\":\""
+                        <> status
+                        <> "\",\"conclusion\":\""
+                        <> conclusion
+                        <> "\"}"
+            rollup "[]" `shouldBe` Just PullRequestChecksNone
+            rollup
+                ("["
+                    <> check "COMPLETED" "SUCCESS"
+                    <> ","
+                    <> check "IN_PROGRESS" ""
+                    <> "]")
+                `shouldBe` Just PullRequestChecksPending
+            rollup "[{\"__typename\":\"StatusContext\",\"state\":\"SUCCESS\"}]"
+                `shouldBe` Just PullRequestChecksPassed
+            rollup
+                ("["
+                    <> check "COMPLETED" "FAILURE"
+                    <> ","
+                    <> check "QUEUED" ""
+                    <> "]")
+                `shouldBe` Just PullRequestChecksFailed
+            rollup ("[" <> check "COMPLETED" "NEW_STATE" <> "]")
+                `shouldBe` Just PullRequestChecksUnknown
 
         it "animates while pull request checks are pending" do
             runtime <- newScriptRuntime initialUiState
