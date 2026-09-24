@@ -781,9 +781,10 @@ assertOptionalShellSchema tools =
                 maybe False (Text.isInfixOf "`workdir` is optional")
             propertyNames shell `shouldMatchList`
                 [ "command", "workdir", "timeout_ms", "yield_time_ms"
-                , "sandbox_permissions", "justification"
+                , "sandbox_permissions", "justification", "interactive"
                 ]
             propertyType "workdir" shell `shouldBe` Just "string"
+            propertyType "interactive" shell `shouldBe` Just "boolean"
             propertyType "sandbox_permissions" shell `shouldBe` Just "string"
             propertyType "justification" shell `shouldBe` Just "string"
         other -> expectationFailure
