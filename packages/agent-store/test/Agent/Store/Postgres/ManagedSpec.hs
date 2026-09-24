@@ -31,6 +31,7 @@ import Agent.Store.Postgres.Connection
     , ReconnectionPolicy(..)
     , closeStorePool
     , defaultPoolConfig
+    , openRoleStorePool
     , openStorePool
     , withSession
     , withSessionSingleAttempt
@@ -59,6 +60,15 @@ assertStoreClosed store =
     scopePool store "unused-role" >>= \case
         Left err -> err `shouldBe` StoreConnectionError "PostgreSQL store is closed"
         Right _ -> expectationFailure "scoped store was not closed"
+
+-- Session temp roots can be long; keep the Unix socket path under Darwin's limit.
+shortSocketPostgresConfig :: FilePath -> ManagedPostgresConfig
+shortSocketPostgresConfig stateDirectory =
+    let config = defaultManagedPostgresConfig stateDirectory ""
+    in config
+        { postgresPaths = config.postgresPaths
+            { postgresSocketDirectory = stateDirectory <> "/s" }
+        }
 
 spec :: Spec
 spec =
@@ -428,6 +438,78 @@ spec =
                                         )
                                         `shouldReturn`
                                             Right (True, True, True, True, True)
+                                )
+                                (closeStorePool ownerPool)
+                    ) `finally` cleanup
+
+        it "restores CONNECT for custom scopes that only inherited PUBLIC access" $
+            withSystemTempDirectory "ha" \stateDirectory -> do
+                let
+                    config = shortSocketPostgresConfig stateDirectory
+                    cleanup = do
+                        _ <- stopManagedPostgres config
+                        pure ()
+                    migrationsBeforeRepair =
+                        takeWhile
+                            ((<= 118) . (.migrationVersion))
+                            coreMigrations
+                    roleName =
+                        "ha_scope_r_0123456789abcdef0123456789abcdef" :: Text
+                (do
+                    ensureManagedPostgres config
+                        >>= (`shouldSatisfy` isRight)
+                    openStorePool config defaultPoolConfig >>= \case
+                        Left err ->
+                            expectationFailure
+                                ("could not open migration pool: " <> show err)
+                        Right ownerPool ->
+                            finally
+                                (do
+                                    runMigrations ownerPool
+                                        migrationsBeforeRepair
+                                        `shouldReturn` Right ()
+                                    withSession ownerPool
+                                        (Session.script
+                                            createLegacyCustomScopeSql)
+                                        `shouldReturn` Right ()
+                                    withSession ownerPool
+                                        (Session.statement
+                                            roleName
+                                            scopeConnectPrivilegeStatement)
+                                        `shouldReturn` Right False
+                                    openRoleStorePool
+                                        config
+                                        roleName
+                                        defaultPoolConfig
+                                        >>= \case
+                                            Left err ->
+                                                show err
+                                                    `shouldSatisfy`
+                                                        (Text.isInfixOf
+                                                            "permission denied"
+                                                            . Text.pack)
+                                            Right pool -> do
+                                                closeStorePool pool
+                                                expectationFailure
+                                                    "legacy custom scope connected without CONNECT"
+                                    runMigrations ownerPool coreMigrations
+                                        `shouldReturn` Right ()
+                                    withSession ownerPool
+                                        (Session.statement
+                                            roleName
+                                            scopeConnectPrivilegeStatement)
+                                        `shouldReturn` Right True
+                                    openRoleStorePool
+                                        config
+                                        roleName
+                                        defaultPoolConfig
+                                        >>= \case
+                                            Left err ->
+                                                expectationFailure
+                                                    ("repaired custom scope could not connect: "
+                                                        <> show err)
+                                            Right pool ->
+                                                closeStorePool pool
                                 )
                                 (closeStorePool ownerPool)
                     ) `finally` cleanup
@@ -1004,3 +1086,26 @@ upgradedSchemaStatement = Statement.preparable
             <*> Decoders.column (Decoders.nonNullable Decoders.bool)
             <*> Decoders.column (Decoders.nonNullable Decoders.bool)
             <*> Decoders.column (Decoders.nonNullable Decoders.bool))
+
+-- | A custom scope created after PUBLIC CONNECT was revoked, without the
+-- explicit GRANT that current provisioning applies.
+createLegacyCustomScopeSql :: Text
+createLegacyCustomScopeSql =
+    "CREATE ROLE ha_scope_r_0123456789abcdef0123456789abcdef \
+    \ LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE \
+    \ NOINHERIT NOREPLICATION NOBYPASSRLS; \
+    \ CREATE SCHEMA custom_r_0123456789abcdef0123456789abcdef \
+    \ AUTHORIZATION ha_scope_r_0123456789abcdef0123456789abcdef; \
+    \ INSERT INTO harness.custom_scopes \
+    \ (scope_key, scope_kind, role_name, schema_name) VALUES \
+    \ ('0123456789abcdef0123456789abcdef', 'repository', \
+    \  'ha_scope_r_0123456789abcdef0123456789abcdef', \
+    \  'custom_r_0123456789abcdef0123456789abcdef')"
+
+scopeConnectPrivilegeStatement :: Statement Text Bool
+scopeConnectPrivilegeStatement = Statement.preparable
+    "SELECT pg_catalog.has_database_privilege(\
+    \ $1, current_database(), 'CONNECT')"
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.singleRow $
+        Decoders.column (Decoders.nonNullable Decoders.bool))
