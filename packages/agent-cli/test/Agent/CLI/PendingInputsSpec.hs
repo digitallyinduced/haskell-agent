@@ -18,6 +18,7 @@ import Agent.CLI.PendingInputs
     )
 import Agent.CLI.SteeringInputs
     ( awaitSteeringInput
+    , awaitSteeringInputReady
     , awaitUserSteering
     , clearSteeringInputs
     , commitSteeringInputs
@@ -27,9 +28,11 @@ import Agent.CLI.SteeringInputs
     , hasBackgroundCompletions
     , hasSteeringInputWake
     , newSteeringInputs
+    , prepareBackgroundCompletion
     , readSteeringInputs
     , readSteeringTurn
     , steeringInputCountLimit
+    , steeringInputByteLimit
     , suppressUserSteeringWake
     )
 import Agent.Error (ApiError(..))
@@ -60,6 +63,7 @@ import Control.Concurrent
     )
 import Control.Exception.Safe (tryAny)
 import Control.Concurrent.STM (atomically, orElse)
+import qualified Data.ByteString as ByteString
 import Data.Either (isLeft)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.Text as Text
@@ -526,6 +530,88 @@ spec = do
             all (`notElem` [UserMessage "omitted one", UserMessage "omitted two"])
 
   describe "SteeringInputs" do
+    it "observes idle readiness without consuming the wake or pending input" do
+        steering <- newSteeringInputs
+        let ready = atomically $
+                (awaitSteeringInputReady steering >> pure True) `orElse` pure False
+            completion = UserMessage "completed"
+        ready `shouldReturn` False
+        enqueueBackgroundCompletion steering "build" completion `shouldReturn` Right True
+        ready `shouldReturn` True
+        ready `shouldReturn` True
+        hasSteeringInputWake steering `shouldReturn` True
+        readSteeringInputs steering `shouldReturn` [completion]
+        atomically (awaitSteeringInput steering)
+        ready `shouldReturn` False
+        readSteeringInputs steering `shouldReturn` [completion]
+
+    it "retains completions beyond the count limit and delivers bounded batches" do
+        steering <- newSteeringInputs
+        let guidance = replicate steeringInputCountLimit (UserMessage "guidance")
+            completion = UserMessage "completed"
+        enqueueSteeringInputs steering guidance `shouldReturn` Right ()
+        suppressUserSteeringWake steering
+        enqueueBackgroundCompletion steering "first" completion `shouldReturn` Right True
+        enqueueBackgroundCompletion steering "second" completion `shouldReturn` Right True
+        enqueueBackgroundCompletion steering "first" completion `shouldReturn` Right False
+        suppressUserSteeringWake steering
+        hasBackgroundCompletions steering `shouldReturn` True
+        hasSteeringInputWake steering `shouldReturn` True
+        atomically (awaitSteeringInput steering)
+        hasSteeringInputWake steering `shouldReturn` False
+        readSteeringInputs steering `shouldReturn` guidance
+        commitSteeringInputs steering 1
+        readSteeringInputs steering `shouldReturn` (drop 1 guidance <> [completion])
+        hasSteeringInputWake steering `shouldReturn` True
+        commitSteeringInputs steering steeringInputCountLimit
+        readSteeringInputs steering `shouldReturn` [completion]
+        commitSteeringInputs steering 1
+        hasBackgroundCompletions steering `shouldReturn` False
+
+    it "retains completions beyond the byte limit until guidance is acknowledged" do
+        steering <- newSteeringInputs
+        -- Binary payload accounting is O(1), avoiding a 64 MiB interpreted
+        -- character fold in GHCi while exercising the same byte-budget limit.
+        let guidance = userMessageWithAttachments ""
+                [FileAttachmentItem (FileAttachment Nothing ""
+                    (ByteString.replicate steeringInputByteLimit 0))]
+            completion = UserMessage "completed"
+        enqueueSteeringInputs steering [guidance] `shouldReturn` Right ()
+        enqueueBackgroundCompletion steering "build" completion `shouldReturn` Right True
+        readSteeringInputs steering `shouldReturn` [guidance]
+        commitSteeringInputs steering 1
+        readSteeringInputs steering `shouldReturn` [completion]
+
+    it "promotes deferred completions when an earlier notice is explicitly collected" do
+        steering <- newSteeringInputs
+        let guidance = replicate (steeringInputCountLimit - 1) (UserMessage "guidance")
+            first = UserMessage "first completed"
+            second = UserMessage "second completed"
+        enqueueSteeringInputs steering guidance `shouldReturn` Right ()
+        enqueueBackgroundCompletion steering "first" first `shouldReturn` Right True
+        enqueueBackgroundCompletion steering "second" second `shouldReturn` Right True
+        dismissBackgroundCompletion steering "first"
+        readSteeringInputs steering `shouldReturn` (guidance <> [second])
+        dismissBackgroundCompletion steering "second"
+        readSteeringInputs steering `shouldReturn` guidance
+        hasBackgroundCompletions steering `shouldReturn` False
+
+    it "dismisses deferred notices and isolates them across conversation resets" do
+        steering <- newSteeringInputs
+        publish <- prepareBackgroundCompletion steering
+        let guidance = replicate steeringInputCountLimit (UserMessage "guidance")
+            completion = UserMessage "completed"
+        enqueueSteeringInputs steering guidance `shouldReturn` Right ()
+        publish "dismissed" completion `shouldReturn` Right True
+        dismissBackgroundCompletion steering "dismissed"
+        hasBackgroundCompletions steering `shouldReturn` False
+        publish "old-conversation" completion `shouldReturn` Right True
+        clearSteeringInputs steering
+        publish "late-completion" completion `shouldReturn` Right False
+        readSteeringInputs steering `shouldReturn` []
+        hasBackgroundCompletions steering `shouldReturn` False
+        hasSteeringInputWake steering `shouldReturn` False
+
     it "wakes passive waits without consuming guidance or its idle notification" do
         steering <- newSteeringInputs
         let ready = atomically $
