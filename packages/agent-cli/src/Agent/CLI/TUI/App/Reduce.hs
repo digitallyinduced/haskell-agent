@@ -349,6 +349,8 @@ applyUiEvent uiEvent state =
     let
         previousUi = state.appUi
         nextUi = reduceUi uiEvent previousUi
+        nextPullRequestURLs =
+            Bridge.pullRequestForUiEvent uiEvent previousUi state.appPullRequestURLs
         retainedFlashes =
             case uiEvent of
                 UiConversationCleared ->
@@ -380,8 +382,11 @@ applyUiEvent uiEvent state =
         nextState0 =
             state
                 { appUi = nextUi
-                , appPullRequestURL =
-                    Bridge.pullRequestForUiEvent uiEvent previousUi state.appPullRequestURL
+                , appPullRequestURLs = nextPullRequestURLs
+                , appPullRequestCI =
+                    Map.restrictKeys
+                        state.appPullRequestCI
+                        (Set.fromList nextPullRequestURLs)
                 , appAutoRecapShownThisAway =
                     case uiEvent of
                         UiRecapReady _ -> True

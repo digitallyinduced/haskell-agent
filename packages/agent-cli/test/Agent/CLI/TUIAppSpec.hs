@@ -49,6 +49,8 @@ import Agent.CLI.TUI.App
     , fullscreenVtyConfig
     , fullscreenSurface
     , fullscreenApp
+    , appMotionDemand
+    , parsePullRequestChecksJSON
     , initialFullscreenAppState
     , isCommandPaletteKey
     , isMetaConsoleToggle
@@ -103,6 +105,8 @@ import Agent.CLI.TUI.Types
     , selectedChoice
     , FullscreenRuntime(..)
     , HistoryCommit(..)
+    , PullRequestChecks(..)
+    , pullRequestChecksFromCode
     , MetaConsoleOverlay(..)
     , Name(..)
     , PendingDialog(..)
@@ -942,23 +946,31 @@ spec = do
                     Map.null rejected.appSubmittedImagePreviews `shouldBe` True
     describe "pull request event state" do
         let url = "https://github.com/owner/repository/pull/42"
+            otherURL = "https://github.com/owner/runtime/pull/43"
             association generation =
-                FullscreenScriptApp (AppSetPullRequestURL (HistoryGeneration generation) (Just url))
+                FullscreenScriptApp (AppSetPullRequestURLs (HistoryGeneration generation) [url])
+            visibleState runtime =
+                (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    { appTerminalSize = Just (120, 35)
+                    , appTerminalFocus = TerminalFocused
+                    }
+            ciAt state forURL =
+                Map.findWithDefault PullRequestChecksUnknown forURL state.appPullRequestCI
         it "accepts the active session generation and rejects a different generation" do
             runtime <- newScriptRuntime initialUiState
-            let initialState = initialFullscreenAppState runtime [] AgentRoot [] 0
+            let initialState = visibleState runtime
             (_, associated) <- runFullscreenScriptWithState initialState
                 [association 0, FullscreenScriptHalt]
-            associated.appPullRequestURL `shouldBe` Just url
+            associated.appPullRequestURLs `shouldBe` [url]
             (_, unchanged) <- runFullscreenScriptWithState associated
-                [ FullscreenScriptApp (AppSetPullRequestURL (HistoryGeneration 1) Nothing)
+                [ FullscreenScriptApp (AppSetPullRequestURLs (HistoryGeneration 1) [])
                 , FullscreenScriptHalt
                 ]
-            unchanged.appPullRequestURL `shouldBe` Just url
+            unchanged.appPullRequestURLs `shouldBe` [url]
         it "clears a previous session association and rejects its delayed result" do
             runtime <- newScriptRuntime initialUiState
-            let initialState = (initialFullscreenAppState runtime [] AgentRoot [] 0)
-                    { appPullRequestURL = Just url }
+            let initialState = (visibleState runtime)
+                    { appPullRequestURLs = [url] }
                 page = HistoryPage
                     { historyPageGeneration = HistoryGeneration 1
                     , historyPageDirection = HistoryNewer
@@ -973,14 +985,70 @@ spec = do
                 , association 0
                 , FullscreenScriptHalt
                 ]
-            cleared.appPullRequestURL `shouldBe` Nothing
+            cleared.appPullRequestURLs `shouldBe` []
+        it "records GitHub check status for the active pull request only" do
+            runtime <- newScriptRuntime initialUiState
+            let initialState = visibleState runtime
+                setChecks =
+                    FullscreenScriptApp
+                        (AppSetPullRequestCI
+                            (HistoryGeneration 0)
+                            url
+                            PullRequestChecksPassed)
+            (_, associated) <- runFullscreenScriptWithState initialState
+                [association 0, setChecks, FullscreenScriptHalt]
+            ciAt associated url `shouldBe` PullRequestChecksPassed
+            atomically (readTVar associated.appRuntime.runtimePullRequestPoll)
+                `shouldReturn` Just (HistoryGeneration 0, [url])
+            (_, stale) <- runFullscreenScriptWithState associated
+                [ FullscreenScriptApp
+                    (AppSetPullRequestCI
+                        (HistoryGeneration 1)
+                        url
+                        PullRequestChecksFailed)
+                , FullscreenScriptHalt
+                ]
+            ciAt stale url `shouldBe` PullRequestChecksPassed
+            (_, other) <- runFullscreenScriptWithState associated
+                [ FullscreenScriptApp
+                    (AppSetPullRequestCI
+                        (HistoryGeneration 0)
+                        "https://github.com/owner/other/pull/7"
+                        PullRequestChecksFailed)
+                , FullscreenScriptHalt
+                ]
+            ciAt other url `shouldBe` PullRequestChecksPassed
+        it "keeps an earlier pull request when a newer one is associated" do
+            runtime <- newScriptRuntime initialUiState
+            let initialState = visibleState runtime
+            (_, both) <- runFullscreenScriptWithState initialState
+                [ association 0
+                , FullscreenScriptApp
+                    (AppSetPullRequestURLs (HistoryGeneration 0) [otherURL])
+                , FullscreenScriptHalt
+                ]
+            both.appPullRequestURLs `shouldBe` [otherURL, url]
+        it "clears check status when the associated pull request changes" do
+            runtime <- newScriptRuntime initialUiState
+            let initialState = (visibleState runtime)
+                    { appPullRequestURLs = [url]
+                    , appPullRequestCI = Map.singleton url PullRequestChecksPassed
+                    }
+            (_, cleared) <- runFullscreenScriptWithState initialState
+                [ FullscreenScriptApp (AppSetPullRequestURLs (HistoryGeneration 0) [])
+                , FullscreenScriptHalt
+                ]
+            cleared.appPullRequestURLs `shouldBe` []
+            Map.null cleared.appPullRequestCI `shouldBe` True
+            atomically (readTVar cleared.appRuntime.runtimePullRequestPoll)
+                `shouldReturn` Nothing
         it "reflows a cached transcript when the pull request pane appears" do
             let body = Text.unwords (replicate 18 "transcript")
                 bounds = (160, 24)
             initialState <- cachedHistoryState [markerBlock (BlockId (-1)) body]
             (_, frames, finalState) <- runFullscreenScriptDetailedAt bounds initialState
                 [association 0, FullscreenScriptHalt]
-            finalState.appPullRequestURL `shouldBe` Just url
+            finalState.appPullRequestURLs `shouldBe` [url]
             frames `shouldSatisfy` (not . null)
             let finalText = renderedPictureTextAt bounds (last frames)
             finalText `shouldSatisfy` Text.isInfixOf "PR #42"
@@ -3082,8 +3150,8 @@ spec = do
             runtime <- newScriptRuntime initialUiState
             let state entries =
                     (initialFullscreenAppState runtime [] AgentRoot entries 0)
-                        { appPullRequestURL =
-                            Just "https://github.com/owner/repository/pull/42"
+                        { appPullRequestURLs =
+                            ["https://github.com/owner/repository/pull/42"]
                         }
                 withAgents = renderedAppText (120, 35)
                     (state [rootEntry, childEntry 1])
@@ -3096,12 +3164,132 @@ spec = do
             withoutAgents `shouldSatisfy` Text.isInfixOf "PR #42"
             withoutAgents `shouldSatisfy` (not . Text.isInfixOf "Agents ·")
 
+        it "shows GitHub check status on the pull request pane" do
+            runtime <- newScriptRuntime initialUiState
+            let url = "https://github.com/owner/repository/pull/42"
+                other = "https://github.com/owner/runtime/pull/43"
+                state checks =
+                    (initialFullscreenAppState runtime [] AgentRoot [rootEntry] 0)
+                        { appPullRequestURLs = [url]
+                        , appPullRequestCI = Map.singleton url checks
+                        }
+                pane = renderedAppText (120, 35) . state
+                prLine number text =
+                    case filter (Text.isInfixOf number) (Text.lines text) of
+                        line : _ -> line
+                        [] -> text
+            prLine "PR #42" (pane PullRequestChecksUnknown)
+                `shouldSatisfy` (not . Text.any (`elem` ("✓✕○⋅?" :: String)))
+            prLine "PR #42" (pane PullRequestChecksPassed)
+                `shouldSatisfy` Text.isInfixOf "✓"
+            prLine "PR #42" (pane PullRequestChecksFailed)
+                `shouldSatisfy` Text.isInfixOf "✕"
+            prLine "PR #42" (pane PullRequestChecksPending)
+                `shouldSatisfy` Text.isInfixOf "⋅"
+            prLine "PR #42" (pane PullRequestChecksNone)
+                `shouldSatisfy` Text.isInfixOf "○"
+            prLine "PR #42" (pane PullRequestChecksUnavailable)
+                `shouldSatisfy` Text.isInfixOf "?"
+            let both =
+                    (initialFullscreenAppState runtime [] AgentRoot [rootEntry] 0)
+                        { appPullRequestURLs = [url, other]
+                        }
+                bothText = renderedAppText (120, 35) both
+            bothText `shouldSatisfy` Text.isInfixOf "PR #42"
+            bothText `shouldSatisfy` Text.isInfixOf "PR #43"
+            pullRequestChecksFromCode 3 `shouldBe` PullRequestChecksPassed
+            pullRequestChecksFromCode 4 `shouldBe` PullRequestChecksFailed
+            pullRequestChecksFromCode 2 `shouldBe` PullRequestChecksPending
+            pullRequestChecksFromCode 1 `shouldBe` PullRequestChecksNone
+            pullRequestChecksFromCode 0 `shouldBe` PullRequestChecksUnknown
+            let rollup checks =
+                    parsePullRequestChecksJSON
+                        (TextEncoding.encodeUtf8
+                            ("{\"statusCheckRollup\":" <> checks <> "}"))
+                check status conclusion =
+                    "{\"__typename\":\"CheckRun\",\"status\":\""
+                        <> status
+                        <> "\",\"conclusion\":\""
+                        <> conclusion
+                        <> "\"}"
+            rollup "[]" `shouldBe` Just PullRequestChecksNone
+            rollup
+                ("["
+                    <> check "COMPLETED" "SUCCESS"
+                    <> ","
+                    <> check "IN_PROGRESS" ""
+                    <> "]")
+                `shouldBe` Just PullRequestChecksPending
+            rollup "[{\"__typename\":\"StatusContext\",\"state\":\"SUCCESS\"}]"
+                `shouldBe` Just PullRequestChecksPassed
+            rollup
+                ("["
+                    <> check "COMPLETED" "FAILURE"
+                    <> ","
+                    <> check "QUEUED" ""
+                    <> "]")
+                `shouldBe` Just PullRequestChecksFailed
+            rollup ("[" <> check "COMPLETED" "NEW_STATE" <> "]")
+                `shouldBe` Just PullRequestChecksUnknown
+
+        it "animates while pull request checks are pending" do
+            runtime <- newScriptRuntime initialUiState
+            reducedRuntime <- newScriptRuntime initialUiState
+            let idle = reduceUi (UiUserSubmitted "done") initialUiState
+                visibleSize = Just (120, 35)
+                url = "https://github.com/owner/repository/pull/42"
+                stateFor runtime checks =
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                        { appUi = idle
+                        , appPullRequestURLs = [url]
+                        , appPullRequestCI = Map.singleton url checks
+                        , appTerminalSize = visibleSize
+                        , appTerminalFocus = TerminalFocused
+                        }
+                state = stateFor runtime
+            appMotionDemand (state PullRequestChecksPending)
+                `shouldBe` MotionSlow
+            appMotionDemand (state PullRequestChecksPassed)
+                `shouldBe` MotionNone
+            appMotionDemand
+                ((state PullRequestChecksPending)
+                    { appTerminalFocus = TerminalUnfocused })
+                `shouldBe` MotionNone
+            appMotionDemand
+                ((state PullRequestChecksPending)
+                    { appTerminalSize = Nothing })
+                `shouldBe` MotionNone
+            appMotionDemand
+                ((state PullRequestChecksPending)
+                    { appTerminalSize = Just (71, 35) })
+                `shouldBe` MotionNone
+            appMotionDemand
+                ((state PullRequestChecksPending)
+                    { appTerminalSize = Just (120, 9) })
+                `shouldBe` MotionNone
+            appMotionDemand
+                (stateFor
+                    (reducedRuntime { runtimeMotionMode = MotionReduced })
+                    PullRequestChecksPending)
+                `shouldBe` MotionNone
+            appMotionDemand
+                (stateFor
+                    (reducedRuntime { runtimeMotionMode = MotionOff })
+                    PullRequestChecksPending)
+                `shouldBe` MotionNone
+            (_, resized) <- runFullscreenScriptWithState
+                (state PullRequestChecksPending)
+                [ FullscreenScriptVty (V.EvResize 80 24)
+                , FullscreenScriptHalt
+                ]
+            resized.appTerminalSize `shouldBe` Just (80, 24)
+
         it "hides the pull request in narrow terminals and when absent" do
             runtime <- newScriptRuntime initialUiState
             let state = initialFullscreenAppState runtime [] AgentRoot [rootEntry] 0
                 withPullRequest = state
-                    { appPullRequestURL =
-                        Just "https://github.com/owner/repository/pull/42"
+                    { appPullRequestURLs =
+                        ["https://github.com/owner/repository/pull/42"]
                     }
             renderedAppText (71, 35) withPullRequest `shouldSatisfy`
                 (not . Text.isInfixOf "PR #42")

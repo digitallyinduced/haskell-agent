@@ -4,6 +4,7 @@ module Agent.CLI.TUI.Render.Workspace
     , agentPopoverLayers
     , agentEntryWindow
     , agentPaneVisible
+    , workspaceSidePaneVisible
     , agentPaneEntryLimit
     , conversationScrollbarRenderer
     , selectedAgentConversation
@@ -39,7 +40,12 @@ import Agent.CLI.Style ( motionGlyphSet )
 import Agent.CLI.TUI.History ( HistoryWindow(historyWindowTurns, historyWindowHasNewer) )
 import Agent.CLI.TUI.ImagePreview ()
 import Agent.CLI.TUI.LambdaArt ()
-import Agent.CLI.TUI.Motion ( isBackgroundAgentActive )
+import Agent.CLI.TUI.Motion
+    ( isBackgroundAgentActive
+    , sidePaneMinAvailableHeight
+    , sidePaneMinScreenWidth
+    , workspaceSidePaneVisible
+    )
 import Agent.CLI.TUI.MeasuredViewport ( measuredViewportWithFooter )
 import Agent.CLI.TUI.Render.Transcript
     ( drawTranscript,
@@ -51,7 +57,9 @@ import Agent.CLI.TUI.Types
     ( AgentHover(agentHoverTarget, agentHoverPaneUpperLeft,
                  agentHoverPaneWidth, agentHoverUpperLeft),
       AppState(appAgentHover, appRuntime, appMotionElapsedMillis, appUi,
-               appAgentSelected, appHistoryWindow, appAgentEntries, appPullRequestURL),
+               appAgentSelected, appHistoryWindow, appAgentEntries, appPullRequestURLs,
+               appPullRequestCI),
+      PullRequestChecks(..),
       FullscreenRuntime(runtimeMotionMode),
       Name(AgentPopover, ConversationViewportExtent, ConversationMessage, ConversationBlock, ConversationLatest, ConversationNewerGap,
            ConversationViewport, AgentRow, AgentPane, MarkdownLink) )
@@ -116,7 +124,7 @@ import Data.Foldable ()
 import Data.IORef ()
 import Data.List ( findIndex, intersperse, sortOn )
 import Data.List.NonEmpty ()
-import Data.Maybe ( fromMaybe, isJust )
+import Data.Maybe ( fromMaybe )
 import Data.Sequence ()
 import Data.Text ( Text )
 import Data.Time.Clock ()
@@ -133,7 +141,7 @@ import qualified Brick.Types as B ()
 import qualified Brick.Widgets.Border as Border ( borderAttr )
 import qualified Agent.CLI.TUI.Bridge as Bridge ()
 import qualified Agent.CLI.TUI.Composer as Composer ()
-import qualified Data.Map.Strict as Map ()
+import qualified Data.Map.Strict as Map
 import qualified Agent.CLI.TUI.Scroll as Scroll
     ( conversationMessagesBelow, conversationMessagesBelowLabel )
 import qualified Data.Sequence as Seq ( null )
@@ -175,7 +183,7 @@ drawWorkspace state =
                                 context.availWidth
                                 context.availHeight
                                 state.appAgentEntries
-                                state.appPullRequestURL)
+                                state.appPullRequestURLs)
                             then []
                             else
                                 [ hLimitPercent 40 $
@@ -192,38 +200,78 @@ drawWorkspace state =
                                                     state.appAgentEntries
                                                 | showAgents
                                                 ]
-                                                <> [ (if showAgents
-                                                        then padTop (Pad 1)
-                                                        else id) (drawPullRequestPane url)
-                                                   | Just url <- [state.appPullRequestURL]
-                                                   ]
+                                                <> zipWith
+                                                    (\index url ->
+                                                        (if showAgents || index > 0
+                                                            then padTop (Pad 1)
+                                                            else id)
+                                                            (drawPullRequestPane state url))
+                                                    [0 :: Int ..]
+                                                    (take visiblePullRequestLimit
+                                                        state.appPullRequestURLs)
                                 ]
   where
-    pullRequestHeight = if isJust state.appPullRequestURL then 5 else 0
+    pullRequestCount =
+        min visiblePullRequestLimit (length state.appPullRequestURLs)
+    pullRequestHeight
+        | pullRequestCount <= 0 = 0
+        | otherwise = 5 * pullRequestCount
 
--- The PR remains accessible when the last subagent has finished.
-workspaceSidePaneVisible :: Int -> Int -> [AgentEntry] -> Maybe Text -> Bool
-workspaceSidePaneVisible width height entries pullRequest =
-    width >= agentPaneMinScreenWidth
-        && height >= agentPaneMinAvailableHeight
-        && (length entries > 1 || isJust pullRequest)
+visiblePullRequestLimit :: Int
+visiblePullRequestLimit = 3
 
-drawPullRequestPane :: Text -> Widget Name
-drawPullRequestPane url =
+drawPullRequestPane :: AppState -> Text -> Widget Name
+drawPullRequestPane state url =
     withAttr Theme.borderAttr $
         withBorderStyle unicodeRounded $
             borderWithLabel (txt " Pull request ") $
                 padLeftRight 1 $
                     vBox
-                        [ clickable (MarkdownLink url) $
-                            withAttr Theme.controlLinkAttr $
-                                terminalTxt ("PR #" <> Text.takeWhileEnd (/= '/') url <> " ↗")
+                        [ clickable (MarkdownLink link) $
+                            hBox
+                                (pullRequestChecksGlyph checks state
+                                    <> [ withAttr Theme.controlLinkAttr $
+                                            terminalTxt
+                                                ("PR #"
+                                                    <> Text.takeWhileEnd (/= '/') url
+                                                    <> " ↗")
+                                       ])
                         , withAttr Theme.mutedAttr $
                             terminalTxt repository
                         ]
   where
+    checks =
+        Map.findWithDefault PullRequestChecksUnknown url state.appPullRequestCI
+    link = pullRequestStatusLink url checks
     repository = fst $ Text.breakOn "/pull/" $
         fromMaybe url (Text.stripPrefix "https://github.com/" url)
+
+pullRequestStatusLink :: Text -> PullRequestChecks -> Text
+pullRequestStatusLink url checks
+    | checks == PullRequestChecksFailed = url <> "/checks"
+    | otherwise = url
+
+pullRequestChecksGlyph :: PullRequestChecks -> AppState -> [Widget Name]
+pullRequestChecksGlyph checks state =
+    case checks of
+        PullRequestChecksUnknown -> []
+        PullRequestChecksNone ->
+            [ withAttr Theme.mutedAttr (txt "○ ") ]
+        PullRequestChecksPending ->
+            [ withAttr Theme.thinkingAttr $
+                txt
+                    (quietIndicator
+                        motionGlyphSet
+                        state.appRuntime.runtimeMotionMode
+                        state.appMotionElapsedMillis
+                        <> " ")
+            ]
+        PullRequestChecksPassed ->
+            [ withAttr Theme.successAttr (txt "✓ ") ]
+        PullRequestChecksFailed ->
+            [ withAttr Theme.errorAttr (txt "✕ ") ]
+        PullRequestChecksUnavailable ->
+            [ withAttr Theme.mutedAttr (txt "? ") ]
 
 drawConversationPane :: AppState -> Widget Name
 drawConversationPane state =
@@ -386,16 +434,10 @@ conversationScrollbarRenderer =
 agentPaneWidth :: Int
 agentPaneWidth = 42
 
-agentPaneMinScreenWidth :: Int
-agentPaneMinScreenWidth = 72
-
-agentPaneMinAvailableHeight :: Int
-agentPaneMinAvailableHeight = 10
-
 agentPaneVisible :: Int -> Int -> [AgentEntry] -> Bool
 agentPaneVisible width height entries =
-    width >= agentPaneMinScreenWidth
-        && height >= agentPaneMinAvailableHeight
+    width >= sidePaneMinScreenWidth
+        && height >= sidePaneMinAvailableHeight
         && length entries > 1
 
 agentPaneEntryLimit :: Int -> Int
@@ -529,7 +571,7 @@ positionAgentPopover state hover entry =
                         (max 0 (screenWidth - width - agentPopoverGap))
                         paneRight
             y = max 0 (min anchorY (screenHeight - height))
-        if screenWidth < agentPaneMinScreenWidth
+        if screenWidth < sidePaneMinScreenWidth
             || width < agentPopoverMinWidth
             || height < 5
             then render emptyWidget

@@ -27,6 +27,8 @@ module Agent.CLI.TUI.Types
     , FullscreenInputBuffer(..)
     , FullscreenHistorySource(..)
     , HistoryCommit(..)
+    , PullRequestChecks(..)
+    , pullRequestChecksFromCode
     , FullscreenRuntime(..)
     , FullscreenSessionActions(..)
     , MetaConsoleOverlay(..)
@@ -74,6 +76,10 @@ import Agent.CLI.TUI.History
     , HistoryRequest
     , HistoryTurn
     , HistoryWindow
+    )
+import Agent.Runtime.Session.PullRequest
+    ( PullRequestChecks(..)
+    , pullRequestChecksFromCode
     )
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import Agent.Loop (ImageAttachment)
@@ -227,7 +233,8 @@ data AppEvent
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
     | AppSetWindowTitle !Text
     | AppSetMouseCapture !Bool
-    | AppSetPullRequestURL !HistoryGeneration !(Maybe Text)
+    | AppSetPullRequestURLs !HistoryGeneration ![Text]
+    | AppSetPullRequestCI !HistoryGeneration !Text !PullRequestChecks
     | AppSyntaxHighlighterChanged
     | AppHistoryReset !HistoryPage
     | AppHistoryChartPrepared !HistoryGeneration !BlockId !TuiImagePreview
@@ -469,6 +476,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeHistoryChartRequests :: !(TVar [(HistoryGeneration, BlockId, Text)])
     , runtimeHistorySource :: !(IORef (Maybe FullscreenHistorySource))
     , runtimeHistoryGeneration :: !(IORef Int64)
+    , runtimePullRequestPoll :: !(TVar (Maybe (HistoryGeneration, [Text])))
     , runtimeDictationJobs :: !(TQueue DictationJob)
     }
 
@@ -568,7 +576,8 @@ data AppState = AppState
     , appSubmittedImagePreviews :: !(Map.Map BlockId [TuiImagePreview])
     , appAgentSelected :: !AgentTarget
     , appAgentEntries :: ![AgentEntry]
-    , appPullRequestURL :: !(Maybe Text)
+    , appPullRequestURLs :: ![Text]
+    , appPullRequestCI :: !(Map.Map Text PullRequestChecks)
     , appAgentHover :: !(Maybe AgentHover)
     , appMarkdownLinkHovered :: !Bool
     , appHoveredControl :: !(Maybe Name)
@@ -592,6 +601,8 @@ data AppState = AppState
     , appSyntaxHighlighter :: !(Maybe SyntaxHighlighter)
     , appSyntaxRequested :: !(Set.Set Text)
     , appTerminalFocus :: !TerminalFocus
+      -- | Latest EvResize columns and rows. Nothing until Brick reports a size.
+    , appTerminalSize :: !(Maybe (Int, Int))
     , appClipboardTip :: !ClipboardFocusTipState
     , appClipboardImageProbe :: !ClipboardImageProbe
     , appClipboardTipRemainingMillis :: !(Maybe Int)

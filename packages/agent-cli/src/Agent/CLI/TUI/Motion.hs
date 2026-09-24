@@ -11,6 +11,10 @@ module Agent.CLI.TUI.Motion
     , motionDemandFor
     , motionDemandForTerminalFocus
     , motionModeForTerminalFocus
+    , sidePaneMinScreenWidth
+    , sidePaneMinAvailableHeight
+    , workspaceSidePaneVisible
+    , pullRequestChecksShouldPoll
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
     , turnCompletionRequiresRedraw
@@ -28,6 +32,7 @@ import Agent.CLI.TUI.Types
     , ChoiceOverlay(choicePresentation)
     , ChoicePresentation(ChoiceDocument)
     , FullscreenRuntime(..)
+    , PullRequestChecks(..)
     , TerminalFocus(..)
     )
 import Agent.Loop (LoopEvent(..))
@@ -53,6 +58,7 @@ import Data.Foldable (toList)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Maybe (isJust)
+import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Word (Word64)
 
@@ -152,7 +158,52 @@ appMotionDemand state =
             state.appUi
         , clipboardImageTipMotionDemand
             state.appClipboardTipRemainingMillis
+        , pullRequestChecksMotionDemand state
         ]
+
+pullRequestChecksMotionDemand :: AppState -> MotionDemand
+pullRequestChecksMotionDemand state
+    | not (pullRequestChecksShouldPoll state) = MotionNone
+    | state.appRuntime.runtimeMotionMode /= MotionFull = MotionNone
+    | not (any pendingCheck state.appPullRequestURLs) = MotionNone
+    | otherwise = MotionSlow
+  where
+    pendingCheck url =
+        Map.findWithDefault PullRequestChecksUnknown url state.appPullRequestCI
+            == PullRequestChecksPending
+
+-- | Poll GitHub only while the pane can be on screen. Unfocused and
+-- undersized terminals keep the last glyph without scheduling gh.
+pullRequestChecksShouldPoll :: AppState -> Bool
+pullRequestChecksShouldPoll state =
+    state.appTerminalFocus /= TerminalUnfocused
+        && not (null state.appPullRequestURLs)
+        && pullRequestChecksPaneVisible state
+
+pullRequestChecksPaneVisible :: AppState -> Bool
+pullRequestChecksPaneVisible state =
+    case state.appTerminalSize of
+        Just (width, height) ->
+            workspaceSidePaneVisible
+                width
+                height
+                state.appAgentEntries
+                state.appPullRequestURLs
+        Nothing ->
+            False
+
+sidePaneMinScreenWidth :: Int
+sidePaneMinScreenWidth = 72
+
+sidePaneMinAvailableHeight :: Int
+sidePaneMinAvailableHeight = 10
+
+-- The PR remains accessible when the last subagent has finished.
+workspaceSidePaneVisible :: Int -> Int -> [AgentEntry] -> [Text] -> Bool
+workspaceSidePaneVisible width height entries urls =
+    width >= sidePaneMinScreenWidth
+        && height >= sidePaneMinAvailableHeight
+        && (length entries > 1 || not (null urls))
 
 appMotionTiming :: AppState -> (MotionDemand, Int)
 appMotionTiming state =

@@ -108,7 +108,7 @@ import Agent.CLI.TUI.History ( HistoryCursor(..)
     , setHistoryWindowTurns
     )
 import Agent.CLI.TUI.LambdaArt ( lambdaArtWidget )
-import Agent.CLI.TUI.Motion ( advanceCompletionFlashes , appMotionTiming , completionFlashTransitions , elapsedMillisSince , hasBackgroundActivity , isBackgroundAgentActive , motionDemandFor , motionDemandForTerminalFocus , motionModeForTerminalFocus , nativeProgressKeepaliveDue , nextMotionSchedule , turnCompletionRequiresRedraw , uiEventRestartsMotionSchedule , userActionPending )
+import Agent.CLI.TUI.Motion ( advanceCompletionFlashes , appMotionTiming , completionFlashTransitions , elapsedMillisSince , hasBackgroundActivity , isBackgroundAgentActive , motionDemandFor , motionDemandForTerminalFocus , motionModeForTerminalFocus , nativeProgressKeepaliveDue , nextMotionSchedule , pullRequestChecksShouldPoll , turnCompletionRequiresRedraw , uiEventRestartsMotionSchedule , userActionPending )
 import Agent.CLI.TUI.Render ( agentEntryWindow , agentPaneEntryLimit , agentPaneVisible , applyChildConversationUiEvent , choiceRowColumns , conversationUiForTarget , conversationScrollbarRenderer , drawApp , fullscreenBounds , fullscreenSurface , onboardingVisibleRowIndices , normalizeTextOverlayInsertion , maskedSecretText , quickStartRows , quickStartVisible , repositoryHeaderText , resumeSearchCursorColumn , selectedAgentConversation , textOverlayDisplayText )
 import Agent.CLI.TUI.ImagePreview ( NativePreviewPlacement(..)
     , TuiImagePreview(..)
@@ -129,6 +129,10 @@ import Agent.Syntax ( SyntaxHighlighter , loadSyntaxLanguage , newSyntaxHighligh
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import qualified Agent.CLI.TUI.Transcript as Transcript
 import Agent.CLI.TUI.Types
+import Agent.Runtime.Session.PullRequest
+    ( parsePullRequestChecksJSON
+    , pullRequestURLs
+    )
 import Agent.TUI.Model
 import Agent.TUI.Theme (ThemeKind(..))
 import Agent.TUI.Motion ( MotionDemand(..)
@@ -152,7 +156,7 @@ import Codec.Picture (pixelAt)
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async (race, wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
-import Control.Monad (forever, unless, void, when, (>=>))
+import Control.Monad (forM, forever, unless, void, when, (>=>))
 import Control.Concurrent.STM ( STM , TMVar , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , writeTQueue , writeTVar )
 import Agent.CLI.Notification
     ( AttentionRequest(PermissionRequested, SecretRequested)
@@ -161,8 +165,9 @@ import Agent.CLI.Notification
 import Agent.CLI.Recap ( autoRecapAwayThreshold , autoRecapIdleThreshold , autoRecapRetryInterval )
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
-import Control.Exception.Safe (bracket_, finally, mask, onException, throwIO, tryAny)
-import Control.Exception (AsyncException(UserInterrupt))
+import Control.Exception.Safe (bracket_, finally, mask, onException, throwIO, tryAny, tryIO)
+import qualified Data.ByteString as BS
+import Control.Exception (AsyncException(UserInterrupt), evaluate)
 import Data.Char (isControl, isSpace)
 import Data.Foldable (toList)
 import Data.IORef ( atomicModifyIORef' , modifyIORef' , newIORef , readIORef , writeIORef )
@@ -184,10 +189,19 @@ import GHC.Clock (getMonotonicTimeNSec)
 import qualified Graphics.Vty as V
 import qualified Graphics.Vty.CrossPlatform as Vty
 import System.Environment (lookupEnv)
+import System.Exit (ExitCode(..))
 import System.Info (os)
 import System.IO (stderr, stdout)
 import System.Posix.Process (getProcessID)
-import System.Process (callProcess)
+import System.Process
+    ( CreateProcess(..)
+    , StdStream(..)
+    , callProcess
+    , proc
+    , waitForProcess
+    , withCreateProcess
+    )
+import System.Timeout (timeout)
 
 newFullscreenInputBuffer :: IO FullscreenInputBuffer
 newFullscreenInputBuffer = Composer.newFullscreenInputBuffer
@@ -309,6 +323,7 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
             newIORef (SyntaxHighlighterUnloaded 0)
         historySource <- newIORef Nothing
         historyGeneration <- newIORef 0
+        pullRequestPoll <- newTVarIO Nothing
         dictationJobs <- newTQueueIO
         imagePreviews <- newIORef []
         submittedImagePlacements <- newIORef []
@@ -393,6 +408,7 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
             , runtimeHistoryChartRequests = historyChartRequests
             , runtimeHistorySource = historySource
             , runtimeHistoryGeneration = historyGeneration
+            , runtimePullRequestPoll = pullRequestPoll
             , runtimeDictationJobs = dictationJobs
             }
         pure runtime
@@ -446,10 +462,120 @@ setFullscreenSessionActions
             , sessionAgentSelect = agentSelect
             }
 
-setFullscreenPullRequestURL :: FullscreenRuntime -> Maybe Text -> IO ()
-setFullscreenPullRequestURL runtime url = do
+setFullscreenPullRequestURLs :: FullscreenRuntime -> [Text] -> IO ()
+setFullscreenPullRequestURLs runtime urls = do
     generation <- HistoryGeneration <$> readIORef runtime.runtimeHistoryGeneration
-    enqueueAppEvent runtime (AppSetPullRequestURL generation url)
+    enqueueAppEvent runtime (AppSetPullRequestURLs generation urls)
+
+syncPullRequestChecksPoll :: AppState -> IO ()
+syncPullRequestChecksPoll state = do
+    let next
+            | pullRequestChecksShouldPoll state =
+                Just
+                    ( state.appHistoryWindow.historyWindowGeneration
+                    , state.appPullRequestURLs
+                    )
+            | otherwise = Nothing
+    atomically do
+        current <- readTVar state.appRuntime.runtimePullRequestPoll
+        when (current /= next) $
+            writeTVar state.appRuntime.runtimePullRequestPoll next
+
+runPullRequestChecksWorker :: FullscreenRuntime -> IO ()
+runPullRequestChecksWorker runtime = forever do
+    request <- atomically do
+        pending <- readTVar runtime.runtimePullRequestPoll
+        maybe retry pure pending
+    intervalMicros <- refreshPullRequestChecks runtime request
+    waitPullRequestChecksInterval runtime request intervalMicros
+
+refreshPullRequestChecks
+    :: FullscreenRuntime
+    -> (HistoryGeneration, [Text])
+    -> IO Int
+refreshPullRequestChecks runtime (generation, urls) = do
+    currentGeneration <- HistoryGeneration <$> readIORef runtime.runtimeHistoryGeneration
+    if currentGeneration /= generation || null urls
+        then pure pullRequestChecksRetryMicros
+        else do
+            results <- forM urls lookupPullRequestChecks
+            stillCurrent <- atomically do
+                pending <- readTVar runtime.runtimePullRequestPoll
+                pure (pending == Just (generation, urls))
+            if stillCurrent
+                then do
+                    mapM_
+                        (\(url, checks) ->
+                            enqueueAppEvent runtime
+                                (AppSetPullRequestCI generation url checks))
+                        (zip urls results)
+                    pure (minimum (map pullRequestChecksIntervalMicros results))
+                else
+                    pure pullRequestChecksRetryMicros
+
+waitPullRequestChecksInterval
+    :: FullscreenRuntime
+    -> (HistoryGeneration, [Text])
+    -> Int
+    -> IO ()
+waitPullRequestChecksInterval runtime request intervalMicros = do
+    timer <- registerDelay intervalMicros
+    atomically do
+        pending <- readTVar runtime.runtimePullRequestPoll
+        ready <- readTVar timer
+        check (pending /= Just request || ready)
+
+pullRequestChecksRetryMicros :: Int
+pullRequestChecksRetryMicros = 15_000_000
+
+pullRequestChecksIntervalMicros :: PullRequestChecks -> Int
+pullRequestChecksIntervalMicros = \case
+    PullRequestChecksPending -> pullRequestChecksRetryMicros
+    PullRequestChecksUnknown -> pullRequestChecksRetryMicros
+    PullRequestChecksUnavailable -> 30_000_000
+    _ -> 45_000_000
+
+lookupPullRequestChecks :: Text -> IO PullRequestChecks
+lookupPullRequestChecks url =
+    case pullRequestViewArguments url of
+        Nothing -> pure PullRequestChecksUnavailable
+        Just arguments -> do
+            output <- runGhJson arguments
+            pure $
+                fromMaybe PullRequestChecksUnavailable
+                    (output >>= parsePullRequestChecksJSON)
+
+pullRequestViewArguments :: Text -> Maybe [String]
+pullRequestViewArguments url
+    | pullRequestURLs url == [url]
+    , [owner, repo, "pull", number] <- Text.splitOn "/" (Text.drop 19 url)
+    = Just
+        [ "pr", "view", Text.unpack number
+        , "--repo", Text.unpack (owner <> "/" <> repo)
+        , "--json", "statusCheckRollup"
+        ]
+    | otherwise = Nothing
+
+runGhJson :: [String] -> IO (Maybe BS.ByteString)
+runGhJson arguments = do
+    let spec =
+            (proc "gh" arguments)
+                { std_in = NoStream
+                , std_out = CreatePipe
+                , std_err = CreatePipe
+                }
+    result <- timeout 15_000_000 $
+        tryIO $
+            withCreateProcess spec \_stdin stdoutHandle stderrHandle processHandle -> do
+                out <- maybe (pure BS.empty) BS.hGetContents stdoutHandle
+                err <- maybe (pure BS.empty) BS.hGetContents stderrHandle
+                code <- waitForProcess processHandle
+                _ <- evaluate (BS.length out)
+                _ <- evaluate (BS.length err)
+                pure (code, out)
+    pure $ case result of
+        Just (Right (ExitSuccess, output)) -> Just output
+        _ -> Nothing
 
 setFullscreenHistorySource
     :: FullscreenRuntime

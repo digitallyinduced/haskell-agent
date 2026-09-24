@@ -51,7 +51,12 @@ import Crypto.Hash (Digest, SHA1, SHA256, hash)
 import Data.Aeson ((.:), (.:?), (.!=))
 import qualified Data.Aeson.Types as AesonTypes
 import qualified Data.Aeson.KeyMap as KeyMap
-import Agent.Runtime.Session.PullRequest (pullRequestURLs, conversationPullRequestURLs)
+import Agent.Runtime.Session.PullRequest
+    ( parsePullRequestChecksRollup
+    , pullRequestChecksToCode
+    , pullRequestURLs
+    , conversationPullRequestURLs
+    )
 import Data.List (nub)
 import Data.Maybe (fromMaybe)
 import Text.Read (readMaybe)
@@ -1762,37 +1767,9 @@ parseRepositoryPullRequest repository bytes = do
 -- gh reports each check separately; the ABI carries one rolled-up code:
 -- unknown, none, pending, passed, failed (0..4).
 pullRequestCheckRollup :: Aeson.Object -> AesonTypes.Parser Int
-pullRequestCheckRollup o = do
-    checks <- o .:? "statusCheckRollup" .!= []
-    statuses <- traverse parsePullRequestCheck checks
-    pure (rollup statuses)
-  where
-    rollup statuses
-        | null statuses = 1
-        | 4 `elem` statuses = 4
-        | 2 `elem` statuses = 2
-        | 0 `elem` statuses = 0
-        | otherwise = 3
-
-parsePullRequestCheck :: Aeson.Value -> AesonTypes.Parser Int
-parsePullRequestCheck = Aeson.withObject "check" \o -> do
-    kind <- o .: "__typename" :: AesonTypes.Parser Text
-    case kind of
-        "CheckRun" -> do
-            status <- o .: "status" :: AesonTypes.Parser Text
-            conclusion <- o .:? "conclusion" .!= ""
-            pure $ if status `elem` ["QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED"] then 2
-                else if status /= "COMPLETED" then 0
-                else classifyPullRequestCheck conclusion
-        "StatusContext" -> classifyPullRequestCheck <$> o .: "state"
-        _ -> pure 0
-
-classifyPullRequestCheck :: Text -> Int
-classifyPullRequestCheck value
-    | value `elem` ["SUCCESS", "NEUTRAL", "SKIPPED"] = 3
-    | value `elem` ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"] = 4
-    | value `elem` ["PENDING", "EXPECTED"] = 2
-    | otherwise = 0
+pullRequestCheckRollup object =
+    pullRequestChecksToCode
+        <$> parsePullRequestChecksRollup (Aeson.Object object)
 
 parsePullRequestState :: Text -> Bool -> AesonTypes.Parser Int
 parsePullRequestState state draft = case state of
