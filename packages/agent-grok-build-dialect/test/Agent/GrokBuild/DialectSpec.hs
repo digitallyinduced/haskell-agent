@@ -34,7 +34,7 @@ import Agent.ToolDispatch
     )
 import Agent.Tools.Scheduling (schedulingPlansConflict)
 import Agent.Tools.Background
-    ( BackgroundTaskStatus(..), readBackgroundTasks, setBackgroundTaskHooks )
+    ( BackgroundTaskStatus(..), readBackgroundTasks, readBackgroundTasksSTM, setBackgroundTaskHooks )
 import Agent.Tools.IO (CommandResult(..))
 import Agent.Tools.Types
     ( AppTool(..)
@@ -54,10 +54,14 @@ import Agent.Tools.Types
     , toolApprovalRequirement
     )
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.STM (atomically, check)
 import Control.Concurrent.MVar
     ( MVar
     , modifyMVar_
     , newMVar
+    , newEmptyMVar
+    , putMVar
+    , takeMVar
     , readMVar
     )
 import Control.Exception.Safe (bracket, tryIO)
@@ -542,7 +546,28 @@ spec = describe "Grok Build dialect" do
                     Text.isInfixOf "completion-output"
                 notice.noticeBody `shouldSatisfy`
                     Text.isInfixOf "do not call get_task_output"
-                readBackgroundTasks env `shouldReturn` []
+                Timeout.timeout 1000000 (atomically $
+                    readBackgroundTasksSTM env >>= check . null)
+                    `shouldReturn` Just ()
+
+    it "retains task ownership until completion publication" do
+        requireProcessSandbox
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            observed <- newEmptyMVar
+            setBackgroundTaskHooks env BackgroundTaskHooks
+                { backgroundTaskCompleted = \_ -> do
+                    tasks <- readBackgroundTasks env
+                    putMVar observed (map (.taskKey) tasks)
+                    pure True
+                , backgroundTaskDismissed = const (pure ())
+                }
+            bracket (newGrokSession env) closeGrokSession \session -> do
+                started <- startBackground session "sleep 0.05; printf completed"
+                started `shouldSatisfy`
+                    either (const False) (Text.isInfixOf "task_id: t1")
+                Timeout.timeout 1000000 (takeMVar observed)
+                    `shouldReturn` Just ["grok-terminal:t1"]
 
     it "retracts a completion notice when output is read explicitly" do
         requireProcessSandbox

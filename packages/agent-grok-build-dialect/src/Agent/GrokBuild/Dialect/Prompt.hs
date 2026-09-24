@@ -382,7 +382,7 @@ subagentBackgroundTasks tools available
         "<background_tasks>\n\
         \For long-running commands, use `background: true` in `"
             <> tools.grokExecute
-            <> "`, then continue independent work; completion is reported automatically while this agent remains active. Before finishing, use one bounded wait if an owned task is still running. Use `"
+            <> "`, then continue independent work or end your reply; you will resume automatically with its completion result. Stop persistent servers you own when no longer needed. Use `"
             <> tools.grokGetOutput
             <> "` for a snapshot or one bounded wait — do not poll repeatedly.\n\
         \</background_tasks>"

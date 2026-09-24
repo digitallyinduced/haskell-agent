@@ -13,6 +13,7 @@ module Agent.Tools.Background
     , publishBackgroundTaskNotice
     , publishCompletion
     , readBackgroundTasks
+    , readBackgroundTasksSTM
     , registerBackgroundTask
     , removeBackgroundTask
     , setBackgroundTaskHooks
@@ -27,9 +28,10 @@ import Agent.Tools.Types
     , ToolEnv(..)
     )
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
+import Control.Concurrent.STM (STM, atomically, modifyTVar', readTVar)
 import Control.Exception.Safe (tryAny)
 import Control.Monad (void)
-import Data.IORef (atomicModifyIORef', readIORef, writeIORef)
+import Data.IORef (readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
 import Data.List (sortOn)
 import Data.Text (Text)
@@ -38,9 +40,14 @@ import Data.Time.Clock (getCurrentTime)
 
 -- | Snapshot only: never consumes task output or completion notifications.
 readBackgroundTasks :: ToolEnv -> IO [BackgroundTaskStatus]
-readBackgroundTasks env =
+readBackgroundTasks = atomically . readBackgroundTasksSTM
+
+-- | Read task ownership in the same transaction as a completion queue, so
+-- an idle owner can wait for either publication or explicit task removal.
+readBackgroundTasksSTM :: ToolEnv -> STM [BackgroundTaskStatus]
+readBackgroundTasksSTM env =
     sortOn (\task -> (task.taskStartedAt, task.taskKey)) . Map.elems
-        <$> readIORef env.toolBackgroundTasks
+        <$> readTVar env.toolBackgroundTasks
 
 -- | Register before starting the worker, so an immediate completion cannot
 -- remove its entry before insertion. Repeated registration preserves its age.
@@ -48,14 +55,13 @@ registerBackgroundTask :: ToolEnv -> Text -> Text -> Bool -> IO ()
 registerBackgroundTask env key label autoResume = do
     startedAt <- getCurrentTime
     let status = BackgroundTaskStatus key label startedAt autoResume
-    atomicModifyIORef' env.toolBackgroundTasks \tasks ->
-        (Map.insertWith (\_ existing -> existing) key status tasks, ())
+    atomically $ modifyTVar' env.toolBackgroundTasks $
+        Map.insertWith (\_ existing -> existing) key status
 
 -- | Idempotent removal on completion, failed start, cancellation, or shutdown.
 removeBackgroundTask :: ToolEnv -> Text -> IO ()
 removeBackgroundTask env key =
-    atomicModifyIORef' env.toolBackgroundTasks \tasks ->
-        (Map.delete key tasks, ())
+    atomically $ modifyTVar' env.toolBackgroundTasks (Map.delete key)
 
 setBackgroundTaskHooks :: ToolEnv -> BackgroundTaskHooks -> IO ()
 setBackgroundTaskHooks env = writeIORef env.toolBackgroundTaskHooks

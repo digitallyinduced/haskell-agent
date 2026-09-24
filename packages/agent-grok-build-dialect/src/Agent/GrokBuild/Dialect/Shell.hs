@@ -67,7 +67,7 @@ import Agent.Tools.Types
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (mapConcurrently_, race)
 import Control.Concurrent.MVar
-import Control.Exception.Safe (bracketOnError, mask, onException, throwIO, tryAny)
+import Control.Exception.Safe (bracketOnError, finally, mask, onException, throwIO, tryAny)
 import Control.Monad (forM, void)
 import Data.IORef
 import Data.List (sortOn)
@@ -331,8 +331,9 @@ startBackgroundCommand authorization session command =
                                     removeStatus =
                                         removeBackgroundTask session.grokEnv
                                             (grokCompletionKey taskId)
-                                    publish result = do
-                                        removeStatus
+                                    -- Publish before relinquishing ownership;
+                                    -- idle children observe both via STM.
+                                    publish result = flip finally removeStatus do
                                         publishCompletion completion $
                                             publishBackgroundTaskNotice
                                                 session.grokEnv
