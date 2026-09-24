@@ -32,6 +32,7 @@ import Agent.Store.Postgres.Connection
     , closeStorePool
     , defaultPoolConfig
     , openStorePool
+    , postgresApplicationNameFromEnvironment
     , withSession
     , withSessionSingleAttempt
     , withStorePool
@@ -117,6 +118,12 @@ spec =
                                 , True
                                 , True
                                 )
+                    expectedApplicationName <-
+                        postgresApplicationNameFromEnvironment
+                    withSession
+                        (trustedPool store)
+                        (Session.statement () applicationNameStatement)
+                        `shouldReturn` Right expectedApplicationName
                     forbiddenResult <- withSession
                         (trustedPool store)
                         (Session.script
@@ -846,6 +853,13 @@ probeStatement = Statement.preparable
     Encoders.noParams
     (Decoders.singleRow $
         Decoders.column (Decoders.nonNullable Decoders.bool))
+
+applicationNameStatement :: Statement () Text
+applicationNameStatement = Statement.preparable
+    "SELECT current_setting('application_name')"
+    Encoders.noParams
+    (Decoders.singleRow $
+        Decoders.column (Decoders.nonNullable Decoders.text))
 
 providerTelemetryColumnStatement :: Statement () Bool
 providerTelemetryColumnStatement = Statement.preparable

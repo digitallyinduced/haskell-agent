@@ -11,6 +11,9 @@ module Agent.Store.Postgres.Connection
     , StoreConnection
     , PoolConfig(..)
     , defaultPoolConfig
+    , postgresApplicationName
+    , formatPostgresApplicationName
+    , postgresApplicationNameFromEnvironment
     , connectionSettingsForRole
     , openStorePool
     , openStorePoolWithConnectionTimeout
@@ -49,10 +52,12 @@ import Control.Exception.Safe
     , tryAny
     )
 import Control.Monad.Except (catchError, throwError)
+import Data.Char (isAlphaNum, isAscii)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (DiffTime)
 import GHC.Conc (threadWaitReadSTM)
+import System.Environment (lookupEnv)
 import qualified Hasql.Connection as Connection
 import qualified Hasql.Connection.Settings as ConnectionSettings
 import qualified Hasql.Errors as Errors
@@ -133,19 +138,64 @@ defaultReconnectionPolicy = ReconnectionPolicy
 noReconnectionPolicy :: ReconnectionPolicy
 noReconnectionPolicy = ReconnectionPolicy { reconnectionDelays = [] }
 
+-- | Product prefix of PostgreSQL @application_name@.
+postgresApplicationName :: Text
+postgresApplicationName = "haskell-agent"
+
+-- | PostgreSQL stores at most @NAMEDATALEN - 1@ bytes in @application_name@.
+postgresApplicationNameLimit :: Int
+postgresApplicationNameLimit = 63
+
+-- | Build @application_name@ from a build commit.
+--
+-- Missing or invalid commits become @development@. The result is printable
+-- ASCII and at most 63 bytes, which is PostgreSQL's @application_name@ limit.
+formatPostgresApplicationName :: Text -> Text
+formatPostgresApplicationName rawCommit =
+    Text.take postgresApplicationNameLimit
+        (postgresApplicationName <> "/" <> commit)
+  where
+    commit
+        | not (Text.null rawCommit)
+        , Text.all validCommitCharacter rawCommit
+        = rawCommit
+        | otherwise = "development"
+
+validCommitCharacter :: Char -> Bool
+validCommitCharacter character =
+    isAscii character
+        && (isAlphaNum character || character `elem` ("-._" :: String))
+
+-- | Read @AGENT_BUILD_COMMIT@, the same revision the CLI and native runtime
+-- export for gateway identity. This stays an environment lookup so agent-store
+-- is not rebuilt on every commit.
+postgresApplicationNameFromEnvironment :: IO Text
+postgresApplicationNameFromEnvironment = do
+    value <- lookupEnv "AGENT_BUILD_COMMIT"
+    pure $ formatPostgresApplicationName (maybe "" Text.pack value)
+
 connectionSettingsForRole
     :: ManagedPostgresConfig
     -> Text
     -> ConnectionSettings.Settings
 connectionSettingsForRole config role =
-    connectionSettingsForRoleWithTimeout config role 10
+    connectionSettingsForRoleWithTimeout
+        config
+        role
+        10
+        postgresApplicationName
 
 connectionSettingsForRoleWithTimeout
     :: ManagedPostgresConfig
     -> Text
     -> Int
+    -> Text
     -> ConnectionSettings.Settings
-connectionSettingsForRoleWithTimeout config role timeoutSeconds =
+connectionSettingsForRoleWithTimeout
+    config
+    role
+    timeoutSeconds
+    applicationName =
     ConnectionSettings.hostAndPort
         (Text.pack config.postgresPaths.postgresSocketDirectory)
         config.postgresPort
@@ -154,7 +204,7 @@ connectionSettingsForRoleWithTimeout config role timeoutSeconds =
         <> ConnectionSettings.other
             "connect_timeout"
             (Text.pack (show timeoutSeconds))
-        <> ConnectionSettings.applicationName "haskell-agent"
+        <> ConnectionSettings.applicationName applicationName
 
 openStorePool
     :: ManagedPostgresConfig
@@ -195,11 +245,13 @@ openRoleStorePoolWithConnectionTimeout
     role
     timeoutSeconds
     options = mask \restore -> do
+    applicationName <- postgresApplicationNameFromEnvironment
     let settings =
             connectionSettingsForRoleWithTimeout
                 config
                 role
                 timeoutSeconds
+                applicationName
     pool <- Pool.acquire PqiFfi.adapter $ PoolConfig.settings
         [ PoolConfig.size options.poolSize
         , PoolConfig.acquisitionTimeout options.poolAcquisitionTimeout
