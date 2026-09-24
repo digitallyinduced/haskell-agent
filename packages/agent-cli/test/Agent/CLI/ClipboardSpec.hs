@@ -96,6 +96,17 @@ spec = do
             clipboardImagePasteableFromTypes
                 ["public.png", "NSFilenamesPboardType"]
                 `shouldBe` False
+            clipboardImagePasteableFromTypes
+                ["public.tiff", "com.apple.pasteboard.promised-file-url"]
+                `shouldBe` False
+            clipboardImagePasteableFromTypes
+                [ "public.png"
+                , "com.apple.pasteboard.promised-file-content-type"
+                ]
+                `shouldBe` False
+            clipboardImagePasteableFromTypes
+                ["public.jpeg", "com.apple.pasteboard.finder-node"]
+                `shouldBe` False
 
         it "rejects text-only clipboards" do
             clipboardImagePasteableFromTypes ["public.utf8-plain-text"]

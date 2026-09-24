@@ -89,7 +89,11 @@ static int flavor_is_file_url(CFStringRef flavor)
     return flavor != NULL &&
            (UTTypeConformsTo(flavor, CFSTR("public.file-url")) ||
             CFEqual(flavor, CFSTR("public.file-url")) ||
-            CFEqual(flavor, CFSTR("NSFilenamesPboardType")));
+            CFEqual(flavor, CFSTR("NSFilenamesPboardType")) ||
+            CFEqual(flavor, CFSTR("com.apple.pasteboard.promised-file-url")) ||
+            CFEqual(flavor,
+                    CFSTR("com.apple.pasteboard.promised-file-content-type")) ||
+            CFEqual(flavor, CFSTR("com.apple.pasteboard.finder-node")));
 }
 
 static int flavor_is_raster(CFStringRef flavor)

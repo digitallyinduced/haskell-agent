@@ -104,7 +104,11 @@ clipboardImagePasteableFromTypes types
 
 isClipboardFileUrlType :: Text -> Bool
 isClipboardFileUrlType typeName =
-    typeName == "public.file-url" || typeName == "NSFilenamesPboardType"
+    typeName == "public.file-url"
+        || typeName == "NSFilenamesPboardType"
+        || typeName == "com.apple.pasteboard.promised-file-url"
+        || typeName == "com.apple.pasteboard.promised-file-content-type"
+        || typeName == "com.apple.pasteboard.finder-node"
 
 isClipboardRasterType :: Text -> Bool
 isClipboardRasterType typeName =
