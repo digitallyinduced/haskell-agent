@@ -59,6 +59,7 @@ library
         Documentation.Pages.BrowserControl
         Documentation.Pages.Deployment
         Documentation.Pages.NativeIntegration
+        Documentation.Pages.NativeMedia
         Documentation.Pages.RuntimeDaemon
         Documentation.Pages.ScheduledWork
         Documentation.Pages.Server

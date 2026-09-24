@@ -170,7 +170,8 @@ DevTools protocol; neither Python nor Playwright is required.
 ### Coverage regression checks
 
 With the current documentation server running, compare published article text
-with the CLI registries and configuration decoders:
+with the CLI registries, configuration decoders and accepted response-history
+item tags (including aliases):
 
 ```sh
 nix develop .#docs -c runghc docs/scripts/VerifyDocumentationCoverage.hs --self-test

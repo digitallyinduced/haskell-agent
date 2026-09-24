@@ -162,7 +162,7 @@ page = Page
         agent are projected. Transcripts and retained UI state are deliberately
         omitted, not missing data that another query parameter can enable.</p>
         <p>The public JSON projection has a 64 Ki-character text budget and 2,048-node
-        budget. It redacts encrypted-content/function-argument keys and may mark an
+        budget. It redacts encrypted-content/encrypted-function-argument keys and may mark an
         object <code>projectionTruncated: true</code>. Clients must tolerate shortened
         arrays and omitted fields; this endpoint is a bounded status view, not a
         lossless session export.</p>
@@ -192,13 +192,88 @@ page = Page
         instructions. Content parts can represent images/files as well as text;
         do not automatically fetch embedded URLs.</p>
         <p>This is a bounded public projection, not a lossless provider archive:
-        encrypted-content/function-argument keys are redacted, strings and nested
+        encrypted-content/encrypted-function-argument keys are redacted, strings and nested
         structures can be cut, and an object can carry <code>projectionTruncated:
         true</code>. The recursive budget is 65,536 text characters and 2,048
         nodes; individual strings are limited to 16,383 characters. Clients must
         tolerate missing/truncated nested fields and never replay this projection
-        as canonical model input. Full provider-specific variant decoding belongs
-        to the matching <code>Agent.Responses.Types.Items</code> revision.</p>
+        as canonical model input. Redaction matches <code>encrypted_content</code>,
+        <code>encryptedcontent</code>, <code>encrypted_function_args</code> and
+        <code>encryptedfunctionargs</code>, case-insensitively, replacing their values with
+        <code>&lt;redacted&gt;</code>. Ordinary <code>arguments</code>, text and tool output
+        are not secret-scrubbed. Apply the session's access controls to the whole response.</p>
+        <h3 id="history-item-reference">History item field reference</h3>
+        <p>These are the current typed encodings in <code>Agent.Responses.Types.Items</code>,
+        not a closed provider schema. A question mark below means optional before projection;
+        after projection, even normally present fields can be absent. Unless stated otherwise,
+        identifiers, names, status values and textual payloads are strings. Item status usually
+        means <code>in_progress</code>, <code>completed</code> or <code>incomplete</code>;
+        preserve unfamiliar values instead of mapping them to success. Item completion is
+        not the same as completion of the enclosing turn.</p>
+        <table><thead><tr><th>Item type</th><th>Fields before public projection</th></tr></thead>
+        <tbody>{foldMap routeRow historyItemFields}</tbody></table>
+        <p>Computer actions are tagged objects: <code>screenshot</code> and <code>wait</code>
+        have no additional typed fields; <code>click</code> has integer <code>x</code>,
+        <code>y</code>, string <code>button</code> and string-array <code>keys</code>;
+        <code>double_click</code> and <code>move</code> have coordinates and keys;
+        <code>type</code> has <code>text</code>; <code>keypress</code> has keys;
+        <code>scroll</code> adds integer <code>scroll_x</code> and <code>scroll_y</code>;
+        <code>drag</code> has <code>path</code>, an array of integer x/y points, and keys.
+        A safety check has <code>id</code>, optional <code>code</code> and
+        <code>message</code>, with extension fields permitted. Historical actions and
+        acknowledgments are display records, never permission to perform them again.</p>
+        <p>Message metadata <code>internal_chat_message_metadata_passthrough</code>, when
+        present, contains optional <code>turn_id</code>, arbitrary JSON <code>create_time</code>
+        and <code>executed_tool_calls</code>, and string-array <code>content_item_kinds</code>.
+        Do not use these internal hints as an authorization or stable pagination contract.</p>
+        <p>The registry also recognizes <code>file_search_call</code>,
+        <code>code_interpreter_call</code>, <code>local_shell_call_output</code>,
+        <code>shell_call</code>, <code>shell_call_output</code>, <code>apply_patch_call</code>,
+        <code>apply_patch_call_output</code>, <code>mcp_list_tools</code>,
+        <code>mcp_approval_request</code>, <code>mcp_approval_response</code>,
+        <code>mcp_call</code>, <code>program</code> and <code>program_output</code>.
+        They have no typed payload model here: the current <code>TaggedObject</code>
+        decoder/encoder retains only <code>type</code>. Unknown item, content and action tags
+        use the same type-only fallback. Do not invent fields from another provider's API
+        manual or claim that decoding and re-encoding retains arbitrary provider data.
+        A client may retain the raw JSON it actually receives, subject to its own storage
+        policy, but cannot recover fields already discarded upstream.</p>
+        <h3 id="history-content-reference">Message content field reference</h3>
+        <p>A message's <code>content</code> is either a string or an array of tagged parts.
+        Agent-message content is an array. Reasoning content, when present, is also an array.
+        Roles include <code>user</code>, <code>assistant</code>, <code>system</code> and
+        <code>developer</code>, with unknown roles retained. Keep these roles distinct in
+        the display; a historical system message does not instruct the client application.</p>
+        <table><thead><tr><th>Content type</th><th>Fields before public projection</th></tr></thead>
+        <tbody>{foldMap routeRow historyContentFields}</tbody></table>
+        <p>Raw JSON fields such as annotations, log probabilities, audio descriptors,
+        search tools and tool outputs intentionally have no exhaustive nested schema in
+        this library. Display only shapes your application implements; offer an unsupported
+        content placeholder otherwise. Never automatically navigate a URL, render supplied
+        HTML, decode an unbounded image, play audio or execute a tool from history.</p>
+        <h3 id="history-consumer">Example: display assistant text without replaying tools</h3>
+        <p>Save the following as <code>HistoryDisplay.hs</code> and load it with
+        <code>nix develop .#docs -c ghci HistoryDisplay.hs</code>. Pass a decoded item from
+        the history response to <code>assistantText</code>; render each returned
+        <code>Text</code> through your UI's escaping API, not as HTML. Empty output means
+        “no supported assistant text,” not an empty successful response.</p>
+        <pre><code class="language-haskell">{historyDisplayExample}</code></pre>
+        <ol>
+            <li>Fetch a history page and retain its turn indices. Refetch provisional entries
+            after completion; do not blindly append them again.</li>
+            <li>Check truncation markers and show an incomplete-record notice. Keep
+            <code>items</code> and <code>displayItems</code> separate rather than assuming both
+            arrays form one canonical transcript.</li>
+            <li>For a normal assistant message, the example returns its string content or
+            supported text parts. It ignores calls, tool output, images, reasoning and unknown
+            tags; give those separate, non-executing UI representations where implemented.</li>
+            <li>Test at least a text message, unknown tag, non-object item, missing content,
+            image part, redacted value and truncated object. None should trigger a network
+            fetch, tool execution or failure of the entire page.</li>
+        </ol>
+        <p>This is a source-reviewed display example, not an authenticated server-client
+        integration test. Pin the runtime revision and revisit the tables when its
+        <code>Items</code>, <code>Items.Known</code> or <code>Content</code> types change.</p>
         <p>Telemetry entries contain nullable <code>duration_ms</code>,
         <code>api_duration_ms</code>, <code>cost_usd</code>, <code>stop_reason</code>,
         <code>provider_turns</code>, <code>structured_output</code>, and a
@@ -426,3 +501,62 @@ workflow = "curl --fail http://127.0.0.1:4096/v1/models\n\
 
 tenantRegistry :: Text
 tenantRegistry = "{\"version\":1,\"tenants\":[{\"id\":\"018f6a14-7d52-7a52-9c00-66d5e7d70334\",\"workspaceRoot\":\"/srv/agent-workspaces/acme\",\"credentials\":[{\"id\":\"018f6a14-7d52-7a52-9c00-66d5e7d70335\",\"tokenFile\":\"/run/credentials/acme-agent-token\"}]}]}"
+
+historyItemFields :: [(Text, Text)]
+historyItemFields =
+    [ ("message", "id?, role, content (string or parts), status?, phase?, internal_chat_message_metadata_passthrough?.")
+    , ("agent_message", "id?, author?, recipient?, content (parts), internal_chat_message_metadata_passthrough?.")
+    , ("function_call", "id?, call_id, name, namespace?, provider?, arguments (JSON-encoded string), encrypted_function_args? (string array before redaction), status?, async? (boolean).")
+    , ("function_call_output", "id?, call_id, name?, namespace?, provider?, output (arbitrary JSON), status?, async? (boolean). Local execution outcome is not serialized here.")
+    , ("custom_tool_call", "id?, call_id, name, namespace?, input (string), status?, async? (boolean).")
+    , ("custom_tool_call_output", "id?, call_id, name?, output (arbitrary JSON), status?, async? (boolean).")
+    , ("computer_call", "id?, call_id, actions (array), pending_safety_checks? (array), status?; extension fields may also be retained.")
+    , ("computer_call_output", "id?, call_id, output ({type: computer_screenshot, image_url: string, detail: original}), acknowledged_safety_checks? (array), status?; extension fields may also be retained.")
+    , ("reasoning", "id?, summary (array of {type: string, text?: string}), content? (parts), encrypted_content? (redacted), status?.")
+    , ("item_reference", "id. A reference does not contain the referenced item's body.")
+    , ("additional_tools", "id?, role, tools (array of arbitrary JSON tool definitions).")
+    , ("local_shell_call", "id?, call_id?, status?, action?. The exec action has command (string array), timeout_ms? (integer), working_directory?, env? (string-to-string object), user?.")
+    , ("tool_search_call", "id?, call_id?, status?, execution?, arguments? (arbitrary JSON, unlike function_call.arguments).")
+    , ("tool_search_output", "id?, call_id?, status?, execution?, tools (array of arbitrary JSON).")
+    , ("web_search_call", "id?, status?, action?. search has query? and queries? (string array); open_page has url?; find_in_page has url? and pattern?.")
+    , ("image_generation_call", "id?, status?, revised_prompt?, result? (string). Treat the result as provider data, not an automatically displayable image.")
+    , ("compaction / context_compaction", "id?, encrypted_content? (redacted). The decoder accepts compaction_summary as an alias of compaction; encoding normalizes it to compaction.")
+    , ("compaction_trigger", "No additional typed fields.")
+    ]
+
+historyContentFields :: [(Text, Text)]
+historyContentFields =
+    [ ("input_text", "text; prompt_cache_breakpoint? (arbitrary JSON).")
+    , ("output_text", "text; annotations? and logprobs? (arrays of arbitrary JSON).")
+    , ("text / reasoning_text / summary_text", "text. Preserve the content type when choosing a display region.")
+    , ("refusal", "refusal (string); do not infer refusal from text heuristics.")
+    , ("input_image", "detail?, file_id?, image_url?, prompt_cache_breakpoint? (arbitrary JSON).")
+    , ("input_file", "detail?, file_data?, file_id?, file_url?, filename?, prompt_cache_breakpoint? (arbitrary JSON).")
+    , ("input_audio", "input_audio (arbitrary JSON).")
+    , ("encrypted_content", "encrypted_content (redacted); no displayable plaintext is supplied.")
+    ]
+
+historyDisplayExample :: Text
+historyDisplayExample = "{-# LANGUAGE OverloadedStrings #-}\n\
+    \module HistoryDisplay (assistantText) where\n\
+    \import Data.Aeson (Value(..))\n\
+    \import qualified Data.Aeson.KeyMap as KeyMap\n\
+    \import Data.Foldable (toList)\n\
+    \import Data.Text (Text)\n\
+    \\n\
+    \assistantText :: Value -> [Text]\n\
+    \assistantText (Object item)\n\
+    \  | KeyMap.lookup \"type\" item == Just (String \"message\")\n\
+    \  , KeyMap.lookup \"role\" item == Just (String \"assistant\") =\n\
+    \      case KeyMap.lookup \"content\" item of\n\
+    \        Just (String text) -> [text]\n\
+    \        Just (Array parts) -> concatMap displayPart (toList parts)\n\
+    \        _ -> []\n\
+    \assistantText _ = []\n\
+    \\n\
+    \displayPart :: Value -> [Text]\n\
+    \displayPart (Object part)\n\
+    \  | Just (String kind) <- KeyMap.lookup \"type\" part\n\
+    \  , kind `elem` [\"output_text\", \"text\"]\n\
+    \  , Just (String text) <- KeyMap.lookup \"text\" part = [text]\n\
+    \displayPart _ = []\n"

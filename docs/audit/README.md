@@ -7,21 +7,24 @@ line numbers in this checkout, not claims about another release.
 
 ## Remediation delivered
 
-The website now contains 39 pages, including expanded CLI and configuration
+The website now contains 40 pages, including expanded CLI and configuration
 references, tool availability and lifecycle contracts, storage recovery,
 deployment, REST/SSE, runtime daemon and native integration guides. The original
-Missing and Conflict findings have documentation remedies; some detailed
-interface and workflow findings remain Partial in the matrices below. A partial
-row is not silently counted as complete just because its function is named.
+Missing, Conflict and Partial findings have source-backed documentation remedies.
+The September 24 follow-up adds per-family native workflows, native media,
+history variant contracts and sandbox/Darwin installation procedures.
 
-Current reconciliation: **507 Covered, 26 Partial, 0 Missing, 0 Conflict** across
-533 audit rows. The remaining partials concern 22 native integration families,
-the full provider-specific history payload variants, native voice-host behavior,
-and two sandbox/native installation topics. These still need deeper recipes or
-host-specific evidence; this is not a claim of exhaustive end-to-end coverage.
+Current reconciliation: **533 Covered, 0 Partial, 0 Missing, 0 Conflict** across
+533 audit rows. Covered means the inventoried documentation contract is addressed,
+not that every integration has run successfully. Open provider payloads remain
+open; external native applications and deployed infrastructure still require
+host-specific acceptance testing.
 
-Validation includes 182 Haskell website tests, desktop/mobile browser checks,
-registry-derived presence checks, and 11 rendered configuration examples accepted
+Current validation includes 185 Haskell website tests, desktop/mobile browser
+checks across 40 pages, 15 coverage-check fixtures and all 33 accepted history
+tags. The native C example passes syntax checking, and the Haskell history
+consumer passes eight display fixtures. Earlier validation also includes
+registry-derived presence checks and 11 rendered configuration examples accepted
 by the actual product decoders with positive/negative fixtures. The bundled OpenAPI
 contract is checked byte-for-byte against its repository source; the native C
 header is linked directly from the source repository rather than duplicated.

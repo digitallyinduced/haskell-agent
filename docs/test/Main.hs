@@ -32,6 +32,7 @@ spec :: Application -> Spec
 spec application = do
     describe "Documentation routes" $ do
         it "registers unique canonical page routes including the reference guides" $ do
+            map pagePath pages `shouldContain` ["/reference/native-media/"]
             map pagePath pages `shouldContain` ["/", "/getting-started/installation/"]
             map pagePath pages `shouldContain` ["/guides/agent-lifecycle/"]
             forM_ ["/reference/configuration/", "/reference/providers/", "/reference/tools/", "/reference/keybindings/", "/reference/environment/", "/reference/persisted-settings/", "/guides/documentation/"] $ \path ->
