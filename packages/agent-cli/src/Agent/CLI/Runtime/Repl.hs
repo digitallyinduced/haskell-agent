@@ -63,6 +63,7 @@ import Agent.CLI.Session.Interaction
     , syncFullscreenContext
     )
 import Agent.CLI.Session.Lifecycle ( SessionContinuation(..) )
+import Agent.CLI.SessionState (restoreSessionDraft, suspendSessionDraft)
 import Agent.CLI.SessionEnv ( SessionEnv(..), SessionInboxRuntime(..) )
 import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.CLI.Skills ( skillInvocationCommand )
@@ -182,8 +183,11 @@ replWithDraft env@SessionEnv
     , sessionTerminal = terminal
     , sessionFullscreen = fullscreen
     , sessionAgentViewport = agentViewport
-    } draft = do
-    writeIORef draftRef draft
+    } requestedDraft = do
+    -- Both lifecycle continuations (including those rebuilt after a provider
+    -- switch) reopen here. A suspended composer takes precedence over the
+    -- synthetic turn's recovery prompt until this point.
+    draft <- restoreSessionDraft draftRef env.sessionSuspendedDraft requestedDraft
     refreshSkills False
     skillInvocations <- readIORef skillInvocationsRef
     let skillCommands =
@@ -324,6 +328,7 @@ replWithDraft env@SessionEnv
                         Right line -> pure (Right (line, False))
     case mlineResult of
         Left (SteeringInputWake suspendedDraft) -> do
+            suspendSessionDraft env.sessionDraft env.sessionSuspendedDraft suspendedDraft
             (promptText, pending) <-
                 readSteeringTurn env.sessionSteeringInputs
             if null pending
@@ -340,9 +345,6 @@ replWithDraft env@SessionEnv
                     result <- runOneTurn env promptText []
                     SessionLifecycle.finishTurn
                         sessionContinuation
-                            { resumeSession = \nextEnv ->
-                                replWithDraft nextEnv suspendedDraft
-                            }
                         env False result
         Left (ProviderUnavailableWake apiError) -> do
             -- The startup check is one-shot. If no fallback account is usable,

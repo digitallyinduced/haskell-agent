@@ -128,6 +128,7 @@ data SessionEnv = SessionEnv
     , sessionBackground :: !Bool
     , sessionStdinControl :: !StdinControl
     , sessionDraft :: !(IORef Text)
+    , sessionSuspendedDraft :: !(IORef (Maybe Text))
     , sessionPreviewId :: !(IORef Int)
     , sessionInterrupt :: !InterruptState
     , sessionRestartEffort :: !(IORef (Maybe Text))

@@ -1,6 +1,6 @@
 -- | First-party line editing for interactive prompts. TTY sessions use a raw
 -- inline editor with live slash-command completion; non-TTY falls back to
--- plain 'getLine'.
+-- plain line input with optional draft-preserving wake-up.
 module Agent.CLI.Input
     ( ReplLine(..)
     , readReplLine
@@ -93,6 +93,8 @@ import Data.List (isPrefixOf)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
+import qualified Data.Text.Lazy as LazyText
+import qualified Data.Text.Lazy.Builder as TextBuilder
 import System.Console.ANSI
     ( getTerminalSize
     , hHideCursor
@@ -321,8 +323,8 @@ readLineConfiguredOr
         else do
             Text.hPutStr stdout prompt
             hFlush stdout
-            readOrWake wake readRawLine >>= \case
-                Left reason -> pure (Left (reason, initial))
+            readRawLineOr wake initial >>= \case
+                Left suspended -> pure (Left suspended)
                 Right line -> pure (Right (maybe ReplEof classifySubmitted line))
   where
     classifyLine = \case
@@ -785,3 +787,27 @@ readRawLine = do
     if done
         then pure Nothing
         else Just <$> Text.getLine
+
+-- Only race non-consuming readiness. Cancelling getLine after it has consumed
+-- part of a slow pipe loses that prefix. Keep consumed characters outside the
+-- race and return them as the draft, just as the terminal editor does.
+readRawLineOr
+    :: Maybe (STM wake)
+    -> Text
+    -> IO (Either (wake, Text) (Maybe Text))
+readRawLineOr Nothing _ = Right <$> readRawLine
+readRawLineOr wake initial = go (TextBuilder.fromText initial)
+  where
+    finish = LazyText.toStrict . TextBuilder.toLazyText
+    go accumulated =
+        readOrWake wake (tryIO (hLookAhead stdin)) >>= \case
+            Left reason -> pure (Left (reason, finish accumulated))
+            Right (Left err)
+                | isEOFError err ->
+                    let line = finish accumulated
+                    in pure (Right (if Text.null line then Nothing else Just line))
+                | otherwise -> throwIO err
+            Right (Right _) ->
+                hGetChar stdin >>= \case
+                    '\n' -> pure (Right (Just (finish accumulated)))
+                    character -> go (accumulated <> TextBuilder.singleton character)
