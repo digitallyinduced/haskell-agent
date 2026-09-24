@@ -23,7 +23,7 @@ import Agent.Codex.Dialect.Shell
 import Agent.Codex.Dialect.Tools (shellCommandIsReadOnly)
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
 import Agent.Tools.Background
-    ( BackgroundTaskStatus(..), readBackgroundTasks, setBackgroundTaskHooks )
+    ( BackgroundTaskStatus(..), readBackgroundTasks, readBackgroundTasksSTM, setBackgroundTaskHooks )
 import Agent.Tools.IO (CommandResult(..))
 import Agent.ToolDispatch
     ( ToolOutcome(..)
@@ -66,7 +66,10 @@ import Control.Concurrent.MVar
     ( MVar
     , modifyMVar_
     , newMVar
+    , newEmptyMVar
+    , putMVar
     , readMVar
+    , takeMVar
     )
 import Control.Exception.Safe (bracket, tryIO)
 import qualified Data.Text as Text
@@ -486,6 +489,27 @@ spec = describe "Codex dialect" do
                     readMVar notices `shouldReturn` Nothing
                     readBackgroundTasks env `shouldReturn` []
 
+    it "retains task ownership until completion publication" do
+        requireProcessSandbox
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            observed <- newEmptyMVar
+            setBackgroundTaskHooks env BackgroundTaskHooks
+                { backgroundTaskCompleted = \_ -> do
+                    tasks <- readBackgroundTasks env
+                    putMVar observed (map (.taskKey) tasks)
+                    pure True
+                , backgroundTaskDismissed = const (pure ())
+                }
+            bracket (newCodexShellSession env) closeCodexShellSession \session -> do
+                started <- startCodexShellCommand session env.toolCwd
+                    "sleep 0.05; printf completed" 1 (\_ _ -> pure ())
+                case started of
+                    Right CodexShellRunning { codexShellSessionId = identifier } ->
+                        timeout 1000000 (takeMVar observed) `shouldReturn`
+                            Just ["codex-shell:" <> Text.pack (show identifier)]
+                    _ -> expectationFailure "expected a retained command"
+
     it "formats project instructions as a contextual user fragment" do
         let loaded = LoadedAgentsMd
                 { loadedGlobal = Just
@@ -798,7 +822,9 @@ spec = describe "Codex dialect" do
                         Text.isInfixOf "completion-output"
                     notice.noticeBody `shouldSatisfy`
                         Text.isInfixOf "do not call write_stdin"
-                    readBackgroundTasks env `shouldReturn` []
+                    timeout 1000000 (atomically $
+                        readBackgroundTasksSTM env >>= check . null)
+                        `shouldReturn` Just ()
 
     it "tracks retained commands without consuming output and clears status on reset" do
         requireProcessSandbox

@@ -10,6 +10,7 @@ module Agent.CLI.Subagents.Runtime
     , runHttpSubagent, runXaiParentSubagent, runGatewaySubagent
     , runXaiSubagent, resolveGatewaySubagentTarget, grokSpawnedChildIdentity
     , usesOpenAiChildTransport, validatePersistedSubagentTarget
+    , runChildWithBackgroundTasks
     ) where
 import Agent.Runtime.Session.Request
     ( readSessionRequestParams
@@ -60,7 +61,10 @@ import Agent.CLI.Subagents.Runtime.Target
 import Agent.Runtime.Provider.OpenAI.Fresh
     (freshOpenAiBackend, freshOpenAiBackendWithTurnState)
 import Agent.CLI.SteeringInputs
-    ( commitSteeringInputs
+    ( SteeringInputs
+    , awaitSteeringInput
+    , awaitSteeringInputReady
+    , commitSteeringInputs
     , dismissBackgroundCompletion
     , enqueueBackgroundCompletion
     , newSteeringInputs
@@ -87,11 +91,14 @@ import Agent.Loop
     (Backend(..), BackendMiddleware, BackendSnapshot(..),
      BackendStateStore(..), LoopConfig(..), LoopError(..), LoopEvent(..),
      LoopResult(..), TurnInput(..), advanceBackendSnapshot,
+     addTokenUsage, emptyTokenUsage,
      defaultLoopDispatch, emptyBackendSnapshot, initialBackendSnapshot,
      runLoop, runLoopInputs)
 import Agent.ToolDispatch (ToolDispatchConfig(..))
+import Agent.Cancel (waitCancel)
 import Agent.Tools.OutputArtifact (finalizeToolOutput)
-import Agent.Tools.Background (setBackgroundTaskHooks)
+import Agent.Tools.Background
+    (BackgroundTaskStatus(..), readBackgroundTasksSTM, setBackgroundTaskHooks)
 import qualified Agent.OpenAI.Client as OpenAI
 import Agent.OpenAI.LoopBackend
     ( openAiBackendWithTransportFallback
@@ -144,6 +151,8 @@ import Agent.Tools.Types
     )
 import Control.Concurrent.MVar
     (modifyMVar, modifyMVar_, newMVar)
+import Control.Concurrent.Async (race)
+import Control.Concurrent.STM (atomically, check, orElse)
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (finally, throwIO)
 import Control.Monad (unless)
@@ -1419,7 +1428,7 @@ runPreparedChild runtime env session toolEnv toolRegistry backend onEvent runChi
             , loopInterrupt = pure ()
             , loopCancel = env.subCancel
             }
-    result <- runChild config
+    result <- runChildWithBackgroundTasks toolEnv steering config runChild
     case result of
         Right loopResult ->
             setPreviousResponseId
@@ -1436,6 +1445,61 @@ runPreparedChild runtime env session toolEnv toolRegistry backend onEvent runChi
         runtime.subagentStoreRoot runtime.subagentRegistry
         runtime.subagentTypes env.subId status session
     pure result
+
+-- | A final response only suspends a child while it still owns automatically
+-- resumed commands. Keep its coding resource scope alive and submit the next
+-- model turn only after completion, not on a polling timer.
+runChildWithBackgroundTasks
+    :: ToolEnv
+    -> SteeringInputs
+    -> LoopConfig
+    -> (LoopConfig -> IO (Either LoopError LoopResult))
+    -> IO (Either LoopError LoopResult)
+runChildWithBackgroundTasks toolEnv steering config runFirst = do
+    lastOutput <- newIORef Nothing
+    let trackedConfig = config
+            { loopOnEvent = \event -> do
+                case event of
+                    TurnFinished output -> writeIORef lastOutput (Just output)
+                    _ -> pure ()
+                config.loopOnEvent event
+            }
+        pendingWork =
+            (True <$ awaitSteeringInputReady steering)
+                `orElse`
+                    (any (.taskAutoResume) <$> readBackgroundTasksSTM toolEnv)
+        nextCompletion =
+            (True <$ awaitSteeringInput steering)
+                `orElse` do
+                    tasks <- readBackgroundTasksSTM toolEnv
+                    check (not (any (.taskAutoResume) tasks))
+                    pure False
+        continue accumulatedTurns accumulatedUsage result = case result of
+            Left err -> pure (Left err)
+            Right finished -> do
+                let totalTurns = accumulatedTurns + finished.turnsUsed
+                    totalUsage = addTokenUsage accumulatedUsage finished.tokenUsage
+                    aggregate = finished
+                        { turnsUsed = totalTurns, tokenUsage = totalUsage }
+                    remainingTurns = config.loopMaxTurns - totalTurns
+                pending <- atomically pendingWork
+                if not pending
+                    then pure (Right aggregate)
+                    else if remainingTurns <= 0
+                        then readIORef lastOutput >>= \case
+                            Just output -> pure (Left (LoopMaxTurns output))
+                            Nothing -> pure (Left LoopNoResponseId)
+                        else race (waitCancel config.loopCancel)
+                                (atomically nextCompletion) >>= \case
+                            Left () -> pure (Left (LoopCancelled []))
+                            Right False -> pure (Right aggregate)
+                            Right True -> do
+                                resumed <- runLoopInputs
+                                    trackedConfig { loopMaxTurns = remainingTurns }
+                                    (Just finished.finalResponseId)
+                                    []
+                                continue totalTurns totalUsage resumed
+    runFirst trackedConfig >>= continue 0 emptyTokenUsage
 
 genericSubagentSuffix :: Text -> SubagentId -> Text
 genericSubagentSuffix agentType agentId =

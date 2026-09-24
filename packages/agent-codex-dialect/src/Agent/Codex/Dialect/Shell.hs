@@ -69,7 +69,7 @@ import Control.Concurrent.MVar
     , tryPutMVar
     , withMVar
     )
-import Control.Exception.Safe (SomeException, mask, onException, try)
+import Control.Exception.Safe (SomeException, finally, mask, onException, try)
 import Control.Monad (forM, void, when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except (ExceptT(..), runExceptT, throwE)
@@ -388,8 +388,10 @@ startManagedCommand authorization session workdir command =
                             cursor <- newMVar initialRunningOutputCursor
                             yielded <- newEmptyMVar
                             runningVar <- newEmptyMVar
-                            let publish result = do
-                                    removeStatus
+                            -- Keep ownership visible until the notice is
+                            -- queued, so an idle child cannot finish between
+                            -- task removal and completion publication.
+                            let publish result = flip finally removeStatus do
                                     didYield <- readMVar yielded
                                     when didYield $
                                       publishCompletion completion do

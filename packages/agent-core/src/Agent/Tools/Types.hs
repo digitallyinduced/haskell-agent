@@ -87,7 +87,7 @@ import Agent.Tools.Scheduling
     )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (race_)
-import Control.Concurrent.STM (STM, atomically, retry)
+import Control.Concurrent.STM (STM, TVar, atomically, newTVarIO, retry)
 import Control.Exception.Safe (bracket_, tryAny)
 import Control.Monad (foldM)
 import Data.Aeson (Value)
@@ -282,7 +282,7 @@ data ToolEnv = ToolEnv
       -- Stored behind an IORef because the CLI runner is installed after the
       -- provider-native tool runtimes are constructed.
     , toolBackgroundTaskHooks :: !(IORef BackgroundTaskHooks)
-    , toolBackgroundTasks :: !(IORef (Map.Map Text BackgroundTaskStatus))
+    , toolBackgroundTasks :: !(TVar (Map.Map Text BackgroundTaskStatus))
       -- | Non-consuming notification of pending guidance. Managed background
       -- waits may yield early, but must not cancel the underlying work.
     , toolSteeringWait :: !(IORef (STM ()))
@@ -301,7 +301,7 @@ defaultToolEnv cwd = do
     sessionTmp <- newIORef Nothing
     outputMemory <- newOutputArtifactMemoryStore
     backgroundTaskHooks <- newIORef noBackgroundTaskHooks
-    backgroundTasks <- newIORef Map.empty
+    backgroundTasks <- newTVarIO Map.empty
     steeringWait <- newIORef retry
     pure ToolEnv
         { toolCwd = dropTrailingPathSeparator cwd

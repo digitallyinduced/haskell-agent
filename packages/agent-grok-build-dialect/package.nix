@@ -1,6 +1,6 @@
 { mkDerivation, aeson, agent-core, agent-json, agent-tools, async
 , base, containers, directory, filepath, hspec, lib, process
-, safe-exceptions, temporary, text, time, transformers, unix
+, safe-exceptions, stm, temporary, text, time, transformers, unix
 }:
 mkDerivation {
   pname = "agent-grok-build-dialect";
@@ -13,7 +13,7 @@ mkDerivation {
   ];
   testHaskellDepends = [
     agent-core agent-tools async base containers directory filepath
-    hspec process safe-exceptions temporary text time unix
+    hspec process safe-exceptions stm temporary text time unix
   ];
   benchmarkHaskellDepends = [
     aeson agent-core agent-tools async base containers filepath

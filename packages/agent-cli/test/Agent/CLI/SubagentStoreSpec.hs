@@ -6,7 +6,11 @@ import Agent.CLI.SubagentStore
 import Agent.Runtime.Session (LegacySubagentTarget(..))
 import Agent.Dialect (DialectId(..))
 import Agent.Loop
-    ( BackendSnapshot(..)
+    ( Backend(..), BackendResult(..), BackendStateStore(..)
+    , LoopConfig(..), LoopError(..), LoopResult(..)
+    , TurnInput(..), TurnOutput(..), TokenUsage(..), emptyTurnOutput
+    , defaultLoopDispatch, runLoopInputs
+    , BackendSnapshot(..)
     , emptyBackendSnapshot
     , initialBackendSnapshot
     )
@@ -26,7 +30,14 @@ import Agent.CLI.Subagents.Runtime
     , unpinSubagentSession
     , usesOpenAiChildTransport
     , validatePersistedSubagentTarget
+    , runChildWithBackgroundTasks
     )
+import Agent.Cancel (newCancelFlag, requestCancel)
+import Agent.CLI.SteeringInputs
+    (SteeringInputs, newSteeringInputs, enqueueBackgroundCompletion,
+     readSteeringInputs, commitSteeringInputs)
+import Agent.Tools.Background (registerBackgroundTask, removeBackgroundTask)
+import Agent.Tools.Types (defaultToolEnv, mkToolRegistry)
 import Agent.Runtime.ProviderRequest (requestParams)
 import Agent.GrokBuild.Dialect.Task (lookupAgentReasoningEffort)
 import Agent.Responses.Types
@@ -60,13 +71,152 @@ import System.Directory.OsPath (doesFileExist)
 import qualified System.FilePath as FilePath
 import System.OsPath ((</>))
 import System.Posix.Temp (mkdtemp)
+import System.Timeout (timeout)
 import Test.Hspec
 
 fromFilePath = unsafeEncodeUtf
 toFilePath path = either (error . show) id (decodeUtf path)
 
+backgroundChildConfig :: SteeringInputs -> IORef [[TurnInput]] -> IO LoopConfig
+backgroundChildConfig steering requests = do
+    cancel <- newCancelFlag
+    snapshot <- newIORef emptyBackendSnapshot
+    registry <- either (fail . show) pure (mkToolRegistry [])
+    pure LoopConfig
+        { loopBackend = Backend \current _ inputs _ -> do
+            modifyIORef' requests (<> [inputs])
+            pure $ Right BackendResult
+                { backendOutput =
+                    (emptyTurnOutput "response" [] (Just "finished"))
+                        { tokenUsage = TokenUsage 3 2 0 }
+                , backendState = current
+                }
+        , loopBackendState = BackendStateStore
+            { readBackendState = readIORef snapshot
+            , commitBackendState = \current -> writeIORef snapshot current >> pure current
+            }
+        , loopTools = registry
+        , loopReadTools = Nothing
+        , loopDispatch = defaultLoopDispatch
+        , loopMaxTurns = 5
+        , loopOnEvent = const (pure ())
+        , loopApprove = const (fail "unexpected tool request")
+        , loopReadSteering = readSteeringInputs steering
+        , loopCommitSteering = commitSteeringInputs steering
+        , loopInterrupt = pure ()
+        , loopCancel = cancel
+        }
+
 spec :: Spec
 spec = describe "Agent.CLI.SubagentStore" do
+    describe "owned background command continuation" do
+        it "keeps the child alive after its reply and resumes with completion exactly once" do
+            env <- defaultToolEnv (unsafeEncodeUtf ".")
+            steering <- newSteeringInputs
+            requests <- newIORef []
+            config <- backgroundChildConfig steering requests
+            returned <- newEmptyMVar
+            registerBackgroundTask env "command" "test command" True
+            let runFirst current = do
+                    result <- runLoopInputs current Nothing [UserMessage "initial"]
+                    putMVar returned ()
+                    pure result
+            withAsync (runChildWithBackgroundTasks env steering config runFirst) \worker -> do
+                takeMVar returned
+                timeout 20000 (wait worker) `shouldReturn` Nothing
+                readIORef requests `shouldReturn` [[UserMessage "initial"]]
+                enqueueBackgroundCompletion steering "command" (UserMessage "completed")
+                    `shouldReturn` Right True
+                removeBackgroundTask env "command"
+                timeout 1000000 (wait worker) `shouldReturn`
+                    Just (Right (LoopResult "response" (Just "finished") 2 (TokenUsage 6 4 0)))
+            readIORef requests `shouldReturn`
+                [[UserMessage "initial"], [UserMessage "completed"]]
+            readSteeringInputs steering `shouldReturn` []
+
+        it "observes completion queued before checking whether the child can finish" do
+            env <- defaultToolEnv (unsafeEncodeUtf ".")
+            steering <- newSteeringInputs
+            requests <- newIORef []
+            config <- backgroundChildConfig steering requests
+            let runFirst current = do
+                    result <- runLoopInputs current Nothing [UserMessage "initial"]
+                    enqueueBackgroundCompletion steering "command" (UserMessage "completed")
+                        `shouldReturn` Right True
+                    pure result
+            result <- runChildWithBackgroundTasks env steering config runFirst
+            fmap (.turnsUsed) result `shouldBe` Right 2
+            readIORef requests `shouldReturn`
+                [[UserMessage "initial"], [UserMessage "completed"]]
+
+        it "cancels a child suspended on an owned command without another model request" do
+            env <- defaultToolEnv (unsafeEncodeUtf ".")
+            steering <- newSteeringInputs
+            requests <- newIORef []
+            config <- backgroundChildConfig steering requests
+            returned <- newEmptyMVar
+            registerBackgroundTask env "command" "test command" True
+            let runFirst current = do
+                    result <- runLoopInputs current Nothing [UserMessage "initial"]
+                    putMVar returned ()
+                    pure result
+            withAsync (runChildWithBackgroundTasks env steering config runFirst) \worker -> do
+                takeMVar returned
+                requestCancel config.loopCancel
+                timeout 1000000 (wait worker) `shouldReturn`
+                    Just (Left (LoopCancelled []))
+            readIORef requests `shouldReturn` [[UserMessage "initial"]]
+
+        it "does not wait for tasks that require explicit observation" do
+            env <- defaultToolEnv (unsafeEncodeUtf ".")
+            steering <- newSteeringInputs
+            requests <- newIORef []
+            config <- backgroundChildConfig steering requests
+            registerBackgroundTask env "observation" "persistent observation" False
+            result <- timeout 1000000 $
+                runChildWithBackgroundTasks env steering config
+                    (\current -> runLoopInputs current Nothing [UserMessage "initial"])
+            fmap (fmap (.turnsUsed)) result `shouldBe` Just (Right 1)
+
+        it "finishes without a model request when an owned command is explicitly removed" do
+            env <- defaultToolEnv (unsafeEncodeUtf ".")
+            steering <- newSteeringInputs
+            requests <- newIORef []
+            config <- backgroundChildConfig steering requests
+            returned <- newEmptyMVar
+            registerBackgroundTask env "command" "test command" True
+            let runFirst current = do
+                    result <- runLoopInputs current Nothing [UserMessage "initial"]
+                    putMVar returned ()
+                    pure result
+            withAsync (runChildWithBackgroundTasks env steering config runFirst) \worker -> do
+                takeMVar returned
+                timeout 20000 (wait worker) `shouldReturn` Nothing
+                removeBackgroundTask env "command"
+                result <- timeout 1000000 (wait worker)
+                fmap (fmap (.turnsUsed)) result `shouldBe` Just (Right 1)
+            readIORef requests `shouldReturn` [[UserMessage "initial"]]
+
+        it "does not reset the model turn budget when a completion resumes the child" do
+            env <- defaultToolEnv (unsafeEncodeUtf ".")
+            steering <- newSteeringInputs
+            requests <- newIORef []
+            initialConfig <- backgroundChildConfig steering requests
+            let config = initialConfig { loopMaxTurns = 2 }
+                runFirst current = do
+                    result <- runLoopInputs current Nothing [UserMessage "initial"]
+                    enqueueBackgroundCompletion steering "first" (UserMessage "completed")
+                        `shouldReturn` Right True
+                    pure result
+            registerBackgroundTask env "second" "another command" True
+            result <- timeout 1000000 $
+                runChildWithBackgroundTasks env steering config runFirst
+            case result of
+                Just (Left (LoopMaxTurns _)) -> pure ()
+                other -> expectationFailure ("expected exhausted turn budget, got " <> show other)
+            readIORef requests `shouldReturn`
+                [[UserMessage "initial"], [UserMessage "completed"]]
+
     describe "gateway subagent transport selection" do
         let target provider model dialect = CollaborationModelTarget
                 { collaborationTargetProvider = provider
