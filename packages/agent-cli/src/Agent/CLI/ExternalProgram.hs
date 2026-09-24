@@ -26,6 +26,7 @@ import Data.Char (isSpace)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
+import GHC.IO.Handle (hDuplicate)
 import System.Directory
     ( getTemporaryDirectory
     , removeFile
@@ -139,16 +140,19 @@ runExternalProgramOnFile program path = do
         terminalStderr <- getTerminalStderr
         -- Editors and pagers own the terminal while the REPL is suspended.
         -- Preserve their stderr UI without exposing parent native diagnostics.
-        withCreateProcess
-            ((proc
-                program.externalProgramExecutable
-                (program.externalProgramArguments <> [path]))
-                { std_err = UseHandle terminalStderr })
-            \_ _ _ processHandle ->
-                waitForProcess processHandle `onException` do
-                    terminateProcess processHandle
-                    _ <- waitForProcess processHandle
-                    pure ()
+        -- Process creation consumes nonstandard UseHandle handles, so give
+        -- the child an owned duplicate rather than the shared UI handle.
+        bracket (hDuplicate terminalStderr) hClose \childStderr ->
+            withCreateProcess
+                ((proc
+                    program.externalProgramExecutable
+                    (program.externalProgramArguments <> [path]))
+                    { std_err = UseHandle childStderr })
+                \_ _ _ processHandle ->
+                    waitForProcess processHandle `onException` do
+                        terminateProcess processHandle
+                        _ <- waitForProcess processHandle
+                        pure ()
     pure $
         case result of
             Left exception ->

@@ -5,7 +5,7 @@ import Agent.CLI.TerminalDiagnostics
 import Control.Concurrent.Async (cancel, withAsync)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception.Safe (bracket, bracket_, finally, throwIO)
-import Control.Monad (void)
+import Control.Monad (replicateM_, void)
 import Data.Bits ((.&.))
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Text (Text)
@@ -112,13 +112,17 @@ spec = describe "native terminal diagnostics" do
         withSystemTempDirectory "terminal-diagnostics" \directory ->
         captureStderr \output -> do
             path <- withTerminalDiagnostics directory \path -> do
-                runExternalProgramOnFile
-                    (ExternalProgram "/bin/sh" ["-c", "printf 'Editor prompt\\n' >&2"])
-                    path
-                    `shouldReturn` Right ()
+                replicateM_ 2 $
+                    runExternalProgramOnFile
+                        (ExternalProgram "/bin/sh" ["-c", "printf 'Editor prompt\\n' >&2"])
+                        path
+                        `shouldReturn` Right ()
+                terminal <- getTerminalStderr
+                hPutStrLn terminal "Parent UI resumed"
+                hFlush terminal
                 void (fdWrite stdError "Parent native diagnostic\n")
                 pure path
-            readCapture output `shouldReturn` "Editor prompt\n"
+            readCapture output `shouldReturn` "Editor prompt\nEditor prompt\nParent UI resumed\n"
             Text.readFile path `shouldReturn` "Parent native diagnostic\n"
 
     it "preserves interactive child stderr outside diagnostic isolation" $
