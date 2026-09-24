@@ -4,6 +4,11 @@ module Agent.CLI.TUI.Keyboard
     ( mkKeyboardVty
     , classifyKeyboard
     , decodeKeyboardBody
+    , CursorCapabilities(..)
+    , CursorFrameState(..)
+    , initialCursorFrameState
+    , preserveCursorFrame
+    , preserveCursorBlinkOutput
     , runKeyboardInput
     ) where
 
@@ -13,12 +18,15 @@ import Agent.CLI.Input.Types (KittyKey(..))
 import Control.Concurrent (threadWaitRead)
 import qualified Control.Concurrent.Async as Async
 import Control.Concurrent.STM
-import Control.Exception.Safe (mask, onException, finally, throwIO)
+import Control.Exception.Safe (catch, mask, onException, finally, throwIO)
 import Control.Monad (unless, when, void)
 import Data.Bits (testBit, (.&.))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import Data.Char (chr, toUpper)
+import Data.IORef (atomicModifyIORef', newIORef)
+import Data.Maybe (fromMaybe)
+import Data.Word (Word8)
 import Foreign (allocaBytes, castPtr)
 import qualified Graphics.Vty as V
 import Graphics.Vty.Input (Input(..), InternalEvent(..))
@@ -106,9 +114,213 @@ mkKeyboardVty config = mask \restore -> do
     input <- buildKeyboardInput config settings
     output <- restore (buildOutput config settings)
         `onException` shutdownInput input
-    restore (V.mkVtyFromPair input output) `onException`
+    blinkingOutput <- preserveCursorBlinkOutput output
+    restore (V.mkVtyFromPair input blinkingOutput) `onException`
         (shutdownInput input `finally`
             (V.releaseDisplay output `finally` V.releaseTerminal output))
+
+-- | Terminfo @civis@ and @cnorm@ for this terminal. Vty writes those exact
+-- byte strings around every picture. They are not always a single private-mode
+-- sequence: the Linux console hides with @CSI ? 25 l CSI ? 1 c@ and shows with
+-- @CSI ? 25 h CSI ? 0 c@.
+data CursorCapabilities = CursorCapabilities
+    { cursorHide :: !BS.ByteString
+    , cursorShow :: !BS.ByteString
+    }
+    deriving (Eq, Show)
+
+-- | Last hardware-cursor placement written to the terminal.
+-- 'CursorVisible' is the 1-based column and row emitted by terminfo @cup@.
+-- 'CursorUnsynchronized' means this process has not placed the cursor yet, so
+-- the next picture may show or hide it once.
+data CursorFrameState
+    = CursorUnsynchronized
+    | CursorHidden
+    | CursorVisible !Int !Int
+    deriving (Eq, Show)
+
+initialCursorFrameState :: CursorFrameState
+initialCursorFrameState = CursorUnsynchronized
+
+-- | Keep the terminal's own cursor blink. 'outputPicture' writes @civis@,
+-- changed cells, then @cnorm@ and a cursor address on every refresh. xterm
+-- and Ghostty put @CSI ? 12 l@ in @cnorm@, which turns blinking off. tmux
+-- prepends @CSI 34 h@, and the Linux console appends a cursor-shape sequence
+-- after @CSI ? 25 h@. Repeating show or move restarts the blink timer, and
+-- failing to recognize a multi-part @cnorm@ makes the caret look hidden.
+-- Strip the terminal's own sequences. Emit show or hide only when visibility
+-- changes, and emit a move only when the cell changed or the caret moved.
+-- Picture bytes are wrapped in a synchronized update so the caret is not
+-- painted at intermediate cells.
+preserveCursorFrame
+    :: CursorCapabilities
+    -> CursorFrameState
+    -> BS.ByteString
+    -> (BS.ByteString, CursorFrameState)
+preserveCursorFrame capabilities state bytes =
+    case BS.stripPrefix capabilities.cursorHide bytes of
+        Nothing -> (stripDisableBlink bytes, state)
+        Just rest ->
+            case splitVisibleSuffix capabilities.cursorShow rest of
+                Just (content, column, row) ->
+                    visibleFrame capabilities state content column row
+                Nothing -> hiddenFrame capabilities state rest
+
+-- | Apply 'preserveCursorFrame' to bytes actually written for a picture.
+-- Vty's display context otherwise retains the unwrapped output and would keep
+-- sending the terminfo sequence that disables blinking.
+preserveCursorBlinkOutput :: V.Output -> IO V.Output
+preserveCursorBlinkOutput output = do
+    capabilities <- loadCursorCapabilities (V.terminalID output)
+    cursorState <- newIORef initialCursorFrameState
+    let wrapped =
+            output
+                { V.outputByteBuffer = writeCursor cursorState
+                , V.mkDisplayContext = \_device region -> do
+                    context <- V.mkDisplayContext output output region
+                    pure context {V.contextDevice = wrapped}
+                }
+        writeCursor cursorRef nextBytes = do
+            emitted <- atomicModifyIORef' cursorRef \current ->
+                let (revised, next) =
+                        preserveCursorFrame capabilities current nextBytes
+                in (next, revised)
+            unless (BS.null emitted) $
+                V.outputByteBuffer output emitted
+    pure wrapped
+
+loadCursorCapabilities :: String -> IO CursorCapabilities
+loadCursorCapabilities name =
+    (cursorCapabilities <$> Terminfo.setupTerm name)
+        `catch` \(_ :: Terminfo.SetupTermError) -> pure fallbackCursorCapabilities
+
+cursorCapabilities :: Terminfo.Terminal -> CursorCapabilities
+cursorCapabilities terminal =
+    CursorCapabilities
+        { cursorHide =
+            fromMaybe fallbackCursorCapabilities.cursorHide
+                (plainCapability terminal "civis")
+        , cursorShow =
+            fromMaybe fallbackCursorCapabilities.cursorShow
+                (plainCapability terminal "cnorm")
+        }
+
+-- | xterm and Ghostty. Used when the output has no terminfo entry, including
+-- Vty's mock terminal.
+fallbackCursorCapabilities :: CursorCapabilities
+fallbackCursorCapabilities =
+    CursorCapabilities
+        { cursorHide = "\ESC[?25l"
+        , cursorShow = "\ESC[?12l\ESC[?25h"
+        }
+
+-- | Unpadded terminfo output. Padded capabilities cannot be compared with the
+-- bytes Vty writes, so those stay on the fallback sequences.
+plainCapability :: Terminfo.Terminal -> String -> Maybe BS.ByteString
+plainCapability terminal name =
+    case Terminfo.getCapability terminal capability of
+        Just value | not (null value) -> Just (BS8.pack value)
+        _ -> Nothing
+  where
+    capability :: Terminfo.Capability String
+    capability = Terminfo.tiGetOutput1 name
+
+visibleFrame
+    :: CursorCapabilities
+    -> CursorFrameState
+    -> BS.ByteString
+    -> Int
+    -> Int
+    -> (BS.ByteString, CursorFrameState)
+visibleFrame capabilities state content column row =
+    let placement = CursorVisible column row
+        reposition = content <> moveCursor column row
+    in case state of
+        CursorVisible currentColumn currentRow
+            | currentColumn == column && currentRow == row && BS.null content ->
+                (mempty, state)
+            | otherwise -> (synchronize reposition, placement)
+        _ ->
+            ( synchronize (reposition <> stripDisableBlink capabilities.cursorShow)
+            , placement
+            )
+
+hiddenFrame
+    :: CursorCapabilities
+    -> CursorFrameState
+    -> BS.ByteString
+    -> (BS.ByteString, CursorFrameState)
+hiddenFrame capabilities state content =
+    case state of
+        CursorHidden
+            | BS.null content -> (mempty, state)
+            | otherwise -> (synchronize content, state)
+        _ -> (synchronize (content <> capabilities.cursorHide), CursorHidden)
+
+-- | Terminfo @cup@ is @CSI row ; column H@. The show sequence sits immediately
+-- before that address, including any cursor-shape suffix after @CSI ? 25 h@.
+splitVisibleSuffix
+    :: BS.ByteString
+    -> BS.ByteString
+    -> Maybe (BS.ByteString, Int, Int)
+splitVisibleSuffix showSequence rest = do
+    (beforeMove, column, row) <- splitCupSuffix rest
+    content <- BS.stripSuffix showSequence beforeMove
+    pure (content, column, row)
+
+splitCupSuffix :: BS.ByteString -> Maybe (BS.ByteString, Int, Int)
+splitCupSuffix bytes = do
+    beforeTerminator <- BS.stripSuffix "H" bytes
+    (beforeColumn, column) <- takeTrailingDigits beforeTerminator
+    beforeSeparator <- BS.stripSuffix ";" beforeColumn
+    (beforeRow, row) <- takeTrailingDigits beforeSeparator
+    content <- BS.stripSuffix "\ESC[" beforeRow
+    pure (content, column, row)
+
+takeTrailingDigits :: BS.ByteString -> Maybe (BS.ByteString, Int)
+takeTrailingDigits bytes =
+    let (prefix, digits) = BS.spanEnd isDigitByte bytes
+    in if BS.null digits then Nothing else Just (prefix, foldDigits digits)
+
+isDigitByte :: Word8 -> Bool
+isDigitByte byte = byte >= 48 && byte <= 57
+
+foldDigits :: BS.ByteString -> Int
+foldDigits = BS.foldl' (\value byte -> value * 10 + fromIntegral byte - 48) 0
+
+moveCursor :: Int -> Int -> BS.ByteString
+moveCursor column row =
+    "\ESC[" <> decimal row <> ";" <> decimal column <> "H"
+
+decimal :: Int -> BS.ByteString
+decimal value
+    | value < 0 = "0"
+    | value < 10 = BS8.singleton (chr (value + 48))
+    | otherwise = decimal (value `div` 10) <> BS8.singleton (chr (value `mod` 10 + 48))
+
+synchronize :: BS.ByteString -> BS.ByteString
+synchronize bytes
+    | BS.null bytes = bytes
+    | otherwise = "\ESC[?2026h" <> bytes <> "\ESC[?2026l"
+
+stripDisableBlink :: BS.ByteString -> BS.ByteString
+stripDisableBlink = replaceBytes disableCursorBlink mempty
+
+replaceBytes :: BS.ByteString -> BS.ByteString -> BS.ByteString -> BS.ByteString
+replaceBytes needle replacement bytes =
+    case BS.breakSubstring needle bytes of
+        (before, rest)
+            | BS.null rest -> bytes
+            | otherwise ->
+                before
+                    <> replacement
+                    <> replaceBytes
+                        needle
+                        replacement
+                        (BS.drop (BS.length needle) rest)
+
+disableCursorBlink :: BS.ByteString
+disableCursorBlink = "\ESC[?12l"
 
 buildKeyboardInput :: V.VtyUserConfig -> UnixSettings -> IO Input
 buildKeyboardInput config settings = mask \restore -> do
