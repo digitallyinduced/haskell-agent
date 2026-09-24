@@ -1,7 +1,15 @@
 module Agent.CLI.TUIAppSpec (spec) where
 
 import qualified Agent.TUI.Theme as Theme
-import Agent.CLI.TUI.Keyboard (decodeKeyboardBody, classifyKeyboard, runKeyboardInput)
+import Agent.CLI.TUI.Keyboard
+    ( CursorFrameState(..)
+    , classifyKeyboard
+    , decodeKeyboardBody
+    , preserveCursorBlinkOutput
+    , initialCursorFrameState
+    , preserveCursorFrame
+    , runKeyboardInput
+    )
 import Agent.CLI.TUI.App (finishedMarkdownProseCaches)
 import qualified Agent.CLI.TUI.App as Runtime
 import Control.Monad (forM_, when)
@@ -2409,6 +2417,55 @@ spec = do
                 `shouldBe` Just (V.EvKey (V.KChar '!') [])
             decodeKeyboardBody "13;2u"
                 `shouldBe` Just (V.EvKey V.KEnter [V.MShift])
+
+        it "preserves the terminal cursor blink without forcing it" do
+            let hide = "\ESC[?25l"
+                showCursor = "\ESC[?25h"
+                disableBlink = "\ESC[?12l"
+                place column row =
+                    "\ESC[" <> ByteString.pack (show row <> ";" <> show column) <> "H"
+                caret = place 4 2
+                idle = hide <> disableBlink <> showCursor <> caret
+                changed = hide <> "cells" <> disableBlink <> showCursor <> caret
+                moved = hide <> disableBlink <> showCursor <> place 5 2
+                synchronize payload =
+                    "\ESC[?2026h" <> payload <> "\ESC[?2026l"
+                step state bytes = preserveCursorFrame state bytes
+            step initialCursorFrameState (disableBlink <> showCursor)
+                `shouldBe` (showCursor, initialCursorFrameState)
+            let (revealed, visible) = step initialCursorFrameState idle
+            revealed `shouldBe` synchronize (caret <> showCursor)
+            visible `shouldBe` CursorVisible 4 2
+            step visible idle `shouldBe` (mempty, visible)
+            let tmuxIdle = hide <> "\ESC[34h" <> showCursor <> caret
+                (tmuxRevealed, tmuxVisible) =
+                    step initialCursorFrameState tmuxIdle
+            tmuxRevealed `shouldBe` synchronize (caret <> showCursor)
+            tmuxVisible `shouldBe` visible
+            step tmuxVisible tmuxIdle `shouldBe` (mempty, tmuxVisible)
+            step visible changed
+                `shouldBe` (synchronize ("cells" <> caret), visible)
+            let (relocated, relocatedState) = step visible moved
+            relocated `shouldBe` synchronize (place 5 2)
+            relocatedState `shouldBe` CursorVisible 5 2
+            step relocatedState (hide <> "kept \ESC[?12l")
+                `shouldBe`
+                    (synchronize ("kept \ESC[?12l" <> hide), CursorHidden)
+            step CursorHidden hide `shouldBe` (mempty, CursorHidden)
+            step CursorHidden "\ESC]0;title\BEL"
+                `shouldBe` ("\ESC]0;title\BEL", CursorHidden)
+            events <- newIORef ([] :: [ByteString.ByteString])
+            (_, output) <- VMock.mockTerminal (10, 2)
+            let recording =
+                    output
+                        { V.outputByteBuffer =
+                            \bytes -> modifyIORef' events (<> [bytes])
+                        }
+            wrapped <- preserveCursorBlinkOutput recording
+            V.outputByteBuffer wrapped idle
+            context <- V.mkDisplayContext wrapped wrapped (10, 2)
+            V.outputByteBuffer (V.contextDevice context) idle
+            readIORef events `shouldReturn` [synchronize (caret <> showCursor)]
 
         it "preserves cancel behavior for modified Escape" do
             decodeKeyboardBody "27;3u"

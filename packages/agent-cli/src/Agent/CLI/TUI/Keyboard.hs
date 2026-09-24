@@ -4,6 +4,10 @@ module Agent.CLI.TUI.Keyboard
     ( mkKeyboardVty
     , classifyKeyboard
     , decodeKeyboardBody
+    , CursorFrameState(..)
+    , initialCursorFrameState
+    , preserveCursorFrame
+    , preserveCursorBlinkOutput
     , runKeyboardInput
     ) where
 
@@ -19,6 +23,9 @@ import Data.Bits (testBit, (.&.))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import Data.Char (chr, toUpper)
+import Data.IORef (atomicModifyIORef', newIORef)
+import Data.Maybe (fromMaybe)
+import Data.Word (Word8)
 import Foreign (allocaBytes, castPtr)
 import qualified Graphics.Vty as V
 import Graphics.Vty.Input (Input(..), InternalEvent(..))
@@ -106,9 +113,162 @@ mkKeyboardVty config = mask \restore -> do
     input <- buildKeyboardInput config settings
     output <- restore (buildOutput config settings)
         `onException` shutdownInput input
-    restore (V.mkVtyFromPair input output) `onException`
+    blinkingOutput <- preserveCursorBlinkOutput output
+    restore (V.mkVtyFromPair input blinkingOutput) `onException`
         (shutdownInput input `finally`
             (V.releaseDisplay output `finally` V.releaseTerminal output))
+
+-- | Last hardware-cursor placement written to the terminal.
+-- 'CursorVisible' is the 1-based column and row emitted by terminfo @cup@.
+-- 'CursorUnsynchronized' means this process has not placed the cursor yet, so
+-- the next picture may show or hide it once.
+data CursorFrameState
+    = CursorUnsynchronized
+    | CursorHidden
+    | CursorVisible !Int !Int
+    deriving (Eq, Show)
+
+initialCursorFrameState :: CursorFrameState
+initialCursorFrameState = CursorUnsynchronized
+
+-- | Keep the terminal's own cursor blink. Vty's @cnorm@ repeats on every
+-- refresh: xterm and Ghostty send @CSI ? 12 l@, which turns blinking off, and
+-- tmux and screen send @CSI 34 h@. 'outputPicture' also hides and moves the
+-- cursor every frame. Repeating show or move restarts the blink timer, so an
+-- otherwise idle caret never finishes a blink. Drop those cursor-style
+-- sequences. Emit show or hide only when visibility changes, and emit a move
+-- only when the cell changed or the caret moved.
+-- Picture bytes are wrapped in a synchronized update so the caret is not
+-- painted at intermediate cells.
+preserveCursorFrame :: CursorFrameState -> BS.ByteString -> (BS.ByteString, CursorFrameState)
+preserveCursorFrame state bytes =
+    case BS.stripPrefix hideCursor bytes of
+        Nothing -> (stripDisableBlink bytes, state)
+        Just rest ->
+            case splitVisibleSuffix rest of
+                Just (content, column, row) -> visibleFrame state content column row
+                Nothing -> hiddenFrame state rest
+
+-- | Apply 'preserveCursorFrame' to bytes actually written for a picture.
+-- Vty's display context otherwise retains the unwrapped output and would keep
+-- sending the terminfo sequence that disables blinking.
+preserveCursorBlinkOutput :: V.Output -> IO V.Output
+preserveCursorBlinkOutput output = do
+    cursorState <- newIORef initialCursorFrameState
+    let wrapped =
+            output
+                { V.outputByteBuffer = writeCursor cursorState
+                , V.mkDisplayContext = \_device region -> do
+                    context <- V.mkDisplayContext output output region
+                    pure context {V.contextDevice = wrapped}
+                }
+        writeCursor cursorRef nextBytes = do
+            emitted <- atomicModifyIORef' cursorRef \current ->
+                let (revised, next) = preserveCursorFrame current nextBytes
+                in (next, revised)
+            unless (BS.null emitted) $
+                V.outputByteBuffer output emitted
+    pure wrapped
+
+visibleFrame :: CursorFrameState -> BS.ByteString -> Int -> Int -> (BS.ByteString, CursorFrameState)
+visibleFrame state content column row =
+    let placement = CursorVisible column row
+        reposition = content <> moveCursor column row
+    in case state of
+        CursorVisible currentColumn currentRow
+            | currentColumn == column && currentRow == row && BS.null content ->
+                (mempty, state)
+            | otherwise -> (synchronize reposition, placement)
+        _ -> (synchronize (reposition <> showCursor), placement)
+
+hiddenFrame :: CursorFrameState -> BS.ByteString -> (BS.ByteString, CursorFrameState)
+hiddenFrame state content =
+    case state of
+        CursorHidden
+            | BS.null content -> (mempty, state)
+            | otherwise -> (synchronize content, state)
+        _ -> (synchronize (content <> hideCursor), CursorHidden)
+
+-- | Terminfo @cup@ is @CSI row ; column H@. The trailing numbers are the caret.
+splitVisibleSuffix :: BS.ByteString -> Maybe (BS.ByteString, Int, Int)
+splitVisibleSuffix rest = do
+    (beforeMove, column, row) <- splitCupSuffix rest
+    beforeShow <- BS.stripSuffix showCursor beforeMove
+    pure (stripShowPrefix beforeShow, column, row)
+
+-- | Terminfo @cnorm@ is not only @CSI ? 25 h@. xterm and Ghostty prepend
+-- @CSI ? 12 l@, which disables blinking. tmux and screen prepend @CSI 34 h@.
+-- Both sit immediately before show-cursor, so they are not cell text. Leaving
+-- them in the frame makes every refresh look changed and reissues the move
+-- that restarts the blink timer.
+stripShowPrefix :: BS.ByteString -> BS.ByteString
+stripShowPrefix bytes =
+    case BS.stripSuffix disableCursorBlink bytes of
+        Just content -> content
+        Nothing -> fromMaybe bytes (BS.stripSuffix normalCursor bytes)
+
+splitCupSuffix :: BS.ByteString -> Maybe (BS.ByteString, Int, Int)
+splitCupSuffix bytes = do
+    beforeTerminator <- BS.stripSuffix "H" bytes
+    (beforeColumn, column) <- takeTrailingDigits beforeTerminator
+    beforeSeparator <- BS.stripSuffix ";" beforeColumn
+    (beforeRow, row) <- takeTrailingDigits beforeSeparator
+    content <- BS.stripSuffix "\ESC[" beforeRow
+    pure (content, column, row)
+
+takeTrailingDigits :: BS.ByteString -> Maybe (BS.ByteString, Int)
+takeTrailingDigits bytes =
+    let (prefix, digits) = BS.spanEnd isDigitByte bytes
+    in if BS.null digits then Nothing else Just (prefix, foldDigits digits)
+
+isDigitByte :: Word8 -> Bool
+isDigitByte byte = byte >= 48 && byte <= 57
+
+foldDigits :: BS.ByteString -> Int
+foldDigits = BS.foldl' (\value byte -> value * 10 + fromIntegral byte - 48) 0
+
+moveCursor :: Int -> Int -> BS.ByteString
+moveCursor column row =
+    "\ESC[" <> decimal row <> ";" <> decimal column <> "H"
+
+decimal :: Int -> BS.ByteString
+decimal value
+    | value < 0 = "0"
+    | value < 10 = BS8.singleton (chr (value + 48))
+    | otherwise = decimal (value `div` 10) <> BS8.singleton (chr (value `mod` 10 + 48))
+
+synchronize :: BS.ByteString -> BS.ByteString
+synchronize bytes
+    | BS.null bytes = bytes
+    | otherwise = "\ESC[?2026h" <> bytes <> "\ESC[?2026l"
+
+stripDisableBlink :: BS.ByteString -> BS.ByteString
+stripDisableBlink = replaceBytes disableCursorBlink mempty
+
+replaceBytes :: BS.ByteString -> BS.ByteString -> BS.ByteString -> BS.ByteString
+replaceBytes needle replacement bytes =
+    case BS.breakSubstring needle bytes of
+        (before, rest)
+            | BS.null rest -> bytes
+            | otherwise ->
+                before
+                    <> replacement
+                    <> replaceBytes
+                        needle
+                        replacement
+                        (BS.drop (BS.length needle) rest)
+
+disableCursorBlink :: BS.ByteString
+disableCursorBlink = "\ESC[?12l"
+
+normalCursor :: BS.ByteString
+normalCursor = "\ESC[34h"
+
+showCursor :: BS.ByteString
+showCursor = "\ESC[?25h"
+
+hideCursor :: BS.ByteString
+hideCursor = "\ESC[?25l"
 
 buildKeyboardInput :: V.VtyUserConfig -> UnixSettings -> IO Input
 buildKeyboardInput config settings = mask \restore -> do
