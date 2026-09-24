@@ -137,6 +137,7 @@ library
                     , Agent.CLI.TUI.App.Reduce
                     , Agent.CLI.TUI.App.Run
                     , Agent.CLI.TUI.App.Runtime
+                    , Agent.CLI.TUI.ClipboardTip
                     , Agent.CLI.TUI.Composer.Logic
                     , Agent.CLI.TUI.Composer.Render
                     , Agent.CLI.TUI.LambdaArt
@@ -648,6 +649,7 @@ test-suite agent-cli-test
                     , Agent.CLI.TUIAppSpec.AgentFixtures
                     , Agent.CLI.TUIAppSpec.Motion
                     , Agent.CLI.TUIBridgeSpec
+                    , Agent.CLI.TUIClipboardTipSpec
                     , Agent.CLI.TUIComposerSpec
                     , Agent.CLI.TUIComposerUndoSpec
                     , Agent.CLI.TUIImagePreviewSpec

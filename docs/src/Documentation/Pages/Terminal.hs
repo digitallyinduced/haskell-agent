@@ -186,6 +186,11 @@ page = Page
         with <code>/mouse on</code>; the preference is saved. Keyboard navigation remains
         available in either mode.</p>
         <h2 id="attach-images">Attach images</h2>
+        <p>When a screenshot or copied raster is already on the clipboard at session
+        start, fullscreen mode shows a short hint above the prompt:
+        <code>Image in clipboard · Ctrl+V to paste</code>. The hint is metadata-only: it
+        inspects advertised pasteboard types, not image bytes, and it does not fire for
+        Finder file copies. Ctrl/Cmd+V then attaches the image as usual.</p>
         <p>Use <code>/paste</code> to attach a clipboard image and preview it in the terminal.
         <code>/attachments</code> lists queued images; <code>/clear-attachments</code> drops them.</p>
         <p>The explicit image command first tries existing clipboard image-file paths, then

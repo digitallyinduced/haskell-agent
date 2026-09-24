@@ -70,7 +70,7 @@ page = Page
             <tr><td><kbd>Ctrl+_</kbd></td><td>Undo a draft edit, not a conversation turn or file edit</td></tr>
             <tr><td><kbd>Ctrl+L</kbd></td><td>Invalidate the rendering cache and redraw</td></tr>
             <tr><td><kbd>Up</kbd> / <kbd>Down</kbd></td><td>Move between draft lines, then prompt history at its boundaries</td></tr>
-            <tr><td><kbd>Ctrl+V</kbd> / <kbd>Meta+V</kbd></td><td>Paste clipboard text or attach supported images; inspect the draft before sending</td></tr>
+            <tr><td><kbd>Ctrl+V</kbd> / <kbd>Meta+V</kbd></td><td>Paste clipboard text or attach supported images; a fullscreen hint appears when a raster is already on the clipboard</td></tr>
             <tr><td><kbd>Shift+Tab</kbd></td><td>Cycle prompt mode while awaiting input</td></tr>
         </tbody></table>
         <p>When slash suggestions are open, <kbd>Up</kbd>/<kbd>Down</kbd> select a

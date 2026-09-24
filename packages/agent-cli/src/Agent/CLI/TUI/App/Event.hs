@@ -95,6 +95,14 @@ import Agent.CLI.TUI.History ( HistoryCursor(..)
     , markHistoryRequest
     , setHistoryWindowTurns
     )
+import Agent.CLI.TUI.ClipboardTip
+    ( clipboardImageTipDurationMillis
+    , clipboardImageTipEligible
+    , clipboardImageTipInCooldown
+    , noteFiredClipboardImageTip
+    , pollClipboardFocusTip
+    , shouldFireClipboardImageTip
+    )
 import Agent.CLI.TUI.LambdaArt ( lambdaArtWidget )
 import Agent.CLI.TUI.Motion ( advanceCompletionFlashes , appMotionTiming , completionFlashTransitions , completionRequiresRedraw , elapsedMillisSince , hasBackgroundActivity , isBackgroundAgentActive , motionDemandFor , motionDemandForTerminalFocus , motionModeForTerminalFocus , nativeProgressKeepaliveDue , nextMotionSchedule , uiEventRestartsMotionSchedule , userActionPending )
 import Agent.CLI.TUI.Render ( agentEntryWindow , agentPaneEntryLimit , agentPaneVisible , applyChildConversationUiEvent , choiceRowColumns , conversationUiForTarget , conversationScrollbarRenderer , drawApp , fullscreenBounds , fullscreenSurface , onboardingVisibleRowIndices , normalizeTextOverlayInsertion , maskedSecretText , quickStartRows , quickStartVisible , repositoryHeaderText , resumeSearchCursorColumn , selectedAgentConversation , textOverlayDisplayText )
@@ -218,6 +226,7 @@ handleEvent event = do
         resolveConversationFollow
     when (isMotionTick event) refreshNativeProgressKeepalive
     handleEventInner event
+    pollClipboardImageTipEvent
     stateAfterEvent <- get
     when (isJust stateBeforeEvent.appPullRequestURL
         /= isJust stateAfterEvent.appPullRequestURL) do
@@ -351,6 +360,56 @@ handleEvent event = do
     isMotionTick = \case
         AppEvent AppMotionTick -> True
         _ -> False
+
+pollClipboardImageTipEvent :: EventM Name AppState ()
+pollClipboardImageTipEvent = do
+    state <- get
+    let pendingAction = userActionPending state
+        attachments = state.appUi.uiPrompt.promptAttachments
+        hasPreviews = not (null state.appImagePreviews)
+        unfocused = state.appTerminalFocus == TerminalUnfocused
+        blocked = pendingAction || attachments > 0 || hasPreviews
+        eligible =
+            clipboardImageTipEligible
+                pendingAction
+                attachments
+                hasPreviews
+                unfocused
+    if blocked
+        then when (isJust state.appClipboardTipRemainingMillis) $
+            modify' \current ->
+                current { appClipboardTipRemainingMillis = Nothing }
+        else if not eligible
+            then pure ()
+            else do
+                let now = state.appClockNanos
+                    tipState = state.appClipboardTip
+                if clipboardImageTipInCooldown tipState now
+                    then pure ()
+                    else do
+                        (outcome, nextTip) <-
+                            liftIO $
+                                pollClipboardFocusTip
+                                    now
+                                    state.appClipboardImageProbe
+                                    tipState
+                        modify' \current ->
+                            current { appClipboardTip = nextTip }
+                        case outcome of
+                            Just snapshot
+                                | shouldFireClipboardImageTip nextTip snapshot now ->
+                                    modify' \current ->
+                                        current
+                                            { appClipboardTip =
+                                                noteFiredClipboardImageTip
+                                                    current.appClipboardTip
+                                                    snapshot
+                                                    now
+                                            , appClipboardTipRemainingMillis =
+                                                Just clipboardImageTipDurationMillis
+                                            }
+                            _ ->
+                                pure ()
 
 syncMotionDemand :: EventM Name AppState ()
 syncMotionDemand = do

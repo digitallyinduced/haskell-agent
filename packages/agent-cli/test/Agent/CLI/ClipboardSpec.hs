@@ -79,6 +79,41 @@ spec = do
                             Right [ImageAttachment "image/png" "fixture-png"]
                     readFile probeLog `shouldReturn` "png\n"
 
+    describe "clipboardImagePasteableFromTypes" do
+        it "treats a screenshot raster as pasteable" do
+            clipboardImagePasteableFromTypes ["public.png", "public.tiff"]
+                `shouldBe` True
+            clipboardImagePasteableFromTypes ["public.jpeg"]
+                `shouldBe` True
+
+        it "rejects Finder file copies that advertise a file-icon raster" do
+            clipboardImagePasteableFromTypes
+                ["public.file-url", "public.tiff"]
+                `shouldBe` False
+            clipboardImagePasteableFromTypes
+                ["public.tiff", "public.file-url"]
+                `shouldBe` False
+            clipboardImagePasteableFromTypes
+                ["public.png", "NSFilenamesPboardType"]
+                `shouldBe` False
+            clipboardImagePasteableFromTypes
+                ["public.tiff", "com.apple.pasteboard.promised-file-url"]
+                `shouldBe` False
+            clipboardImagePasteableFromTypes
+                [ "public.png"
+                , "com.apple.pasteboard.promised-file-content-type"
+                ]
+                `shouldBe` False
+            clipboardImagePasteableFromTypes
+                ["public.jpeg", "com.apple.pasteboard.finder-node"]
+                `shouldBe` False
+
+        it "rejects text-only clipboards" do
+            clipboardImagePasteableFromTypes ["public.utf8-plain-text"]
+                `shouldBe` False
+            clipboardImagePasteableFromTypes []
+                `shouldBe` False
+
     describe "nonEmptyClipboardImages" do
         it "keeps only successful non-empty image reads" do
             let image = ImageAttachment "image/png" "png-bytes"

@@ -55,6 +55,10 @@ import Agent.CLI.Command
     , parseReplLineWithCatalog
     )
 import Agent.CLI.Dictation (DictationTarget)
+import Agent.CLI.TUI.ClipboardTip
+    ( ClipboardFocusTipState
+    , ClipboardImageProbe
+    )
 import Agent.CLI.TUI.Composer.Undo (UndoEntry)
 import Agent.CLI.Input.Types (ReplLine)
 import Agent.CLI.Interrupt (CtrlCDecision)
@@ -588,6 +592,9 @@ data AppState = AppState
     , appSyntaxHighlighter :: !(Maybe SyntaxHighlighter)
     , appSyntaxRequested :: !(Set.Set Text)
     , appTerminalFocus :: !TerminalFocus
+    , appClipboardTip :: !ClipboardFocusTipState
+    , appClipboardImageProbe :: !ClipboardImageProbe
+    , appClipboardTipRemainingMillis :: !(Maybe Int)
     }
 
 -- | Best-effort focus state reported by the terminal. Unknown preserves the

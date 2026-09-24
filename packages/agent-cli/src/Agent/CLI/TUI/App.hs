@@ -128,10 +128,30 @@ module Agent.CLI.TUI.App
     , normalizeTextOverlayInsertion
     , textOverlayDisplayText
     , withFullscreenSuspended
+    , ClipboardFocusTipState(..)
+    , ClipboardImageProbe(..)
+    , emptyClipboardFocusTipState
+    , inactiveClipboardImageProbe
+    , liveClipboardImageProbe
+    , clipboardImageTipDurationMillis
+    , clipboardImageTipLabel
+    , clipboardImageTipPrefix
+    , clipboardImageTipChord
+    , clipboardImageTipSuffix
+    , pollClipboardFocusTip
+    , shouldFireClipboardImageTip
+    , noteFiredClipboardImageTip
+    , advanceClipboardImageTip
+    , clipboardImageTipEligible
+    , clipboardImageTipPollIntervalNanos
+    , clipboardImageTipFireCooldownNanos
+    , clipboardImageTipDueToPoll
+    , clipboardImageTipInCooldown
     ) where
 
 
 import Agent.CLI.TUI.Types
+import Agent.CLI.TUI.ClipboardTip
 import Agent.CLI.TUI.Motion
 import Agent.CLI.TUI.Render
 import Agent.CLI.TUI.Render.Blocks (drawBlock)
