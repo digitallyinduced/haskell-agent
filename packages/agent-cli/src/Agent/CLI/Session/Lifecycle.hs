@@ -394,9 +394,7 @@ continueAfterTurn continuation env
         steeringWake <-
             hasSteeringInputWake env.sessionSteeringInputs
         failedTurn <- readIORef env.sessionLastFailedTurn
-        let willWake = case env.sessionFullscreen of
-                Just _ -> steeringWake && isNothing failedTurn
-                Nothing -> False
+        let willWake = steeringWake && isNothing failedTurn
         when (not queued && not willWake) $
             notifyAttention env.sessionRender.renderStderr InputRequested
         continuation.resumeSession env

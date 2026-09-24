@@ -1,6 +1,9 @@
 module Agent.CLI.InputSpec (spec) where
 
 import Agent.CLI.Command (defaultSlashCatalog)
+import Agent.CLI.Dictation (DictationTarget(..))
+import Agent.CLI.Interrupt (newInterruptState)
+import Agent.Provider (Provider(OpenAIProvider))
 import Agent.CLI.Input
     ( ChoiceKey(..)
     , approvalKeyText
@@ -15,6 +18,7 @@ import Agent.CLI.Input
     , isShiftTabCsiBody
     , parseChoiceKey
     , replHistoryPath
+    , readReplLineOrWithCatalogForTarget
     , submissionPromptText
     , terminalTextWidth
     , truncateDisplayText
@@ -36,9 +40,17 @@ import Agent.CLI.Input.Types
 import Data.Char (isControl)
 import Data.Either (isLeft)
 import Data.List (mapAccumL)
+import Control.Concurrent.STM (STM, retry)
+import Control.Exception.Safe (bracket, finally)
 import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
 import qualified Graphics.Vty as V
+import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.FilePath ((</>))
+import System.IO (Handle, SeekMode(AbsoluteSeek), hClose, hFlush, hSeek, stdin, stdout)
+import System.IO.Temp (withSystemTempFile)
+import System.Posix.IO (createPipe, fdToHandle)
+import System.Timeout (timeout)
 import Test.Hspec
 import Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
 import Test.QuickCheck
@@ -59,8 +71,51 @@ data EditorViewportCase = EditorViewportCase !Int !Text.Text !Int
 newtype EditorKeySequence = EditorKeySequence [EditorKey]
     deriving (Show)
 
+withPromptInputPipe :: (Handle -> IO a) -> IO a
+withPromptInputPipe action =
+    bracket
+        (do
+            (reader, writer) <- createPipe
+            (,) <$> fdToHandle reader <*> fdToHandle writer)
+        (\(reader, writer) -> hClose reader `finally` hClose writer)
+        \(reader, writer) ->
+            withPromptHandles reader (action writer)
+
+withPromptHandles :: Handle -> IO a -> IO a
+withPromptHandles reader action =
+    withSystemTempFile "prompt-output" \_ output -> do
+        let redirect target replacement inner =
+                bracket (hDuplicate target)
+                    (\saved ->
+                        hDuplicateTo saved target `finally` hClose saved)
+                    (\_ -> hDuplicateTo replacement target >> inner)
+        redirect stdin reader $ redirect stdout output action
+
 spec :: Spec
 spec = do
+    describe "externally resumed prompt" do
+        it "wakes without input and returns the unsubmitted draft" do
+            result <- withPromptInputPipe \_ -> do
+                interrupt <- newInterruptState (const (pure ()))
+                timeout 1000000 $
+                    readReplLineOrWithCatalogForTarget
+                        (DirectDictation OpenAIProvider) defaultSlashCatalog
+                        interrupt "" "unsubmitted draft" (pure ())
+            result `shouldBe` Just (Left ((), "unsubmitted draft"))
+
+        it "submits input normally when the wake is disabled" do
+            result <- withSystemTempFile "prompt-input" \_ input -> do
+                Text.hPutStrLn input "submitted text"
+                hFlush input
+                hSeek input AbsoluteSeek 0
+                withPromptHandles input do
+                    interrupt <- newInterruptState (const (pure ()))
+                    timeout 1000000 $
+                        readReplLineOrWithCatalogForTarget
+                            (DirectDictation OpenAIProvider) defaultSlashCatalog
+                            interrupt "" "" (retry :: STM ())
+            result `shouldBe` Just (Right (ReplText "submitted text"))
+
     describe "replHistoryPath" do
         it "is ~/.haskell-agent/history" do
             replHistoryPath "/home/marc"

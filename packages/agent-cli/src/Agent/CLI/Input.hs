@@ -9,6 +9,7 @@ module Agent.CLI.Input
     , readReplLineWithCatalog
     , readReplLineWithCatalogForProvider
     , readReplLineWithCatalogForTarget
+    , readReplLineOrWithCatalogForTarget
     , readReplLineWithSkills
     , readReplLineWithSkillsAndModels
     , readModalText
@@ -85,6 +86,9 @@ import Control.Exception.Safe
     , tryIO
     )
 import Control.Monad (unless, when)
+import Control.Concurrent.Async (race)
+import Control.Concurrent.STM (STM, atomically)
+import Data.Void (absurd)
 import Data.List (isPrefixOf)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -106,6 +110,7 @@ import System.IO
     , hGetChar
     , hIsTerminalDevice
     , hSetBuffering
+    , hLookAhead
     , hWaitForInput
     , isEOF
     , stdin
@@ -180,6 +185,22 @@ readReplLineWithCatalogForTarget
     -> IO ReplLine
 readReplLineWithCatalogForTarget target catalog =
     readReplLineConfigured (Just target) catalog True
+
+-- | Suspend the prompt at a key boundary and return its unsubmitted draft
+-- when an external event is ready. Suspension never adds a history entry.
+-- The wake transaction must observe readiness without consuming its event;
+-- the caller acknowledges it only after receiving 'Left'.
+readReplLineOrWithCatalogForTarget
+    :: DictationTarget
+    -> SlashCatalog
+    -> InterruptState
+    -> Text
+    -> Text
+    -> STM wake
+    -> IO (Either (wake, Text) ReplLine)
+readReplLineOrWithCatalogForTarget target catalog interrupt prompt initial wake =
+    readLineConfiguredOr (Just wake) True (Just target) catalog True
+        interrupt prompt initial
 
 readReplLineWithSkills
     :: [SkillCommand]
@@ -256,6 +277,23 @@ readLineConfigured
     -> Text
     -> IO ReplLine
 readLineConfigured
+        historyEnabled dictationProvider catalog slashEnabled interrupt prompt initial =
+    either (absurd . fst) id <$>
+        readLineConfiguredOr Nothing historyEnabled dictationProvider catalog
+            slashEnabled interrupt prompt initial
+
+readLineConfiguredOr
+    :: Maybe (STM wake)
+    -> Bool
+    -> Maybe DictationTarget
+    -> SlashCatalog
+    -> Bool
+    -> InterruptState
+    -> Text
+    -> Text
+    -> IO (Either (wake, Text) ReplLine)
+readLineConfiguredOr
+        wake
         historyEnabled
         dictationProvider
         catalog
@@ -269,8 +307,9 @@ readLineConfigured
             home <- getHomeDirectory
             let path = replHistoryPath home
             when historyEnabled (ensureHistoryParent path)
-            classifyLine <$>
+            fmap classifyLine <$>
                 readInlineEditor
+                    wake
                     historyEnabled
                     dictationProvider
                     catalog
@@ -282,7 +321,9 @@ readLineConfigured
         else do
             Text.hPutStr stdout prompt
             hFlush stdout
-            fmap (maybe ReplEof classifySubmitted) readRawLine
+            readOrWake wake readRawLine >>= \case
+                Left reason -> pure (Left (reason, initial))
+                Right line -> pure (Right (maybe ReplEof classifySubmitted line))
   where
     classifyLine = \case
         ReplText text -> classifySubmitted text
@@ -294,7 +335,8 @@ readLineConfigured
 -- | First-party inline editor for the interactive TTY path. It owns the
 -- prompt redraw so slash suggestions can update after every keystroke.
 readInlineEditor
-    :: Bool
+    :: Maybe (STM wake)
+    -> Bool
     -> Maybe DictationTarget
     -> SlashCatalog
     -> Bool
@@ -302,8 +344,9 @@ readInlineEditor
     -> FilePath
     -> Text
     -> Text
-    -> IO ReplLine
+    -> IO (Either (wake, Text) ReplLine)
 readInlineEditor
+        wake
         historyEnabled
         dictationProvider
         catalog
@@ -330,7 +373,14 @@ readInlineEditor
                         editorLoop entries state
   where
     editorLoop entries state = do
-        key <- readEditorKey
+        -- Race readiness, not decoding: cancelling a partially decoded paste
+        -- or escape sequence would discard bytes already consumed from stdin.
+        readOrWake wake (tryIO (hLookAhead stdin)) >>= \case
+            Left reason -> do
+                finishEditorLine prompt state
+                pure (Left (reason, state.editorText))
+            Right _ -> readEditorKey >>= applyKey entries state
+    applyKey entries state key = do
         case (historyEnabled, key, currentMenu state) of
             (False, EditorEscape, Nothing) ->
                 cancelModal state
@@ -340,7 +390,7 @@ readInlineEditor
       where
         cancelModal state = do
             finishEditorLine prompt state
-            pure ReplQuitInterrupt
+            pure (Right ReplQuitInterrupt)
         applyStep key = do
           let EditorStep
                   { editorStepState = next
@@ -354,7 +404,7 @@ readInlineEditor
                 finish next
             ReturnEditor line -> do
                 finishEditorLine prompt next
-                pure line
+                pure (Right line)
             CheckEditorInterrupt ->
                 if not historyEnabled
                     then cancelModal next
@@ -366,7 +416,7 @@ readInlineEditor
                             editorLoop entries next
                         QuitProcess -> do
                             finishEditorLine prompt next
-                            pure ReplQuitInterrupt
+                            pure (Right ReplQuitInterrupt)
             ClearEditorScreen -> do
                 Text.hPutStr stdout "\ESC[2J\ESC[H"
                 redrawEditor prompt next
@@ -415,10 +465,14 @@ readInlineEditor
                 unless (Text.all (== ' ') text) $
                     appendReplHistoryAt historyPath text
                         `catchIO` \_ -> pure ()
-            pure $
+            pure $ Right $
                 if state'.editorPasted
                     then ReplPasted text
                     else ReplText text
+
+readOrWake :: Maybe (STM wake) -> IO value -> IO (Either wake value)
+readOrWake Nothing action = Right <$> action
+readOrWake (Just wake) action = race (atomically wake) action
 
 readEditorKey :: IO EditorKey
 readEditorKey = do
