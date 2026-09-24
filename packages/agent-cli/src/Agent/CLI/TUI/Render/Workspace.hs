@@ -51,7 +51,9 @@ import Agent.CLI.TUI.Types
     ( AgentHover(agentHoverTarget, agentHoverPaneUpperLeft,
                  agentHoverPaneWidth, agentHoverUpperLeft),
       AppState(appAgentHover, appRuntime, appMotionElapsedMillis, appUi,
-               appAgentSelected, appHistoryWindow, appAgentEntries, appPullRequestURL),
+               appAgentSelected, appHistoryWindow, appAgentEntries, appPullRequestURL,
+               appPullRequestCI),
+      PullRequestChecks(..),
       FullscreenRuntime(runtimeMotionMode),
       Name(AgentPopover, ConversationViewportExtent, ConversationMessage, ConversationBlock, ConversationLatest, ConversationNewerGap,
            ConversationViewport, AgentRow, AgentPane, MarkdownLink) )
@@ -194,7 +196,7 @@ drawWorkspace state =
                                                 ]
                                                 <> [ (if showAgents
                                                         then padTop (Pad 1)
-                                                        else id) (drawPullRequestPane url)
+                                                        else id) (drawPullRequestPane state url)
                                                    | Just url <- [state.appPullRequestURL]
                                                    ]
                                 ]
@@ -208,22 +210,48 @@ workspaceSidePaneVisible width height entries pullRequest =
         && height >= agentPaneMinAvailableHeight
         && (length entries > 1 || isJust pullRequest)
 
-drawPullRequestPane :: Text -> Widget Name
-drawPullRequestPane url =
+drawPullRequestPane :: AppState -> Text -> Widget Name
+drawPullRequestPane state url =
     withAttr Theme.borderAttr $
         withBorderStyle unicodeRounded $
             borderWithLabel (txt " Pull request ") $
                 padLeftRight 1 $
                     vBox
                         [ clickable (MarkdownLink url) $
-                            withAttr Theme.controlLinkAttr $
-                                terminalTxt ("PR #" <> Text.takeWhileEnd (/= '/') url <> " ↗")
+                            hBox
+                                (pullRequestChecksGlyph state
+                                    <> [ withAttr Theme.controlLinkAttr $
+                                            terminalTxt
+                                                ("PR #"
+                                                    <> Text.takeWhileEnd (/= '/') url
+                                                    <> " ↗")
+                                       ])
                         , withAttr Theme.mutedAttr $
                             terminalTxt repository
                         ]
   where
     repository = fst $ Text.breakOn "/pull/" $
         fromMaybe url (Text.stripPrefix "https://github.com/" url)
+
+pullRequestChecksGlyph :: AppState -> [Widget Name]
+pullRequestChecksGlyph state =
+    case state.appPullRequestCI of
+        PullRequestChecksUnknown -> []
+        PullRequestChecksNone ->
+            [ withAttr Theme.mutedAttr (txt "○ ") ]
+        PullRequestChecksPending ->
+            [ withAttr Theme.thinkingAttr $
+                txt
+                    (quietIndicator
+                        motionGlyphSet
+                        state.appRuntime.runtimeMotionMode
+                        state.appMotionElapsedMillis
+                        <> " ")
+            ]
+        PullRequestChecksPassed ->
+            [ withAttr Theme.successAttr (txt "✓ ") ]
+        PullRequestChecksFailed ->
+            [ withAttr Theme.errorAttr (txt "✕ ") ]
 
 drawConversationPane :: AppState -> Widget Name
 drawConversationPane state =

@@ -6,6 +6,10 @@ import Agent.CLI.TUI.App.Mailbox
     ( appEventChannelCapacity
     , enqueueAppEvent
     )
+import Agent.CLI.RepositoryDelivery
+    ( RepositoryPullRequest(..)
+    , pullRequestByURL
+    )
 
 import Agent.CLI.Clipboard ( formatImageSize )
 import Agent.CLI.Dictation ( DictationControl(..)
@@ -161,7 +165,7 @@ import Agent.CLI.Notification
 import Agent.CLI.Recap ( autoRecapAwayThreshold , autoRecapIdleThreshold , autoRecapRetryInterval )
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
-import Control.Exception.Safe (bracket_, finally, mask, onException, throwIO, tryAny)
+import Control.Exception.Safe (bracket_, finally, mask, onException, throwIO, tryAny, tryIO)
 import Control.Exception (AsyncException(UserInterrupt))
 import Data.Char (isControl, isSpace)
 import Data.Foldable (toList)
@@ -183,6 +187,7 @@ import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
 import qualified Graphics.Vty as V
 import qualified Graphics.Vty.CrossPlatform as Vty
+import System.Directory (getCurrentDirectory)
 import System.Environment (lookupEnv)
 import System.Info (os)
 import System.IO (stderr, stdout)
@@ -309,6 +314,7 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
             newIORef (SyntaxHighlighterUnloaded 0)
         historySource <- newIORef Nothing
         historyGeneration <- newIORef 0
+        pullRequestPoll <- newTVarIO Nothing
         dictationJobs <- newTQueueIO
         imagePreviews <- newIORef []
         submittedImagePlacements <- newIORef []
@@ -393,6 +399,7 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
             , runtimeHistoryChartRequests = historyChartRequests
             , runtimeHistorySource = historySource
             , runtimeHistoryGeneration = historyGeneration
+            , runtimePullRequestPoll = pullRequestPoll
             , runtimeDictationJobs = dictationJobs
             }
         pure runtime
@@ -450,6 +457,68 @@ setFullscreenPullRequestURL :: FullscreenRuntime -> Maybe Text -> IO ()
 setFullscreenPullRequestURL runtime url = do
     generation <- HistoryGeneration <$> readIORef runtime.runtimeHistoryGeneration
     enqueueAppEvent runtime (AppSetPullRequestURL generation url)
+
+syncPullRequestChecksPoll :: AppState -> IO ()
+syncPullRequestChecksPoll state =
+    atomically $
+        writeTVar
+            state.appRuntime.runtimePullRequestPoll
+            (fmap
+                (\url -> (state.appHistoryWindow.historyWindowGeneration, url))
+                state.appPullRequestURL)
+
+runPullRequestChecksWorker :: FullscreenRuntime -> IO ()
+runPullRequestChecksWorker runtime = forever do
+    request <- atomically do
+        pending <- readTVar runtime.runtimePullRequestPoll
+        maybe retry pure pending
+    intervalMicros <- refreshPullRequestChecks runtime request
+    waitPullRequestChecksInterval runtime request intervalMicros
+
+refreshPullRequestChecks
+    :: FullscreenRuntime
+    -> (HistoryGeneration, Text)
+    -> IO Int
+refreshPullRequestChecks runtime (generation, url) = do
+    currentGeneration <- HistoryGeneration <$> readIORef runtime.runtimeHistoryGeneration
+    if currentGeneration /= generation
+        then pure pullRequestChecksRetryMicros
+        else do
+            cwd <- getCurrentDirectory
+            fetched <- tryIO (pullRequestByURL cwd url)
+            stillCurrent <- atomically do
+                pending <- readTVar runtime.runtimePullRequestPoll
+                pure (pending == Just (generation, url))
+            case fetched of
+                Right (Right pr)
+                    | stillCurrent -> do
+                        let checks = pullRequestChecksFromCode pr.repositoryPullRequestCI
+                        enqueueAppEvent runtime
+                            (AppSetPullRequestCI generation url checks)
+                        pure (pullRequestChecksIntervalMicros checks)
+                _ ->
+                    pure pullRequestChecksRetryMicros
+
+waitPullRequestChecksInterval
+    :: FullscreenRuntime
+    -> (HistoryGeneration, Text)
+    -> Int
+    -> IO ()
+waitPullRequestChecksInterval runtime request intervalMicros = do
+    timer <- registerDelay intervalMicros
+    atomically do
+        pending <- readTVar runtime.runtimePullRequestPoll
+        ready <- readTVar timer
+        check (pending /= Just request || ready)
+
+pullRequestChecksRetryMicros :: Int
+pullRequestChecksRetryMicros = 15_000_000
+
+pullRequestChecksIntervalMicros :: PullRequestChecks -> Int
+pullRequestChecksIntervalMicros = \case
+    PullRequestChecksPending -> pullRequestChecksRetryMicros
+    PullRequestChecksUnknown -> pullRequestChecksRetryMicros
+    _ -> 45_000_000
 
 setFullscreenHistorySource
     :: FullscreenRuntime

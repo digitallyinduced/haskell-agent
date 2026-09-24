@@ -49,6 +49,7 @@ import Agent.CLI.TUI.App
     , fullscreenVtyConfig
     , fullscreenSurface
     , fullscreenApp
+    , appMotionDemand
     , initialFullscreenAppState
     , isCommandPaletteKey
     , isMetaConsoleToggle
@@ -103,6 +104,8 @@ import Agent.CLI.TUI.Types
     , selectedChoice
     , FullscreenRuntime(..)
     , HistoryCommit(..)
+    , PullRequestChecks(..)
+    , pullRequestChecksFromCode
     , MetaConsoleOverlay(..)
     , Name(..)
     , PendingDialog(..)
@@ -974,6 +977,52 @@ spec = do
                 , FullscreenScriptHalt
                 ]
             cleared.appPullRequestURL `shouldBe` Nothing
+        it "records GitHub check status for the active pull request only" do
+            runtime <- newScriptRuntime initialUiState
+            let initialState = initialFullscreenAppState runtime [] AgentRoot [] 0
+                setChecks =
+                    FullscreenScriptApp
+                        (AppSetPullRequestCI
+                            (HistoryGeneration 0)
+                            url
+                            PullRequestChecksPassed)
+            (_, associated) <- runFullscreenScriptWithState initialState
+                [association 0, setChecks, FullscreenScriptHalt]
+            associated.appPullRequestCI `shouldBe` PullRequestChecksPassed
+            atomically (readTVar associated.appRuntime.runtimePullRequestPoll)
+                `shouldReturn` Just (HistoryGeneration 0, url)
+            (_, stale) <- runFullscreenScriptWithState associated
+                [ FullscreenScriptApp
+                    (AppSetPullRequestCI
+                        (HistoryGeneration 1)
+                        url
+                        PullRequestChecksFailed)
+                , FullscreenScriptHalt
+                ]
+            stale.appPullRequestCI `shouldBe` PullRequestChecksPassed
+            (_, other) <- runFullscreenScriptWithState associated
+                [ FullscreenScriptApp
+                    (AppSetPullRequestCI
+                        (HistoryGeneration 0)
+                        "https://github.com/owner/other/pull/7"
+                        PullRequestChecksFailed)
+                , FullscreenScriptHalt
+                ]
+            other.appPullRequestCI `shouldBe` PullRequestChecksPassed
+        it "clears check status when the associated pull request changes" do
+            runtime <- newScriptRuntime initialUiState
+            let initialState = (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    { appPullRequestURL = Just url
+                    , appPullRequestCI = PullRequestChecksPassed
+                    }
+            (_, cleared) <- runFullscreenScriptWithState initialState
+                [ FullscreenScriptApp (AppSetPullRequestURL (HistoryGeneration 0) Nothing)
+                , FullscreenScriptHalt
+                ]
+            cleared.appPullRequestURL `shouldBe` Nothing
+            cleared.appPullRequestCI `shouldBe` PullRequestChecksUnknown
+            atomically (readTVar cleared.appRuntime.runtimePullRequestPoll)
+                `shouldReturn` Nothing
         it "reflows a cached transcript when the pull request pane appears" do
             let body = Text.unwords (replicate 18 "transcript")
                 bounds = (160, 24)
@@ -3095,6 +3144,54 @@ spec = do
                 (> rowOf "Agents" withAgents)
             withoutAgents `shouldSatisfy` Text.isInfixOf "PR #42"
             withoutAgents `shouldSatisfy` (not . Text.isInfixOf "Agents ·")
+
+        it "shows GitHub check status on the pull request pane" do
+            runtime <- newScriptRuntime initialUiState
+            let url = "https://github.com/owner/repository/pull/42"
+                state checks =
+                    (initialFullscreenAppState runtime [] AgentRoot [rootEntry] 0)
+                        { appPullRequestURL = Just url
+                        , appPullRequestCI = checks
+                        }
+                pane = renderedAppText (120, 35) . state
+                prLine text =
+                    case filter (Text.isInfixOf "PR #42") (Text.lines text) of
+                        line : _ -> line
+                        [] -> text
+            prLine (pane PullRequestChecksUnknown)
+                `shouldSatisfy` (not . Text.any (`elem` ("✓✕○⋅" :: String)))
+            prLine (pane PullRequestChecksPassed)
+                `shouldSatisfy` Text.isInfixOf "✓"
+            prLine (pane PullRequestChecksFailed)
+                `shouldSatisfy` Text.isInfixOf "✕"
+            prLine (pane PullRequestChecksPending)
+                `shouldSatisfy` Text.isInfixOf "⋅"
+            prLine (pane PullRequestChecksNone)
+                `shouldSatisfy` Text.isInfixOf "○"
+            pullRequestChecksFromCode 3 `shouldBe` PullRequestChecksPassed
+            pullRequestChecksFromCode 4 `shouldBe` PullRequestChecksFailed
+            pullRequestChecksFromCode 2 `shouldBe` PullRequestChecksPending
+            pullRequestChecksFromCode 1 `shouldBe` PullRequestChecksNone
+            pullRequestChecksFromCode 0 `shouldBe` PullRequestChecksUnknown
+
+        it "animates while pull request checks are pending" do
+            runtime <- newScriptRuntime initialUiState
+            let idle = reduceUi (UiUserSubmitted "done") initialUiState
+                state checks =
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                        { appUi = idle
+                        , appPullRequestURL =
+                            Just "https://github.com/owner/repository/pull/42"
+                        , appPullRequestCI = checks
+                        }
+            appMotionDemand (state PullRequestChecksPending)
+                `shouldBe` MotionSlow
+            appMotionDemand (state PullRequestChecksPassed)
+                `shouldBe` MotionNone
+            appMotionDemand
+                ((state PullRequestChecksPending)
+                    { appTerminalFocus = TerminalUnfocused })
+                `shouldBe` MotionNone
 
         it "hides the pull request in narrow terminals and when absent" do
             runtime <- newScriptRuntime initialUiState

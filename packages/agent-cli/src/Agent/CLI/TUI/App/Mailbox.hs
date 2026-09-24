@@ -468,6 +468,7 @@ data PendingEventCoalesceKey
     | CoalesceMotionTick
     | CoalesceRecapPoll
     | CoalesceSyntaxHighlighter
+    | CoalescePullRequestCI
     deriving (Eq)
 
 pendingEventCoalesceKey
@@ -495,6 +496,7 @@ pendingEventCoalesceKey = \case
             AppRecapPoll -> Just CoalesceRecapPoll
             AppSyntaxHighlighterChanged ->
                 Just CoalesceSyntaxHighlighter
+            AppSetPullRequestCI{} -> Just CoalescePullRequestCI
             _ -> Nothing
     _ -> Nothing
 
@@ -778,6 +780,8 @@ appEventLogicalBytes = \case
     AppSyntaxHighlighterChanged -> 256
     AppSetPullRequestURL _ url ->
         saturatingAdd 256 (maybe 0 logicalTextBytes url)
+    AppSetPullRequestCI _ url _ ->
+        saturatingAdd 256 (logicalTextBytes url)
     AppHistoryReset page ->
         saturatingAdd 256 (historyPageLogicalBytes page)
     AppHistoryChartPrepared _ _ preview ->

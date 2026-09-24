@@ -298,6 +298,7 @@ library
     reexported-modules:
                       agent-external-session:Agent.CLI.ExternalSession as Agent.CLI.ExternalSession
     build-depends:    agent-runtime >= 0.1 && < 0.2
+                    , agent-repository >= 0.1 && < 0.2
                     , agent-tools >= 0.1 && < 0.2
                     , agent-accounts >= 0.1 && < 0.2
                     , agent-external-session >= 0.1 && < 0.2

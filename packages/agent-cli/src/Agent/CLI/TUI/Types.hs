@@ -27,6 +27,8 @@ module Agent.CLI.TUI.Types
     , FullscreenInputBuffer(..)
     , FullscreenHistorySource(..)
     , HistoryCommit(..)
+    , PullRequestChecks(..)
+    , pullRequestChecksFromCode
     , FullscreenRuntime(..)
     , FullscreenSessionActions(..)
     , MetaConsoleOverlay(..)
@@ -228,6 +230,7 @@ data AppEvent
     | AppSetWindowTitle !Text
     | AppSetMouseCapture !Bool
     | AppSetPullRequestURL !HistoryGeneration !(Maybe Text)
+    | AppSetPullRequestCI !HistoryGeneration !Text !PullRequestChecks
     | AppSyntaxHighlighterChanged
     | AppHistoryReset !HistoryPage
     | AppHistoryChartPrepared !HistoryGeneration !BlockId !TuiImagePreview
@@ -469,8 +472,28 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeHistoryChartRequests :: !(TVar [(HistoryGeneration, BlockId, Text)])
     , runtimeHistorySource :: !(IORef (Maybe FullscreenHistorySource))
     , runtimeHistoryGeneration :: !(IORef Int64)
+    , runtimePullRequestPoll :: !(TVar (Maybe (HistoryGeneration, Text)))
     , runtimeDictationJobs :: !(TQueue DictationJob)
     }
+
+-- | Rolled-up GitHub check status for the associated pull request.
+-- Codes match the repository-delivery ABI: unknown, none, pending, passed,
+-- failed (0..4).
+data PullRequestChecks
+    = PullRequestChecksUnknown
+    | PullRequestChecksNone
+    | PullRequestChecksPending
+    | PullRequestChecksPassed
+    | PullRequestChecksFailed
+    deriving (Eq, Show)
+
+pullRequestChecksFromCode :: Int -> PullRequestChecks
+pullRequestChecksFromCode = \case
+    1 -> PullRequestChecksNone
+    2 -> PullRequestChecksPending
+    3 -> PullRequestChecksPassed
+    4 -> PullRequestChecksFailed
+    _ -> PullRequestChecksUnknown
 
 data DictationJob = DictationJob
     { dictationJobWaitForStop :: IO ()
@@ -569,6 +592,7 @@ data AppState = AppState
     , appAgentSelected :: !AgentTarget
     , appAgentEntries :: ![AgentEntry]
     , appPullRequestURL :: !(Maybe Text)
+    , appPullRequestCI :: !PullRequestChecks
     , appAgentHover :: !(Maybe AgentHover)
     , appMarkdownLinkHovered :: !Bool
     , appHoveredControl :: !(Maybe Name)

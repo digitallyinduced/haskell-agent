@@ -208,6 +208,7 @@ resetHistoryPage page state =
         nextState = state
             { appUi = reduceUi UiConversationCleared state.appUi
             , appPullRequestURL = Nothing
+            , appPullRequestCI = PullRequestChecksUnknown
             , appHistoryWindow = window
             , appHistorySelectedBlock = Nothing
             , appHistoryLiveStart = Nothing

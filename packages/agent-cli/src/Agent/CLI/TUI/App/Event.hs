@@ -228,10 +228,11 @@ handleEvent event = do
     handleEventInner event
     pollClipboardImageTipEvent
     stateAfterEvent <- get
-    when (isJust stateBeforeEvent.appPullRequestURL
-        /= isJust stateAfterEvent.appPullRequestURL) do
+    when (stateBeforeEvent.appPullRequestURL
+        /= stateAfterEvent.appPullRequestURL) do
         invalidateCache
         queueConversationReflow
+        liftIO (syncPullRequestChecksPoll stateAfterEvent)
     when (eventMayExposeSyntax event) requestVisibleSyntaxLanguages
     state <- get
     let visible =
@@ -302,6 +303,7 @@ handleEvent event = do
         AppAgentSnapshot{} -> True
         AppSetWindowTitle{} -> True
         AppSetPullRequestURL{} -> True
+        AppSetPullRequestCI{} -> True
         AppSyntaxHighlighterChanged -> True
         AppHistoryLiveStarted -> True
         AppConversationReflow -> True
@@ -333,6 +335,7 @@ handleEvent event = do
     agentStructureRequiresUnfocusedRedraw previous next =
         previous.appAgentSelected /= next.appAgentSelected
             || previous.appPullRequestURL /= next.appPullRequestURL
+            || previous.appPullRequestCI /= next.appPullRequestCI
             || agentChromeSignature previous.appAgentEntries
                 /= agentChromeSignature next.appAgentEntries
 
@@ -504,7 +507,21 @@ handleAppEvent = \case
     AppSetPullRequestURL generation url -> do
         state <- get
         when (generation == state.appHistoryWindow.historyWindowGeneration) $
-            modify' \current -> current { appPullRequestURL = url }
+            modify' \current ->
+                current
+                    { appPullRequestURL = url
+                    , appPullRequestCI =
+                        if url == current.appPullRequestURL
+                            then current.appPullRequestCI
+                            else PullRequestChecksUnknown
+                    }
+    AppSetPullRequestCI generation url checks -> do
+        state <- get
+        when
+            ( generation == state.appHistoryWindow.historyWindowGeneration
+                && state.appPullRequestURL == Just url
+            ) $
+            modify' \current -> current { appPullRequestCI = checks }
     AppHistoryReset page ->
         handleHistoryResetEvent page
     AppHistoryChartPrepared generation blockId preview -> do

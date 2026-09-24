@@ -39,6 +39,7 @@ module Agent.CLI.TUI.App
     , initialFullscreenAppState
     , isCommandPaletteKey
     , mergeConversationView
+    , appMotionDemand
     , motionDemandFor
     , motionDemandForTerminalFocus
     , motionModeForTerminalFocus
@@ -104,6 +105,8 @@ module Agent.CLI.TUI.App
     , reloadFullscreenHistorySource
     , setFullscreenHistorySource
     , setFullscreenPullRequestURL
+    , syncPullRequestChecksPoll
+    , runPullRequestChecksWorker
     , setFullscreenSessionActions
     , fullscreenBounds
     , fullscreenVtyConfig

@@ -290,7 +290,11 @@ runFullscreen runtime workerAction = do
         withAsync uiTicker \_uiTicker ->
             withAsync (agentTicker (initialAgent, initialAgents)) \_agentTicker ->
                 withAsync (eventPump runtime) \_eventPump ->
-                    withAsync (recapTicker runtime) \_recapTicker ->
+                    withAsync
+                        (concurrently_
+                            (recapTicker runtime)
+                            (runPullRequestChecksWorker runtime))
+                        \_recapTicker ->
                         withAsync
                             (concurrently_ historyLoader (runHistoryChartWorker runtime))
                             \_historyLoader ->
@@ -491,6 +495,7 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appAgentSelected = initialAgent
         , appAgentEntries = initialAgents
         , appPullRequestURL = Nothing
+        , appPullRequestCI = PullRequestChecksUnknown
         , appAgentHover = Nothing
         , appMarkdownLinkHovered = False
         , appHoveredControl = Nothing

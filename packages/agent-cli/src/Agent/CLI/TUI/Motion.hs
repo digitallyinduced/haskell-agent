@@ -28,6 +28,7 @@ import Agent.CLI.TUI.Types
     , ChoiceOverlay(choicePresentation)
     , ChoicePresentation(ChoiceDocument)
     , FullscreenRuntime(..)
+    , PullRequestChecks(..)
     , TerminalFocus(..)
     )
 import Agent.Loop (LoopEvent(..))
@@ -152,7 +153,14 @@ appMotionDemand state =
             state.appUi
         , clipboardImageTipMotionDemand
             state.appClipboardTipRemainingMillis
+        , pullRequestChecksMotionDemand state
         ]
+
+pullRequestChecksMotionDemand :: AppState -> MotionDemand
+pullRequestChecksMotionDemand state
+    | state.appTerminalFocus == TerminalUnfocused = MotionNone
+    | state.appPullRequestCI == PullRequestChecksPending = MotionSlow
+    | otherwise = MotionNone
 
 appMotionTiming :: AppState -> (MotionDemand, Int)
 appMotionTiming state =
