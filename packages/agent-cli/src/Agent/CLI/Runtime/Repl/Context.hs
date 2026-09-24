@@ -28,7 +28,7 @@ import Data.Text ( Text )
 import qualified Data.Text as Text
     ( intercalate, null, strip )
 import qualified Data.Text.IO as Text ( hPutStrLn )
-import System.IO ( stderr )
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
 
 data ReplHandlerContext = ReplHandlerContext
     { handlerSessionEnv :: !SessionEnv
@@ -72,6 +72,7 @@ requestReplChoice context title body initial rows
                     (max 0 (min (length rows - 1) initial))
                     rows
             Nothing -> do
+                stderr <- getTerminalStderr
                 color <- resolveColor stderr
                 Text.hPutStrLn stderr
                     (roleMuted color
@@ -106,6 +107,7 @@ requestReplText context title body initial =
         Just runtime ->
             requestFullscreenText runtime title body initial
         Nothing -> do
+            stderr <- getTerminalStderr
             color <- resolveColor stderr
             unless (Text.null (Text.strip body)) $
                 Text.hPutStrLn stderr (roleMuted color body)

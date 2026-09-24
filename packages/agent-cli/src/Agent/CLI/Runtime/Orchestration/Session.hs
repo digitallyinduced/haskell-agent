@@ -267,7 +267,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock ( getCurrentTime, utctDay )
 import System.Environment ( getProgName )
-import System.IO (Handle, stderr)
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
+import System.IO (Handle)
 import System.Mem ( performMajorGC )
 import System.OsPath (OsPath)
 import Agent.OsPath (unsafeToFilePath)
@@ -1508,6 +1509,7 @@ printResumeHint progName persist = do
 
 printResumeHintForId :: String -> Text -> IO ()
 printResumeHintForId progName sessionId = do
+    stderr <- getTerminalStderr
     -- Drop an in-place "Thinking…" status so the hint is its own line.
     Text.hPutStr stderr "\r\ESC[K"
     clearNativeProgress stderr

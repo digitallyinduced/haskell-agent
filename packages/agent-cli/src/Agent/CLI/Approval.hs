@@ -74,7 +74,7 @@ import Data.IORef
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
-import System.IO (stderr)
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
 import System.OsPath (OsPath)
 
 -- | Auto-approve access to additional filesystem roots while yolo mode is
@@ -124,15 +124,18 @@ approveToolDecisionClassified classifyReadOnly
     approveToolDecisionWithReporterAndPersistenceClassifiedWithPrompt
         classifyReadOnly
         (\requiresExplicit requested -> do
+            stderr <- getTerminalStderr
             color <- resolveColor stderr
             if requiresExplicit
                 then promptPermissionOnce color (toText cwd) requested
                 else promptPermission color (toText cwd) requested)
         (\case
             ApprovalWarning message -> do
+                stderr <- getTerminalStderr
                 color <- resolveColor stderr
                 putTextLn stderr (roleWarn color message)
             ApprovalSuccess message -> do
+                stderr <- getTerminalStderr
                 color <- resolveColor stderr
                 putTextLn stderr (roleSuccess color message))
         (saveProjectAutoApprove projectRoot True)
@@ -153,9 +156,11 @@ approveToolDecisionWith
 approveToolDecisionWith requestPermission =
     approveToolDecisionWithReporterAndPersistence requestPermission (\case
         ApprovalWarning message -> do
+            stderr <- getTerminalStderr
             color <- resolveColor stderr
             putTextLn stderr (roleWarn color message)
         ApprovalSuccess message -> do
+            stderr <- getTerminalStderr
             color <- resolveColor stderr
             putTextLn stderr (roleSuccess color message))
         (pure ())

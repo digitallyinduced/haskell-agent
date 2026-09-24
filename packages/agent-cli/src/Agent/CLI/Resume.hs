@@ -90,7 +90,8 @@ import Data.Time.Format (defaultTimeLocale, formatTime)
 import System.Console.ANSI (getTerminalSize)
 import System.Directory.OsPath (canonicalizePath)
 import System.OsPath (OsPath, takeDirectory, takeFileName)
-import System.IO (hFlush, hIsTerminalDevice, stderr, stdin)
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
+import System.IO (hFlush, hIsTerminalDevice, stdin)
 
 data ResumeSourceFilter
     = ResumeAll
@@ -748,6 +749,7 @@ pickResumeEntriesWithTty
 pickResumeEntriesWithTty isTty color entries =
     if not isTty
         then do
+            stderr <- getTerminalStderr
             Text.hPutStrLn stderr (formatResumeListing color entries)
             hFlush stderr
             pure Nothing

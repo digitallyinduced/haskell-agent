@@ -240,6 +240,13 @@ remain eligible. Explicit session IDs are not subject to this filter.
 If no session matches, it reports an error rather than starting a new session.
 Resume and `--worktree` cannot be combined.
 
+Interactive terminal sessions keep native-library diagnostics out of the
+prompt by saving them to private `~/.haskell-agent/logs/native-diagnostics-*`
+files. Check the newest file when troubleshooting native warnings or crashes.
+Normal CLI messages remain visible; one-shot runs and redirected stderr retain
+their usual behavior. These diagnostic files are retained after exit and can
+be removed when no longer needed.
+
 On Linux and macOS, supported OpenAI sessions can use the local desktop by
 default in an interactive terminal. One-shot and non-interactive runs keep the
 tool hidden unless `--computer-use` is supplied explicitly. Computer-use

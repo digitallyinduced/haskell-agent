@@ -120,7 +120,8 @@ import Data.List ( findIndex )
 import Data.Maybe ( fromMaybe, isJust, listToMaybe )
 import Data.Text ( Text )
 import Data.Time.Clock ( getCurrentTime )
-import System.IO ( stdout, stderr )
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
+import System.IO ( stdout )
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text ( putStrLn, hPutStrLn )
 
@@ -350,6 +351,7 @@ handleSelection
         setEffort env level
         continue
     Right ReplToggleFast -> do
+        stderr <- getTerminalStderr
         color <- resolveColor stdout
         params <- readSessionRequestParams paramsRef
         let enabled = params.serviceTier == Just "priority"
@@ -384,6 +386,7 @@ handleSelection
     Right ReplClearTitleModel ->
         persistTitleModel env Nothing continue
     Right (ReplSetModel name) -> do
+        stderr <- getTerminalStderr
         color <- resolveColor stdout
         resolveRequestedModel env name >>= \case
             Left err -> do
@@ -412,6 +415,7 @@ handleSelection
     Right (ReplSetTheme name) ->
         case parseThemeKind name of
             Nothing -> do
+                stderr <- getTerminalStderr
                 color <- resolveColor stderr
                 let message =
                         "unknown theme '"
@@ -450,6 +454,7 @@ withReplActivity env message action = do
 
 setEffort :: SessionEnv -> ReasoningEffort -> IO ()
 setEffort env level = do
+    stderr <- getTerminalStderr
     color <- resolveColor stdout
     let supported = reasoningEffortsForDialect (dialectId env.sessionDialect)
         levelText = reasoningEffortText level
@@ -492,6 +497,7 @@ chooseModel env@SessionEnv
     , sessionState = sessionState
     , sessionPersist = persist
     } next = do
+    stderr <- getTerminalStderr
     color <- resolveColor stderr
     params <- readSessionRequestParams paramsRef
     gatewayAccess <- readIORef gatewayModelsRef
@@ -584,6 +590,7 @@ chooseTheme :: SessionEnv -> IO RunResult -> IO RunResult
 chooseTheme env next =
     case env.sessionFullscreen of
         Nothing -> do
+            stderr <- getTerminalStderr
             color <- resolveColor stderr
             let message = "theme selection requires fullscreen mode"
             Text.hPutStrLn stderr (roleError color message)
@@ -606,6 +613,7 @@ setTheme :: SessionEnv -> ThemeKind -> IO RunResult -> IO RunResult
 setTheme env theme next =
     case env.sessionFullscreen of
         Nothing -> do
+            stderr <- getTerminalStderr
             color <- resolveColor stderr
             let message = "theme selection requires fullscreen mode"
             Text.hPutStrLn stderr (roleError color message)
@@ -616,6 +624,7 @@ setTheme env theme next =
                 (\config -> Right config { configTheme = theme })
                 >>= \case
                 Left err -> do
+                    stderr <- getTerminalStderr
                     color <- resolveColor stderr
                     Text.hPutStrLn stderr (roleError color err)
                     next
@@ -634,6 +643,7 @@ chooseTitleModel env@SessionEnv
     , sessionProvider = provider
     , sessionWorkspace = WorkspaceContext{home}
     } next = do
+    stderr <- getTerminalStderr
     color <- resolveColor stderr
     settings <- loadUserSettings home
     gatewayAccess <- readIORef gatewayModelsRef
@@ -665,6 +675,7 @@ setTitleModelByName env name next
     | isAppleFoundationTitleModelName name =
         persistTitleModel env (Just TitleModelAppleFoundation) next
     | otherwise = do
+        stderr <- getTerminalStderr
         color <- resolveColor stdout
         resolveRequestedModel env name >>= \case
             Left err -> do
@@ -730,7 +741,7 @@ switchModelTarget
     -> Maybe ReasoningEffort
     -> IO RunResult
     -> IO RunResult
-switchModelTarget env color choice selectedEffort next =
+switchModelTarget env color choice selectedEffort next = getTerminalStderr >>= \stderr ->
     requestModelTargetSwitch env.sessionFullscreen choice env.sessionPersist >>= \case
         Left err
             | choice.modelTarget.targetProvider == GeminiProvider
@@ -866,6 +877,7 @@ chooseAccountFromOptions env@SessionEnv
                                             selectedAccountId
                                             selectedLabel
                                 AccountPickerConnect selectedProvider -> do
+                                    stderr <- getTerminalStderr
                                     color <- resolveColor stderr
                                     connected <-
                                         withFullscreenSuspended runtime $

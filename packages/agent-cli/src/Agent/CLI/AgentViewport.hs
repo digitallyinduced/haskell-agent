@@ -84,7 +84,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import System.Console.ANSI (getTerminalSize)
-import System.IO (hFlush, hIsTerminalDevice, stderr, stdin)
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
+import System.IO (hFlush, hIsTerminalDevice, stdin)
 
 data AgentTarget
     = AgentRoot
@@ -308,6 +309,7 @@ pickAgentViewport
     -> [AgentEntry]
     -> IO (Maybe AgentTarget)
 pickAgentViewport color selected entries = do
+    stderr <- getTerminalStderr
     isTty <- hIsTerminalDevice stdin
     let state = initialAgentViewportState selected entries
     if not isTty

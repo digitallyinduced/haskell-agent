@@ -37,6 +37,7 @@ import System.Console.ANSI.Codes
     ( clearLineCode
     , cursorUpCode
     )
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
 import System.IO
     ( BufferMode(..)
     , Handle
@@ -46,7 +47,6 @@ import System.IO
     , hPutStr
     , hSetBuffering
     , hWaitForInput
-    , stderr
     , stdin
     )
 import System.IO.Error (isEOFError)
@@ -248,6 +248,7 @@ runOverlayInternal
     -> IO (Maybe (result, state))
 runOverlayInternal decodeKey render step updates state0 =
     withRawTty do
+        stderr <- getTerminalStderr
         terminal <- detectTerminalCapabilities stderr
         let frame0 = render state0
             lines0 = frameLineCount frame0
@@ -307,6 +308,7 @@ runOverlayInternal decodeKey render step updates state0 =
 
 withRawTty :: IO a -> IO a
 withRawTty action = do
+    stderr <- getTerminalStderr
     oldTerm <- getTerminalAttributes stdInput
     oldBuf <- hGetBuffering stdin
     terminal <- detectTerminalCapabilities stderr

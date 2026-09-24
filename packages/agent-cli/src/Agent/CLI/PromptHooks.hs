@@ -36,7 +36,7 @@ import Data.IORef (IORef, readIORef)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.IO (stderr)
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
 
 fullscreenAwarePlanHooks
     :: IORef (Maybe FullscreenRuntime)
@@ -47,6 +47,7 @@ fullscreenAwarePlanHooks runtimeRef hooks = PlanModeHooks
         withCurrentFullscreen runtimeRef
             (hooks.planConfirmEnter reason)
             \runtime -> do
+                stderr <- getTerminalStderr
                 notifyAttention stderr PlanModeRequested
                 requestFullscreenChoiceWithBody
                     runtime
@@ -61,6 +62,7 @@ fullscreenAwarePlanHooks runtimeRef hooks = PlanModeHooks
         withCurrentFullscreen runtimeRef
             (hooks.planDecideExit planBody)
             \runtime -> do
+                stderr <- getTerminalStderr
                 notifyAttention stderr InputRequested
                 requestFullscreenChoiceWithBody
                     runtime
@@ -88,6 +90,7 @@ fullscreenAwarePlanHooks runtimeRef hooks = PlanModeHooks
         withCurrentFullscreen runtimeRef
             (hooks.planAskQuestion question options)
             \runtime -> do
+                stderr <- getTerminalStderr
                 notifyAttention stderr InputRequested
                 case options of
                     [] ->

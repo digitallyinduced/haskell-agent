@@ -154,9 +154,9 @@ import System.Directory.OsPath
     ( getCurrentDirectory
     , getHomeDirectory
     )
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
 import System.IO
     ( Handle
-    , stderr
     , stdout
     )
 import System.OsPath (OsPath)
@@ -183,6 +183,7 @@ reportProviderUnavailable
     -> ApiError
     -> IO ()
 reportProviderUnavailable fullscreen apiError = do
+    stderr <- getTerminalStderr
     now <- getCurrentTime
     let leading = "No usable fallback provider account is available.\n"
         message = leading <> formatApiErrorAt now apiError

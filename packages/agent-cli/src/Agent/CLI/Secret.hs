@@ -15,12 +15,12 @@ import Data.Char (isControl)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
 import System.IO
     ( hFlush
     , hGetEcho
     , hIsTerminalDevice
     , hSetEcho
-    , stderr
     , stdin
     )
 
@@ -36,6 +36,7 @@ promptSecretLine
     -> IO (Maybe Text)
 promptSecretLine stdinControl prompt purpose =
     withStdinPaused stdinControl do
+        stderr <- getTerminalStderr
         tty <- hIsTerminalDevice stdin
         if not tty
             then pure Nothing
