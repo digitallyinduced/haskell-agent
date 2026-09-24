@@ -283,7 +283,27 @@ spec = describe "agent-server HTTP client" do
                         )
         withTestClient application \client -> do
             streamAgentServerTurn client validTurnId Nothing (\_ -> pure (Right ()))
-                `shouldReturn` Right AgentServerStreamNeedsRefetch
+                `shouldReturn` Right (AgentServerStreamNeedsRefetch 0)
+
+    it "resumes after the last delivered event when a replay reset follows it" do
+        let earlierEvent =
+                "id: 7\nevent: turn.started\n\
+                \data: {\"id\":7,\"type\":\"turn.started\",\
+                \\"turnId\":\"01991f6d-7200-7000-8000-000000000001\",\
+                \\"sessionId\":\"01991f6d-7200-7000-8000-000000000002\",\
+                \\"data\":{},\"at\":\"2026-09-03T00:00:00Z\"}\n\n"
+            resetEvent =
+                "event: replay.reset\n\
+                \data: {\"reason\":\"event_gap\",\"refetch\":true}\n\n"
+            application _ respond =
+                respond $
+                    responseLBS
+                        status200
+                        [(hContentType, "text/event-stream")]
+                        (earlierEvent <> resetEvent)
+        withTestClient application \client -> do
+            streamAgentServerTurn client validTurnId Nothing (\_ -> pure (Right ()))
+                `shouldReturn` Right (AgentServerStreamNeedsRefetch 7)
 
     it "refetches when another instance durably finishes the turn" do
         let application request respond
@@ -313,7 +333,7 @@ spec = describe "agent-server HTTP client" do
                         (\_ -> pure (Right ()))
                     )
             result
-                `shouldBe` Just (Right AgentServerStreamNeedsRefetch)
+                `shouldBe` Just (Right (AgentServerStreamNeedsRefetch 0))
 
     it "refetches when another instance deletes the turn" do
         let application request respond
@@ -343,7 +363,7 @@ spec = describe "agent-server HTTP client" do
                         (\_ -> pure (Right ()))
                     )
             result
-                `shouldBe` Just (Right AgentServerStreamNeedsRefetch)
+                `shouldBe` Just (Right (AgentServerStreamNeedsRefetch 0))
 
     it "refetches when another instance durably requests human input" do
         requestQuery <- newEmptyMVar
@@ -382,7 +402,7 @@ spec = describe "agent-server HTTP client" do
                         (\_ -> pure (Right ()))
                     )
             result
-                `shouldBe` Just (Right AgentServerStreamNeedsRefetch)
+                `shouldBe` Just (Right (AgentServerStreamNeedsRefetch 0))
             takeMVar requestQuery
                 `shouldReturn` "?turnId=01991f6d-7200-7000-8000-000000000001"
 

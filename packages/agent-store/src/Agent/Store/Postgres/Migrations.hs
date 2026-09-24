@@ -541,6 +541,23 @@ coreMigrations =
               \ $ha$"
             ]
         }
+    , Migration
+        { migrationVersion = 120
+        , migrationName = "consumed human request resolution"
+        , migrationStatements =
+            [ "CREATE TABLE IF NOT EXISTS\
+              \ harness.server_human_request_resolutions (\
+              \ request_id uuid PRIMARY KEY,\
+              \ turn_id uuid NOT NULL\
+              \   REFERENCES harness.server_turns(turn_id) ON DELETE CASCADE,\
+              \ tenant_id text NOT NULL,\
+              \ gateway_identity text,\
+              \ resolved_at timestamptz NOT NULL\
+              \ )"
+            , "GRANT SELECT, INSERT, DELETE\
+              \ ON harness.server_human_request_resolutions TO ha_runtime"
+            ]
+        }
     ]
 
 -- | Specialize all runtime grants for a validated cluster-global role.

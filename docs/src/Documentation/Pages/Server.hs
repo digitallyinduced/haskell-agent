@@ -402,9 +402,13 @@ page = Page
         <code>Agent.Server.Client.Protocol</code>. Use
         <code>streamAgentServerTurn client turnId lastEventId onEvent</code> with a callback
         that returns an error when it cannot apply an event. Handle completed, failed,
-        cancelled and <code>AgentServerStreamNeedsRefetch</code> distinctly; refetch
-        durable history/state after a replay gap instead of presenting a partial transcript
-        as complete. Polling a result is not equivalent to resolving an approval.</p>
+        cancelled and <code>AgentServerStreamNeedsRefetch</code> distinctly. The refetch
+        value is the last delivered event id; pass it as <code>lastEventId</code> on the
+        next subscription so earlier events, including a consumed approval, are not applied
+        again. Refetch durable history/state after a replay gap instead of presenting a
+        partial transcript as complete. Polling a result is not equivalent to resolving an
+        approval. Resolving an approval that was already consumed returns a conflict, not
+        a missing request.</p>
         <h2 id="token-rotation">Rotate a server token</h2>
         <ol>
             <li>Schedule an interruption; stop new submissions and let existing turns settle
