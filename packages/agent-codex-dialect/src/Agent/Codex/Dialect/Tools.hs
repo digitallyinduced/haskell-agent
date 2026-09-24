@@ -41,7 +41,7 @@ import Agent.Codex.Dialect.Shell
     , CodexShellSession
     , continueCodexShellCommandAuthorized
     , codexShellCommandIsEscalated
-    , startCodexShellCommandAuthorized
+    , startCodexShellCommandWithInputAuthorized
     )
 import Agent.Tools.Ghci (GhciSession, runGhciTool)
 import Agent.Tools.Dangerous (blockedShellCommandReasonAt)
@@ -155,6 +155,7 @@ data ShellCommandArgs = ShellCommandArgs
     , workdir :: Maybe Text
     , timeoutMs :: Maybe Int
     , yieldTimeMs :: Maybe Int
+    , interactive :: Bool
     , sandboxPermission :: ShellPermissionRequest
     }
 
@@ -165,6 +166,7 @@ shellCommandArgsDecoder = Json.object $
         <*> optionalText "workdir"
         <*> optionalIntOrString "timeout_ms"
         <*> optionalIntOrString "yield_time_ms"
+        <*> (maybe False id <$> Json.atKeyOptional "interactive" Json.bool)
         <*> shellPermissionFieldsDecoder
 
 shellCommandTool :: ToolEnv -> CodexShellSession -> AppTool
@@ -183,6 +185,8 @@ shellCommandTool env session =
                 "Maximum command runtime; commands that reach it are stopped. Mutually exclusive with yield_time_ms."
             , PropertySchema "yield_time_ms" PropertyInteger False $ Just
                 "Wait before returning a session_id for a command that is still running. Defaults to 10000 ms when neither timing control is set. Completion is reported automatically; do not repeatedly poll. Mutually exclusive with timeout_ms."
+            , PropertySchema "interactive" PropertyBoolean False $ Just
+                "Keep stdin open for later write_stdin input. Defaults to false (stdin is /dev/null). Does not allocate a terminal. Cannot be combined with timeout_ms."
             , PropertySchema "sandbox_permissions" PropertyString False $ Just
                 "use_default (default), or require_escalated to request authorization to run this exact command outside the sandbox. Full access (--yolo) auto-approves escalation; otherwise fresh user approval is required."
             , PropertySchema "justification" PropertyString False $ Just
@@ -225,6 +229,7 @@ shellDescription =
     \- By default, a command that is still running after 10000 ms is retained and returned with a session_id. Completion is reported automatically; do not poll or run sleep commands while waiting.\n\
     \- Set `timeout_ms` only when the command should be stopped after a fixed runtime, or `yield_time_ms` to change the initial wait.\n\
     \- Use `write_stdin` only to send input, interrupt, inspect a current snapshot, or perform one bounded wait.\n\
+    \- Stdin defaults to `/dev/null`. Set `interactive=true` only when the command needs later `write_stdin` input; this retains an input pipe, not a terminal.\n\
     \- If sandbox isolation blocks a required command (for example Swift package manifests), request require_escalated with a justification. Full access (--yolo) auto-approves this request; otherwise fresh user approval is required. Never silently retry outside the sandbox or disable isolation globally."
 
 defaultShellYieldMs :: Int
@@ -240,6 +245,8 @@ runShell
 runShell env session authorization emitOutput args
     | args.timeoutMs /= Nothing && args.yieldTimeMs /= Nothing =
         pure (Left "timeout_ms and yield_time_ms are mutually exclusive")
+    | args.interactive && args.timeoutMs /= Nothing =
+        pure (Left "interactive=true cannot be combined with timeout_ms")
     | Left err <- executionAuthorization = pure (Left err)
     | otherwise = do
         workdir <- case args.workdir of
@@ -264,8 +271,9 @@ runShell env session authorization emitOutput args
         let yieldMs = clampMs requestedYield
         case executionAuthorization of
             Left err -> pure (Left err)
-            Right authorized -> startCodexShellCommandAuthorized
+            Right authorized -> startCodexShellCommandWithInputAuthorized
                 authorized
+                args.interactive
                 session
                 dir
                 args.command
@@ -312,7 +320,7 @@ writeStdinTool session =
         [ PropertySchema "session_id" PropertyInteger True $ Just
             "Identifier returned by shell_command for a running command."
         , PropertySchema "chars" PropertyString False $ Just
-            "Text to write to stdin. Omit or use an empty string for one snapshot or bounded wait; completion is otherwise reported automatically. Use \\u0003 to interrupt."
+            "Text to write to stdin (requires shell_command interactive=true). Omit or use an empty string for one snapshot or bounded wait; completion is otherwise reported automatically. Use \\u0003 to interrupt any running command."
         , PropertySchema "yield_time_ms" PropertyInteger False $ Just
             "Wait before returning output. Defaults to 5000 ms; maximum 300000 ms."
         ]
