@@ -39,8 +39,9 @@ import Data.ByteString.Char8 qualified as ByteString8
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Char (toLower)
 import Data.Int (Int64)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.List (minimumBy)
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
@@ -95,7 +96,7 @@ data AgentServerStreamResult
     = AgentServerStreamCompleted
     | AgentServerStreamFailed !(Maybe Text)
     | AgentServerStreamCancelled
-    | AgentServerStreamNeedsRefetch
+    | AgentServerStreamNeedsRefetch !Int64
     deriving (Eq, Show)
 
 newAgentServerClient ::
@@ -252,14 +253,16 @@ streamAgentServerTurn ::
     Maybe Int64 ->
     (AgentServerEvent -> IO (Either AgentServerClientError ())) ->
     IO (Either AgentServerClientError AgentServerStreamResult)
-streamAgentServerTurn client expectedTurnId lastEventId onEvent =
-    race consumeStream monitorDurableTurn >>= pure . either id id
+streamAgentServerTurn client expectedTurnId lastEventId onEvent = do
+    cursorRef <- newIORef (fromMaybe 0 lastEventId)
+    race (consumeStream cursorRef) (monitorDurableTurn cursorRef)
+        >>= pure . either id id
   where
-    consumeStream = do
+    consumeStream cursorRef = do
         outcome <- Exception.try @IO @HttpException do
             request <- authenticatedRequest client "GET" "/v1/events"
-            let cursor = maybe 0 id lastEventId
-                eventRequest =
+            cursor <- readIORef cursorRef
+            let eventRequest =
                     request
                         { requestHeaders =
                             (hAccept, "text/event-stream")
@@ -279,6 +282,7 @@ streamAgentServerTurn client expectedTurnId lastEventId onEvent =
                     then decodeErrorResponse response
                     else
                         consumeEventStream
+                            cursorRef
                             ByteString.empty
                             response.responseBody
         pure case outcome of
@@ -289,14 +293,14 @@ streamAgentServerTurn client expectedTurnId lastEventId onEvent =
                     )
             Right result -> result
 
-    monitorDurableTurn = do
+    monitorDurableTurn cursorRef = do
         threadDelay durableTurnPollIntervalMicros
         getAgentServerTurn client expectedTurnId >>= \case
             Right turn
                 | isTerminalTurnStatus turn.agentServerTurnStatus ->
-                    pure (Right AgentServerStreamNeedsRefetch)
+                    refetch cursorRef
             Left (AgentServerHttpError 404 _ _) ->
-                pure (Right AgentServerStreamNeedsRefetch)
+                refetch cursorRef
             _ ->
                 listAgentServerRequestsForTurn client expectedTurnId >>= \case
                     Right requests
@@ -305,10 +309,14 @@ streamAgentServerTurn client expectedTurnId lastEventId onEvent =
                                 . (.agentServerRequestTurnId)
                             )
                             requests.agentServerRequests ->
-                            pure (Right AgentServerStreamNeedsRefetch)
-                    _ -> monitorDurableTurn
+                            refetch cursorRef
+                    _ -> monitorDurableTurn cursorRef
 
-    consumeEventStream buffered bodyReader = do
+    refetch cursorRef = do
+        cursor <- readIORef cursorRef
+        pure (Right (AgentServerStreamNeedsRefetch cursor))
+
+    consumeEventStream cursorRef buffered bodyReader = do
         chunk <- brRead bodyReader
         if ByteString.null chunk
             then
@@ -329,62 +337,63 @@ streamAgentServerTurn client expectedTurnId lastEventId onEvent =
                                 )
                             )
                     else
-                        processFrames combined >>= \case
+                        processFrames cursorRef combined >>= \case
                             Left err -> pure (Left err)
                             Right (remaining, Nothing) ->
-                                consumeEventStream remaining bodyReader
+                                consumeEventStream cursorRef remaining bodyReader
                             Right (_, Just terminal) ->
                                 pure (Right terminal)
 
-    processFrames buffered =
+    processFrames cursorRef buffered =
         case takeSseFrame buffered of
             Nothing -> pure (Right (buffered, Nothing))
             Just (frame, rest) ->
                 case parseAgentServerSseFrame frame of
                     Left message ->
                         pure (Left (AgentServerProtocolError message))
-                    Right Nothing -> processFrames rest
+                    Right Nothing -> processFrames cursorRef rest
                     Right (Just (AgentServerSseReplayReset _)) ->
-                        pure
-                            ( Right
-                                (rest, Just AgentServerStreamNeedsRefetch)
-                            )
-                    Right (Just (AgentServerSseEvent event))
-                        | event.agentServerEventTurnId
-                            /= Just expectedTurnId ->
-                            processFrames rest
-                        | otherwise ->
-                            onEvent event >>= \case
-                                Left err -> pure (Left err)
-                                Right () ->
-                                    case event.agentServerEventPayload of
-                                        AgentServerTurnCompletedEvent ->
-                                            pure
-                                                ( Right
-                                                    ( rest
-                                                    , Just
-                                                        AgentServerStreamCompleted
-                                                    )
-                                                )
-                                        AgentServerTurnFailedEvent message ->
-                                            pure
-                                                ( Right
-                                                    ( rest
-                                                    , Just
-                                                        ( AgentServerStreamFailed
-                                                            message
+                        refetch cursorRef
+                            >>= \refetchResult ->
+                                pure (fmap (\terminal -> (rest, Just terminal)) refetchResult)
+                    Right (Just (AgentServerSseEvent event)) -> do
+                        atomicModifyIORef'
+                            cursorRef
+                            (\seen -> (max seen event.agentServerEventId, ()))
+                        if event.agentServerEventTurnId /= Just expectedTurnId
+                            then processFrames cursorRef rest
+                            else
+                                onEvent event >>= \case
+                                    Left err -> pure (Left err)
+                                    Right () ->
+                                        case event.agentServerEventPayload of
+                                            AgentServerTurnCompletedEvent ->
+                                                pure
+                                                    ( Right
+                                                        ( rest
+                                                        , Just
+                                                            AgentServerStreamCompleted
                                                         )
                                                     )
-                                                )
-                                        AgentServerTurnCancelledEvent ->
-                                            pure
-                                                ( Right
-                                                    ( rest
-                                                    , Just
-                                                        AgentServerStreamCancelled
+                                            AgentServerTurnFailedEvent message ->
+                                                pure
+                                                    ( Right
+                                                        ( rest
+                                                        , Just
+                                                            ( AgentServerStreamFailed
+                                                                message
+                                                            )
+                                                        )
                                                     )
-                                                )
-                                        _ -> processFrames rest
+                                            AgentServerTurnCancelledEvent ->
+                                                pure
+                                                    ( Right
+                                                        ( rest
+                                                        , Just
+                                                            AgentServerStreamCancelled
+                                                        )
+                                                    )
+                                            _ -> processFrames cursorRef rest
 
 isTerminalTurnStatus :: AgentServerTurnStatus -> Bool
 isTerminalTurnStatus = \case

@@ -126,7 +126,14 @@ resolveServerHumanRequest pool boundary requestId response resolvedAt =
                 loadServerHumanRequestForUpdateStatement
                 >>= \case
                     Nothing ->
-                        pure ServerHumanRequestNotFound
+                        Transaction.statement
+                            (boundary, requestId)
+                            consumedServerHumanRequestStatement
+                            >>= \case
+                                True ->
+                                    pure ServerHumanRequestAlreadyResolved
+                                False ->
+                                    pure ServerHumanRequestNotFound
                     Just request
                         | request.storedServerHumanRequestResolvedAt
                             /= Nothing ->
@@ -509,7 +516,8 @@ deleteConsumedServerHumanRequestStatement ::
     Statement (ServerTurnBoundary, Text, Text, Text) ()
 deleteConsumedServerHumanRequestStatement =
     mkStatement
-        "DELETE FROM harness.server_human_requests server_request\
+        "WITH deleted AS (\
+        \ DELETE FROM harness.server_human_requests server_request\
         \ USING harness.server_turns server_turn\
         \ WHERE server_turn.turn_id = server_request.turn_id\
         \ AND server_turn.tenant_id = $1\
@@ -517,7 +525,19 @@ deleteConsumedServerHumanRequestStatement =
         \ AND server_turn.owner_instance_id = $3::uuid\
         \ AND server_turn.turn_id = $4::uuid\
         \ AND server_request.request_id = $5::uuid\
-        \ AND server_request.resolved_at IS NOT NULL"
+        \ AND server_request.resolved_at IS NOT NULL\
+        \ RETURNING server_request.request_id AS deleted_request_id,\
+        \ server_request.turn_id AS deleted_turn_id,\
+        \ server_request.resolved_at AS deleted_resolved_at)\
+        \ INSERT INTO harness.server_human_request_resolutions (\
+        \ request_id, turn_id, tenant_id, gateway_identity, resolved_at)\
+        \ SELECT deleted.deleted_request_id, deleted.deleted_turn_id,\
+        \ server_turn.tenant_id, server_turn.gateway_identity,\
+        \ deleted.deleted_resolved_at\
+        \ FROM deleted\
+        \ JOIN harness.server_turns server_turn\
+        \ ON server_turn.turn_id = deleted.deleted_turn_id\
+        \ ON CONFLICT (request_id) DO NOTHING"
         ( boundaryEncoder (\(boundary, _, _, _) -> boundary)
             <> ( (\(_, ownerInstanceId, _, _) -> ownerInstanceId)
                     >$< Encoders.param (Encoders.nonNullable Encoders.text)
@@ -530,4 +550,25 @@ deleteConsumedServerHumanRequestStatement =
                )
         )
         Decoders.noResult
+        True
+
+-- A consumed approval is deleted so its prompt is not retained. Resolving
+-- that same id again is a replay of a completed approval, not an unknown
+-- request.
+consumedServerHumanRequestStatement ::
+    Statement (ServerTurnBoundary, Text) Bool
+consumedServerHumanRequestStatement =
+    mkStatement
+        "SELECT EXISTS (\
+        \ SELECT 1\
+        \ FROM harness.server_human_request_resolutions resolution\
+        \ WHERE resolution.request_id = $3::uuid\
+        \ AND resolution.tenant_id = $1\
+        \ AND resolution.gateway_identity IS NOT DISTINCT FROM $2)"
+        ( boundaryEncoder fst
+            <> ( snd
+                    >$< Encoders.param (Encoders.nonNullable Encoders.text)
+               )
+        )
+        (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.bool)))
         True

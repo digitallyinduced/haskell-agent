@@ -412,6 +412,27 @@ exerciseTurnStoreWithOwners pool ownerOne ownerTwo = do
         request.reserveServerTurnId
         humanRequest.createServerHumanRequestId
         `shouldReturn` Right Nothing
+    HumanRequest.resolveServerHumanRequest
+        pool
+        boundary
+        humanRequest.createServerHumanRequestId
+        approval
+        finishedAt
+        `shouldReturn` Right HumanRequest.ServerHumanRequestAlreadyResolved
+    HumanRequest.resolveServerHumanRequest
+        pool
+        otherBoundary
+        humanRequest.createServerHumanRequestId
+        approval
+        finishedAt
+        `shouldReturn` Right HumanRequest.ServerHumanRequestNotFound
+    HumanRequest.resolveServerHumanRequest
+        pool
+        boundary
+        "01999999-0000-7000-8000-000000000098"
+        approval
+        finishedAt
+        `shouldReturn` Right HumanRequest.ServerHumanRequestNotFound
     HumanRequest.listServerHumanRequests pool boundary
         `shouldReturn` Right []
 
