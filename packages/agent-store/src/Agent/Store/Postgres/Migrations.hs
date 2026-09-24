@@ -511,6 +511,36 @@ coreMigrations =
               \ ADD COLUMN IF NOT EXISTS headless boolean NOT NULL DEFAULT false"
             ]
         }
+    , Migration
+        { migrationVersion = 119
+        , migrationName = "custom scope database connection privilege"
+        , migrationStatements =
+            [ "DO $ha$\
+              \ DECLARE\
+              \   rec record;\
+              \ BEGIN\
+              \   IF to_regclass('harness.custom_scopes') IS NULL THEN\
+              \     RETURN;\
+              \   END IF;\
+              \   FOR rec IN\
+              \     SELECT role_name::text AS role_name\
+              \     FROM harness.custom_scopes\
+              \   LOOP\
+              \     IF EXISTS (\
+              \       SELECT 1 FROM pg_catalog.pg_roles\
+              \       WHERE rolname = rec.role_name\
+              \     ) THEN\
+              \       EXECUTE format(\
+              \         'GRANT CONNECT ON DATABASE %I TO %I',\
+              \         current_database(),\
+              \         rec.role_name\
+              \       );\
+              \     END IF;\
+              \   END LOOP;\
+              \ END\
+              \ $ha$"
+            ]
+        }
     ]
 
 -- | Specialize all runtime grants for a validated cluster-global role.

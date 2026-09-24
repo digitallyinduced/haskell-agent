@@ -97,6 +97,11 @@ import Agent.CLI.TUI.History ( HistoryCursor(..)
     , markHistoryRequest
     , setHistoryWindowTurns
     )
+import Agent.CLI.TUI.ClipboardTip
+    ( emptyClipboardFocusTipState
+    , inactiveClipboardImageProbe
+    , liveClipboardImageProbe
+    )
 import Agent.CLI.TUI.LambdaArt ( lambdaArtWidget )
 import Agent.CLI.TUI.Motion ( advanceCompletionFlashes , appMotionTiming , completionFlashTransitions , elapsedMillisSince , hasBackgroundActivity , isBackgroundAgentActive , motionDemandFor , motionDemandForTerminalFocus , motionModeForTerminalFocus , nativeProgressKeepaliveDue , nextMotionSchedule , turnCompletionRequiresRedraw , uiEventRestartsMotionSchedule , userActionPending )
 import Agent.CLI.TUI.Render ( agentEntryWindow , agentPaneEntryLimit , agentPaneVisible , applyChildConversationUiEvent , choiceRowColumns , conversationUiForTarget , conversationScrollbarRenderer , drawApp , fullscreenBounds , fullscreenSurface , onboardingVisibleRowIndices , normalizeTextOverlayInsertion , maskedSecretText , quickStartRows , quickStartVisible , repositoryHeaderText , resumeSearchCursorColumn , selectedAgentConversation , textOverlayDisplayText )
@@ -253,12 +258,13 @@ runFullscreen runtime workerAction = do
         initialVty <- buildVty
         let
             initialState =
-                initialFullscreenAppState
+                (initialFullscreenAppState
                     runtime
                     history
                     initialAgent
                     initialAgents
-                    initialClock
+                    initialClock)
+                    { appClipboardImageProbe = liveClipboardImageProbe }
             (initialDemand, initialDelay) =
                 appMotionTiming initialState
         atomically $
@@ -507,4 +513,7 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appSyntaxHighlighter = Nothing
         , appSyntaxRequested = Set.empty
         , appTerminalFocus = TerminalFocusUnknown
+        , appClipboardTip = emptyClipboardFocusTipState
+        , appClipboardImageProbe = inactiveClipboardImageProbe
+        , appClipboardTipRemainingMillis = Nothing
         }

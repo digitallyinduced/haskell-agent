@@ -57,7 +57,13 @@ concurrently through a bounded worker pool.
 
 The gateway accepts edited messages, reactions, photos, documents, audio,
 video, video notes, animations, stickers, locations, contacts, venues, polls,
-and dice. Images are sent to multimodal providers natively; other files use
+and dice. Images are sent to multimodal providers natively. Videos, video
+notes, animations, and video files sent as documents are retained in the
+session's private temporary workspace and supplied as local paths, not inline
+`input_file` content. The agent can inspect them using tools (for example,
+extracting frames with FFmpeg); no automatic video transcription or frame
+extraction is performed. These files remain available for follow-up turns and
+retries until the session's temporary workspace is removed. Other files use
 Responses `input_file` content or a private local-path fallback.
 
 The agent can send documents, photos, and voice files, react to messages, ask

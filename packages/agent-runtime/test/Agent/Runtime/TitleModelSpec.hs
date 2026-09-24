@@ -37,11 +37,11 @@ spec = do
             (cheapTitleModel catalog GeminiProvider).modelTarget.targetModelId
                 `shouldBe` "gemini-3.5-flash-lite"
 
-        it "selects the free OpenRouter model and the sole xAI model" do
+        it "selects the free OpenRouter model and the default xAI model" do
             (cheapTitleModel catalog OpenRouterProvider).modelTarget.targetModelId
                 `shouldBe` "stealth/ox-alpha"
             (cheapTitleModel catalog XAIProvider).modelTarget.targetModelId
-                `shouldBe` "grok-4.6"
+                `shouldBe` "grok-4.7"
 
     describe "resolveTitleModel" do
         mapM_ (\provider ->

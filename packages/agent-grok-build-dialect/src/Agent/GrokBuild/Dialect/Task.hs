@@ -93,7 +93,7 @@ lunaSubagentEffort = "high"
 -- | Models a Grok-root spawn_subagent call may select.
 grokRootChildModels :: Bool -> [Text]
 grokRootChildModels openaiAvailable =
-    "grok-4.6" : "grok-4.5" : [lunaSubagentModel | openaiAvailable]
+    "grok-4.7" : "grok-4.6" : "grok-4.5" : [lunaSubagentModel | openaiAvailable]
 
 isLunaSubagentModel :: Text -> Bool
 isLunaSubagentModel = (== lunaSubagentModel)
@@ -102,6 +102,10 @@ isLunaSubagentModel = (== lunaSubagentModel)
 canonicalizeGrokChildModel :: Text -> Maybe Text
 canonicalizeGrokChildModel raw =
     case folded of
+        "grok-4.7" -> Just "grok-4.7"
+        "grok-4-7" -> Just "grok-4.7"
+        "grok4.7" -> Just "grok-4.7"
+        "grok4-7" -> Just "grok-4.7"
         "grok-4.6" -> Just "grok-4.6"
         "grok-4-6" -> Just "grok-4.6"
         "grok4.6" -> Just "grok-4.6"

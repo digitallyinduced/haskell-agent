@@ -42,6 +42,7 @@ import Control.Exception.Safe
     , throwIO
     )
 import Control.Monad (void, when)
+import Data.Char (isAscii, isAlphaNum)
 import Data.IORef (newIORef, readIORef)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -149,27 +150,11 @@ runQueuedMediaTurn runtime pending =
     let agentPrompt = telegramAgentPrompt pending.pendingMediaText
     bracket
         (downloadTelegramMediaAttachments runtime handle pending)
-        (cleanupManagedTurnMedia . map snd)
+        cleanupTelegramMediaAttachments
         (runWithAttachments cancellation progressMessageId handle agentPrompt)
   where
    runWithAttachments cancellation progressMessageId handle agentPrompt attachments = do
-    let imageAttachments =
-            [ media
-            | (TelegramMediaPhoto, media) <- attachments
-            ]
-        fileAttachments =
-            [ media
-            | (kind, media) <- attachments
-            , kind /= TelegramMediaPhoto
-            ]
-        request = ManagedTurnRequest
-            { managedTurnVersion = 1
-            , managedTurnText = agentPrompt
-            , managedTurnImages = imageAttachments
-            , managedTurnFiles = fileAttachments
-            , managedTurnBridgeDirectory = Nothing
-            , managedTurnContext = Nothing
-            }
+    let request = telegramMediaTurnRequest agentPrompt attachments
     let bridgeDir =
             handle.sessionTempDir
                 </> unsafeEncodeUtf
@@ -228,7 +213,7 @@ runQueuedMediaTurn runtime pending =
                                 Just turnIndex
                                     | maybe True (< turnIndex) priorTurnIndex
                                     , latestTurnMatches
-                                        agentPrompt
+                                        request.managedTurnText
                                         turns ->
                                         pure (renderLatestTurn turns)
                                 _ ->
@@ -320,6 +305,57 @@ downloadTelegramMediaAttachments runtime handle pending =
         pending.pendingMediaUpdateId
         pending.pendingMediaAttachments
 
+-- Videos are local tool inputs, not generic provider file attachments. Keep
+-- the same classification for request construction and resource cleanup.
+telegramMediaUsesLocalPath :: TelegramMediaKind -> ManagedTurnMedia -> Bool
+telegramMediaUsesLocalPath kind media =
+    kind `elem` [TelegramMediaVideo, TelegramMediaVideoNote, TelegramMediaAnimation]
+        || (kind == TelegramMediaDocument
+            && ("video/" `Text.isPrefixOf` Text.toLower media.managedTurnMediaMime
+                || extension `elem` [".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".mpeg", ".mpg", ".3gp", ".3g2", ".ogv", ".wmv", ".flv"]))
+  where
+    extension = Text.toLower $ Text.pack $ takeExtension $
+        maybe media.managedTurnMediaPath Text.unpack media.managedTurnMediaName
+
+telegramMediaTurnRequest
+    :: Text
+    -> [(TelegramMediaKind, ManagedTurnMedia)]
+    -> ManagedTurnRequest
+telegramMediaTurnRequest prompt attachments =
+    (managedTurnRequestFromText (prompt <> localReferences))
+        { managedTurnImages =
+            [media | (TelegramMediaPhoto, media) <- attachments]
+        , managedTurnFiles =
+            [ media
+            | (kind, media) <- attachments
+            , kind /= TelegramMediaPhoto
+            , not (telegramMediaUsesLocalPath kind media)
+            ]
+        }
+  where
+    localReferences = Text.concat
+        [ "\n\n[Video available as a local file]\n"
+            <> renderLocalPath media.managedTurnMediaPath
+            <> "\nUse local tools to inspect this file or extract frames/audio as needed."
+        | (kind, media) <- attachments
+        , telegramMediaUsesLocalPath kind media
+        ]
+    renderLocalPath path =
+        let rawPath = Text.pack path
+            fence = Text.replicate (1 + maximum (2 : map Text.length (Text.split (/= '`') rawPath))) "`"
+        in fence <> "\n" <> rawPath <> "\n" <> fence
+
+-- Retained videos remain in the session workspace for subsequent tool calls,
+-- subject to its normal retention policy. Inline inputs can be removed after
+-- import into the conversation.
+cleanupTelegramMediaAttachments :: [(TelegramMediaKind, ManagedTurnMedia)] -> IO ()
+cleanupTelegramMediaAttachments attachments =
+    cleanupManagedTurnMedia
+        [ media
+        | (kind, media) <- attachments
+        , not (telegramMediaUsesLocalPath kind media)
+        ]
+
 -- | Download one Telegram media batch with bounded concurrency. The injected
 -- operations make ordering, cleanup, and cancellation behavior testable
 -- without a live Telegram API.
@@ -340,7 +376,6 @@ downloadTelegramMediaAttachmentsWith getFilePath downloadFile tempDir updateId m
                 case attachment.telegramMediaFile of
                     Nothing -> pure []
                     Just file -> do
-                        filePath <- getFilePath file.fileMediaFileId
                         let extension =
                                 fromMaybe
                                     (kindExtension attachment.telegramMediaKind)
@@ -353,21 +388,30 @@ downloadTelegramMediaAttachmentsWith getFilePath downloadFile tempDir updateId m
                                             <> "-"
                                             <> show index
                                             <> extension)
-                        modifyMVar_ cleanupPaths (pure . (localPath :))
-                        path <- downloadFile filePath localPath
-                        pure
-                            [ ( attachment.telegramMediaKind
-                              , ManagedTurnMedia
+                            mediaInput = ManagedTurnMedia
                                     { managedTurnMediaPath =
-                                        unsafeToFilePath path
+                                        unsafeToFilePath localPath
                                     , managedTurnMediaMime =
                                         fromMaybe "application/octet-stream"
                                             file.fileMediaMimeType
                                     , managedTurnMediaName =
                                         file.fileMediaName
                                     }
-                              )
-                            ]
+                            retain = telegramMediaUsesLocalPath attachment.telegramMediaKind mediaInput
+                            stagingPath = localPath <> unsafeEncodeUtf ".download"
+                        retained <- if retain
+                            then Directory.doesFileExist (unsafeToFilePath localPath)
+                            else pure False
+                        when (not retained) do
+                            filePath <- getFilePath file.fileMediaFileId
+                            modifyMVar_ cleanupPaths
+                                (pure . ((if retain then [stagingPath, localPath] else [localPath]) <>))
+                            if retain
+                                then do
+                                    path <- downloadFile filePath stagingPath
+                                    Directory.renameFile (unsafeToFilePath path) (unsafeToFilePath localPath)
+                                else void (downloadFile filePath localPath)
+                        pure [(attachment.telegramMediaKind, mediaInput)]
         concat
             <$> mapConcurrentlyBounded
                 telegramMediaDownloadConcurrency
@@ -381,7 +425,10 @@ downloadTelegramMediaAttachmentsWith getFilePath downloadFile tempDir updateId m
         case file.fileMediaName of
             Just name | not (Text.null name) ->
                 let ext = takeExtension (Text.unpack name)
-                in if null ext then Nothing else Just ext
+                in if length ext > 1 && length ext <= 16
+                        && all (\character -> isAscii character && isAlphaNum character) (drop 1 ext)
+                    then Just ext
+                    else Nothing
             _ -> Nothing
 
     kindExtension = \case

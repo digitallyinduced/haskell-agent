@@ -147,7 +147,7 @@ trimBeforeLatestCheckpoint ResponseCreateParams { input, .. } =
                 checkpoint : reverse after
             _ -> items
 
--- | Grok Build always splices hosted @x_search@ onto grok-4.6 Responses
+-- | Grok Build always splices hosted @x_search@ onto grok-4.7 Responses
 -- requests. Keep a single empty-fields entry even when the caller omitted
 -- tools or already listed web search.
 withHostedXSearch :: ResponseCreateParams -> ResponseCreateParams

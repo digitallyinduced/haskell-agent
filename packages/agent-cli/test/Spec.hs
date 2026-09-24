@@ -110,6 +110,7 @@ import qualified Agent.CLI.TextLayoutSpec as TextLayoutSpec
 import qualified Agent.CLI.ToolsSpec as ToolsSpec
 import qualified Agent.CLI.TUIAppSpec as TUIAppSpec
 import qualified Agent.CLI.TUIBridgeSpec as TUIBridgeSpec
+import qualified Agent.CLI.TUIClipboardTipSpec as TUIClipboardTipSpec
 import qualified Agent.CLI.TUIComposerSpec as TUIComposerSpec
 import qualified Agent.CLI.TUIComposerUndoSpec as TUIComposerUndoSpec
 import qualified Agent.CLI.TUIImagePreviewSpec as TUIImagePreviewSpec
@@ -254,6 +255,7 @@ specs = do
     ToolsSpec.spec
     TUIAppSpec.spec
     TUIBridgeSpec.spec
+    TUIClipboardTipSpec.spec
     TUIComposerSpec.spec
     TUIComposerUndoSpec.spec
     TUIImagePreviewSpec.spec

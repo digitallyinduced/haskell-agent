@@ -18,8 +18,8 @@ mkDerivation {
   ];
   executableHaskellDepends = [ base ];
   testHaskellDepends = [
-    aeson agent-core agent-json base bytestring containers directory
-    filepath hspec safe-exceptions temporary text
+    aeson agent-core agent-json agent-runtime base bytestring
+    containers directory filepath hspec safe-exceptions temporary text
   ];
   benchmarkHaskellDepends = [ base filepath temporary text time ];
   description = "Telegram gateway for the universal agent harness";

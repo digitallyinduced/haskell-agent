@@ -38,14 +38,14 @@ grokClientIdentifier = "grok-shell"
 defaultGrokClientVersion :: Text
 defaultGrokClientVersion = "1.0.8"
 
--- | Context window advertised by the current Grok 4.5/4.6 model catalog.
+-- | Context window advertised by the current Grok 4.5/4.6/4.7 model catalog.
 grokDefaultContextWindow :: Int
 grokDefaultContextWindow = 500_000
 
--- | Grok 4.5/4.6 override the Grok Build global 85% fallback with 80%.
+-- | Grok 4.5/4.6/4.7 override the Grok Build global 85% fallback with 80%.
 grokAutoCompactThresholdPercent :: Text -> Int
 grokAutoCompactThresholdPercent model
-    | model `elem` ["grok-4.5", "grok-4.6"] = 80
+    | model `elem` ["grok-4.5", "grok-4.6", "grok-4.7"] = 80
     | otherwise = 85
 
 -- | Resolve the client-side automatic compaction threshold for a model.
@@ -61,7 +61,7 @@ grokAutoCompactTokenLimit model contextWindow =
 -- configuration has not opted into.
 grokServerCompactionAtTokens :: Text -> Maybe Int
 grokServerCompactionAtTokens model
-    | model `elem` ["grok-4.5", "grok-4.6"] =
+    | model `elem` ["grok-4.5", "grok-4.6", "grok-4.7"] =
         Just (grokAutoCompactTokenLimit model grokDefaultContextWindow)
     | otherwise = Nothing
 
@@ -128,7 +128,7 @@ defaultClientOptions :: ClientOptions
 defaultClientOptions = ClientOptions
     { baseUrl = "https://cli-chat-proxy.grok.com/v1"
     , modelOverrides = Map.empty
-    , defaultModel = "grok-4.6"
+    , defaultModel = "grok-4.7"
     , preserveModelNames = False
     , requestRedirectCount = 10
     , autoCompactTokenLimit = Nothing

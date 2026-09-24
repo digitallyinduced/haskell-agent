@@ -88,7 +88,7 @@
       "fallback_priority": 5
     },
     {
-      "id": "grok-4.6",
+      "id": "grok-4.7",
       "connection": "xai",
       "dialect": "grok-build",
       "context_window": 500000,
@@ -97,6 +97,23 @@
       "default_reasoning_effort": "high",
       "default": true,
       "fallback_priority": 10
+    },
+    {
+      "id": "grok-4.6",
+      "connection": "xai",
+      "dialect": "grok-build",
+      "context_window": 500000,
+      "reasoning_efforts": ["low", "medium", "high", "xhigh"],
+      "default_reasoning_effort": "high",
+      "fallback_priority": 11
+    },
+    {
+      "id": "grok-4.7",
+      "connection": "organization-gateway",
+      "dialect": "grok-build",
+      "context_window": 500000,
+      "reasoning_efforts": ["low", "medium", "high", "xhigh"],
+      "default_reasoning_effort": "high"
     },
     {
       "id": "grok-4.6",

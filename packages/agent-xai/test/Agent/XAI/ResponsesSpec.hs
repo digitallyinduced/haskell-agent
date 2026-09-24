@@ -27,11 +27,11 @@ spec = do
         it "prefers exact overrides, passes grok names through, and falls back otherwise" do
             let options = defaultClientOptions
                     { modelOverrides = Map.fromList [("gpt-5.6-sol", "grok-4.6-mini")]
-                    , defaultModel = "grok-4.6"
+                    , defaultModel = "grok-4.7"
                     }
             mapModel options "gpt-5.6-sol" `shouldBe` "grok-4.6-mini"
             mapModel options "grok-3" `shouldBe` "grok-3"
-            mapModel options "gpt-5.6-terra" `shouldBe` "grok-4.6"
+            mapModel options "gpt-5.6-terra" `shouldBe` "grok-4.7"
 
         it "preserves authoritative gateway aliases instead of inferring models" do
             let options = gatewayClientOptions "https://gateway.example/"
@@ -51,7 +51,7 @@ spec = do
             let value = requestValue defaultClientOptions sampleRequest
             object <- expectObject value
 
-            KeyMap.lookup "model" object `shouldBe` Just (Aeson.String "grok-4.6")
+            KeyMap.lookup "model" object `shouldBe` Just (Aeson.String "grok-4.7")
             KeyMap.lookup "store" object `shouldBe` Just (Aeson.Bool False)
             KeyMap.lookup "stream" object `shouldBe` Just (Aeson.Bool True)
             KeyMap.lookup "reasoning" object `shouldBe` Just (Aeson.object
@@ -204,7 +204,7 @@ spec = do
             KeyMap.lookup "tools" object
                 `shouldBe` Just (Aeson.toJSON ([] :: [Aeson.Value]))
 
-        it "maps OpenAI-only efforts down and passes grok-4.6 xhigh through" do
+        it "maps OpenAI-only efforts down and passes grok-4.7 xhigh through" do
             let effortOf request = do
                     object <- expectObject (requestValue defaultClientOptions request)
                     reasoning <- expectObject =<< maybe

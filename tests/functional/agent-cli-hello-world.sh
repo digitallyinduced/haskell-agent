@@ -40,7 +40,7 @@ case "$provider" in
       "$credential_home/.grok/auth.json" \
       "$test_home/.grok/auth.json"; then
       provider=xai
-      model=${model:-grok-4.6}
+      model=${model:-grok-4.7}
     elif copy_file_if_present \
       "$credential_home/.codex/auth.json" \
       "$test_home/.codex/auth.json"; then
@@ -73,7 +73,7 @@ case "$provider" in
         echo "missing $credential_home/.grok/auth.json" >&2
         exit 1
       }
-    model=${model:-grok-4.6}
+    model=${model:-grok-4.7}
     ;;
   *)
     echo "unsupported AGENT_FUNCTIONAL_TEST_PROVIDER: $provider" >&2

@@ -230,6 +230,7 @@ spec = do
             frame `shouldSatisfy` Text.isInfixOf "gpt-6-sol"
             defaultModelFor catalog XAIProvider
                 `shouldSatisfy` (\model -> Text.isInfixOf model frame)
+            frame `shouldSatisfy` Text.isInfixOf "grok-4.7"
             frame `shouldSatisfy` Text.isInfixOf "grok-4.6"
             frame `shouldSatisfy` Text.isInfixOf "confirm"
             frame `shouldSatisfy` Text.isInfixOf "reasoning effort"
@@ -401,6 +402,7 @@ spec = do
             listing `shouldSatisfy` Text.isInfixOf "gpt-5.6-terra"
             listing `shouldSatisfy` Text.isInfixOf "gpt-5.6-luna"
             listing `shouldSatisfy` Text.isInfixOf "openai"
+            listing `shouldSatisfy` Text.isInfixOf "grok-4.7"
             listing `shouldSatisfy` Text.isInfixOf "grok-4.6"
             listing `shouldSatisfy` Text.isInfixOf "openrouter"
             listing `shouldSatisfy` Text.isInfixOf "claude-code"

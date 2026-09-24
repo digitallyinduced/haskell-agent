@@ -21,6 +21,7 @@ module Agent.CLI.TUI.Composer
     , draftCursorLocation
     , draftWindowStart
     , drawComposer
+    , drawClipboardImageTip
     , drawBackgroundTaskStatus
     , drawQueuedInputs
     , drawSlashMenu

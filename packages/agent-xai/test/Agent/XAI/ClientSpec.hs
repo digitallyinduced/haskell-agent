@@ -118,7 +118,7 @@ spec = do
                 `shouldBe` Just "400000"
             lookup "x-compactions-remaining" request.headers
                 `shouldBe` Just "1"
-            requestModel request `shouldBe` Just "grok-4.6"
+            requestModel request `shouldBe` Just "grok-4.7"
             -- instructions travel as the leading system item
             requestInputRoles request `shouldBe` Just ["system", "user"]
 
@@ -146,7 +146,7 @@ spec = do
                     , completedEvent "resp-expanded-context" []
                     ]
                 resolvedThreshold =
-                    grokAutoCompactTokenLimit "grok-4.6" 1_000_000
+                    grokAutoCompactTokenLimit "grok-4.7" 1_000_000
             withMockGrok recorded handler \options -> do
                 result <- createResponseWith
                     options
@@ -713,6 +713,8 @@ spec = do
 
     describe "Grok automatic compaction policy" do
         it "uses the current 80% model override and 85% fallback" do
+            grokAutoCompactTokenLimit "grok-4.7" 500_000
+                `shouldBe` 400_000
             grokAutoCompactTokenLimit "grok-4.6" 500_000
                 `shouldBe` 400_000
             grokAutoCompactTokenLimit "grok-4.5" 500_000

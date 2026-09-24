@@ -74,6 +74,8 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         closeSubagentRegistry registry
 
     it "canonicalizes Grok-root child model aliases" do
+        canonicalizeGrokChildModel "Grok 4.7" `shouldBe` Just "grok-4.7"
+        canonicalizeGrokChildModel "grok-4-7" `shouldBe` Just "grok-4.7"
         canonicalizeGrokChildModel "Grok 4.6" `shouldBe` Just "grok-4.6"
         canonicalizeGrokChildModel "grok-4-5" `shouldBe` Just "grok-4.5"
         canonicalizeGrokChildModel "luna" `shouldBe` Just lunaSubagentModel
@@ -84,6 +86,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
             `shouldBe` Just lunaSubagentModel
         canonicalizeGrokChildModel "grok-4-1-fast" `shouldBe` Nothing
         canonicalizeGrokChildModel "grok-4.6-mini" `shouldBe` Nothing
+        canonicalizeGrokChildModel "grok-4.7-fast" `shouldBe` Nothing
 
     it "rejects unknown Grok-root child models against the allowlist" do
         resolveRequestedGrokChildModel
@@ -102,9 +105,9 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
             (Just (grokRootChildModels True))
             Nothing
             `shouldBe` Right Nothing
-        grokRootChildModels False `shouldBe` ["grok-4.6", "grok-4.5"]
+        grokRootChildModels False `shouldBe` ["grok-4.7", "grok-4.6", "grok-4.5"]
         grokRootChildModels True
-            `shouldBe` ["grok-4.6", "grok-4.5", lunaSubagentModel]
+            `shouldBe` ["grok-4.7", "grok-4.6", "grok-4.5", lunaSubagentModel]
 
     it "advertises the Grok-root allowlist and records Luna at high effort" do
         withSystemTempDirectory "agent-grok-task" \dir -> do

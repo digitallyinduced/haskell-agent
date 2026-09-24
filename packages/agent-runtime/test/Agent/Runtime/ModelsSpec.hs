@@ -53,7 +53,7 @@ spec = do
             modelIdsFor OpenAIProvider
                 `shouldContain` ["gpt-6-sol", "gpt-6-astra"]
             modelIdsFor OpenAIProvider `shouldContain` ["gpt-6-luna"]
-            modelIdsFor XAIProvider `shouldContain` ["grok-4.6"]
+            modelIdsFor XAIProvider `shouldContain` ["grok-4.7", "grok-4.6"]
             modelIdsFor OpenRouterProvider `shouldContain` ["stealth/ox-alpha"]
             modelIdsFor GeminiProvider `shouldContain` ["gemini-3.7-flash"]
 
@@ -67,7 +67,7 @@ spec = do
                     , "gpt-5.6-sol"
                     , "gpt-5.6-luna"
                     ]
-            modelIdsFor XAIProvider `shouldBe` ["grok-4.6"]
+            modelIdsFor XAIProvider `shouldBe` ["grok-4.7", "grok-4.6"]
             modelIdsFor OpenRouterProvider
                 `shouldBe` ["stealth/ox-alpha", "meta/muse-spark-1.2"]
             modelIdsFor GeminiProvider
@@ -100,11 +100,14 @@ spec = do
                 `shouldSatisfy` all (== ClaudeCodeDialect)
 
         it "keeps structured context metadata on picker options" do
-            let grok =
+            let grok modelId =
                     find
-                        ((== "grok-4.6") . (.modelTarget.targetModelId))
+                        ((== modelId) . (.modelTarget.targetModelId))
                         (modelsForProvider catalog XAIProvider)
-            fmap (.modelContextWindow) grok `shouldBe` Just (Just 500000)
+            fmap (.modelContextWindow) (grok "grok-4.7")
+                `shouldBe` Just (Just 500000)
+            fmap (.modelContextWindow) (grok "grok-4.6")
+                `shouldBe` Just (Just 500000)
 
         it "includes Fable 5.1 with its Claude Code wire model id" do
             let fable =
@@ -221,9 +224,21 @@ spec = do
                 `shouldBe` True
 
         it "uses Grok capabilities for the gateway Grok model" do
-            gatewayModelOptions catalog XAIProvider ["grok-4.6"]
+            gatewayModelOptions catalog XAIProvider ["grok-4.7", "grok-4.6"]
                 `shouldBe`
                     [ ModelOption
+                        { modelTarget =
+                            ModelTarget
+                                XAIProvider
+                                organizationGatewayConnectionId
+                                "grok-4.7"
+                                "grok-4.7"
+                                GrokBuildDialect
+                        , modelContextWindow = Just 500_000
+                        , modelLabel = Nothing
+                        , modelFallbackPriority = Nothing
+                        }
+                    , ModelOption
                         { modelTarget =
                             ModelTarget
                                 XAIProvider
@@ -563,7 +578,7 @@ spec = do
                     catalog
                     "xai"
                     XAIProvider
-                    "grok-4.6"
+                    "grok-4.7"
                     GrokBuildDialect
 
         it "starts on the current model" do
@@ -577,7 +592,7 @@ spec = do
                 `shouldBe`
                     Just
                         ( XAIProvider
-                        , "grok-4.6"
+                        , "grok-4.7"
                         , GrokBuildDialect
                         )
 
@@ -620,7 +635,7 @@ spec = do
             applyPickerEvent PickerConfirm state0
                 `shouldBe` Left (Just
                     ((testOption XAIProvider "xai"
-                        "grok-4.6" "grok-4.6" GrokBuildDialect
+                        "grok-4.7" "grok-4.7" GrokBuildDialect
                         (Just "default") (Just 10))
                         { modelContextWindow = Just 500000 }))
 

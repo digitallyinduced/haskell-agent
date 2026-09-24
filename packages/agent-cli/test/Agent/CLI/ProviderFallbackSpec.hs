@@ -37,7 +37,7 @@ spec = do
     catalog <- runIO readPackagedCatalog
     describe "selectAutomaticProviderCandidateWith" do
         let openai = rawModelOption OpenAIProvider "gpt-6-astra"
-            grok = rawModelOption XAIProvider "grok-4.6"
+            grok = rawModelOption XAIProvider "grok-4.7"
             gemini = rawModelOption GeminiProvider "gemini-3.7-flash"
             ignoreSkipped _ _ = pure ()
 
@@ -91,7 +91,7 @@ spec = do
                     , Set.fromList [OpenRouterProvider, XAIProvider, OpenAIProvider]
                     )
             readIORef events `shouldReturn`
-                [ "resolve grok-4.6", "validate grok-4.6", "skip"
+                [ "resolve grok-4.7", "validate grok-4.7", "skip"
                 , "resolve gemini-3.7-flash", "validate gemini-3.7-flash"
                 ]
 
@@ -153,7 +153,7 @@ spec = do
                     , model.modelTarget.targetModelId
                     ))
                 (fallbackCandidates catalog Set.empty XAIProvider
-                    "grok-4.6" exhausted)
+                    "grok-4.7" exhausted)
                 `shouldBe`
                     [ (OpenAIProvider, "gpt-6-astra")
                     , (GeminiProvider, "gemini-3.7-flash")
@@ -169,7 +169,7 @@ spec = do
                 (fallbackCandidates catalog Set.empty OpenAIProvider
                     "gpt-6-sol" exhausted)
                 `shouldBe`
-                    [ (XAIProvider, "grok-4.6")
+                    [ (XAIProvider, "grok-4.7")
                     , (GeminiProvider, "gemini-3.7-flash")
                     , (OpenRouterProvider, "stealth/ox-alpha")
                     ]
@@ -186,7 +186,7 @@ spec = do
         it "skips providers already found unavailable" do
             map (.modelTarget.targetProvider)
                 (fallbackCandidates catalog (Set.singleton OpenAIProvider)
-                    XAIProvider "grok-4.6" exhausted)
+                    XAIProvider "grok-4.7" exhausted)
                 `shouldBe` [GeminiProvider, OpenRouterProvider]
 
         it "accepts direct usage-limit errors from every provider" do
@@ -202,7 +202,7 @@ spec = do
         it "accepts other definitive account and billing exhaustion errors" do
             map
                 (not . null . fallbackCandidates catalog Set.empty XAIProvider
-                    "grok-4.6")
+                    "grok-4.7")
                 [ ProviderError UsageBalanceExhausted "balance exhausted" Nothing
                 , ProviderError QuotaExceeded "quota exhausted" Nothing
                 , ProviderError UsageNotIncluded "not included" Nothing
@@ -211,7 +211,7 @@ spec = do
                 `shouldBe` replicate 4 True
 
         it "does not switch for transient capacity failures" do
-            fallbackCandidates catalog Set.empty XAIProvider "grok-4.6"
+            fallbackCandidates catalog Set.empty XAIProvider "grok-4.7"
                 (ProviderError OverloadedError "busy" (Just 30))
                 `shouldBe` []
 
@@ -238,7 +238,7 @@ spec = do
                     , "gpt-5.6-terra"
                     , "gpt-6-luna"
                     , "gpt-5.6-luna"
-                    , "grok-4.6"
+                    , "grok-4.7"
                     , "gemini-3.7-flash"
                     , "stealth/ox-alpha"
                     ]
@@ -251,7 +251,7 @@ spec = do
                     , "gpt-5.6-terra"
                     , "gpt-6-luna"
                     , "gpt-5.6-luna"
-                    , "grok-4.6"
+                    , "grok-4.7"
                     , "gemini-3.7-flash"
                     , "stealth/ox-alpha"
                     ]
@@ -262,7 +262,7 @@ spec = do
                 `shouldBe`
                     [ "gpt-6-luna"
                     , "gpt-5.6-luna"
-                    , "grok-4.6"
+                    , "grok-4.7"
                     , "gemini-3.7-flash"
                     , "stealth/ox-alpha"
                     ]
