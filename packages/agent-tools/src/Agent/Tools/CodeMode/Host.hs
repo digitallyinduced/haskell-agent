@@ -108,6 +108,7 @@ import Control.Monad (filterM, void)
 import Data.Aeson (ToJSON(toJSON), Value(..), object, (.=))
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Char8 as BS8
 import Data.IORef (atomicModifyIORef', newIORef)
 import Data.Map.Strict (Map)
@@ -653,12 +654,17 @@ monitorWorker
                             failClosed False "tool call received before ready"
                     Right WorkerYielded{..}
                         | hasStarted -> do
-                            atomically do
+                            accepted <- atomically do
                                 values <- drainTQueue content
-                                writeTQueue yields $
-                                    preferStreamedContent values
-                                        (protocolValue responseValue)
-                            loop True
+                                let (value, failure) = validatedCellContent $
+                                        preferStreamedContent values
+                                            (protocolValue responseValue)
+                                case failure of
+                                    Nothing -> writeTQueue yields value >> pure True
+                                    Just err -> do
+                                        void $ tryPutTMVar result $ Right (CellRejected value err)
+                                        pure False
+                            if accepted then loop True else pure ()
                         | otherwise ->
                             failClosed False "yield received before ready"
                     Right WorkerNotification{..}
@@ -669,9 +675,15 @@ monitorWorker
                             failClosed False "notification received before ready"
                     Right WorkerContent{..}
                         | hasStarted -> do
-                            atomically $
-                                writeTQueue content (protocolValue contentValue)
-                            loop True
+                            let value = protocolValue contentValue
+                            case validateImageContent value of
+                                Left err -> atomically do
+                                    values <- drainTQueue content
+                                    void $ tryPutTMVar result $
+                                        Right (CellRejected (contentResult values) err)
+                                Right () -> do
+                                    atomically $ writeTQueue content value
+                                    loop True
                         | otherwise ->
                             failClosed False "content received before ready"
                     Right WorkerExecSucceeded{..}
@@ -688,11 +700,11 @@ monitorWorker
                                 -- this completed cell.
                                 atomically do
                                     values <- drainTQueue content
-                                    void $ tryPutTMVar result $
-                                        Right (CellSucceeded
-                                            (preferStreamedContent
-                                                values
-                                                (protocolValue responseValue)))
+                                    let (value, failure) = validatedCellContent $
+                                            preferStreamedContent values
+                                                (protocolValue responseValue)
+                                    void $ tryPutTMVar result $ Right $
+                                        maybe (CellSucceeded value) (CellRejected value) failure
                                 pure updated
                         | otherwise ->
                             failClosed hasStarted
@@ -708,12 +720,11 @@ monitorWorker
                                 -- See the corresponding success branch.
                                 atomically do
                                     values <- drainTQueue content
-                                    void $ tryPutTMVar result $
-                                        Right (CellFailed
-                                            (preferStreamedContent
-                                                values
-                                                (protocolValue responseValue))
-                                            responseError)
+                                    let (value, failure) = validatedCellContent $
+                                            preferStreamedContent values
+                                                (protocolValue responseValue)
+                                    void $ tryPutTMVar result $ Right $
+                                        maybe (CellFailed value responseError) (CellRejected value) failure
                                 pure updated
                         | otherwise ->
                             failClosed hasStarted
@@ -896,6 +907,46 @@ preferStreamedContent :: [Value] -> Value -> Value
 preferStreamedContent [] fallback = fallback
 preferStreamedContent values _ = contentResult values
 
+-- Validate before content enters a queue: early yields are provider-bound too.
+-- Retain only the valid prefix when a worker response contains a bad image.
+validatedCellContent :: Value -> (Value, Maybe Text)
+validatedCellContent value =
+    case collect [] (resultContentItems value) of
+        (_, Nothing) -> (value, Nothing)
+        (items, failure) -> (contentResult items, failure)
+  where
+    collect accepted [] = (reverse accepted, Nothing)
+    collect accepted (item : rest) =
+        case validateImageContent item of
+            Left err -> (reverse accepted, Just err)
+            Right () -> collect (item : accepted) rest
+
+validateImageContent :: Value -> Either Text ()
+validateImageContent (Object item)
+    | KeyMap.lookup "type" item == Just (String "image") =
+        case KeyMap.lookup "image_url" item of
+            Just (String url)
+                | validImageDataUrl url -> Right ()
+            _ -> Left "image expects an image MIME type and a non-empty, valid base64 payload; pass image data, not formatted tool output"
+validateImageContent _ = Right ()
+
+validImageDataUrl :: Text -> Bool
+validImageDataUrl url =
+    let (header, separatorAndPayload) = Text.breakOn "," url
+        payload = Text.encodeUtf8 (Text.drop 1 separatorAndPayload)
+        imageSubtype = Text.stripPrefix "data:image/" (Text.toLower header)
+            >>= Text.stripSuffix ";base64"
+        validSubtype subtype = not (Text.null subtype)
+            && Text.all (\character ->
+                (character >= 'a' && character <= 'z')
+                    || (character >= '0' && character <= '9')
+                    || character `elem` (".+-" :: String)) subtype
+     in maybe False validSubtype imageSubtype
+        && not (BS.null payload)
+        && case Base64.decode payload of
+            Left _ -> False
+            Right decoded -> Base64.encode decoded == payload
+
 -- The host evaluator and public code-mode result API still operate on Aeson
 -- values. Keep that materialisation at this explicit boundary rather than in
 -- the worker protocol decoder.
@@ -913,6 +964,11 @@ cellOutcomeResult identifier = \case
         , cellValue = value
         , cellError = err
         }
+    CellRejected value err -> CodeModeFailed
+        { cellId = identifier
+        , cellValue = value
+        , cellError = err
+        }
 
 releaseCell :: CodeModeHost -> Cell -> IO ()
 releaseCell host cell = do
@@ -920,6 +976,7 @@ releaseCell host cell = do
     cancelCellCallbacks cell
     outcome <- atomically $ tryReadTMVar cell.cellResult
     case outcome of
+        Just (Right CellRejected{}) -> stopCell cell
         Just (Right _) -> do
             retained <- modifyMVar host.hostWorkerPool \pool ->
                 if not pool.poolClosed

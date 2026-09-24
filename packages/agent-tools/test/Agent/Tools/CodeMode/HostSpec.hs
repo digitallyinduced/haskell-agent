@@ -719,9 +719,10 @@ spec = describe "code-mode Bun host" do
 
     mapM_ (\(label, source) ->
         it ("rejects malformed image content from " <> label <> " without invalidating the next cell") do
-            let config = defaultCodeModeConfig
+            let config = (defaultCodeModeConfig
                     "data/code-mode/worker.mjs"
-                    (\_ _ -> pure $ Left "no tools")
+                    (\_ _ -> pure $ Left "no tools"))
+                    { workerPoolSize = 1 }
             host <- newCodeModeHost config
             failed <- execCodeCell host ("text(\"before\"); " <> source) [] 3000
             failed `shouldSatisfy` \case
@@ -749,6 +750,41 @@ spec = describe "code-mode Bun host" do
         , ("an empty payload", "image(\"data:image/png;base64,\");")
         , ("a non-image MIME type", "image(\"data:text/plain;base64,AA==\");")
         , ("invalid padding", "image(\"data:image/png;base64,A===\");")
+        ]
+
+    mapM_ (\(label, response) ->
+        it ("validates image content in worker " <> label) do
+            directory <- getTemporaryDirectory
+            bracket
+                (do
+                    (script, handle) <- openTempFile directory "code-mode-image-validation.mjs"
+                    hPutStr handle $ unlines
+                        [ "import readline from 'node:readline';"
+                        , "const send = value => console.log(JSON.stringify({jsonrpc:'2.0', ...value}));"
+                        , "send({method:'ready'});"
+                        , "readline.createInterface({input:process.stdin}).on('line', line => {"
+                        , "const request = JSON.parse(line); if (request.method !== 'exec') return;"
+                        , "const content = [{type:'text',text:'before'}, {type:'image',image_url:'data:image/png;base64,not base64'}];"
+                        , response
+                        , "});"
+                        ]
+                    hClose handle
+                    pure script)
+                removeFile
+                \script -> do
+                    let config = defaultCodeModeConfig script (\_ _ -> pure $ Left "no tools")
+                    withCodeModeHost config \host -> do
+                        failed <- execCodeCell host "" [] 3000
+                        failed `shouldSatisfy` \case
+                            Right CodeModeFailed{cellValue = value, cellError = errorText} ->
+                                value == textContent "before"
+                                    && "base64" `Text.isInfixOf` errorText
+                            _ -> False
+        )
+        [ ("stream notifications", "for (const value of content) send({method:'content',params:{value}});")
+        , ("successful terminal results", "send({id:request.id,result:{content}});")
+        , ("failed terminal results", "send({id:request.id,error:{code:-32000,message:'failed'},partial_result:{content}});")
+        , ("yield results", "send({method:'yield',params:{value:{content}}});")
         ]
 
     it "validates generated image metadata before emitting image content" do

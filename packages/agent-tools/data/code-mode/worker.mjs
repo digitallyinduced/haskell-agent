@@ -156,27 +156,6 @@ async function execute(id, params) {
     }
     return value;
   };
-  const imageDataUrl = (value) => {
-    dataUrl(value, "image");
-    const separator = value.indexOf(",");
-    const header = value.slice(0, separator);
-    const payload = value.slice(separator + 1);
-    // Buffer's decoder tolerates invalid characters and truncated input. Check
-    // the envelope and canonical encoding before emitting provider-bound data.
-    if (
-      separator < 0 ||
-      !/^data:image\/[a-z0-9.+-]+;base64$/i.test(header) ||
-      payload.length === 0 ||
-      payload.length % 4 !== 0 ||
-      /[^A-Za-z0-9+/=]/.test(payload) ||
-      Buffer.from(payload, "base64").toString("base64") !== payload
-    ) {
-      throw new TypeError(
-        "image expects an image MIME type and a non-empty, valid base64 payload; pass image data, not formatted tool output",
-      );
-    }
-    return value;
-  };
   const imageDetail = (value) => {
     if (value === undefined || value === null) return undefined;
     if (typeof value !== "string") {
@@ -195,7 +174,7 @@ async function execute(id, params) {
     if (typeof value === "string") {
       const item = {
         type: "image",
-        image_url: imageDataUrl(value),
+        image_url: dataUrl(value, "image"),
       };
       if (imageDetailVisible) item.detail = detailOverride ?? "high";
       appendContent(item);
@@ -208,7 +187,7 @@ async function execute(id, params) {
     ) {
       const item = {
         type: "image",
-        image_url: imageDataUrl(value.image_url),
+        image_url: dataUrl(value.image_url, "image"),
       };
       if (imageDetailVisible) {
         item.detail = detailOverride ?? imageDetail(value.detail) ?? "high";
@@ -237,11 +216,9 @@ async function execute(id, params) {
           : undefined;
       const item = {
         type: "image",
-        image_url: imageDataUrl(
-          value.data.slice(0, 5).toLowerCase() === "data:"
-            ? value.data
-            : `data:${mimeType};base64,${value.data}`,
-        ),
+        image_url: value.data.slice(0, 5).toLowerCase() === "data:"
+          ? value.data
+          : `data:${mimeType};base64,${value.data}`,
       };
       if (imageDetailVisible) {
         item.detail = detailOverride ?? imageDetail(metadataDetail) ?? "high";
