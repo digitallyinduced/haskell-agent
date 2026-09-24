@@ -1732,6 +1732,7 @@ buildSessionEnv
         , sessionBackground = startup.startupBackground
         , sessionStdinControl = stdinControl
         , sessionDraft = startup.startupSessionState.sessionDraft
+        , sessionSuspendedDraft = startup.startupSessionState.sessionSuspendedDraft
         , sessionPreviewId =
             startup.startupSessionState.sessionPreviewId
         , sessionInterrupt = interrupt
