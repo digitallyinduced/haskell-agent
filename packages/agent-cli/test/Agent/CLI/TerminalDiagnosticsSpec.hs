@@ -1,5 +1,6 @@
 module Agent.CLI.TerminalDiagnosticsSpec (spec) where
 
+import Agent.CLI.ExternalProgram (ExternalProgram(..), runExternalProgramOnFile)
 import Agent.CLI.TerminalDiagnostics
 import Control.Concurrent.Async (cancel, withAsync)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
@@ -106,6 +107,27 @@ spec = describe "native terminal diagnostics" do
             Text.readFile path `shouldReturn` "Child diagnostic\n"
             void (fdWrite stdError "Parent restored\n")
             readCapture output `shouldReturn` "Parent restored\n"
+
+    it "keeps interactive child stderr visible without exposing parent diagnostics" $
+        withSystemTempDirectory "terminal-diagnostics" \directory ->
+        captureStderr \output -> do
+            path <- withTerminalDiagnostics directory \path -> do
+                runExternalProgramOnFile
+                    (ExternalProgram "/bin/sh" ["-c", "printf 'Editor prompt\\n' >&2"])
+                    path
+                    `shouldReturn` Right ()
+                void (fdWrite stdError "Parent native diagnostic\n")
+                pure path
+            readCapture output `shouldReturn` "Editor prompt\n"
+            Text.readFile path `shouldReturn` "Parent native diagnostic\n"
+
+    it "preserves interactive child stderr outside diagnostic isolation" $
+        captureStderr \output -> do
+            runExternalProgramOnFile
+                (ExternalProgram "/bin/sh" ["-c", "printf 'Pager error\\n' >&2; exit 7"])
+                "unused"
+                `shouldReturn` Left "/bin/sh exited with status 7"
+            readCapture output `shouldReturn` "Pager error\n"
 
     it "suspends isolation for subprocess handoffs and resumes after errors" $
         withSystemTempDirectory "terminal-diagnostics" \directory ->

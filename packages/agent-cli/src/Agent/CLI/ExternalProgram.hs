@@ -14,6 +14,7 @@ module Agent.CLI.ExternalProgram
     , normalizeEditedText
     ) where
 
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
 import Control.Exception.Safe
     ( bracket
     , catchAny
@@ -36,7 +37,9 @@ import System.IO
     , openTempFile
     )
 import System.Process
-    ( proc
+    ( CreateProcess(std_err)
+    , StdStream(UseHandle)
+    , proc
     , terminateProcess
     , waitForProcess
     , withCreateProcess
@@ -133,10 +136,14 @@ runExternalProgramOnFile
     -> IO (Either Text ())
 runExternalProgramOnFile program path = do
     result <- tryAny do
+        terminalStderr <- getTerminalStderr
+        -- Editors and pagers own the terminal while the REPL is suspended.
+        -- Preserve their stderr UI without exposing parent native diagnostics.
         withCreateProcess
-            (proc
+            ((proc
                 program.externalProgramExecutable
                 (program.externalProgramArguments <> [path]))
+                { std_err = UseHandle terminalStderr })
             \_ _ _ processHandle ->
                 waitForProcess processHandle `onException` do
                     terminateProcess processHandle
