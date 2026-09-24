@@ -21,7 +21,11 @@ import qualified Hasql.Encoders as Encoders
 import qualified Hasql.Session as Session
 import Hasql.Statement (Statement)
 import qualified Hasql.Statement as Statement
+import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
+import System.Posix.Process (getProcessGroupID, getProcessGroupIDOf)
+import System.Posix.Signals (sigTERM, signalProcess)
+import System.Posix.Types (CPid)
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -29,10 +33,13 @@ import Agent.Store.Postgres
 import Agent.Store.Postgres.Connection
     ( PoolConfig(..)
     , ReconnectionPolicy(..)
+    , closeStoreConnection
     , closeStorePool
     , defaultPoolConfig
     , openRoleStorePool
+    , openStoreConnection
     , openStorePool
+    , openStorePoolWithConnectionTimeout
     , postgresApplicationNameFromEnvironment
     , withSession
     , withSessionSingleAttempt
@@ -316,6 +323,76 @@ spec =
                                 wait restart >>= (`shouldSatisfy` isRight)
                         pure (Right ()))
                         `shouldReturn` Right ()
+                    ) `finally` cleanup
+
+        it "detaches the postmaster from the caller's process group" $
+            withSystemTempDirectory "ha" \stateDirectory -> do
+                let
+                    config = shortSocketPostgresConfig stateDirectory
+                    cleanup = void (stopManagedPostgres config)
+                (do
+                    ensureManagedPostgres config
+                        >>= (`shouldSatisfy` isRight)
+                    postmaster <- postmasterProcessId config
+                    postmasterGroup <- getProcessGroupIDOf postmaster
+                    callerGroup <- getProcessGroupID
+                    postmasterGroup `shouldNotBe` callerGroup
+                    ) `finally` cleanup
+
+        it "restarts a cluster stuck in smart shutdown while another client is connected" $
+            withSystemTempDirectory "ha" \stateDirectory -> do
+                let
+                    config = shortSocketPostgresConfig stateDirectory
+                    probe = Session.statement () probeStatement
+                    cleanup = void (stopManagedPostgres config)
+                    waitForSmartShutdown = do
+                        openStorePoolWithConnectionTimeout
+                            config
+                            1
+                            defaultPoolConfig
+                            >>= \case
+                                Left _ -> pure ()
+                                Right extra -> do
+                                    closeStorePool extra
+                                    threadDelay 50_000
+                                    waitForSmartShutdown
+                (do
+                    ensureManagedPostgres config
+                        >>= (`shouldSatisfy` isRight)
+                    openStorePool config defaultPoolConfig >>= \case
+                        Left err ->
+                            expectationFailure
+                                ("could not open pool: " <> show err)
+                        Right pool ->
+                            finally
+                                (openStoreConnection pool >>= \case
+                                    Left err ->
+                                        expectationFailure
+                                            ("could not hold a client connection: "
+                                                <> show err)
+                                    Right holding ->
+                                        finally
+                                            (do
+                                                signalProcess
+                                                    sigTERM
+                                                    =<< postmasterProcessId config
+                                                timeout 5_000_000 waitForSmartShutdown
+                                                    >>= \case
+                                                        Just () -> pure ()
+                                                        Nothing ->
+                                                            expectationFailure
+                                                                "postmaster did not enter smart shutdown"
+                                                timeout
+                                                    30_000_000
+                                                    (ensureManagedPostgres config)
+                                                    `shouldReturn`
+                                                        Just (Right PostgresRunning)
+                                                withSession pool probe
+                                                    `shouldReturn` Right True
+                                            )
+                                            (closeStoreConnection holding)
+                                )
+                                (closeStorePool pool)
                     ) `finally` cleanup
 
         it "retries a pooled connection that a fast shutdown closed" $
@@ -942,6 +1019,17 @@ applicationNameStatement = Statement.preparable
     Encoders.noParams
     (Decoders.singleRow $
         Decoders.column (Decoders.nonNullable Decoders.text))
+
+postmasterProcessId :: ManagedPostgresConfig -> IO CPid
+postmasterProcessId config = do
+    contents <- readFile
+        (config.postgresPaths.postgresDataDirectory </> "postmaster.pid")
+    case reads (takeWhile (/= '\n') contents) of
+        [(processId, "")] -> pure processId
+        _ ->
+            fail
+                ("could not read postmaster pid from "
+                    <> config.postgresPaths.postgresDataDirectory)
 
 providerTelemetryColumnStatement :: Statement () Bool
 providerTelemetryColumnStatement = Statement.preparable

@@ -232,3 +232,5 @@ test-suite agent-store-test
                     , temporary
                     , text
                     , time
+                    , unix
+                    , filepath
