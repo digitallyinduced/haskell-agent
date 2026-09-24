@@ -51,7 +51,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import System.Directory.OsPath (getHomeDirectory)
-import System.Exit (die)
+import Agent.CLI.TerminalDiagnostics (dieToTerminal)
 import System.OsPath (OsPath)
 
 data McpCatalogError
@@ -90,7 +90,7 @@ runMcpList :: SessionOutputFormat -> IO ()
 runMcpList outputFormat = do
     home <- getHomeDirectory
     listMcpCatalog home >>= \case
-        Left err -> die (Text.unpack (catalogErrorText err))
+        Left err -> dieToTerminal (catalogErrorText err)
         Right entries ->
             case outputFormat of
                 SessionHuman -> Text.putStr (formatMcpCatalogHuman entries)
@@ -100,14 +100,14 @@ runMcpSetEnabled :: Bool -> Text -> IO ()
 runMcpSetEnabled enabled name = do
     home <- getHomeDirectory
     setMcpCatalogEnabled home name enabled >>= \case
-        Left err -> die (Text.unpack (catalogErrorText err))
+        Left err -> dieToTerminal (catalogErrorText err)
         Right change -> Text.putStrLn (formatMcpCatalogChange enabled change)
 
 runMcpAdd :: McpAddCommand -> IO ()
 runMcpAdd command = do
     home <- getHomeDirectory
     addMcpCatalogServer home command >>= \case
-        Left err -> die (Text.unpack (catalogErrorText err))
+        Left err -> dieToTerminal (catalogErrorText err)
         Right entry ->
             Text.putStrLn
                 ("Added MCP server " <> entry.mcpCatalogName

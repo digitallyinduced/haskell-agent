@@ -25,11 +25,12 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import System.Directory.OsPath (getCurrentDirectory, getHomeDirectory, makeAbsolute)
 import System.Exit (exitFailure)
-import System.IO (stderr)
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
 import System.OsPath (OsPath, decodeFS, unsafeEncodeUtf, (</>))
 
 runWorktreeAdmin :: WorktreeCommand -> IO ()
 runWorktreeAdmin command = do
+    stderr <- getTerminalStderr
     home <- getHomeDirectory
     let root = worktreeRoot home
         administer requested action message = do
@@ -63,7 +64,10 @@ runWorktreeAdmin command = do
             administer path (\p -> protectWorktree root p False) "Unprotected"
 
 failCommand :: Text -> IO a
-failCommand message = Text.hPutStrLn stderr ("worktree: " <> message) >> exitFailure
+failCommand message = do
+    stderr <- getTerminalStderr
+    Text.hPutStrLn stderr ("worktree: " <> message)
+    exitFailure
 
 -- Open only an ordinary pool: withStoreForHome would start PostgreSQL and run
 -- migrations/imports, which are forbidden side effects for a dry run.

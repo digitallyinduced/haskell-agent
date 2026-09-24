@@ -14,6 +14,7 @@ module Agent.CLI.ExternalProgram
     , normalizeEditedText
     ) where
 
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
 import Control.Exception.Safe
     ( bracket
     , catchAny
@@ -25,6 +26,7 @@ import Data.Char (isSpace)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
+import GHC.IO.Handle (hDuplicate)
 import System.Directory
     ( getTemporaryDirectory
     , removeFile
@@ -36,7 +38,9 @@ import System.IO
     , openTempFile
     )
 import System.Process
-    ( proc
+    ( CreateProcess(std_err)
+    , StdStream(UseHandle)
+    , proc
     , terminateProcess
     , waitForProcess
     , withCreateProcess
@@ -133,15 +137,22 @@ runExternalProgramOnFile
     -> IO (Either Text ())
 runExternalProgramOnFile program path = do
     result <- tryAny do
-        withCreateProcess
-            (proc
-                program.externalProgramExecutable
-                (program.externalProgramArguments <> [path]))
-            \_ _ _ processHandle ->
-                waitForProcess processHandle `onException` do
-                    terminateProcess processHandle
-                    _ <- waitForProcess processHandle
-                    pure ()
+        terminalStderr <- getTerminalStderr
+        -- Editors and pagers own the terminal while the REPL is suspended.
+        -- Preserve their stderr UI without exposing parent native diagnostics.
+        -- Process creation consumes nonstandard UseHandle handles, so give
+        -- the child an owned duplicate rather than the shared UI handle.
+        bracket (hDuplicate terminalStderr) hClose \childStderr ->
+            withCreateProcess
+                ((proc
+                    program.externalProgramExecutable
+                    (program.externalProgramArguments <> [path]))
+                    { std_err = UseHandle childStderr })
+                \_ _ _ processHandle ->
+                    waitForProcess processHandle `onException` do
+                        terminateProcess processHandle
+                        _ <- waitForProcess processHandle
+                        pure ()
     pure $
         case result of
             Left exception ->

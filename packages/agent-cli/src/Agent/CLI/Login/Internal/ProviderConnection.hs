@@ -74,12 +74,12 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Clock (addUTCTime, getCurrentTime)
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
 import System.IO
     ( hFlush
     , hGetEcho
     , hIsTerminalDevice
     , hSetEcho
-    , stderr
     , stdin
     )
 
@@ -522,6 +522,7 @@ presentGoogleLoginFullscreen runtime url = do
 
 connectOpenAI :: Bool -> IO (Maybe Text)
 connectOpenAI color = do
+    stderr <- getTerminalStderr
     clientId <-
         openAIOAuthClientId <$> lookupNonEmpty "OPENAI_OAUTH_CLIENT_ID"
     let options = OpenAILogin.defaultLoginOptions clientId
@@ -579,6 +580,7 @@ connectOpenAI color = do
 
 connectXAI :: Bool -> IO (Maybe Text)
 connectXAI color = do
+    stderr <- getTerminalStderr
     clientId <-
         xaiOAuthClientId <$> lookupNonEmpty "XAI_OAUTH_CLIENT_ID"
     let options = XAIAuth.defaultOAuthOptions clientId
@@ -692,6 +694,7 @@ connectGemini color = do
 
 presentGoogleLogin :: Bool -> Text -> IO ()
 presentGoogleLogin color url = do
+    stderr <- getTerminalStderr
     Text.hPutStrLn stderr $
         roleMuted color "Open "
             <> rolePrompt color url
@@ -758,6 +761,7 @@ storeConnectedCredentialResult provider accountId label billing authKind payload
 
 readSecretLine :: Text -> IO (Maybe Text)
 readSecretLine prompt = do
+    stderr <- getTerminalStderr
     Text.hPutStr stderr prompt
     hFlush stderr
     tty <- hIsTerminalDevice stdin
@@ -783,6 +787,7 @@ printLoginResult color = \case
 
 printLoginMessage :: Bool -> Bool -> Text -> IO ()
 printLoginMessage color success message = do
+    stderr <- getTerminalStderr
     Text.hPutStrLn stderr $
         if success
             then roleSuccess color (glyphOk <> message)

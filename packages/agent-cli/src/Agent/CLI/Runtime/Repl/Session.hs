@@ -104,7 +104,8 @@ import Data.IORef ( readIORef, writeIORef )
 import Data.Maybe ( fromMaybe )
 import Data.Text ( Text )
 import Data.Time.Clock ( getCurrentTime )
-import System.IO ( stdout, stderr )
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
+import System.IO ( stdout )
 import System.OsPath ( OsPath, takeDirectory )
 import qualified Data.Set as Set ( toAscList )
 import qualified Data.Text as Text
@@ -281,6 +282,7 @@ chooseRewindPointFor runtime color choices =
                 rows
                 >>= pure . (>>= atIndex newestFirst)
         Nothing -> do
+            stderr <- getTerminalStderr
             Text.hPutStrLn stderr $
                 roleMuted color
                     "Choose a prompt to restore as a draft. Files stay unchanged."
@@ -318,6 +320,7 @@ confirmRewindFor runtime color prompt =
                 ]
                 >>= pure . (== Just 0)
         Nothing -> do
+            stderr <- getTerminalStderr
             Text.hPutStrLn stderr $
                 roleMuted color
                     ( "Restore conversation state before “"
@@ -407,6 +410,7 @@ handleResumeAction runtime maybeId =
 
 handleRewindAction :: SessionActionRuntime -> IO RunResult
 handleRewindAction runtime = do
+    stderr <- getTerminalStderr
     color <- resolveColor stderr
     let env = runtime.actionEnv
         unavailable message = do
@@ -483,6 +487,7 @@ handleRewindAction runtime = do
 
 handleClearAction :: SessionActionRuntime -> IO RunResult
 handleClearAction runtime = do
+    stderr <- getTerminalStderr
     color <- resolveColor stderr
     let env = runtime.actionEnv
     clearResult <- mask \restore -> case env.sessionPersist of
@@ -562,6 +567,7 @@ handleClearAction runtime = do
 
 handleDeleteAction :: SessionActionRuntime -> IO RunResult
 handleDeleteAction runtime = do
+    stderr <- getTerminalStderr
     color <- resolveColor stderr
     let env = runtime.actionEnv
         unavailable message = do
@@ -600,6 +606,7 @@ handleForkAction
     -> ForkRequest
     -> IO RunResult
 handleForkAction runtime request = do
+    stderr <- getTerminalStderr
     color <- resolveColor stderr
     let env = runtime.actionEnv
         failFork message = do
@@ -771,6 +778,7 @@ handleAfkAction
     -> Maybe Text
     -> IO RunResult
 handleAfkAction runtime rawTarget = do
+    stderr <- getTerminalStderr
     let env = runtime.actionEnv
         failAfk err = do
             color <- resolveColor stderr
@@ -836,6 +844,7 @@ handleAfkAction runtime rawTarget = do
 
 handleWorktreeAction :: SessionActionRuntime -> IO RunResult
 handleWorktreeAction runtime = do
+    stderr <- getTerminalStderr
     let env = runtime.actionEnv
     result <- runtimeWithReplActivity runtime \report ->
         createManagedWorktreeWithProgress
@@ -867,6 +876,7 @@ handleRenameAction
     -> Text
     -> IO RunResult
 handleRenameAction runtime title = do
+    stderr <- getTerminalStderr
     let env = runtime.actionEnv
     color <- resolveColor stderr
     case env.sessionPersist of
@@ -914,6 +924,7 @@ handleRenameAction runtime title = do
 
 handleRenameAutoAction :: SessionActionRuntime -> IO RunResult
 handleRenameAutoAction runtime = do
+    stderr <- getTerminalStderr
     let env = runtime.actionEnv
         message = "automatic session titles enabled"
     color <- resolveColor stderr
@@ -967,6 +978,7 @@ handleRenameAutoAction runtime = do
 
 handleNewAction :: SessionActionRuntime -> IO RunResult
 handleNewAction runtime = do
+    stderr <- getTerminalStderr
     let env = runtime.actionEnv
     env.sessionReset
     runtimeFullscreenEvent runtime UiConversationCleared

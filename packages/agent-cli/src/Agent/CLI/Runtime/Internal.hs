@@ -48,6 +48,7 @@ import Agent.Integration.API
 import Agent.CLI.Options
     ( CliOptions
     , Command(..)
+    , isOneShot
     , parseArgs
     , usage
     )
@@ -84,6 +85,8 @@ import Agent.CLI.Status
     , formatUsageWithRate
     )
 import Agent.CLI.Terminal ( resolveColor )
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr, withInteractiveDiagnostics)
+import Agent.Runtime.Host (AgentRunMode(..))
 import Agent.CLI.Worktree ( isUnderWorktreeRoot, worktreeRoot )
 import Agent.ResourceScope (logSlowCleanup)
 import Agent.Tools.Types (defaultToolEnv)
@@ -218,8 +221,10 @@ configureClientIdentity =
 -- persisted provider metadata only after the replacement backend succeeds.
 runAgentWithRestarts :: CliOptions -> IO DevResult
 runAgentWithRestarts options =
+    withInteractiveDiagnostics (not (isOneShot options)) $
     catchUserInterrupt
         (do
+            terminalStderr <- getTerminalStderr
             home <- getHomeDirectory
             let root = sessionsRoot home
             withNetworkRecovery \networkRecovery -> do
@@ -276,7 +281,9 @@ runAgentWithRestarts options =
                             }
                     withRestoredCurrentDirectory
                         (runAgentWithRuntime
-                            processRuntime foregroundRunMode options)
+                            processRuntime
+                            (foregroundRunMode { runStderr = terminalStderr })
+                            options)
                         `finally`
                             (logSlowCleanup "tool resource arbiter"
                                 (closeToolResourceArbiter toolResourceArbiter)

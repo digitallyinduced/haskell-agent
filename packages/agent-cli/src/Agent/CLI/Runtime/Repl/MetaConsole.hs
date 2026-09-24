@@ -71,7 +71,7 @@ import Control.Monad ( foldM )
 import Data.Aeson ( Value )
 import Data.IORef ( readIORef )
 import Data.Text ( Text )
-import System.IO ( stderr )
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
 import qualified Agent.CLI.MetaConsole as Meta
     ( MetaAction(..)
     , MetaPlan(..)
@@ -227,6 +227,7 @@ showMetaPreview runtime heading plan =
         runtime.metaReplContext
         (heading <> "\n" <> metaPreviewBody plan)
         do
+            stderr <- getTerminalStderr
             color <- resolveColor stderr
             Text.hPutStrLn stderr
                 (roleMuted color
@@ -331,6 +332,7 @@ executeOneMetaHostAction _ _ result@(Left _) _ = pure result
 executeOneMetaHostAction _ _ result@(Right (Just _)) _ = pure result
 executeOneMetaHostAction runtime config (Right Nothing) action = case action of
     Meta.MetaConnectAccount requestedProvider -> do
+        stderr <- getTerminalStderr
         color <- resolveColor stderr
         tryAny
             (withReplSuspended
@@ -426,6 +428,7 @@ metaPlanNeedsRestart actions =
 
 requestMetaRestart :: MetaConsoleRuntime -> IO RunResult
 requestMetaRestart runtime = do
+    stderr <- getTerminalStderr
     color <- resolveColor stderr
     let report message =
             case env.sessionFullscreen of
@@ -449,12 +452,14 @@ requestMetaRestart runtime = do
 displayMetaNotice :: MetaConsoleRuntime -> Text -> IO ()
 displayMetaNotice runtime message =
     displayReplInfo runtime.metaReplContext message do
+        stderr <- getTerminalStderr
         color <- resolveColor stderr
         Text.hPutStrLn stderr (roleMuted color message)
 
 displayMetaSuccess :: MetaConsoleRuntime -> Text -> IO ()
 displayMetaSuccess runtime message =
     displayReplInfo runtime.metaReplContext message do
+        stderr <- getTerminalStderr
         color <- resolveColor stderr
         Text.hPutStrLn stderr
             (roleSuccess color (glyphOk <> message))
@@ -462,6 +467,7 @@ displayMetaSuccess runtime message =
 displayMetaError :: MetaConsoleRuntime -> Text -> IO ()
 displayMetaError runtime message =
     displayReplError runtime.metaReplContext message do
+        stderr <- getTerminalStderr
         color <- resolveColor stderr
         Text.hPutStrLn stderr (roleError color message)
 

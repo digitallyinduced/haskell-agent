@@ -178,8 +178,9 @@ import System.Directory.OsPath
       getHomeDirectory,
       makeAbsolute,
       setCurrentDirectory )
-import System.Exit ( die )
-import System.IO ( hIsTerminalDevice, stderr, stdin )
+import Agent.CLI.TerminalDiagnostics
+    ( dieToTerminal, withTerminalDiagnosticsSuspended )
+import System.IO ( hIsTerminalDevice, stdin )
 import System.OsPath ( OsPath, decodeFS, takeDirectory, takeFileName )
 import System.Posix.Process ( executeFile )
 import System.Process ( callProcess )
@@ -359,7 +360,9 @@ runAgentWithRuntime processRuntime runMode options = do
             RunQuit -> pure DevQuit
             RunReload sessionId -> pure (DevReload sessionId)
 
-    updateAndResume sessionId = do
+    -- The session UI has stopped. Give installer subprocesses and the
+    -- replacement process the terminal, not the native diagnostic log.
+    updateAndResume sessionId = withTerminalDiagnosticsSuspended do
         callProcess "nix"
             [ "profile"
             , "remove"
@@ -568,7 +571,7 @@ runAgent
                         , restartManageAccounts = do
                             gatewayBefore <- loadGatewayCredential
                             recoveryCwd <- getCurrentDirectory
-                            color <- resolveColor stderr
+                            color <- resolveColor runMode.runStderr
                             runLoginManager color
                             gatewayAfter <- loadGatewayCredential
                             pure
@@ -595,7 +598,7 @@ runAgent
                 (\failure@(StartupFailure message) ->
                     if runMode.runInBackground
                         then throwIO failure
-                        else die (Text.unpack message))
+                        else dieToTerminal message)
                 pure
                 startupOutcome
     case (prepared.preparedFullscreen, result) of
@@ -961,7 +964,7 @@ failAgentIterationPreparation request message =
             Nothing
                 | request.iterationRunMode.runInBackground ->
                     throwIO (StartupFailure message)
-                | otherwise -> die (Text.unpack message)
+                | otherwise -> dieToTerminal message
             Just _ -> throwIO (StartupFailure message)
 
 prepareAgentIterationInterface
@@ -1237,7 +1240,7 @@ resolveAgentIterationCwd request resources interface resumeLock =
     worktreeFailed err = do
         mapM_ releaseSessionLock resumeLock
         case fullscreen of
-            Nothing -> die (Text.unpack err)
+            Nothing -> dieToTerminal err
             Just _ -> throwIO (StartupFailure err)
     worktreeCreated path = do
         color <- resolveColor stderrHandle

@@ -64,10 +64,12 @@ import Control.Exception.Safe (tryAny)
 import Control.Monad (void)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
-import System.IO (hFlush, hIsTerminalDevice, stderr, stdin)
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
+import System.IO (hFlush, hIsTerminalDevice, stdin)
 
 runLoginManager :: Bool -> IO ()
 runLoginManager color = do
+    stderr <- getTerminalStderr
     accounts <- discoverLoginAccounts
     tty <- hIsTerminalDevice stdin
     if not tty

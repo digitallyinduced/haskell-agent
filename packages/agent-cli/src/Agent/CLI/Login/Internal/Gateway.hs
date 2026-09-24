@@ -56,7 +56,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Clock (getCurrentTime)
-import System.IO (hFlush, stderr)
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
+import System.IO (hFlush)
 import qualified System.Info as SystemInfo
 
 -- | The interactive gateway authorization appropriate for the current host.
@@ -355,6 +356,7 @@ connectFullscreenGatewayDevice runtime = do
 
 connectTerminalGateway :: Bool -> IO ()
 connectTerminalGateway color = do
+    stderr <- getTerminalStderr
     currentGatewayLoginFlow >>= \case
         GatewayBrowserOAuth -> do
             result <-
@@ -400,7 +402,8 @@ connectTerminalGateway color = do
                     pure ()
 
 waitForTerminalGatewayBrowserCancellation :: Bool -> IO ()
-waitForTerminalGatewayBrowserCancellation color =
+waitForTerminalGatewayBrowserCancellation color = do
+    stderr <- getTerminalStderr
     loop `onException` Text.hPutStrLn stderr ""
   where
     loop =

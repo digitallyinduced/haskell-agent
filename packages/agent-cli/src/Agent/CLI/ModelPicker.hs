@@ -62,7 +62,8 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
-import System.IO (hFlush, hIsTerminalDevice, stderr, stdin)
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
+import System.IO (hFlush, hIsTerminalDevice, stdin)
 
 -- | A confirmed model and the reasoning effort chosen alongside it.
 data ModelPickerSelection = ModelPickerSelection
@@ -202,6 +203,7 @@ pickModelStateWithEffortAndUsage
     -> PickerState
     -> IO (Maybe ModelPickerSelection)
 pickModelStateWithEffortAndUsage color currentEffort usage models = do
+    stderr <- getTerminalStderr
     isTty <- hIsTerminalDevice stdin
     let state0 =
             (initialModelPickerState currentEffort models)
@@ -259,6 +261,7 @@ pickModelStateWithUpdates
     -> ModelPickerRefresh
     -> IO (Maybe ModelPickerSelection)
 pickModelStateWithUpdates color currentEffort notice usage models refresh = do
+    stderr <- getTerminalStderr
     isTty <- hIsTerminalDevice stdin
     if not isTty
         then do

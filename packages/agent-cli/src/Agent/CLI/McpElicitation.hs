@@ -46,10 +46,10 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import System.Exit (ExitCode(..))
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
 import System.IO
     ( hFlush
     , hIsTerminalDevice
-    , stderr
     , stdin
     )
 import System.Process (rawSystem)
@@ -91,6 +91,7 @@ sanitize = Text.map (\character -> if isControl character && character /= '\n' t
 lineElicitation :: StdinControl -> McpElicitRequest -> IO McpElicitResult
 lineElicitation stdinControl request =
     withStdinPaused stdinControl do
+        stderr <- getTerminalStderr
         tty <- hIsTerminalDevice stdin
         if not tty
             then pure McpElicitCancel
@@ -110,6 +111,7 @@ lineElicitation stdinControl request =
 
 lineUrlConsent :: Text -> IO McpElicitResult
 lineUrlConsent url = do
+    stderr <- getTerminalStderr
     Text.hPutStrLn stderr ("URL: " <> sanitize url)
     Text.hPutStrLn stderr ("Host: " <> elicitationHost url)
     Text.hPutStrLn stderr
@@ -130,6 +132,7 @@ lineUrlConsent url = do
 
 lineForm :: [McpFormField] -> IO McpElicitResult
 lineForm fields = do
+    stderr <- getTerminalStderr
     Text.hPutStrLn stderr
         "Answer each field (Enter keeps the default or skips an optional field; type !decline or !cancel to stop)."
     collect fields [] >>= \case
@@ -153,6 +156,7 @@ lineForm fields = do
         Right (Just value) -> collect rest ((field.fieldName, value) : answers)
 
     askField field attempts = do
+        stderr <- getTerminalStderr
         Text.hPutStrLn stderr ""
         Text.hPutStrLn stderr (fieldHeading field)
         forM_ field.fieldDescription \description ->

@@ -100,7 +100,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Clock (getCurrentTime)
-import System.IO (hIsTerminalDevice, stdin, stderr, stdout)
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
+import System.IO (hIsTerminalDevice, stdin, stdout)
 import System.Timeout (timeout)
 
 -- | The local Apple helper is a title backend, not a provider wire model.
@@ -140,6 +141,7 @@ titleModelChoice
     -> IO (Either Text (Maybe ModelOption))
     -> IO (Either Text (Maybe (Maybe TitleModelSetting)))
 titleModelChoice fullscreen color setting providerChoice = do
+    stderr <- getTerminalStderr
     let rows = titleModelChoiceRows setting
         initial = titleModelChoiceIndex setting
         render selected = Text.unlines $

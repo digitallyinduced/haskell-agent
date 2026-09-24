@@ -69,6 +69,7 @@ import System.Directory
     ( findExecutable
     )
 import System.Exit (ExitCode(..))
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
 import System.IO
     ( BufferMode(..)
     , hClose
@@ -77,7 +78,6 @@ import System.IO
     , hGetChar
     , hPutStrLn
     , hSetBuffering
-    , stderr
     , stdin
     )
 import System.Process
@@ -271,6 +271,7 @@ dictateForProvider = dictateForTarget . DirectDictation
 
 dictateForTarget :: DictationTarget -> IO Text
 dictateForTarget target = do
+    stderr <- getTerminalStderr
     Text.hPutStrLn stderr "● Starting dictation…"
     hFlush stderr
     result <-
@@ -432,6 +433,7 @@ streamMicrophone sampleRate waitForStop sendAudio =
 
 renderLiveTranscript :: Text -> IO ()
 renderLiveTranscript text = do
+    stderr <- getTerminalStderr
     let preview =
             Text.takeEnd 100
                 (Text.unwords (Text.lines (Text.strip text)))
@@ -440,6 +442,7 @@ renderLiveTranscript text = do
 
 clearLiveTranscript :: IO ()
 clearLiveTranscript = do
+    stderr <- getTerminalStderr
     Text.hPutStr stderr "\r\ESC[2K"
     hFlush stderr
 

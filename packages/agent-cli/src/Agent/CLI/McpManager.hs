@@ -67,10 +67,10 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import System.Directory.OsPath (doesFileExist)
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
 import System.IO
     ( hFlush
     , hIsTerminalDevice
-    , stderr
     , stdin
     )
 import System.OsPath (OsPath)
@@ -489,6 +489,7 @@ runMcpManager
     -> IO ([McpToolRegistration], [Text], [MCP.McpServerStatus])
     -> IO Bool
 runMcpManager color home readRuntime = do
+    stderr <- getTerminalStderr
     loadHarnessConfigSnapshot home >>= \case
         Left err -> do
             Text.hPutStrLn stderr (roleError color err)

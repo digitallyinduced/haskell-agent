@@ -68,7 +68,8 @@ import System.Console.ANSI
     , SGR(..)
     )
 import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
-import System.IO (Handle, hFlush, hIsTerminalDevice, stderr, stdin)
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
+import System.IO (Handle, hFlush, hIsTerminalDevice, stdin)
 
 -- | Build plan-mode prompts. @stdinControl@ pauses the Esc cancel watcher so
 -- arrow keys / single-key answers are not stolen mid-turn.
@@ -99,6 +100,7 @@ initialPlanExitState = PlanExitState 0
 
 confirmEnter :: IO Bool -> Text -> IO Bool
 confirmEnter resolveColor reason = do
+    stderr <- getTerminalStderr
     color <- resolveColor
     isTty <- hIsTerminalDevice stdin
     if not isTty
@@ -148,6 +150,7 @@ enterChoiceFromIndex _ = PlanStayNormal
 
 decideExit :: Provider -> InterruptState -> IO Bool -> Text -> IO PlanDecision
 decideExit provider interrupt resolveColor planBody = do
+    stderr <- getTerminalStderr
     color <- resolveColor
     isTty <- hIsTerminalDevice stdin
     putTextLn stderr ""
@@ -165,6 +168,7 @@ decideExit provider interrupt resolveColor planBody = do
 
 promptDecision :: Provider -> InterruptState -> Bool -> IO PlanDecision
 promptDecision provider interrupt color = do
+    stderr <- getTerminalStderr
     result <-
         runOverlay
             (renderPlanExitFrame color)
@@ -226,6 +230,7 @@ renderPlanRow color selected label =
 
 readChangeNotes :: Provider -> InterruptState -> Bool -> IO Text
 readChangeNotes provider interrupt color = do
+    stderr <- getTerminalStderr
     notifyAttention stderr InputRequested
     let chrome =
             rolePrompt color "changes> "
@@ -274,6 +279,7 @@ askQuestion
     -> [Text]
     -> IO (Maybe Text)
 askQuestion provider interrupt resolveColor question options = do
+    stderr <- getTerminalStderr
     color <- resolveColor
     isTty <- hIsTerminalDevice stdin
     putTextLn stderr (roleMuted color question)

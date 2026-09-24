@@ -191,7 +191,8 @@ import qualified Graphics.Vty.CrossPlatform as Vty
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode(..))
 import System.Info (os)
-import System.IO (stderr, stdout)
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
+import System.IO (stdout)
 import System.Posix.Process (getProcessID)
 import System.Process
     ( CreateProcess(..)
@@ -1099,6 +1100,7 @@ requestFullscreenPermission
     -> ToolCall
     -> IO (Maybe PermissionChoice)
 requestFullscreenPermission runtime workspace call = do
+    stderr <- getTerminalStderr
     reply <- newEmptyTMVarIO
     let summary = approvalToolCallPromptRelative workspace call
     notifyAttention stderr PermissionRequested
@@ -1112,6 +1114,7 @@ requestFullscreenPermissionOnce
     -> ToolCall
     -> IO (Maybe PermissionChoice)
 requestFullscreenPermissionOnce runtime workspace call = do
+    stderr <- getTerminalStderr
     reply <- newEmptyTMVarIO
     let summary = approvalToolCallPromptOnceRelative workspace call
     notifyAttention stderr PermissionRequested
@@ -1341,6 +1344,7 @@ requestFullscreenSecret
     -> Text
     -> IO (Maybe Text)
 requestFullscreenSecret runtime title body = do
+    stderr <- getTerminalStderr
     reply <- newEmptyTMVarIO
     notifyAttention stderr SecretRequested
     enqueueAppEvent runtime

@@ -68,9 +68,8 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Clock (getCurrentTime)
 import System.Directory.OsPath (getHomeDirectory)
-import System.Exit (die)
 import System.OsPath (OsPath)
-import System.IO (stderr)
+import Agent.CLI.TerminalDiagnostics (dieToTerminal, getTerminalStderr)
 
 loadPrompt :: CliOptions -> IO (Maybe ManagedTurnRequest)
 loadPrompt options =
@@ -84,7 +83,7 @@ loadPrompt options =
         pure (Just (managedTurnRequestFromText (Text.strip text)))
     (_, Just path, _) -> Just <$> loadTextPrompt path
     (_, _, Just path) ->
-        loadManagedTurnRequest path >>= either (die . Text.unpack) (pure . Just)
+        loadManagedTurnRequest path >>= either dieToTerminal (pure . Just)
     _ -> pure Nothing
 
 handleResume
@@ -95,6 +94,7 @@ handleResume
     -> Persistence
     -> IO (Maybe RunResult)
 handleResume databasePool fullscreen gatewayIdentity maybeId persist = do
+    stderr <- getTerminalStderr
     color <- resolveColor stderr
     home <- getHomeDirectory
     let reportInfo message =
@@ -162,6 +162,7 @@ handleConversationSearch
     -> IO (Maybe RunResult)
 handleConversationSearch
         databasePool fullscreen gatewayIdentity query persist = do
+    stderr <- getTerminalStderr
     color <- resolveColor stderr
     home <- getHomeDirectory
     let root = sessionsRoot home

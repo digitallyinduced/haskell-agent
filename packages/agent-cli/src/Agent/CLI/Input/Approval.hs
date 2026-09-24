@@ -22,6 +22,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import System.Console.ANSI (hHideCursor, hShowCursor)
 import System.Console.ANSI.Codes (clearLineCode, cursorUpCode)
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
 import System.IO
     ( BufferMode(..)
     , Handle
@@ -32,7 +33,6 @@ import System.IO
     , hSetBuffering
     , hWaitForInput
     , isEOF
-    , stderr
     , stdin
     )
 import System.IO.Error (isEOFError)
@@ -51,6 +51,7 @@ import System.Posix.Terminal
 -- | Read a one-shot approval answer. TTY input submits on one keypress.
 readApprovalLine :: Text -> IO (Maybe Text)
 readApprovalLine prompt = do
+    stderr <- getTerminalStderr
     Text.hPutStr stderr prompt
     hFlush stderr
     isTty <- hIsTerminalDevice stdin
@@ -72,6 +73,7 @@ readChoiceSelectionAt
     -> [Text]
     -> IO (Maybe Text)
 readChoiceSelectionAt initial formatLine options = do
+    stderr <- getTerminalStderr
     isTty <- hIsTerminalDevice stdin
     case options of
         [] -> pure Nothing
@@ -124,6 +126,7 @@ redrawMenu
     -> Int
     -> IO ()
 redrawMenu formatLine options menuLines idx = do
+    stderr <- getTerminalStderr
     Text.hPutStr stderr (Text.pack (cursorUpCode menuLines))
     drawMenu formatLine options idx
 
@@ -133,6 +136,7 @@ drawMenu
     -> Int
     -> IO ()
 drawMenu formatLine options idx = do
+    stderr <- getTerminalStderr
     mapM_
         (\(i, opt) -> do
             let selected = i == idx
@@ -151,6 +155,7 @@ putChoiceLine handle line = do
 readApprovalKey :: IO (Maybe Text)
 readApprovalKey =
     withRawStdin do
+        stderr <- getTerminalStderr
         result <- tryIO (hGetChar stdin)
         case result of
             Left err

@@ -52,14 +52,13 @@ import Data.Maybe
     , isNothing
     )
 import Data.Text (Text)
-import qualified Data.Text as Text
 import Data.Time.Clock
     ( NominalDiffTime
     , UTCTime
     , diffUTCTime
     , getCurrentTime
     )
-import System.Exit (die)
+import Agent.CLI.TerminalDiagnostics (dieToTerminal)
 
 setStartupNotice :: Maybe FullscreenRuntime -> Text -> IO ()
 setStartupNotice fullscreen message =
@@ -90,7 +89,7 @@ startupDie startup message =
         Nothing
             | startup.startupBackground ->
                 throwIO (StartupFailure message)
-            | otherwise -> die (Text.unpack message)
+            | otherwise -> dieToTerminal message
         Just _ -> throwIO (StartupFailure message)
 
 loadStartupAuth

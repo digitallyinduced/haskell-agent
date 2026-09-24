@@ -7,6 +7,7 @@ import Agent.CLI.Command
     ( WorkflowAction(ReplGoalStatus, ReplGoalPause, ReplGoalResume, ReplGoalClear,
                  ReplGoalSet, ReplWorkflowRuns, ReplWorkflowManage) )
 import Agent.CLI.Runtime.Types ( RunResult )
+import Agent.CLI.Render (RenderConfig(renderStderr))
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
 import Agent.CLI.Style ( roleError, roleMuted )
 import Agent.CLI.TUI.App ( emitUiEvent )
@@ -18,7 +19,7 @@ import Agent.GrokBuild.Dialect.Workflow
     ( formatWorkflowRuns, workflowRunSnapshots )
 import Agent.TUI.Model ( UiEvent(UiErrorMessage, UiSystemMessage) )
 import Data.Text ( Text )
-import System.IO ( stderr, stdout )
+import System.IO ( stdout )
 import qualified Data.Text.IO as Text ( hPutStrLn, putStrLn )
 
 handleWorkflowAction
@@ -32,6 +33,7 @@ handleWorkflowAction
         SessionEnv
             { sessionGrokRuntime = grokRuntime
             , sessionFullscreen = fullscreen
+            , sessionRender = render
             }
         submitExpandedTurn
         color
@@ -181,6 +183,7 @@ handleWorkflowAction
         continue
 
   where
+    stderr = render.renderStderr
     displayInfo message minimalAction = case fullscreen of
         Nothing -> minimalAction
         Just runtime -> emitUiEvent runtime (UiSystemMessage message)

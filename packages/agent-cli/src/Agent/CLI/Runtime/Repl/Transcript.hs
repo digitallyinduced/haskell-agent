@@ -56,7 +56,8 @@ import Data.Text ( Text )
 import qualified Data.Text as Text
     ( null, pack, strip )
 import qualified Data.Text.IO as Text ( hPutStrLn, putStrLn )
-import System.IO ( stderr, stdout )
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
+import System.IO ( stdout )
 
 data TranscriptAction
     = ExportTranscript (Maybe Text)
@@ -96,7 +97,7 @@ exportTranscript
     :: ReplHandlerContext
     -> Maybe Text
     -> IO ()
-exportTranscript context maybePath =
+exportTranscript context maybePath = getTerminalStderr >>= \stderr ->
     loadActiveTranscript context.handlerSessionEnv >>= \case
         Left err ->
             displayReplError context err $
@@ -180,7 +181,7 @@ saveTranscriptExport
     -> Text
     -> Text
     -> IO ()
-saveTranscriptExport context markdown rawPath =
+saveTranscriptExport context markdown rawPath = getTerminalStderr >>= \stderr ->
     resolveExportPath
         context.handlerSessionEnv.sessionWorkspace.cwd
         rawPath >>= \case
@@ -214,7 +215,7 @@ copyResponse
     :: ReplHandlerContext
     -> CopyRequest
     -> IO ()
-copyResponse context request =
+copyResponse context request = getTerminalStderr >>= \stderr ->
     loadAssistantResponses context.handlerSessionEnv >>= \case
         Left err ->
             displayReplError context err do
@@ -270,6 +271,7 @@ copyAssistantResponse
     -> Text
     -> IO ()
 copyAssistantResponse context request answer = do
+    stderr <- getTerminalStderr
     let index = request.copyResponseIndex
         label
             | index == 1 = "last response"
@@ -353,7 +355,7 @@ copySessionId context = do
         sessionId
 
 showTranscript :: ReplHandlerContext -> IO ()
-showTranscript context =
+showTranscript context = getTerminalStderr >>= \stderr ->
     loadPersistedTranscript context.handlerSessionEnv >>= \case
         Left err ->
             displayReplError context err $
@@ -380,7 +382,7 @@ findTranscript
     :: ReplHandlerContext
     -> Maybe Text
     -> IO ()
-findTranscript context maybeQuery =
+findTranscript context maybeQuery = getTerminalStderr >>= \stderr ->
     loadPersistedTranscript context.handlerSessionEnv >>= \case
         Left err ->
             displayReplError context err $
@@ -429,7 +431,7 @@ copyCommand
     -> Text
     -> Maybe Text
     -> IO ()
-copyCommand context label missing payload =
+copyCommand context label missing payload = getTerminalStderr >>= \stderr ->
     case payload of
         Nothing ->
             displayReplError context missing do

@@ -107,8 +107,7 @@ import System.Directory.OsPath
     ( doesDirectoryExist
     , getHomeDirectory
     )
-import System.Exit (die)
-import System.IO (stderr)
+import Agent.CLI.TerminalDiagnostics (dieToTerminal, getTerminalStderr)
 import System.OsPath
     ( OsPath
     , decodeFS
@@ -121,7 +120,7 @@ runStorageAdmin command = do
     home <- getHomeDirectory
     config <- managedPostgresConfigForHome home
     runStorageCommand (postgresStorageCommandEnv config) command >>= \case
-        Left err -> die (Text.unpack err)
+        Left err -> dieToTerminal err
         Right message -> Text.putStrLn message
 
 managedPostgresConfigForHome :: OsPath -> IO ManagedPostgresConfig
@@ -132,6 +131,7 @@ managedPostgresConfigForHome home = do
 
 runListSessions :: SessionOutputFormat -> IO ()
 runListSessions outputFormat = do
+    stderr <- getTerminalStderr
     home <- getHomeDirectory
     withStoreForHome home \store -> do
         let root = sessionsRoot home
@@ -168,14 +168,14 @@ runShowSession sessionId outputFormat pageRequest = do
         case pageRequest of
             Nothing ->
                 loadSession pool root sessionId >>= \case
-                    Left err -> die (Text.unpack err)
+                    Left err -> dieToTerminal err
                     Right (meta, turns) ->
                         renderFullSession outputFormat meta turns
             Just request -> do
                 meta <- loadSessionMeta pool root sessionId
-                    >>= either (die . Text.unpack) pure
+                    >>= either dieToTerminal pure
                 page <- loadPage pool root request
-                    >>= either (die . Text.unpack) pure
+                    >>= either dieToTerminal pure
                 renderSessionPage meta page
   where
     loadPage pool root = \case
@@ -453,7 +453,7 @@ withStoreForHome :: OsPath -> (Store -> IO a) -> IO a
 withStoreForHome home action = do
     config <- managedPostgresConfigForHome home
     withStore config action >>= \case
-        Left err -> die (Text.unpack (renderStoreError err))
+        Left err -> dieToTerminal (renderStoreError err)
         Right value -> pure value
 
 printSessionSummary :: SessionMeta -> IO ()
@@ -483,10 +483,10 @@ printTurn turn = do
 runWaitSession :: Text -> IO ()
 runWaitSession sessionId = do
     home <- getHomeDirectory
-    dir <- either (die . Text.unpack) pure
+    dir <- either dieToTerminal pure
         (sessionDirForId (sessionsRoot home) sessionId)
     exists <- doesDirectoryExist dir
-    unless exists (die ("session not found: " <> Text.unpack sessionId))
+    unless exists (dieToTerminal ("session not found: " <> sessionId))
     let wait = do
             active <- sessionLockIsActive (sessionLockPath dir)
             when active (threadDelay 100000 >> wait)
@@ -497,8 +497,8 @@ runImportSession cwd = do
     bytes <- LBS.getContents
     transfer <- case Hermes.decodeEither sessionTransferDecoder (LBS.toStrict bytes) of
         Left err ->
-            die ("invalid transferred session: "
-                <> Text.unpack (Hermes.jsonErrorMessage err))
+            dieToTerminal ("invalid transferred session: "
+                <> Hermes.jsonErrorMessage err)
         Right value -> pure value
     home <- getHomeDirectory
     withStoreForHome home \store ->
@@ -507,5 +507,5 @@ runImportSession cwd = do
             (sessionsRoot home)
             cwd
             transfer >>= \case
-                Left err -> die (Text.unpack err)
+                Left err -> dieToTerminal err
                 Right sessionId -> Text.putStrLn sessionId

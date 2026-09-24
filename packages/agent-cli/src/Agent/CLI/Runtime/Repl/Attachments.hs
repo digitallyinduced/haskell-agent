@@ -36,7 +36,8 @@ import Agent.TUI.Model
 import Control.Monad ( forM_, when )
 import Data.Maybe ( isNothing )
 import Data.Text ( Text )
-import System.IO ( stderr, stdout )
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
+import System.IO ( stdout )
 import qualified Data.ByteString as BS ( length )
 import qualified Data.Text as Text ( intercalate, null )
 import qualified Data.Text.IO as Text ( hPutStrLn, putStrLn )
@@ -97,6 +98,7 @@ handleClipboardInput
                     >>= \case
                         Left err ->
                             displayError err do
+                                stderr <- getTerminalStderr
                                 errColor <- resolveColor stderr
                                 Text.hPutStrLn stderr (roleError errColor err)
                         Right message -> do
@@ -164,6 +166,7 @@ handleAttachmentAction
         continue = \case
     ReplPaste pasteImmediate pasteCaption -> do
         color <- resolveColor stdout
+        stderr <- getTerminalStderr
         errColor <- resolveColor stderr
         imagesResult <- readClipboardImagesForPaste
         case imagesResult of

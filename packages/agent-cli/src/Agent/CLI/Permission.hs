@@ -45,7 +45,8 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.IO as Text
 import qualified System.FilePath as FilePath
-import System.IO (hIsTerminalDevice, stderr, stdin)
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
+import System.IO (hIsTerminalDevice, stdin)
 import System.OsPath (OsPath)
 import Agent.OsPath (toText)
 
@@ -227,6 +228,7 @@ renderRow color selected label =
 -- current tool for this session.
 promptPermission :: Bool -> Text -> ToolCall -> IO (Maybe PermissionChoice)
 promptPermission color workspace call = do
+    stderr <- getTerminalStderr
     isTty <- hIsTerminalDevice stdin
     let summary = approvalToolCallPromptRelative workspace call
     if not isTty
@@ -244,6 +246,7 @@ promptPermission color workspace call = do
 -- invocation. It intentionally offers no project-wide or per-tool choice.
 promptPermissionOnce :: Bool -> Text -> ToolCall -> IO (Maybe PermissionChoice)
 promptPermissionOnce color workspace call = do
+    stderr <- getTerminalStderr
     isTty <- hIsTerminalDevice stdin
     let summary = approvalToolCallPromptOnceRelative workspace call
         shellEscalation =
@@ -294,6 +297,7 @@ applyPermissionOnceKey key selected = case key of
 -- never enables a tool or persists beyond the current session.
 promptRootAccess :: Bool -> OsPath -> IO Bool
 promptRootAccess color root = do
+    stderr <- getTerminalStderr
     isTty <- hIsTerminalDevice stdin
     let summary = "Allow filesystem access to " <> toText root <> " for this session?"
         labels = ["Allow directory for this session", "Deny"]

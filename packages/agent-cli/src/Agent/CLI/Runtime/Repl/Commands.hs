@@ -195,7 +195,8 @@ import Data.List ( findIndex )
 import Data.Maybe ( fromMaybe, isNothing )
 import Data.Text ( Text )
 import Data.Time.Clock ( getCurrentTime )
-import System.IO ( stdout, hFlush, stderr )
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
+import System.IO ( stdout, hFlush )
 import System.IO.Error ( isDoesNotExistError )
 import System.OsPath ( OsPath, unsafeEncodeUtf, (</>) )
 import System.Posix.Files ( getSymbolicLinkStatus )
@@ -244,6 +245,7 @@ handleReplLine
         | provider == ClaudeCodeProvider -> do
             let message =
                     "Claude Code permissions are fixed when the provider starts; restart with --yolo or --no-yolo to change them."
+            stderr <- getTerminalStderr
             color <- resolveColor stderr
             displayInfo message $
                 putTextLn stderr (roleMuted color message)
@@ -520,6 +522,7 @@ submitReplLine handlerContext finishTurn retryPendingTurn slashCatalog skillInvo
 
 setMouseCapture :: ReplHandlerContext -> IO RunResult -> Bool -> Maybe Bool -> IO RunResult
 setMouseCapture handlerContext next color target = do
+    stderr <- getTerminalStderr
     case env.sessionFullscreen of
         Nothing -> do
             let message = "/mouse requires the fullscreen TUI"
@@ -604,6 +607,7 @@ chooseAgent env next =
             Just viewport -> do
                 entries <- viewport.viewportEntries
                 selected <- readIORef viewport.viewportSelected
+                stderr <- getTerminalStderr
                 color <- resolveColor stderr
                 pickAgentChoice
                     fullscreen color selected entries >>= \case
@@ -616,6 +620,7 @@ chooseAgent env next =
 
 manageMcpServers :: ReplHandlerContext -> IO RunResult -> IO RunResult
 manageMcpServers handlerContext next = do
+        stderr <- getTerminalStderr
         restart <- case fullscreen of
             Just runtime ->
                 runFullscreenMcpManager
@@ -650,6 +655,7 @@ submitMcpPrompt
     :: ReplHandlerContext -> ExpandedTurn -> IO RunResult -> Bool
     -> Text -> Text -> [(Text, Text)] -> IO RunResult
 submitMcpPrompt handlerContext submitExpandedTurn next color server name arguments = do
+        stderr <- getTerminalStderr
         outcome <- case env.sessionMcpFleet of
             Nothing -> pure (Left "no MCP servers are configured")
             Just fleet ->
@@ -671,6 +677,7 @@ submitMcpPrompt handlerContext submitExpandedTurn next color server name argumen
 
 openDesktopSession :: ReplHandlerContext -> IO RunResult -> IO RunResult
 openDesktopSession handlerContext next = do
+        stderr <- getTerminalStderr
         currentSessionId persist >>= \case
             Nothing -> do
                 let err = "/desktop requires a persisted conversation"
@@ -725,6 +732,7 @@ showChangelog handlerContext next = do
 toggleApprovalMode :: ReplHandlerContext -> IO RunResult -> IO RunResult
 toggleApprovalMode handlerContext next
         | provider == ClaudeCodeProvider = do
+            stderr <- getTerminalStderr
             let message =
                     "Claude Code permissions are fixed for this provider session; restart with --yolo or --no-yolo."
             color <- resolveColor stderr
@@ -732,6 +740,7 @@ toggleApprovalMode handlerContext next
                 putTextLn stderr (roleMuted color message)
             next
         | otherwise = do
+            stderr <- getTerminalStderr
             message <- toggleAlwaysApprove policyRef projectRoot
             color <- resolveColor stderr
             displayInfo message $
@@ -762,6 +771,7 @@ showSavedPlan handlerContext next = do
 enterPlanCommand :: ReplHandlerContext -> IO RunResult -> Maybe Text -> IO RunResult
 enterPlanCommand handlerContext next maybeDescription
         | provider == ClaudeCodeProvider = do
+            stderr <- getTerminalStderr
             let message =
                     "Outer plan mode is unavailable for Claude Code because its tools run inside the Claude CLI."
             color <- resolveColor stderr
@@ -867,6 +877,7 @@ requestSessionRecap env next =
 
 manageLogin :: SessionEnv -> IO RunResult -> IO RunResult
 manageLogin env next = do
+        stderr <- getTerminalStderr
         gatewayBefore <- loadGatewayCredential
         case fullscreen of
             Just runtime -> runFullscreenLoginManager runtime
@@ -911,6 +922,7 @@ showUsage handlerContext next = do
 
 reloadProviderAuth :: ReplHandlerContext -> IO RunResult -> IO RunResult
 reloadProviderAuth handlerContext next = do
+        stderr <- getTerminalStderr
         reloadResult <- reloadAuth provider tokenProvider
         color <- resolveColor stderr
         case reloadResult of
@@ -941,6 +953,7 @@ showCommandHelp handlerContext catalog next maybeName = do
 
 showCommandError :: ReplHandlerContext -> IO RunResult -> Text -> IO RunResult
 showCommandError handlerContext next err = do
+        stderr <- getTerminalStderr
         color <- resolveColor stderr
         displayError err $
             Text.hPutStrLn stderr (roleError color err)
@@ -951,6 +964,7 @@ showCommandError handlerContext next err = do
 initializeProjectGuide
     :: ReplHandlerContext -> ExpandedTurn -> IO RunResult -> Bool -> Text -> IO RunResult
 initializeProjectGuide handlerContext submitExpandedTurn next color line = do
+        stderr <- getTerminalStderr
         let guidePath = cwd </> unsafeEncodeUtf "AGENTS.md"
         tryIO
             (getSymbolicLinkStatus
@@ -990,6 +1004,7 @@ submitReview handlerContext submitExpandedTurn next color line = \case
         Nothing ->
             chooseReviewTarget handlerContext >>= \case
                 Left err -> do
+                    stderr <- getTerminalStderr
                     displayError err $
                         Text.hPutStrLn stderr (roleError color err)
                     next
@@ -1006,7 +1021,7 @@ submitReview handlerContext submitExpandedTurn next color line = \case
 submitSkillInvocation
     :: ReplHandlerContext -> (Bool -> TurnResult -> IO RunResult)
     -> [SkillInvocation] -> IO RunResult -> Bool -> Text -> Text -> Text -> IO RunResult
-submitSkillInvocation handlerContext finishTurn invocations next color line invocationName arguments =
+submitSkillInvocation handlerContext finishTurn invocations next color line invocationName arguments = getTerminalStderr >>= \stderr ->
         case resolveSkillInvocation invocations invocationName of
             Left err -> do
                 displayError err $
@@ -1071,6 +1086,7 @@ submitExpandedPrompt
     :: ReplHandlerContext -> (Bool -> TurnResult -> IO RunResult)
     -> Bool -> ExpandedTurn
 submitExpandedPrompt handlerContext finishTurn pasted next color original expanded = do
+        stderr <- getTerminalStderr
         preparePromptSkillInputsWithPaste env pasted original [] >>= \case
             Left err -> do
                 displayError err $
@@ -1104,6 +1120,7 @@ submitPrompt
     -> (Bool -> TurnResult -> IO RunResult)
     -> Bool -> IO RunResult -> Bool -> Text -> IO RunResult
 submitPrompt handlerContext finishTurn pasted next color text = do
+    stderr <- getTerminalStderr
     -- Native Cmd+V of a Finder image often pastes a path rather than
     -- bitmap bytes. Treat a prompt that is only image path(s) as an attach
     -- plus in-terminal preview, matching Grok Build's paste chip.
@@ -1152,6 +1169,7 @@ submitPrompt handlerContext finishTurn pasted next color text = do
 
 showWorkingTreeDiff :: ReplHandlerContext -> IO RunResult -> Bool -> IO RunResult
 showWorkingTreeDiff handlerContext next color = do
+    stderr <- getTerminalStderr
     result <-
         withCommandActivity env "Loading Git diff…" $
             getGitDiff env.sessionWorkspace.cwd
@@ -1184,12 +1202,14 @@ showWorkingTreeDiff handlerContext next color = do
 choosePermissions :: ReplHandlerContext -> IO RunResult -> Bool -> IO RunResult
 choosePermissions handlerContext next color
     | env.sessionProvider == ClaudeCodeProvider = do
+        stderr <- getTerminalStderr
         let message =
                 "Claude Code permissions are fixed for this provider session; restart with --yolo or --no-yolo."
         displayInfo message $
             Text.hPutStrLn stderr (roleMuted color message)
         next
     | otherwise = do
+        stderr <- getTerminalStderr
         current <- readIORef env.sessionPolicy
         requestReplChoice handlerContext
             "Permissions"
@@ -1359,7 +1379,7 @@ withCommandActivity env message action = do
     render = env.sessionRender
 
 editCurrentPrompt :: ReplHandlerContext -> IO RunResult -> Bool -> IO RunResult
-editCurrentPrompt handlerContext next color =
+editCurrentPrompt handlerContext next color = getTerminalStderr >>= \stderr ->
     withReplSuspended handlerContext (editPrompt handlerContext.handlerSessionEnv) >>= \case
         Left err -> do
             displayReplError handlerContext err $
@@ -1402,6 +1422,7 @@ listAt = indexMaybe
 
 compactContext :: ReplHandlerContext -> IO RunResult -> Maybe Text -> IO RunResult
 compactContext handlerContext next focus = do
+    stderr <- getTerminalStderr
     color <- resolveColor stderr
     result <-
         withCommandActivity env "Compacting context…" $
@@ -1482,6 +1503,7 @@ requestReload
     -> Persistence
     -> IO RunResult
 requestReload fullscreen persist = do
+    stderr <- getTerminalStderr
     color <- resolveColor stderr
     let reportInfo message =
             case fullscreen of
@@ -1510,6 +1532,7 @@ requestUpdateAndRestart
     -> Persistence
     -> IO RunResult
 requestUpdateAndRestart fullscreen persist = do
+    stderr <- getTerminalStderr
     color <- resolveColor stderr
     let reportInfo message =
             case fullscreen of
@@ -1541,6 +1564,7 @@ requestMcpRestart
     -> Persistence
     -> IO RunResult
 requestMcpRestart fullscreen persist = do
+    stderr <- getTerminalStderr
     color <- resolveColor stderr
     let report message =
             case fullscreen of
@@ -1564,6 +1588,7 @@ requestGatewayRestart
     -> OsPath
     -> IO RunResult
 requestGatewayRestart fullscreen cwd = do
+    stderr <- getTerminalStderr
     color <- resolveColor stderr
     let report message =
             case fullscreen of
@@ -1581,6 +1606,7 @@ requestCodeModeRestart
     -> Persistence
     -> IO RunResult
 requestCodeModeRestart fullscreen persist = do
+    stderr <- getTerminalStderr
     color <- resolveColor stderr
     let report message =
             case fullscreen of
@@ -1605,6 +1631,7 @@ enterPlanFromSlash env@SessionEnv
     , sessionRender = render
     , sessionFullscreen = fullscreen
     } maybeDescription = do
+    stderr <- getTerminalStderr
     discardStore <- newIORef Nothing
     color <- resolveColor stderr
     let report message minimal = case fullscreen of

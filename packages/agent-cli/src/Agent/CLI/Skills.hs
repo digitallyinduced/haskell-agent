@@ -60,7 +60,7 @@ import Paths_agent_cli (getDataFileName)
 import qualified System.Directory as Directory
 import qualified System.Environment as Environment
 import qualified System.FilePath as FilePath
-import System.IO (stderr)
+import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
 import System.OsPath (OsPath, takeDirectory, unsafeEncodeUtf, (</>))
 
 reservedSlashNames :: [Text]
@@ -98,6 +98,7 @@ loadSkillsCatalog options home projectRoot cwd report
     | otherwise = do
         catalog <- loadSkillsCatalogQuiet options home projectRoot cwd
         when report do
+            stderr <- getTerminalStderr
             color <- resolveColor stderr
             let count = length catalog.catalogSkills
             putTextLn stderr
@@ -322,7 +323,8 @@ packagedSkillsRoot cwd = do
                 False -> firstExisting rest
 
 reportSkillWarning :: Bool -> SkillWarning -> IO ()
-reportSkillWarning color warning =
+reportSkillWarning color warning = do
+    stderr <- getTerminalStderr
     putTextLn stderr $
         roleWarn color
             (glyphWarn
@@ -333,6 +335,7 @@ reportSkillWarning color warning =
 
 queueSkillCatalogContext :: IORef (Maybe Text) -> SkillCatalog -> IO ()
 queueSkillCatalogContext contextRef catalog = do
+    stderr <- getTerminalStderr
     omitted <- queueSkillCatalogContextWithOmissions contextRef catalog
     when (omitted > 0) do
         color <- resolveColor stderr
