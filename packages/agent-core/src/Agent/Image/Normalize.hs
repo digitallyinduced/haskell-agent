@@ -597,7 +597,7 @@ prepareImageDataUrl url
                 | otherwise ->
                     case encodedImageHeader bytes of
                         Nothing
-                            | Text.toLower mime `elem`
+                            | Text.toLower (Text.takeWhile (/= ';') mime) `elem`
                                 ["image/png", "image/jpeg", "image/jpg", "image/bmp"] ->
                                     Left imageProcessingErrorPlaceholder
                             | otherwise -> Right url
@@ -615,15 +615,42 @@ prepareImageDataUrl url
                                             Left imageProcessingErrorPlaceholder
   where
     validImageMime mime =
-        let subtype = Text.drop 6 mime
-        in not (Text.null subtype)
-            && Text.all
-                (\character ->
-                    (character >= 'a' && character <= 'z')
-                        || (character >= 'A' && character <= 'Z')
-                        || (character >= '0' && character <= '9')
-                        || Text.any (== character) "!#$%&'*+-.^_`|~")
-                subtype
+        case Text.splitOn ";" (Text.drop 6 mime) of
+            subtype : parameters ->
+                validToken subtype && all validParameter parameters
+            [] -> False
+    validToken token =
+        not (Text.null token) && Text.all tokenCharacter token
+    tokenCharacter character =
+        asciiAlphaNumeric character
+            || Text.any (== character) "!#$%&'*+-.^_`|~"
+    asciiAlphaNumeric character =
+        (character >= 'a' && character <= 'z')
+            || (character >= 'A' && character <= 'Z')
+            || (character >= '0' && character <= '9')
+    validParameter parameter =
+        let (attribute, valueWithEquals) = Text.breakOn "=" parameter
+            value = Text.drop 1 valueWithEquals
+        in validToken attribute
+            && not (Text.null value)
+            && validParameterValue value
+    -- RFC 2397 parameters use URL escaping, not MIME quoted strings. Check
+    -- escapes without decoding delimiters or modifying the provider's URL.
+    validParameterValue value =
+        case Text.uncons value of
+            Nothing -> True
+            Just ('%', rest) ->
+                Text.length (Text.take 2 rest) == 2
+                    && Text.all hexadecimalDigit (Text.take 2 rest)
+                    && validParameterValue (Text.drop 2 rest)
+            Just (character, rest) ->
+                (asciiAlphaNumeric character
+                    || Text.any (== character) "$-_.+!~*'(),/:?@&=")
+                    && validParameterValue rest
+    hexadecimalDigit character =
+        (character >= '0' && character <= '9')
+            || (character >= 'a' && character <= 'f')
+            || (character >= 'A' && character <= 'F')
 
 parseImageDataUrl :: Text -> Maybe (Text, ByteString)
 parseImageDataUrl url = do

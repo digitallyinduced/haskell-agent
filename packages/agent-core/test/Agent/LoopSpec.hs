@@ -584,6 +584,46 @@ spec = describe "runLoop" do
                     ]]
             prepareHistory items `shouldReturn` items
 
+        it "preserves image data URLs with media-type parameters" do
+            let urls =
+                    [ imageDataUrl "image/png;charset=utf-8" validImageBytes
+                    , imageDataUrl "IMAGE/PNG;Charset=UTF-8" validImageBytes
+                    , imageDataUrl "image/svg+xml;charset=utf-8" "<svg/>"
+                    , imageDataUrl
+                        "image/svg+xml;charset=utf-8;name=diagram%20%3B%22%3D%25.svg"
+                        "<svg/>"
+                    ]
+                items = [message (map imagePart urls)]
+            prepareHistory items `shouldReturn` items
+
+        it "rejects malformed parameters without bypassing image and base64 validation" do
+            let metadata =
+                    [ "image/;charset=utf-8"
+                    , "image/svg+xml;unexpected"
+                    , "image/svg+xml;=utf-8"
+                    , "image/svg+xml;charset="
+                    , "image/svg+xml;charset=\"utf-8\""
+                    , "image/svg+xml;char set=utf-8"
+                    , "image/svg+xml;name=diagram name.svg"
+                    , "image/svg+xml;name=diagram%"
+                    , "image/svg+xml;name=diagram%2"
+                    , "image/svg+xml;name=diagram%GG"
+                    , "image/svg+xml;charset=utf-8;"
+                    ]
+                urls =
+                    map (`imageDataUrl` "<svg/>") metadata
+                        <> [ "data:image/svg+xml;charset=utf-8;base64,%%%"
+                           , "data:image/svg+xml;charset=utf-8;base64,YR=="
+                           , imageDataUrl "image/png;charset=utf-8" "not an image"
+                           , imageDataUrl "IMAGE/JPEG;charset=utf-8" "not an image"
+                           , imageDataUrl "image/png;charset=utf-8"
+                                (ByteString.take 40 validImageBytes)
+                           ]
+            prepareHistory [message (map imagePart urls)]
+                `shouldReturn`
+                    [message (replicate (length urls)
+                        (InputTextPart imageProcessingErrorPlaceholder Nothing))]
+
         it "rejects unsafe inline dimensions and inflation without decoding unbounded rasters" do
             let images =
                     [ unsafeDimensionPng
