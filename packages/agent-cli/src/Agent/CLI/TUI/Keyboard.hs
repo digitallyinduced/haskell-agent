@@ -18,7 +18,6 @@ import Agent.CLI.Input.Types (KittyKey(..))
 import Control.Concurrent (threadWaitRead)
 import qualified Control.Concurrent.Async as Async
 import Control.Concurrent.STM
-import Control.Exception (IOException)
 import Control.Exception.Safe (catch, mask, onException, finally, throwIO)
 import Control.Monad (unless, when, void)
 import Data.Bits (testBit, (.&.))
@@ -193,7 +192,7 @@ preserveCursorBlinkOutput output = do
 loadCursorCapabilities :: String -> IO CursorCapabilities
 loadCursorCapabilities name =
     (cursorCapabilities <$> Terminfo.setupTerm name)
-        `catch` \(_ :: IOException) -> pure fallbackCursorCapabilities
+        `catch` \(_ :: Terminfo.SetupTermError) -> pure fallbackCursorCapabilities
 
 cursorCapabilities :: Terminfo.Terminal -> CursorCapabilities
 cursorCapabilities terminal =
