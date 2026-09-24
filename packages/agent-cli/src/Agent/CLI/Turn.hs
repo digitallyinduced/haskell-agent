@@ -26,9 +26,10 @@ import Agent.Runtime.ProviderRequest (requestPromptParts)
 import Agent.CLI.TUI.App
     ( commitFullscreenHistoryTurn
     , emitUiEvent
-    , setFullscreenPullRequestURL
+    , setFullscreenPullRequestURLs
     )
-import Agent.CLI.TUI.SessionHistory (sessionHistoryTurn, sessionTurnPullRequestURL)
+import Agent.CLI.TUI.SessionHistory (sessionHistoryTurn)
+import Agent.Runtime.Session.PullRequest (sessionTurnPullRequestURLs)
 import Agent.CLI.TUI.Types (HistoryCommit(..))
 import Agent.TUI.Model
     ( BlockState(..)
@@ -656,8 +657,9 @@ persistIncompleteTurn
                     runtime
                     (sessionHistoryTurn turnIndex turn)
                     HistoryCommitAppend
-                forM_ (sessionTurnPullRequestURL turn) $
-                    setFullscreenPullRequestURL runtime . Just
+                case sessionTurnPullRequestURLs turn of
+                    [] -> pure ()
+                    urls -> setFullscreenPullRequestURLs runtime urls
             evictDurableConversation env handle'
   where
     request = executed.executedRequest
@@ -1002,8 +1004,9 @@ persistSuccessfulTurn
                         -- transcript. Keep earlier turns scrollable.
                         TranscriptReplace -> HistoryCommitAppend
                         TranscriptReset -> HistoryCommitReset)
-                forM_ (sessionTurnPullRequestURL turn) $
-                    setFullscreenPullRequestURL runtime . Just
+                case sessionTurnPullRequestURLs turn of
+                    [] -> pure ()
+                    urls -> setFullscreenPullRequestURLs runtime urls
             evictDurableConversation env countedHandle
             when
                 ( not countedMeta.metaTitleIsManual

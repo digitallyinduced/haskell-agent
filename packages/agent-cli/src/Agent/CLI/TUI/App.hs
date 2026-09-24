@@ -40,6 +40,10 @@ module Agent.CLI.TUI.App
     , isCommandPaletteKey
     , mergeConversationView
     , appMotionDemand
+    , pullRequestChecksShouldPoll
+    , workspaceSidePaneVisible
+    , sidePaneMinScreenWidth
+    , sidePaneMinAvailableHeight
     , motionDemandFor
     , motionDemandForTerminalFocus
     , motionModeForTerminalFocus
@@ -104,7 +108,7 @@ module Agent.CLI.TUI.App
     , clearFullscreenHistorySource
     , reloadFullscreenHistorySource
     , setFullscreenHistorySource
-    , setFullscreenPullRequestURL
+    , setFullscreenPullRequestURLs
     , syncPullRequestChecksPoll
     , runPullRequestChecksWorker
     , parsePullRequestChecksJSON
@@ -155,6 +159,7 @@ module Agent.CLI.TUI.App
 
 
 import Agent.CLI.TUI.Types
+import Agent.Runtime.Session.PullRequest (parsePullRequestChecksJSON)
 import Agent.CLI.TUI.ClipboardTip
 import Agent.CLI.TUI.Motion
 import Agent.CLI.TUI.Render

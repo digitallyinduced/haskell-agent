@@ -108,7 +108,7 @@ import Agent.CLI.TUI.History ( HistoryCursor(..)
     , setHistoryWindowTurns
     )
 import Agent.CLI.TUI.LambdaArt ( lambdaArtWidget )
-import Agent.CLI.TUI.Motion ( advanceCompletionFlashes , appMotionTiming , completionFlashTransitions , elapsedMillisSince , hasBackgroundActivity , isBackgroundAgentActive , motionDemandFor , motionDemandForTerminalFocus , motionModeForTerminalFocus , nativeProgressKeepaliveDue , nextMotionSchedule , turnCompletionRequiresRedraw , uiEventRestartsMotionSchedule , userActionPending )
+import Agent.CLI.TUI.Motion ( advanceCompletionFlashes , appMotionTiming , completionFlashTransitions , elapsedMillisSince , hasBackgroundActivity , isBackgroundAgentActive , motionDemandFor , motionDemandForTerminalFocus , motionModeForTerminalFocus , nativeProgressKeepaliveDue , nextMotionSchedule , pullRequestChecksShouldPoll , turnCompletionRequiresRedraw , uiEventRestartsMotionSchedule , userActionPending )
 import Agent.CLI.TUI.Render ( agentEntryWindow , agentPaneEntryLimit , agentPaneVisible , applyChildConversationUiEvent , choiceRowColumns , conversationUiForTarget , conversationScrollbarRenderer , drawApp , fullscreenBounds , fullscreenSurface , onboardingVisibleRowIndices , normalizeTextOverlayInsertion , maskedSecretText , quickStartRows , quickStartVisible , repositoryHeaderText , resumeSearchCursorColumn , selectedAgentConversation , textOverlayDisplayText )
 import Agent.CLI.TUI.ImagePreview ( NativePreviewPlacement(..)
     , TuiImagePreview(..)
@@ -129,7 +129,10 @@ import Agent.Syntax ( SyntaxHighlighter , loadSyntaxLanguage , newSyntaxHighligh
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import qualified Agent.CLI.TUI.Transcript as Transcript
 import Agent.CLI.TUI.Types
-import Agent.Runtime.Session.PullRequest (pullRequestURLs)
+import Agent.Runtime.Session.PullRequest
+    ( parsePullRequestChecksJSON
+    , pullRequestURLs
+    )
 import Agent.TUI.Model
 import Agent.TUI.Theme (ThemeKind(..))
 import Agent.TUI.Motion ( MotionDemand(..)
@@ -153,7 +156,7 @@ import Codec.Picture (pixelAt)
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async (race, wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
-import Control.Monad (forever, unless, void, when, (>=>))
+import Control.Monad (forM, forever, unless, void, when, (>=>))
 import Control.Concurrent.STM ( STM , TMVar , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , writeTQueue , writeTVar )
 import Agent.CLI.Notification
     ( AttentionRequest(PermissionRequested, SecretRequested)
@@ -163,12 +166,8 @@ import Agent.CLI.Recap ( autoRecapAwayThreshold , autoRecapIdleThreshold , autoR
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
 import Control.Exception.Safe (bracket_, finally, mask, onException, throwIO, tryAny, tryIO)
-import Data.Aeson ((.:), (.:?), (.!=))
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Types as AesonTypes
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as BS8
-import Control.Exception (AsyncException(UserInterrupt))
+import Control.Exception (AsyncException(UserInterrupt), evaluate)
 import Data.Char (isControl, isSpace)
 import Data.Foldable (toList)
 import Data.IORef ( atomicModifyIORef' , modifyIORef' , newIORef , readIORef , writeIORef )
@@ -194,7 +193,14 @@ import System.Exit (ExitCode(..))
 import System.Info (os)
 import System.IO (stderr, stdout)
 import System.Posix.Process (getProcessID)
-import System.Process (callProcess, readProcessWithExitCode)
+import System.Process
+    ( CreateProcess(..)
+    , StdStream(..)
+    , callProcess
+    , proc
+    , waitForProcess
+    , withCreateProcess
+    )
 import System.Timeout (timeout)
 
 newFullscreenInputBuffer :: IO FullscreenInputBuffer
@@ -456,19 +462,24 @@ setFullscreenSessionActions
             , sessionAgentSelect = agentSelect
             }
 
-setFullscreenPullRequestURL :: FullscreenRuntime -> Maybe Text -> IO ()
-setFullscreenPullRequestURL runtime url = do
+setFullscreenPullRequestURLs :: FullscreenRuntime -> [Text] -> IO ()
+setFullscreenPullRequestURLs runtime urls = do
     generation <- HistoryGeneration <$> readIORef runtime.runtimeHistoryGeneration
-    enqueueAppEvent runtime (AppSetPullRequestURL generation url)
+    enqueueAppEvent runtime (AppSetPullRequestURLs generation urls)
 
 syncPullRequestChecksPoll :: AppState -> IO ()
-syncPullRequestChecksPoll state =
-    atomically $
-        writeTVar
-            state.appRuntime.runtimePullRequestPoll
-            (fmap
-                (\url -> (state.appHistoryWindow.historyWindowGeneration, url))
-                state.appPullRequestURL)
+syncPullRequestChecksPoll state = do
+    let next
+            | pullRequestChecksShouldPoll state =
+                Just
+                    ( state.appHistoryWindow.historyWindowGeneration
+                    , state.appPullRequestURLs
+                    )
+            | otherwise = Nothing
+    atomically do
+        current <- readTVar state.appRuntime.runtimePullRequestPoll
+        when (current /= next) $
+            writeTVar state.appRuntime.runtimePullRequestPoll next
 
 runPullRequestChecksWorker :: FullscreenRuntime -> IO ()
 runPullRequestChecksWorker runtime = forever do
@@ -480,29 +491,31 @@ runPullRequestChecksWorker runtime = forever do
 
 refreshPullRequestChecks
     :: FullscreenRuntime
-    -> (HistoryGeneration, Text)
+    -> (HistoryGeneration, [Text])
     -> IO Int
-refreshPullRequestChecks runtime (generation, url) = do
+refreshPullRequestChecks runtime (generation, urls) = do
     currentGeneration <- HistoryGeneration <$> readIORef runtime.runtimeHistoryGeneration
-    if currentGeneration /= generation
+    if currentGeneration /= generation || null urls
         then pure pullRequestChecksRetryMicros
         else do
-            fetched <- lookupPullRequestChecks url
+            results <- forM urls lookupPullRequestChecks
             stillCurrent <- atomically do
                 pending <- readTVar runtime.runtimePullRequestPoll
-                pure (pending == Just (generation, url))
-            case fetched of
-                Just checks
-                    | stillCurrent -> do
-                        enqueueAppEvent runtime
-                            (AppSetPullRequestCI generation url checks)
-                        pure (pullRequestChecksIntervalMicros checks)
-                _ ->
+                pure (pending == Just (generation, urls))
+            if stillCurrent
+                then do
+                    mapM_
+                        (\(url, checks) ->
+                            enqueueAppEvent runtime
+                                (AppSetPullRequestCI generation url checks))
+                        (zip urls results)
+                    pure (minimum (map pullRequestChecksIntervalMicros results))
+                else
                     pure pullRequestChecksRetryMicros
 
 waitPullRequestChecksInterval
     :: FullscreenRuntime
-    -> (HistoryGeneration, Text)
+    -> (HistoryGeneration, [Text])
     -> Int
     -> IO ()
 waitPullRequestChecksInterval runtime request intervalMicros = do
@@ -519,20 +532,18 @@ pullRequestChecksIntervalMicros :: PullRequestChecks -> Int
 pullRequestChecksIntervalMicros = \case
     PullRequestChecksPending -> pullRequestChecksRetryMicros
     PullRequestChecksUnknown -> pullRequestChecksRetryMicros
+    PullRequestChecksUnavailable -> 30_000_000
     _ -> 45_000_000
 
-lookupPullRequestChecks :: Text -> IO (Maybe PullRequestChecks)
+lookupPullRequestChecks :: Text -> IO PullRequestChecks
 lookupPullRequestChecks url =
     case pullRequestViewArguments url of
-        Nothing -> pure Nothing
+        Nothing -> pure PullRequestChecksUnavailable
         Just arguments -> do
-            result <- timeout 15_000_000 $
-                tryIO (readProcessWithExitCode "gh" arguments "")
-            pure $ case result of
-                Just (Right (ExitSuccess, output, _)) ->
-                    parsePullRequestChecksJSON (TextEncoding.encodeUtf8 (Text.pack output))
-                _ ->
-                    Nothing
+            output <- runGhJson arguments
+            pure $
+                fromMaybe PullRequestChecksUnavailable
+                    (output >>= parsePullRequestChecksJSON)
 
 pullRequestViewArguments :: Text -> Maybe [String]
 pullRequestViewArguments url
@@ -545,60 +556,26 @@ pullRequestViewArguments url
         ]
     | otherwise = Nothing
 
-parsePullRequestChecksJSON :: BS.ByteString -> Maybe PullRequestChecks
-parsePullRequestChecksJSON bytes =
-    Aeson.decodeStrict' bytes >>= AesonTypes.parseMaybe parsePullRequestChecksRollup
-
-parsePullRequestChecksRollup :: Aeson.Value -> AesonTypes.Parser PullRequestChecks
-parsePullRequestChecksRollup = Aeson.withObject "pull request" \object -> do
-    checks <- object .:? "statusCheckRollup" .!= []
-    statuses <- traverse parsePullRequestCheck checks
-    pure (rollupPullRequestChecks statuses)
-  where
-    rollupPullRequestChecks statuses
-        | null statuses = PullRequestChecksNone
-        | PullRequestChecksFailed `elem` statuses = PullRequestChecksFailed
-        | PullRequestChecksPending `elem` statuses = PullRequestChecksPending
-        | PullRequestChecksUnknown `elem` statuses = PullRequestChecksUnknown
-        | otherwise = PullRequestChecksPassed
-
-parsePullRequestCheck :: Aeson.Value -> AesonTypes.Parser PullRequestChecks
-parsePullRequestCheck = Aeson.withObject "check" \object -> do
-    kind <- object .: "__typename" :: AesonTypes.Parser Text
-    case kind of
-        "CheckRun" -> do
-            status <- object .: "status" :: AesonTypes.Parser Text
-            conclusion <- object .:? "conclusion" .!= ""
-            pure $
-                if status `elem`
-                    ["QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED"]
-                    then PullRequestChecksPending
-                    else if status /= "COMPLETED"
-                        then PullRequestChecksUnknown
-                        else classifyPullRequestCheck conclusion
-        "StatusContext" ->
-            classifyPullRequestCheck <$> object .: "state"
-        _ ->
-            pure PullRequestChecksUnknown
-
-classifyPullRequestCheck :: Text -> PullRequestChecks
-classifyPullRequestCheck value
-    | value `elem` ["SUCCESS", "NEUTRAL", "SKIPPED"] =
-        PullRequestChecksPassed
-    | value `elem`
-        [ "FAILURE"
-        , "ERROR"
-        , "TIMED_OUT"
-        , "CANCELLED"
-        , "ACTION_REQUIRED"
-        , "STARTUP_FAILURE"
-        , "STALE"
-        ] =
-        PullRequestChecksFailed
-    | value `elem` ["PENDING", "EXPECTED"] =
-        PullRequestChecksPending
-    | otherwise =
-        PullRequestChecksUnknown
+runGhJson :: [String] -> IO (Maybe BS.ByteString)
+runGhJson arguments = do
+    let spec =
+            (proc "gh" arguments)
+                { std_in = NoStream
+                , std_out = CreatePipe
+                , std_err = CreatePipe
+                }
+    result <- timeout 15_000_000 $
+        tryIO $
+            withCreateProcess spec \_stdin stdoutHandle stderrHandle processHandle -> do
+                out <- maybe (pure BS.empty) BS.hGetContents stdoutHandle
+                err <- maybe (pure BS.empty) BS.hGetContents stderrHandle
+                code <- waitForProcess processHandle
+                _ <- evaluate (BS.length out)
+                _ <- evaluate (BS.length err)
+                pure (code, out)
+    pure $ case result of
+        Just (Right (ExitSuccess, output)) -> Just output
+        _ -> Nothing
 
 setFullscreenHistorySource
     :: FullscreenRuntime

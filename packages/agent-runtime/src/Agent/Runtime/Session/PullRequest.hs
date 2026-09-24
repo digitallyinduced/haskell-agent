@@ -4,7 +4,14 @@ module Agent.Runtime.Session.PullRequest
     , conversationPullRequestURLs
     , sessionTurnPullRequestURL
     , sessionTurnPullRequestURLs
+    , mergePullRequestURLs
+    , associatedPullRequestLimit
     , advanceSessionPullRequestIndex
+    , PullRequestChecks(..)
+    , pullRequestChecksFromCode
+    , pullRequestChecksToCode
+    , parsePullRequestChecksJSON
+    , parsePullRequestChecksRollup
     ) where
 
 import Agent.Runtime.Session.Types (SessionTurn(..))
@@ -16,8 +23,11 @@ import Agent.Responses.Types
     , CustomToolCallOutput(..)
     )
 import Control.Applicative ((<|>))
+import Data.Aeson ((.:), (.:?), (.!=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Aeson.Types as AesonTypes
+import qualified Data.ByteString as BS
 import Data.Char (isAlphaNum)
 import Data.Int (Int64)
 import Data.List (foldl', nub)
@@ -167,3 +177,95 @@ sessionTurnPullRequestURLs turn = nub $
     maybeToList (sessionTurnPullRequestURL turn)
         <> conversationPullRequestURLs turn.turnUserText turn.turnAssistantText
             (map Aeson.toJSON (turn.turnItems <> turn.turnDisplayItems))
+
+associatedPullRequestLimit :: Int
+associatedPullRequestLimit = 20
+
+-- | Newest associations first. Cap the retained set so a long conversation
+-- cannot accumulate an unbounded sidebar.
+mergePullRequestURLs :: [Text] -> [Text] -> [Text]
+mergePullRequestURLs newer older =
+    take associatedPullRequestLimit (nub (newer <> older))
+
+-- | Rolled-up GitHub check status. Codes 0..4 match the native delivery ABI:
+-- unknown, none, pending, passed, failed. Unavailable is frontend-only.
+data PullRequestChecks
+    = PullRequestChecksUnknown
+    | PullRequestChecksNone
+    | PullRequestChecksPending
+    | PullRequestChecksPassed
+    | PullRequestChecksFailed
+    | PullRequestChecksUnavailable
+    deriving (Eq, Show)
+
+pullRequestChecksFromCode :: Int -> PullRequestChecks
+pullRequestChecksFromCode = \case
+    1 -> PullRequestChecksNone
+    2 -> PullRequestChecksPending
+    3 -> PullRequestChecksPassed
+    4 -> PullRequestChecksFailed
+    _ -> PullRequestChecksUnknown
+
+pullRequestChecksToCode :: PullRequestChecks -> Int
+pullRequestChecksToCode = \case
+    PullRequestChecksUnknown -> 0
+    PullRequestChecksUnavailable -> 0
+    PullRequestChecksNone -> 1
+    PullRequestChecksPending -> 2
+    PullRequestChecksPassed -> 3
+    PullRequestChecksFailed -> 4
+
+parsePullRequestChecksJSON :: BS.ByteString -> Maybe PullRequestChecks
+parsePullRequestChecksJSON bytes =
+    Aeson.decodeStrict' bytes >>= AesonTypes.parseMaybe parsePullRequestChecksRollup
+
+parsePullRequestChecksRollup :: Aeson.Value -> AesonTypes.Parser PullRequestChecks
+parsePullRequestChecksRollup = Aeson.withObject "pull request" \object -> do
+    checks <- object .:? "statusCheckRollup" .!= []
+    statuses <- traverse parsePullRequestCheck checks
+    pure (rollupPullRequestChecks statuses)
+  where
+    rollupPullRequestChecks statuses
+        | null statuses = PullRequestChecksNone
+        | PullRequestChecksFailed `elem` statuses = PullRequestChecksFailed
+        | PullRequestChecksPending `elem` statuses = PullRequestChecksPending
+        | PullRequestChecksUnknown `elem` statuses = PullRequestChecksUnknown
+        | otherwise = PullRequestChecksPassed
+
+parsePullRequestCheck :: Aeson.Value -> AesonTypes.Parser PullRequestChecks
+parsePullRequestCheck = Aeson.withObject "check" \object -> do
+    kind <- object .: "__typename" :: AesonTypes.Parser Text
+    case kind of
+        "CheckRun" -> do
+            status <- object .: "status" :: AesonTypes.Parser Text
+            conclusion <- object .:? "conclusion" .!= ""
+            pure $
+                if status `elem`
+                    ["QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED"]
+                    then PullRequestChecksPending
+                    else if status /= "COMPLETED"
+                        then PullRequestChecksUnknown
+                        else classifyPullRequestCheck conclusion
+        "StatusContext" ->
+            classifyPullRequestCheck <$> object .: "state"
+        _ ->
+            pure PullRequestChecksUnknown
+
+classifyPullRequestCheck :: Text -> PullRequestChecks
+classifyPullRequestCheck value
+    | value `elem` ["SUCCESS", "NEUTRAL", "SKIPPED"] =
+        PullRequestChecksPassed
+    | value `elem`
+        [ "FAILURE"
+        , "ERROR"
+        , "TIMED_OUT"
+        , "CANCELLED"
+        , "ACTION_REQUIRED"
+        , "STARTUP_FAILURE"
+        , "STALE"
+        ] =
+        PullRequestChecksFailed
+    | value `elem` ["PENDING", "EXPECTED"] =
+        PullRequestChecksPending
+    | otherwise =
+        PullRequestChecksUnknown

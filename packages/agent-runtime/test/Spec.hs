@@ -27,7 +27,14 @@ import qualified Agent.Runtime.SessionRequestSpec as SessionRequestSpec
 import qualified Agent.Runtime.TurnRecordSpec as TurnRecordSpec
 import qualified Agent.Runtime.SessionThreadsSpec as SessionThreadsSpec
 import Agent.Runtime.Session.TitlePolicy (titleRefreshIndex)
-import Agent.Runtime.Session.PullRequest (advanceSessionPullRequestIndex)
+import Agent.Runtime.Session.PullRequest
+    ( PullRequestChecks(..)
+    , advanceSessionPullRequestIndex
+    , mergePullRequestURLs
+    , parsePullRequestChecksJSON
+    , pullRequestChecksToCode
+    )
+import qualified Data.Text.Encoding as TextEncoding
 import Data.IORef
 import qualified Agent.Runtime.EnvironmentSpec as EnvironmentSpec
 import qualified Agent.Runtime.ErrorSpec as ErrorSpec
@@ -113,6 +120,34 @@ main = hspec do
                 (\_ _ -> pure (Right [(1, [])]))
                 (\_ _ -> expectationFailure "must not persist incomplete history" >> pure (Right ()))
                 2 Nothing `shouldReturn` Left "invalid PR association history page"
+    describe "GitHub check rollup" do
+        let rollup checks =
+                parsePullRequestChecksJSON
+                    (TextEncoding.encodeUtf8
+                        ("{\"statusCheckRollup\":" <> checks <> "}"))
+            check status conclusion =
+                "{\"__typename\":\"CheckRun\",\"status\":\""
+                    <> status
+                    <> "\",\"conclusion\":\""
+                    <> conclusion
+                    <> "\"}"
+        it "keeps failures visible while another check is pending" do
+            rollup
+                ("["
+                    <> check "COMPLETED" "FAILURE"
+                    <> ","
+                    <> check "QUEUED" ""
+                    <> "]")
+                `shouldBe` Just PullRequestChecksFailed
+            pullRequestChecksToCode PullRequestChecksFailed `shouldBe` 4
+        it "does not turn unknown conclusions into success" do
+            rollup ("[" <> check "COMPLETED" "NEW_STATE" <> "]")
+                `shouldBe` Just PullRequestChecksUnknown
+        it "prepends newer pull request URLs without dropping earlier ones" do
+            let older = "https://github.com/o/repo/pull/1"
+                newer = "https://github.com/o/repo/pull/2"
+            mergePullRequestURLs [newer] [older] `shouldBe` [newer, older]
+            mergePullRequestURLs [older] [older, newer] `shouldBe` [older, newer]
     describe "titleRefreshIndex" do
         it "advances only at the persisted title milestones" do
             map titleRefreshIndex [0, 1, 2, 3, 5, 6, 10]

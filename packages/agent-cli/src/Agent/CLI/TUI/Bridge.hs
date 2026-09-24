@@ -20,49 +20,53 @@ import Agent.CLI.AgentViewport
     )
 import Agent.TUI.Model (UiEvent(..), UiState(..))
 import Agent.Loop (LoopEvent(..), TurnOutput(..))
-import Agent.Runtime.Session.PullRequest (conversationPullRequestURLs)
+import Agent.Runtime.Session.PullRequest
+    ( conversationPullRequestURLs
+    , mergePullRequestURLs
+    )
 import Agent.ToolDispatch (ToolCallResult(..))
-import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.Map.Strict as Map
-import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import qualified Graphics.Vty as V
 
 -- | Use the same evidence rules as persisted conversation associations.
 -- Inspect complete outputs/messages only, never partially streamed URLs.
-pullRequestForUiEvent :: UiEvent -> UiState -> Maybe Text -> Maybe Text
+-- Newly observed URLs are prepended so the current PR stays first.
+pullRequestForUiEvent :: UiEvent -> UiState -> [Text] -> [Text]
 pullRequestForUiEvent event state previous =
     case event of
-        UiConversationCleared -> Nothing
+        UiConversationCleared -> []
         UiUserSubmitted text ->
-            firstURL text Nothing [] <|> previous
+            merge (firstURLs text Nothing [])
         UiAssistantHistory text ->
-            firstURL "" (Just text) [] <|> previous
+            merge (firstURLs "" (Just text) [])
         UiLoop (ToolFinished result) ->
             case Map.lookup result.callId state.uiToolCalls of
                 Nothing -> previous
                 Just (_, call) ->
-                    firstURL "" Nothing
-                        [ Aeson.object
-                            [ "type" .= ("function_call" :: Text)
-                            , "call_id" .= call.callId
-                            , "name" .= call.name
-                            , "arguments" .= call.arguments
+                    merge $
+                        firstURLs "" Nothing
+                            [ Aeson.object
+                                [ "type" .= ("function_call" :: Text)
+                                , "call_id" .= call.callId
+                                , "name" .= call.name
+                                , "arguments" .= call.arguments
+                                ]
+                            , Aeson.object
+                                [ "type" .= ("function_call_output" :: Text)
+                                , "call_id" .= result.callId
+                                , "output" .= result.output
+                                ]
                             ]
-                        , Aeson.object
-                            [ "type" .= ("function_call_output" :: Text)
-                            , "call_id" .= result.callId
-                            , "output" .= result.output
-                            ]
-                        ] <|> previous
         UiLoop (TurnFinished output) ->
-            firstURL "" output.assistantText [] <|> previous
+            merge (firstURLs "" output.assistantText [])
         _ -> previous
   where
-    firstURL user assistant items =
-        listToMaybe (conversationPullRequestURLs user assistant items)
+    merge new = mergePullRequestURLs new previous
+    firstURLs user assistant items =
+        conversationPullRequestURLs user assistant items
 
 -- | Keep enough prompt recall for normal interactive use without retaining an
 -- unbounded copy of the persistent Haskeline history in the fullscreen state.

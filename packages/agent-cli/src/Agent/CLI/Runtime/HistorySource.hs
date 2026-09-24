@@ -30,8 +30,12 @@ import Agent.CLI.TUI.History
     , HistoryPage(..)
     , HistoryRequest(..)
     )
-import Agent.CLI.TUI.SessionHistory (sessionHistoryPage, sessionTurnPullRequestURL)
-import Data.Maybe (listToMaybe, mapMaybe)
+import Agent.CLI.TUI.SessionHistory (sessionHistoryPage)
+import Agent.Runtime.Session.PullRequest
+    ( associatedPullRequestLimit
+    , mergePullRequestURLs
+    , sessionTurnPullRequestURLs
+    )
 import Data.IORef (readIORef)
 import Agent.Store.Postgres.Connection (StorePool)
 import Agent.TUI.Model (UiEvent(..), warningNotice)
@@ -88,25 +92,26 @@ restoreFullscreenPullRequest runtime pool root sessionId = do
     generation <- HistoryGeneration <$> readIORef runtime.runtimeHistoryGeneration
     result <- loadSessionHistorySnapshot pool root sessionId >>= \case
         Left err -> pure (Left err)
-        Right (_, _, total) -> scan total
+        Right (_, _, total) -> scan total []
     case result of
         Left _ -> pure ()
-        Right url ->
-            enqueueAppEvent runtime (AppSetPullRequestURL generation url)
+        Right urls ->
+            enqueueAppEvent runtime (AppSetPullRequestURLs generation urls)
   where
-    scan end
-        | end <= 0 = pure (Right Nothing)
+    scan end acc
+        | length acc >= associatedPullRequestLimit = pure (Right acc)
+        | end <= 0 = pure (Right acc)
         | otherwise = do
             let start = max 0 (end - 32)
             loadSessionHistoryTurnsRangeBounded
                 pool root sessionId start end 32 >>= \case
                     Left err -> pure (Left err)
                     Right page ->
-                        case listToMaybe (mapMaybe
-                            (sessionTurnPullRequestURL . snd)
-                            (reverse page.pageTurns)) of
-                            Just url -> pure (Right (Just url))
-                            Nothing -> scan start
+                        let found =
+                                concatMap
+                                    (sessionTurnPullRequestURLs . snd)
+                                    (reverse page.pageTurns)
+                        in scan start (mergePullRequestURLs acc found)
 
 reloadFullscreenHistoryForHandle
     :: FullscreenRuntime

@@ -124,6 +124,7 @@ import Agent.Syntax ( SyntaxHighlighter , loadSyntaxLanguage , newSyntaxHighligh
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import qualified Agent.CLI.TUI.Transcript as Transcript
 import Agent.CLI.TUI.Types
+import Agent.Runtime.Session.PullRequest (mergePullRequestURLs)
 import Agent.TUI.Model
 import Agent.TUI.Motion ( MotionDemand(..)
     , MotionMode(..)
@@ -228,11 +229,11 @@ handleEvent event = do
     handleEventInner event
     pollClipboardImageTipEvent
     stateAfterEvent <- get
-    when (stateBeforeEvent.appPullRequestURL
-        /= stateAfterEvent.appPullRequestURL) do
+    when (stateBeforeEvent.appPullRequestURLs
+        /= stateAfterEvent.appPullRequestURLs) do
         invalidateCache
         queueConversationReflow
-        liftIO (syncPullRequestChecksPoll stateAfterEvent)
+    liftIO (syncPullRequestChecksPoll stateAfterEvent)
     when (eventMayExposeSyntax event) requestVisibleSyntaxLanguages
     state <- get
     let visible =
@@ -302,7 +303,7 @@ handleEvent event = do
         AppDictationPartial{} -> True
         AppAgentSnapshot{} -> True
         AppSetWindowTitle{} -> True
-        AppSetPullRequestURL{} -> True
+        AppSetPullRequestURLs{} -> True
         AppSetPullRequestCI{} -> True
         AppSyntaxHighlighterChanged -> True
         AppHistoryLiveStarted -> True
@@ -334,7 +335,7 @@ handleEvent event = do
 
     agentStructureRequiresUnfocusedRedraw previous next =
         previous.appAgentSelected /= next.appAgentSelected
-            || previous.appPullRequestURL /= next.appPullRequestURL
+            || previous.appPullRequestURLs /= next.appPullRequestURLs
             || previous.appPullRequestCI /= next.appPullRequestCI
             || agentChromeSignature previous.appAgentEntries
                 /= agentChromeSignature next.appAgentEntries
@@ -504,24 +505,32 @@ handleAppEvent = \case
         modify' \state -> state { appMouseCapture = captured }
     AppSyntaxHighlighterChanged ->
         handleSyntaxHighlighterChangedEvent
-    AppSetPullRequestURL generation url -> do
+    AppSetPullRequestURLs generation urls -> do
         state <- get
         when (generation == state.appHistoryWindow.historyWindowGeneration) $
             modify' \current ->
-                current
-                    { appPullRequestURL = url
+                let nextUrls =
+                        if null urls
+                            then []
+                            else mergePullRequestURLs urls current.appPullRequestURLs
+                in current
+                    { appPullRequestURLs = nextUrls
                     , appPullRequestCI =
-                        if url == current.appPullRequestURL
-                            then current.appPullRequestCI
-                            else PullRequestChecksUnknown
+                        Map.restrictKeys
+                            current.appPullRequestCI
+                            (Set.fromList nextUrls)
                     }
     AppSetPullRequestCI generation url checks -> do
         state <- get
         when
             ( generation == state.appHistoryWindow.historyWindowGeneration
-                && state.appPullRequestURL == Just url
+                && url `elem` state.appPullRequestURLs
             ) $
-            modify' \current -> current { appPullRequestCI = checks }
+            modify' \current ->
+                current
+                    { appPullRequestCI =
+                        Map.insert url checks current.appPullRequestCI
+                    }
     AppHistoryReset page ->
         handleHistoryResetEvent page
     AppHistoryChartPrepared generation blockId preview -> do
