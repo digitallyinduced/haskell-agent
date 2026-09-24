@@ -1007,10 +1007,26 @@ spec = describe "fullscreen UI reducer" do
             [block] -> do
                 block.blockKind `shouldBe` BlockShell
                 block.blockTitle `shouldBe` "$ ghci"
+                blockCodeLanguage block `shouldBe` Just "haskell"
                 block.blockDetail
                     `shouldBe` "do { putStrLn \"one\"; putStrLn \"two\" }"
                 state.uiActivity `shouldBe` "$ ghci"
             _ -> expectationFailure "expected one running GHCi block"
+
+    it "classifies retained shell commands as Bash with or without descriptions" do
+        mapM_ (\name ->
+            mapM_ (\arguments -> do
+                let call = functionToolCall "c1" name arguments
+                    state = apply [UiLoop TurnStarted, UiLoop (ToolStarted call)]
+                case Foldable.toList state.uiBlocks of
+                    [block] -> do
+                        block.blockDetail `shouldBe` "printf hello"
+                        blockCodeLanguage block `shouldBe` Just "bash"
+                    _ -> expectationFailure "expected one shell block")
+                [ "{\"command\":\"printf hello\"}"
+                , "{\"command\":\"printf hello\",\"description\":\"Print a greeting\"}"
+                ])
+            ["shell_command", "run_terminal_cmd"]
 
     it "stores exec source as JavaScript code" do
         let source = "const answer = await tools.read_file({target_file: \"A.hs\"});"

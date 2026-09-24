@@ -117,13 +117,15 @@ toolBlockKind rawName
 
 -- | Syntax grammar for code carried in a shell-style tool block.
 -- The title is retained alongside the source after the original call leaves
--- the live-tool map, so it also identifies exec's JavaScript code here.
+-- the live-tool map, so it identifies GHCi and exec source; other shell
+-- commands use Bash.
 blockCodeLanguage :: UiBlock -> Maybe Text
 blockCodeLanguage block
     | block.blockKind /= BlockShell = Nothing
     | Text.null (Text.strip block.blockDetail) = Nothing
     | block.blockTitle `elem` ["JavaScript execution", "$ exec"] = Just "javascript"
-    | otherwise = Just "haskell"
+    | block.blockTitle == "$ ghci" = Just "haskell"
+    | otherwise = Just "bash"
 
 outputLooksFailed :: Text -> Bool
 outputLooksFailed output =

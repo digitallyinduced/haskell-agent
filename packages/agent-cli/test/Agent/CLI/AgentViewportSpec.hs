@@ -349,7 +349,7 @@ spec = do
                             (Just ItemCompleted)
                         ]
             map (.blockTitle) (toList ui.uiBlocks)
-                `shouldBe` ["Read"]
+                `shouldBe` ["Read 1 file"]
             map (.blockDetail) (toList ui.uiBlocks)
                 `shouldBe` ["nix/modules/telegram.nix"]
             map (.agentStepTitle)
