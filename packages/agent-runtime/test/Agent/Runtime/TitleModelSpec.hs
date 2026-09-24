@@ -33,7 +33,7 @@ spec = do
 
         it "selects the labeled low-cost OpenAI and Gemini models" do
             (cheapTitleModel catalog OpenAIProvider).modelTarget.targetModelId
-                `shouldBe` "gpt-5.6-luna"
+                `shouldBe` "gpt-6-luna"
             (cheapTitleModel catalog GeminiProvider).modelTarget.targetModelId
                 `shouldBe` "gemini-3.5-flash-lite"
 
@@ -89,7 +89,7 @@ spec = do
         it "gives OpenAI Luna titles high reasoning effort" do
             let resolved =
                     resolveTitleModel catalog OpenAIProvider Nothing False
-            resolved.titleModelId `shouldBe` "gpt-5.6-luna"
+            resolved.titleModelId `shouldBe` "gpt-6-luna"
             resolved.titleProvider `shouldBe` OpenAIProvider
             resolved.titleReasoningEffort `shouldBe` "high"
 
@@ -97,7 +97,7 @@ spec = do
             let resolved =
                     resolveTitleModel catalog OpenAIProvider Nothing True
             resolved.titleModelId `shouldBe` appleFoundationTitleModelId
-            resolved.titleWireModelId `shouldBe` "gpt-5.6-luna"
+            resolved.titleWireModelId `shouldBe` "gpt-6-luna"
             resolved.titleReasoningEffort `shouldBe` "high"
             resolved.titleUsesAppleFoundation `shouldBe` True
 

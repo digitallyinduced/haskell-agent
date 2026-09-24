@@ -594,7 +594,7 @@ spec = describe "systemPrompt" do
                     OpenAIProvider
                     SubscriptionBilled
         subscriptionGuidance `shouldSatisfy`
-            maybe False (Text.isInfixOf "`gpt-5.6-luna`")
+            maybe False (Text.isInfixOf "`gpt-6-luna`")
         subscriptionGuidance `shouldSatisfy`
             maybe False (Text.isInfixOf "complexity, ambiguity, and risk")
         subscriptionGuidance `shouldSatisfy`
@@ -602,7 +602,7 @@ spec = describe "systemPrompt" do
         subscriptionGuidance `shouldSatisfy`
             maybe False (Text.isInfixOf "`gpt-5.6-terra`")
         subscriptionGuidance `shouldSatisfy`
-            maybe False (Text.isInfixOf "`gpt-5.6-sol`")
+            maybe False (Text.isInfixOf "`gpt-6-sol`")
         subscriptionGuidance `shouldSatisfy`
             maybe False (Text.isInfixOf "Do not use Luna as a blanket default")
         subscriptionGuidance `shouldSatisfy`

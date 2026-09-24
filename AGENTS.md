@@ -31,7 +31,7 @@ revision actually ran on it.
 use ghci instead of compiling the code. E.g. instead of nix flake check start a ghci and load in the necessary modules. This is way faster than doing a full compile.
 
 From `nix develop`, run `repl` to open the agent under GHCi. It defaults to
-OpenAI `gpt-5.6-sol` with `--yolo`. On first open it passes `--worktree` when
+OpenAI `gpt-6-sol` with `--yolo`. On first open it passes `--worktree` when
 the cwd is not already under `~/.haskell-agent/worktrees`. Agent `:reload`
 returns to GHCi, reloads modules, and resumes the previous session.
 

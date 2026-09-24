@@ -51,7 +51,8 @@ spec = do
 
         it "ships the configured frontier models for each provider" do
             modelIdsFor OpenAIProvider
-                `shouldContain` ["gpt-5.6-sol", "gpt-6-astra"]
+                `shouldContain` ["gpt-6-sol", "gpt-6-astra"]
+            modelIdsFor OpenAIProvider `shouldContain` ["gpt-6-luna"]
             modelIdsFor XAIProvider `shouldContain` ["grok-4.7", "grok-4.6"]
             modelIdsFor OpenRouterProvider `shouldContain` ["stealth/ox-alpha"]
             modelIdsFor GeminiProvider `shouldContain` ["gemini-3.7-flash"]
@@ -59,9 +60,11 @@ spec = do
         it "ships the OpenAI frontier models and each other provider frontier model" do
             modelIdsFor OpenAIProvider
                 `shouldBe`
-                    [ "gpt-5.6-sol"
+                    [ "gpt-6-sol"
                     , "gpt-6-astra"
                     , "gpt-5.6-terra"
+                    , "gpt-6-luna"
+                    , "gpt-5.6-sol"
                     , "gpt-5.6-luna"
                     ]
             modelIdsFor XAIProvider `shouldBe` ["grok-4.7", "grok-4.6"]

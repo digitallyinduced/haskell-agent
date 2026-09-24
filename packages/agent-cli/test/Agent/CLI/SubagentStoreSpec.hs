@@ -171,7 +171,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                 OpenAIProvider
                 "openai"
                 id
-                "gpt-5.6-luna"
+                "gpt-6-luna"
                 "medium"
                 CodexDialect
                 Nothing
@@ -189,14 +189,14 @@ spec = describe "Agent.CLI.SubagentStore" do
             lookupAgentReasoningEffort typesRef agentId
                 `shouldReturn` Nothing
             let rootParams =
-                    requestParams OpenAIProvider "gpt-5.6-sol" "" [] "medium"
+                    requestParams OpenAIProvider "gpt-6-sol" "" [] "medium"
             resolveChildModelAndEffort
                 OpenAIProvider
                 rootParams
-                "gpt-5.6-luna"
+                "gpt-6-luna"
                 Nothing
                 Nothing
-                `shouldBe` ("gpt-5.6-luna", "high")
+                `shouldBe` ("gpt-6-luna", "high")
 
         it "uses an authoritative resolved target for collaboration overrides" do
             sessionsRef <- newIORef Map.empty
@@ -293,7 +293,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                 `shouldBe`
                     ( OpenAIProvider
                     , "openai"
-                    , "gpt-5.6-luna"
+                    , "gpt-6-luna"
                     , CodexDialect
                     )
 

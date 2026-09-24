@@ -45,7 +45,7 @@ case "$provider" in
       "$credential_home/.codex/auth.json" \
       "$test_home/.codex/auth.json"; then
       provider=openai
-      model=${model:-gpt-5.6-luna}
+      model=${model:-gpt-6-luna}
     elif [[ -d "$credential_home/.haskell-agent/credentials" ]]; then
       mkdir -p "$test_home/.haskell-agent"
       cp -R \
@@ -64,7 +64,7 @@ case "$provider" in
         echo "missing $credential_home/.codex/auth.json" >&2
         exit 1
       }
-    model=${model:-gpt-5.6-luna}
+    model=${model:-gpt-6-luna}
     ;;
   xai)
     copy_file_if_present \

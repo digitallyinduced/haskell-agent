@@ -149,7 +149,7 @@ let
         model = mkOption {
           type = types.nullOr types.str;
           default = null;
-          example = "gpt-5.6-sol";
+          example = "gpt-6-sol";
           description = "Optional model override. Null uses the provider default.";
         };
 
