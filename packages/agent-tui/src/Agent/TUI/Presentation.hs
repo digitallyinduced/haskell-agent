@@ -138,6 +138,11 @@ toolCallTitleRelative :: Text -> ToolCall -> Text
 toolCallTitleRelative workspace call
     | canonicalToolName call.name == "run_ghci" = "$ ghci"
     | canonicalToolName call.name == "exec" = "JavaScript execution"
+    | canonicalToolName call.name `elem` ["run_terminal_cmd", "shell_command"]
+    , let description =
+            Text.strip (jsonTextFieldPartialDefault "description" call.arguments)
+    , not (Text.null description) =
+        "Run " <> Text.unwords (Text.words description)
     | otherwise = summarizeToolCallRelative workspace call
 
 -- | Separate a filesystem action from its path so renderers can style the
@@ -157,6 +162,8 @@ toolCallInput :: ToolCall -> Text
 toolCallInput call = case canonicalToolName call.name of
     "run_ghci" -> jsonTextFieldPartialDefault "expression" call.arguments
     "exec" -> call.arguments
+    "run_terminal_cmd" -> jsonTextFieldPartialDefault "command" call.arguments
+    "shell_command" -> jsonTextFieldPartialDefault "command" call.arguments
     _ -> ""
 
 -- Computer-call arguments can contain secrets in @type@ and @keypress@

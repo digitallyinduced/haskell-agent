@@ -343,6 +343,20 @@ spec = describe "tool presentation" do
                 "Evaluate this Haskell code in GHCi?\n\n\
                 \do { putStrLn \"one\"; putStrLn \"two\" }"
 
+    it "uses shell descriptions while retaining full commands for expansion and approval" do
+        let call = functionToolCall "shell" "run_terminal_cmd"
+                "{\"command\":\"git status --short\\ngit diff --check\",\"description\":\"Check repository status\"}"
+        toolCallTitle call `shouldBe` "Run Check repository status"
+        toolCallInput call `shouldBe` "git status --short\ngit diff --check"
+        permissionToolCallPrompt call `shouldBe`
+            "Run this shell command?\n\ngit status --short\ngit diff --check"
+
+    it "falls back to shell commands when no description is available" do
+        let call = functionToolCall "shell" "shell_command"
+                "{\"command\":\"git status --short\\ngit diff --check\",\"description\":\"  \"}"
+        toolCallTitle call `shouldBe` "$ git status --short"
+        toolCallInput call `shouldBe` "git status --short\ngit diff --check"
+
     it "renders exec source and hides successful protocol boilerplate" do
         let source = "const result = await tools.grep({pattern: \"needle\"});\ntext(result);"
             call = customToolCall "exec" "exec" source

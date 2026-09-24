@@ -621,7 +621,7 @@ spec = describe "fullscreen UI reducer" do
         case Foldable.toList state.uiBlocks of
             [block] -> do
                 block.blockKind `shouldBe` BlockInspect
-                block.blockTitle `shouldBe` "Read"
+                block.blockTitle `shouldBe` "Read 1 file"
                 block.blockDetail `shouldBe` "src/Ma"
                 block.blockState `shouldBe` BlockRunning
                 state.uiActivity `shouldBe` "Read src/Ma"
@@ -1007,10 +1007,26 @@ spec = describe "fullscreen UI reducer" do
             [block] -> do
                 block.blockKind `shouldBe` BlockShell
                 block.blockTitle `shouldBe` "$ ghci"
+                blockCodeLanguage block `shouldBe` Just "haskell"
                 block.blockDetail
                     `shouldBe` "do { putStrLn \"one\"; putStrLn \"two\" }"
                 state.uiActivity `shouldBe` "$ ghci"
             _ -> expectationFailure "expected one running GHCi block"
+
+    it "classifies retained shell commands as Bash with or without descriptions" do
+        mapM_ (\name ->
+            mapM_ (\arguments -> do
+                let call = functionToolCall "c1" name arguments
+                    state = apply [UiLoop TurnStarted, UiLoop (ToolStarted call)]
+                case Foldable.toList state.uiBlocks of
+                    [block] -> do
+                        block.blockDetail `shouldBe` "printf hello"
+                        blockCodeLanguage block `shouldBe` Just "bash"
+                    _ -> expectationFailure "expected one shell block")
+                [ "{\"command\":\"printf hello\"}"
+                , "{\"command\":\"printf hello\",\"description\":\"Print a greeting\"}"
+                ])
+            ["shell_command", "run_terminal_cmd"]
 
     it "stores exec source as JavaScript code" do
         let source = "const answer = await tools.read_file({target_file: \"A.hs\"});"
@@ -1700,9 +1716,9 @@ spec = describe "fullscreen UI reducer" do
             [block] -> do
                 block.blockKind `shouldBe` BlockInspect
                 block.blockState `shouldBe` BlockComplete
-                block.blockTitle `shouldBe` "Read"
+                block.blockTitle `shouldBe` "Read 1 file"
                 block.blockDetail `shouldBe` "src/Main.hs"
-                block.blockInspectionGroupable `shouldBe` True
+                block.blockInspectionGroupable `shouldBe` False
             _ -> expectationFailure "expected one completed inspection block"
 
     it "keeps non-filesystem inspection labels intact" do
@@ -1764,12 +1780,38 @@ spec = describe "fullscreen UI reducer" do
         case Foldable.toList state.uiBlocks of
             [block] -> do
                 block.blockKind `shouldBe` BlockInspect
-                block.blockTitle `shouldBe` "Read 2 items, Listed 1 item"
+                block.blockTitle `shouldBe` "Read 2 files, Listed 1 directory"
                 block.blockBody `shouldSatisfy` Text.isInfixOf "Read src/A.hs"
                 block.blockBody `shouldSatisfy` Text.isInfixOf "module B where"
                 block.blockState `shouldBe` BlockComplete
                 block.blockInspectionGroupable `shouldBe` False
             _ -> expectationFailure "expected one grouped inspection block"
+
+    it "distinguishes files, outputs, resources and patterns in inspection summaries" do
+        let calls =
+                [ functionToolCall "file" "read_file" "{\"target_file\":\"src/A.hs\"}"
+                , functionToolCall "output" "read_tool_output" "{\"handle\":\"result\"}"
+                , functionToolCall "resource" "mcp_read_resource" "{\"uri\":\"resource://example\"}"
+                , functionToolCall "pattern" "grep" "{\"pattern\":\"needle\"}"
+                ]
+            state = apply (map (UiLoop . ToolStarted) calls)
+        case Foldable.toList state.uiBlocks of
+            [block] -> do
+                block.blockTitle `shouldBe`
+                    "Read 1 file, Read 1 output, Read 1 resource, Searched 1 pattern"
+                block.blockBody `shouldSatisfy` Text.isInfixOf "src/A.hs"
+                block.blockBody `shouldSatisfy` Text.isInfixOf "needle"
+            _ -> expectationFailure "expected one mixed inspection group"
+
+    it "retains a singleton search pattern for expansion" do
+        let state = apply
+                [UiLoop (ToolStarted (functionToolCall "search" "grep" "{\"pattern\":\"needle\"}"))]
+        case Foldable.toList state.uiBlocks of
+            [block] -> do
+                block.blockTitle `shouldBe` "Searched 1 pattern"
+                block.blockBody `shouldSatisfy` Text.isInfixOf "needle"
+                block.blockInspectionGroupable `shouldBe` False
+            _ -> expectationFailure "expected one search group"
 
     it "retracts completed inspection-group calls independently" do
         let readA =

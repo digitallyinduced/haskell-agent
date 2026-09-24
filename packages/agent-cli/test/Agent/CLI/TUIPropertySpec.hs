@@ -187,14 +187,14 @@ spec = do
                     Text.take 1 row `shouldBe` "╰"
                     Text.stripEnd row `shouldSatisfy` Text.isSuffixOf "╯"
 
-        it "renders reasoning summaries as Markdown instead of literal markers" do
+        it "renders expanded reasoning summaries as Markdown instead of literal markers" do
             let reasoningUi =
                     reduceUi
                         (UiLoop
                             (ReasoningDelta
                                 "**Inspecting dependencies**\n\n**Planning the fix**"))
                         (reduceUi (UiLoop TurnStarted) baseState.appUi)
-                app = baseState { appUi = reasoningUi }
+                app = baseState { appUi = reduceUi UiToggleSelected reasoningUi }
                 size = (80, 20)
                 rows =
                     pictureRows
@@ -208,9 +208,10 @@ spec = do
             rendered `shouldSatisfy` Text.isInfixOf "Planning the fix"
             rendered `shouldSatisfy` (not . Text.isInfixOf "**")
 
-        it "renders inline Markdown in thought blocks" do
+        it "renders inline Markdown in expanded thought blocks" do
             let app = baseState
                     { appUi =
+                        reduceUi UiToggleSelected $
                         reduceUi
                             (UiLoop
                                 (ReasoningDelta
@@ -380,7 +381,8 @@ spec = do
                             size
             frame `shouldSatisfy` Text.isInfixOf "Viewing /root/renderer"
             frame `shouldSatisfy` Text.isInfixOf "Investigate the renderer"
-            frame `shouldSatisfy`
+            frame `shouldSatisfy` Text.isInfixOf "Thought"
+            frame `shouldNotSatisfy`
                 Text.isInfixOf "Compare the retained block paths"
             frame `shouldSatisfy` Text.isInfixOf "rich-child"
             frame `shouldSatisfy` Text.isInfixOf "tool output"

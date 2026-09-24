@@ -133,7 +133,7 @@ import qualified Data.Map.Strict as Map ()
 import qualified Agent.CLI.TUI.Scroll as Scroll
     ( ConversationAnchor(anchorText, anchorReserveRows),
       conversationAnchorSticky )
-import qualified Data.Sequence as Seq ( (!?), length )
+import qualified Data.Sequence as Seq ( (!?), length, lookup )
 import qualified Data.Set as Set ( Set, member, toAscList )
 import qualified Data.Text as Text
     ( intercalate,
@@ -155,7 +155,7 @@ import qualified Agent.CLI.TUI.Transcript as Transcript
 import qualified Graphics.Vty.CrossPlatform as Vty ()
 
 
-import Agent.CLI.TUI.Render.Blocks (drawBlock, cacheableBlock)
+import Agent.CLI.TUI.Render.Blocks (drawBlock, cacheableBlock, compactActionBlock)
 
 terminalTxtWrap :: Text -> Widget n
 terminalTxtWrap = txtWrap . displayTerminalText
@@ -175,12 +175,22 @@ drawTranscriptChunks state =
 drawTranscriptContentChunks :: AppState -> [Widget Name]
 drawTranscriptContentChunks state =
     olderGap
-        <> map
-            (drawTranscriptChunk state AgentRoot state.appUi)
+        <> drawTranscriptChunkSequence state AgentRoot state.appUi
             state.appHistoryWindow.historyWindowTranscriptChunks
         <> newerGap
-        <> [drawConversationBlocks state AgentRoot state.appUi]
+        <> [ (if state.appHistoryWindow.historyWindowHasNewer
+                then id
+                else actionBoundary lastHistoryBlock firstLiveBlock)
+                (drawConversationBlocks state AgentRoot state.appUi)
+           ]
   where
+    lastHistoryBlock = do
+        blocks <- case reverse state.appHistoryWindow.historyWindowTranscriptChunks of
+            [] -> Nothing
+            blockChunk : _ -> Just blockChunk
+        Seq.lookup (Seq.length blocks - 1) blocks
+    firstLiveBlock =
+        Seq.lookup 0 (Transcript.coalesceInspectionBlocks state.appUi.uiBlocks)
     olderGap =
         historyGapWidget
             HistoryOlder
@@ -224,7 +234,13 @@ drawTranscriptChunk state target ui blocks =
         Nothing -> rendered
   where
     rendered =
-        vBox (map (drawBlock state target ui) (toList blocks))
+        vBox $
+            zipWith
+                (\previous block ->
+                    actionBoundary previous (Just block)
+                        (drawBlock state target ui block))
+                (Nothing : map Just (toList blocks))
+                (toList blocks)
     dynamicBlockIds =
         [ blockId
         | state.appUi.uiFocus == FocusScrollback
@@ -250,11 +266,28 @@ drawConversationBlocks
     -> Widget Name
 drawConversationBlocks state target ui =
     vBox $
-        map
-            (drawTranscriptChunk state target ui)
+        drawTranscriptChunkSequence state target ui
             ( Transcript.transcriptChunks
                 (Transcript.coalesceInspectionBlocks ui.uiBlocks)
             )
+
+-- Boundary padding lives outside the cached chunk: changing the preceding
+-- chunk must not leave its successor with a stale leading gap.
+drawTranscriptChunkSequence
+    :: AppState -> AgentTarget -> UiState -> [Seq UiBlock] -> [Widget Name]
+drawTranscriptChunkSequence state target ui chunks =
+    zipWith
+        (\previous blocks ->
+            actionBoundary previous (Seq.lookup 0 blocks)
+                (drawTranscriptChunk state target ui blocks))
+        (Nothing : map (\blocks -> Seq.lookup (Seq.length blocks - 1) blocks) chunks)
+        chunks
+
+actionBoundary :: Maybe UiBlock -> Maybe UiBlock -> Widget Name -> Widget Name
+actionBoundary (Just previous) (Just following)
+    | compactActionBlock previous && not (compactActionBlock following) =
+        padTop (Pad 1)
+actionBoundary _ _ = id
 
 historyRangeWidgets :: AppState -> [Widget Name]
 historyRangeWidgets state =
