@@ -16,6 +16,7 @@ import Agent.Image.Normalize
     ( NormalizedImage(..)
     , normalizeImageDataUrl
     , normalizeImageForPrompt
+    , prepareImageDataUrl
     )
 import Agent.InterAgentMessage (InterAgentMessage)
 import Agent.Json (RawJson, rawJsonBytes, rawJsonFromEncoding)
@@ -36,8 +37,10 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
 import Data.List.NonEmpty (NonEmpty)
+import Data.Either (partitionEithers)
 import qualified Data.List.NonEmpty as NonEmpty
 import Data.Text (Text)
+import qualified Data.Text as Text
 
 -- | Image bytes attached to a user turn (PNG/JPEG/…).
 data ImageAttachment = ImageAttachment
@@ -137,11 +140,16 @@ normalizeTurnInputImages = \case
         file@FileAttachmentItem{} -> file
 
     normalizeToolResultImages result@ToolCallResult{toolResultImages} =
-        result { toolResultImages = fmap normalizeToolResultImage toolResultImages }
+        let (errors, images) =
+                partitionEithers (map normalizeToolResultImage toolResultImages)
+        in result
+            { toolResultImages = images
+            , output = Text.intercalate "\n" (result.output : errors)
+            }
 
-    normalizeToolResultImage :: ToolResultImage -> ToolResultImage
+    normalizeToolResultImage :: ToolResultImage -> Either Text ToolResultImage
     normalizeToolResultImage image@ToolResultImage{imageUrl} =
-        image { imageUrl = normalizeImageDataUrl imageUrl }
+        (\prepared -> ToolResultImage prepared image.imageDetail) <$> prepareImageDataUrl imageUrl
 
 normalizeTurnInputs :: [TurnInput] -> [TurnInput]
 normalizeTurnInputs = map normalizeTurnInputImages
@@ -196,9 +204,13 @@ normalizeResponseContentPartImage
     :: ResponseContentPart
     -> ResponseContentPart
 normalizeResponseContentPartImage part@InputImagePart{imageUrl} =
-    part
-        { imageUrl = fmap normalizeImageDataUrl imageUrl
-        }
+    case traverse prepareImageDataUrl imageUrl of
+        Left reason ->
+            InputTextPart
+                { text = reason
+                , promptCacheBreakpoint = part.promptCacheBreakpoint
+                }
+        Right prepared -> part { imageUrl = prepared }
 normalizeResponseContentPartImage part = part
 
 normalizeRawJsonImages :: RawJson -> RawJson
@@ -230,8 +242,12 @@ normalizeJsonImageValues = \case
             (Just (Aeson.String kind), Just (Aeson.String imageUrl))
                 | kind == "input_image"
                     || kind == "computer_screenshot" ->
-                        KeyMap.insert
-                            "image_url"
-                            (Aeson.String (normalizeImageDataUrl imageUrl))
-                            object
+                        case prepareImageDataUrl imageUrl of
+                            Right prepared ->
+                                KeyMap.insert "image_url" (Aeson.String prepared) object
+                            Left reason ->
+                                KeyMap.fromList
+                                    [ ("type", Aeson.String "input_text")
+                                    , ("text", Aeson.String reason)
+                                    ]
             _ -> object

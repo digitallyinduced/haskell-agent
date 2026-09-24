@@ -3,6 +3,8 @@ module Agent.Image.Normalize
     ( NormalizedImage(..)
     , normalizeImageForPrompt
     , normalizeImageDataUrl
+    , prepareImageDataUrl
+    , imageProcessingErrorPlaceholder
     ) where
 
 import Codec.Picture
@@ -568,6 +570,87 @@ normalizeImageDataUrl url =
                             <> ";base64,"
                             <> TextEncoding.decodeUtf8
                                 (Base64.encode normalizedBytes)
+
+-- | A recoverable replacement, deliberately independent of tool/provider
+-- names. Never include the original payload in the error.
+imageProcessingErrorPlaceholder :: Text
+imageProcessingErrorPlaceholder =
+    "image content omitted because it could not be processed"
+
+-- | Prepare inline image content at the shared model-input boundary. Remote
+-- URLs retain their existing provider-specific behavior. Formats supported by
+-- our bounded decoder are checked even when already small enough; resizing
+-- alone is not validation. Other formats retain the existing pass-through
+-- behavior after base64 validation.
+prepareImageDataUrl :: Text -> Either Text Text
+prepareImageDataUrl url
+    | not ("data:" `Text.isPrefixOf` Text.toLower url) = Right url
+    | otherwise =
+        case parseImageDataUrl url of
+            Nothing -> Left imageProcessingErrorPlaceholder
+            Just (mime, bytes)
+                | ByteString.null bytes
+                    || not (validImageMime mime)
+                    || TextEncoding.decodeUtf8 (Base64.encode bytes)
+                        /= Text.drop 1 (snd (Text.breakOn "," url)) ->
+                        Left imageProcessingErrorPlaceholder
+                | otherwise ->
+                    case encodedImageHeader bytes of
+                        Nothing
+                            | Text.toLower (Text.takeWhile (/= ';') mime) `elem`
+                                ["image/png", "image/jpeg", "image/jpg", "image/bmp"] ->
+                                    Left imageProcessingErrorPlaceholder
+                            | otherwise -> Right url
+                        Just header
+                            | not (headerSafeToDecode bytes header)
+                                || not (encodedPayloadSafeToDecode bytes header) ->
+                                    Left imageProcessingErrorPlaceholder
+                            | otherwise ->
+                                case decodeSupportedImage header.encodedImageFormat bytes of
+                                    Left _ -> Left imageProcessingErrorPlaceholder
+                                    Right (decoded, _)
+                                        | dynamicImageSafeToProcess decoded ->
+                                            Right (normalizeImageDataUrl url)
+                                        | otherwise ->
+                                            Left imageProcessingErrorPlaceholder
+  where
+    validImageMime mime =
+        case Text.splitOn ";" (Text.drop 6 mime) of
+            subtype : parameters ->
+                validToken subtype && all validParameter parameters
+            [] -> False
+    validToken token =
+        not (Text.null token) && Text.all tokenCharacter token
+    tokenCharacter character =
+        asciiAlphaNumeric character
+            || Text.any (== character) "!#$%&'*+-.^_`|~"
+    asciiAlphaNumeric character =
+        (character >= 'a' && character <= 'z')
+            || (character >= 'A' && character <= 'Z')
+            || (character >= '0' && character <= '9')
+    validParameter parameter =
+        let (attribute, valueWithEquals) = Text.breakOn "=" parameter
+            value = Text.drop 1 valueWithEquals
+        in validToken attribute
+            && not (Text.null value)
+            && validParameterValue value
+    -- RFC 2397 parameters use URL escaping, not MIME quoted strings. Check
+    -- escapes without decoding delimiters or modifying the provider's URL.
+    validParameterValue value =
+        case Text.uncons value of
+            Nothing -> True
+            Just ('%', rest) ->
+                Text.length (Text.take 2 rest) == 2
+                    && Text.all hexadecimalDigit (Text.take 2 rest)
+                    && validParameterValue (Text.drop 2 rest)
+            Just (character, rest) ->
+                (asciiAlphaNumeric character
+                    || Text.any (== character) "$-_.+!~*'(),/:?@&=")
+                    && validParameterValue rest
+    hexadecimalDigit character =
+        (character >= '0' && character <= '9')
+            || (character >= 'a' && character <= 'f')
+            || (character >= 'A' && character <= 'F')
 
 parseImageDataUrl :: Text -> Maybe (Text, ByteString)
 parseImageDataUrl url = do

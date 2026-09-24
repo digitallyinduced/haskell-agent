@@ -1,6 +1,19 @@
 module Agent.Tools.CodeMode.HostSpec (spec) where
 
-import Agent.Loop (defaultLoopDispatch)
+import Agent.Cancel (newCancelFlag)
+import Agent.Loop
+    ( Backend(Backend)
+    , BackendResult(..)
+    , BackendStateStore(..)
+    , LoopConfig(..)
+    , ToolApproval(..)
+    , TurnInput(..)
+    , defaultLoopDispatch
+    , defaultLoopMaxTurns
+    , emptyBackendSnapshot
+    , emptyTurnOutput
+    , runLoopInputs
+    )
 import qualified Agent.Json.Decode as Json
 import Agent.ToolArgs (objectArgsExact, reqInt)
 import Agent.ToolDispatch
@@ -10,6 +23,7 @@ import Agent.ToolDispatch
     , ToolHandler
     , customToolCall
     , dispatchToolCall
+    , functionToolCall
     , textTool
     , typedTool
     )
@@ -24,6 +38,7 @@ import Agent.Tools.Types
     , appToolSupportsAsync
     , freeformApplyPatchAppToolWithExecution
     , jsonAppToolWithExecution
+    , mkToolRegistry
     )
 import Control.Concurrent
     ( newEmptyMVar
@@ -717,6 +732,51 @@ spec = describe "code-mode Bun host" do
             _ -> False
         closeCodeModeHost host
 
+    mapM_ (\(label, source) ->
+        it ("prepares malformed image content from " <> label <> " at the shared input boundary") do
+            withImagePreparationToolSet \toolSet -> do
+                result <- runRegisteredExecResult toolSet
+                    ("text(\"before\"); " <> source <> " text(\"after\");")
+                result.output `shouldSatisfy` Text.isInfixOf "Script completed"
+                length result.toolResultImages `shouldBe` 1
+                _ <- assertPreparedImageResult result
+                recovered <- runRegisteredExec toolSet "text(\"recovered\");"
+                recovered `shouldSatisfy` Text.isInfixOf "Script completed"
+                recovered `shouldSatisfy` Text.isInfixOf "recovered"
+        )
+        [ ("a concatenated shell result", "image(\"data:image/png;base64,\" + { stdout: \"AA==\" });")
+        , ("formatted shell output", "image(\"data:image/png;base64,\" + \"Exit code: 0\\nOutput:\\nAA==\");")
+        , ("an image_url object", "image({ image_url: \"data:image/png;base64,not base64\" });")
+        , ("a raw MCP image", "image({ type: \"image\", mimeType: \"image/png\", data: \"not base64\" });")
+        , ("an MCP image data URL", "image({ type: \"image\", data: \"data:image/png;base64,not base64\" });")
+        , ("generatedImage", "generatedImage({ image_url: \"data:image/png;base64,not base64\" });")
+        , ("an empty payload", "image(\"data:image/png;base64,\");")
+        , ("a non-image MIME type", "image(\"data:text/plain;base64,AA==\");")
+        , ("invalid padding", "image(\"data:image/png;base64,A===\");")
+        ]
+
+    it "prepares yielded malformed images without terminating the running script" do
+        withImagePreparationToolSet \toolSet -> do
+            result <- runRegisteredExecResult toolSet
+                "text('before'); image('data:image/png;base64,not base64'); text('after'); yield_control(); await new Promise(resolve => setTimeout(resolve, 30)); text('continued');"
+            result.output `shouldSatisfy` Text.isInfixOf "Script running with cell ID 1"
+            length result.toolResultImages `shouldBe` 1
+            _ <- assertPreparedImageResult result
+            continued <- dispatchToolCall defaultLoopDispatch
+                (map (.appToolHandler) toolSet.codeModeTools)
+                (functionToolCall "wait-call" "wait" "{\"cell_id\":\"1\",\"yield_time_ms\":3000}")
+            continued.output `shouldSatisfy` Text.isInfixOf "Script completed"
+            continued.output `shouldSatisfy` Text.isInfixOf "continued"
+
+    it "prepares malformed images in partial output without losing the script error" do
+        withImagePreparationToolSet \toolSet -> do
+            result <- runRegisteredExecResult toolSet
+                "text('before'); image('data:image/png;base64,not base64'); text('after'); throw new Error('script failure');"
+            length result.toolResultImages `shouldBe` 1
+            prepared <- assertPreparedImageResult result
+            prepared.output `shouldSatisfy` Text.isInfixOf "Script failed"
+            prepared.output `shouldSatisfy` Text.isInfixOf "script failure"
+
     it "validates generated image metadata before emitting image content" do
         let config = defaultCodeModeConfig
                 "data/code-mode/worker.mjs"
@@ -1107,15 +1167,70 @@ toolHandlerOf tool = tool.appToolHandler
 
 -- Run the registered exec tool end to end through its dispatch handler.
 runRegisteredExec :: CodeModeToolSet -> Text.Text -> IO Text.Text
-runRegisteredExec toolSet source =
+runRegisteredExec toolSet source = (.output) <$> runRegisteredExecResult toolSet source
+
+runRegisteredExecResult :: CodeModeToolSet -> Text.Text -> IO ToolCallResult
+runRegisteredExecResult toolSet source =
     case toolSet.codeModeTools of
-        execTool_ : _ -> do
-            result <- dispatchToolCall
+        execTool_ : _ ->
+            dispatchToolCall
                 defaultLoopDispatch
                 [execTool_.appToolHandler]
                 (customToolCall "exec-call" "exec" source)
-            pure result.output
         [] -> fail "missing exec tool"
+
+withImagePreparationToolSet :: (CodeModeToolSet -> IO ()) -> IO ()
+withImagePreparationToolSet action = do
+    worker <- codeModeWorkerPath
+    let create = newCodeModeToolSet CodeOnlyToolMode ImageDetailVisible
+            worker (\_ _ -> pure (Left "no tools")) [] >>= either
+                (\err -> expectationFailure (Text.unpack err) >> fail "unreachable")
+                pure
+    bracket create (.closeCodeModeToolSet) action
+
+assertPreparedImageResult :: ToolCallResult -> IO ToolCallResult
+assertPreparedImageResult result = do
+    submitted <- newIORef []
+    state <- newIORef emptyBackendSnapshot
+    cancel <- newCancelFlag
+    let backend = Backend \snapshot _ inputs _ -> do
+            writeIORef submitted inputs
+            pure (Right BackendResult
+                { backendOutput = emptyTurnOutput "completed" [] (Just "continued")
+                , backendState = snapshot
+                })
+        config = LoopConfig
+            { loopBackend = backend
+            , loopBackendState = BackendStateStore
+                { readBackendState = readIORef state
+                , commitBackendState = \snapshot ->
+                    writeIORef state snapshot >> pure snapshot
+                }
+            , loopTools = either (error . Text.unpack) id (mkToolRegistry [])
+            , loopReadTools = Nothing
+            , loopDispatch = defaultLoopDispatch
+            , loopMaxTurns = defaultLoopMaxTurns
+            , loopOnEvent = \_ -> pure ()
+            , loopApprove = \_ -> pure ToolApprovalGranted
+            , loopReadSteering = pure []
+            , loopCommitSteering = \_ -> pure ()
+            , loopInterrupt = pure ()
+            , loopCancel = cancel
+            }
+    completed <- runLoopInputs config Nothing [CompletedTool result]
+    completed `shouldSatisfy` either (const False) (const True)
+    readIORef submitted >>= \case
+        [CompletedTool prepared] -> do
+            prepared.toolResultImages `shouldBe` []
+            prepared.output `shouldSatisfy` Text.isInfixOf "before"
+            prepared.output `shouldSatisfy` Text.isInfixOf "after"
+            prepared.output `shouldSatisfy`
+                Text.isInfixOf "image content omitted because it could not be processed"
+            prepared.callId `shouldBe` result.callId
+            pure prepared
+        other -> do
+            expectationFailure ("unexpected prepared input: " <> show other)
+            fail "missing prepared tool result"
 
 newtype DoubleArgs = DoubleArgs { value :: Int }
 
