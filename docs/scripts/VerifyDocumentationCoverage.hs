@@ -155,6 +155,15 @@ toolNames sources = do
             _ -> Left ("Unrecognized built-in tool name: " <> name)
     resolve _ _ = Left "Unrecognized built-in tool name"
 
+-- Inventory the accepted wire tags, including aliases, rather than just the
+-- constructors emitted by the encoder. Unknown extension tags remain open.
+responseItemNames :: Text -> Either Text (Set Text)
+responseItemNames source = nonempty "Response item tag" $ Set.fromList
+    [ name
+    | Literal name : Symbol '-' : Symbol '>' : Identifier constructor : _ <- tails (tokens source)
+    , "Item" `Text.isPrefixOf` constructor
+    ]
+
 missingNames :: Set Text -> Text -> [Text]
 missingNames names body = filter (not . present) (Set.toAscList names)
   where
@@ -251,6 +260,7 @@ verify address output = do
         , (,) "machine configuration keys" <$> load decoderNames "packages/agent-runtime/src/Agent/Runtime/Config.hs"
         , (,) "model catalog keys" <$> load decoderNames "packages/agent-runtime/src/Agent/Runtime/ModelConfig.hs"
         , (,) "persisted settings keys" <$> load decoderNames "packages/agent-runtime/src/Agent/Runtime/Project.hs"
+        , (,) "response history item tags" <$> load responseItemNames "packages/agent-responses-types/src/Agent/Responses/Types/Items/Known.hs"
         , (,) "agent-tools JSON descriptor names" <$> (sourceFiles (root </> "packages/agent-tools/src") >>= traverse Text.readFile >>= either (die . Text.unpack) pure . toolNames)
         ]
     failures <- forM registries $ \(label, names) -> do
@@ -263,6 +273,10 @@ verify address output = do
 
 selfTest :: IO ()
 selfTest = hspec $ describe "Documentation coverage inventory" $ do
+    it "requires known history tags and aliases but ignores comments and unknown extensions" $ do
+        responseItemNames "\"compaction\" -> ItemCompaction\n\"compaction_summary\" -> ItemCompaction\nother -> ItemUnknownType other\n-- \"fake\" -> ItemMessage"
+            `shouldBe` Right (Set.fromList ["compaction", "compaction_summary"])
+        responseItemNames "other -> ItemUnknownType other" `shouldSatisfy` isLeft
     it "resolves literal and constant tool names and rejects unknown expressions" $ do
         toolNames ["jsonTool \"read_file\" description\njsonAppToolWithExecution chartName description\nchartName = \"render_chart\"\n"] `shouldBe` Right (Set.fromList ["read_file", "render_chart"])
         toolNames ["jsonTool unknownName description"] `shouldSatisfy` isLeft

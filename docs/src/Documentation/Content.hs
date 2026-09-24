@@ -33,6 +33,7 @@ import qualified Documentation.Pages.PersistedSettings as PersistedSettings
 import qualified Documentation.Pages.BrowserControl as BrowserControl
 import qualified Documentation.Pages.Deployment as Deployment
 import qualified Documentation.Pages.NativeIntegration as NativeIntegration
+import qualified Documentation.Pages.NativeMedia as NativeMedia
 import qualified Documentation.Pages.RuntimeDaemon as RuntimeDaemon
 import qualified Documentation.Pages.ScheduledWork as ScheduledWork
 import qualified Documentation.Pages.Server as Server
@@ -79,4 +80,5 @@ pages =
     , Server.page
     , RuntimeDaemon.page
     , NativeIntegration.page
+    , NativeMedia.page
     ]

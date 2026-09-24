@@ -34,6 +34,10 @@ page = Page
         account needs an available ChatGPT account. Voice signaling keeps one admitted
         credential; it does not retry an ambiguously created call with another identity.
         This workflow is separate from the transcription routing table below.</p>
+        <p>Embedding a native call instead? See the
+        <a href="/reference/native-media/">native voice, mobile and media contracts</a>
+        for capture/playback ownership, pairing and transport lifetimes. An exported
+        media interface does not imply that a phone or desktop application ships here.</p>
         <h2 id="dictate-a-prompt">Dictate a prompt</h2>
         <ol>
             <li>Open an interactive agent session and select a supported model.</li>

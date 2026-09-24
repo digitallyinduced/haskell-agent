@@ -33,6 +33,119 @@ page = Page
         <p>Other named Haskell package outputs support embedding/development. Use
         <code>nix develop</code> for the harness or <code>nix develop .#docs</code> for this
         site's focused GHCi environment.</p>
+        <h2 id="sandbox-provisioning">Provision the Linux sandbox boundary</h2>
+        <p>The runner and root filesystem are a matched pair selected by the flake.
+        On a Linux builder, inspect the artifacts without starting a tenant:</p>
+        <pre><code class="language-sh">{sandboxArtifacts}</code></pre>
+        <p>The rootfs output is an unpacked immutable directory, not a Docker archive
+        or bootable machine image. It contains the guest worker, shell, Git, Nix,
+        document tools, certificates and a Nix registration seed. The runner contains
+        the selected rootfs store path; do not substitute a separately modified tree.
+        These build commands establish neither isolation nor a running server.</p>
+        <ol>
+            <li>Use a Linux NixOS host with unified cgroup v2, the cpu/memory/pids
+            controllers and working unprivileged user/network namespaces. The packaged
+            gVisor uses systrap; the runner uses slirp4netns and namespace-local nftables.</li>
+            <li>Import <code>haskell-agent.nixosModules.agent-server</code> from the
+            locked input. Provision non-overlapping workspaces, owner-only registry
+            and credential files as described in
+            <a href="/reference/server/#tenant-provisioning">tenant provisioning</a>.
+            List every workspace in the module's <code>workspaceRoots</code>.</li>
+            <li>Apply the module fragment below in that NixOS configuration. Replace
+            example paths with the already provisioned paths; this fragment does
+            not create tenants or credentials.</li>
+        </ol>
+        <pre><code class="language-nix">{sandboxService}</code></pre>
+        <p>Deploy with <code>sudo nixos-rebuild switch --flake .#agent-host</code>,
+        using your configuration's actual host name. Keep the initial listener on
+        loopback. Remote exposure additionally requires TLS termination, authentication
+        rate limits, <code>allowRemote</code> and an explicit listener configuration.</p>
+        <p>The module creates a dedicated unprivileged account without supplementary
+        groups, removes every capability, sets <code>NoNewPrivileges</code>, and delegates
+        exactly cpu/memory/pids to its supervisor subgroup. It installs the runner under
+        root-owned <code>/run/haskell-agent-server-runners/STATE/GENERATION/</code>.
+        A direct runner path in a conventional group-writable Nix-store ancestry is
+        intentionally rejected. Do not relax the ancestry check or run as root to
+        bypass a failure. Launching the runner from an ordinary shell does not reproduce
+        the module's security boundary.</p>
+        <h3 id="sandbox-protocol">Runner protocol and resource boundary</h3>
+        <p>This is a private, revision-coupled server/worker protocol, not an additional
+        public automation API. The server invokes <code>serve</code> with
+        <code>--protocol-version 1</code>, tenant UUID, workspace path, recorded workspace
+        device/inode and state path. Stdin must be a read-only pipe; stdout carries
+        newline-delimited JSON and stderr carries private diagnostics. Never insert
+        logging on protocol stdout.</p>
+        <table><thead><tr><th>Phase</th><th>Required interpretation</th></tr></thead><tbody>
+            <tr><td>Readiness</td><td><code>type: ready</code>, version, tenantId, generation UUID, workspace <code>/workspace</code> and state <code>/state</code>. The broker validates identity and mounts before admitting tools.</td></tr>
+            <tr><td>Request</td><td><code>type: tool</code>, version, tenantId, generation, requestId, sessionId, cwd, dialect and call. The call carries id, name, arguments, kind and argumentsEncrypted; async is optional. Encrypted arguments are rejected.</td></tr>
+            <tr><td>Progress and completion</td><td><code>output</code> frames carry output; <code>result</code> frames carry ok/output and optional images. Both bind tenantId, generation and requestId. A progress frame is not successful completion.</td></tr>
+            <tr><td>Limits</td><td>4 MiB requests and 16 MiB response frames. The worker stops emitting progress frames after 8 MiB of accumulated streamed output; the broker has a separate 16 MiB defensive streaming limit. Readiness has a 60-second deadline and tools have a 15-minute deadline. Schema, identity, timeout or transport failures fail closed, never executing the tool on the host instead.</td></tr>
+        </tbody></table>
+        <p>Only the tenant workspace and guest-data directory are writable host binds.
+        The runner pins their directory descriptors and rejects workspace device/inode
+        substitution. Each sandbox tree, including its network helper, is limited to
+        two CPUs, 2 GiB RAM without swap and 512 processes; the rootfs has a private
+        4 GiB overlay and 256 MiB mutable Nix-state tmpfs. Workspace/state disk quotas
+        and database quotas/backups remain operator responsibilities. Outbound networking
+        rejects private, loopback, link-local, metadata, reserved, IPv6 and captured host
+        addresses. Host address changes retire the sandbox; no inbound service is exposed.</p>
+        <h3 id="sandbox-recovery">Verify and recover without weakening isolation</h3>
+        <pre><code class="language-sh">{"systemctl status haskell-agent-server\njournalctl -u haskell-agent-server -n 100 --no-pager\nsystemctl show haskell-agent-server -p User -p Group -p NoNewPrivileges -p Delegate -p ControlGroup\ncurl --fail http://127.0.0.1:4096/healthz" :: Text}</code></pre>
+        <p>A healthy HTTP listener does not prove a sandbox can start. After authentication,
+        run a read-only request that actually uses a workspace inspection tool and verify
+        its result. For startup failures, inspect namespace/cgroup availability, runner
+        generation, workspace ownership and registry identity; diagnostics may contain
+        sensitive paths and belong in a private operator channel.</p>
+        <p>If cleanup cannot prove descendant termination, the runner retains the tenant
+        lock and fail-stops; a stale tenant cgroup blocks replacement. Stop the service
+        and verify that its complete control group is empty before investigating retained
+        state. Never delete a lock or cgroup while processes remain. Preserve diagnostic
+        state, correct the host prerequisite, then restart and revalidate a read-only
+        tool call. An interrupted mutation may already have changed files or remote
+        systems; inspect before retrying. Upgrades and rollback use generation-addressed
+        runner paths, so existing processes never silently switch runner executables.</p>
+        <h2 id="darwin-artifacts">Build and inspect Darwin artifacts</h2>
+        <p>Run these commands in the pinned checkout on a supported Darwin builder.
+        The bridge output contains <code>include/HaskellAgentBridge.h</code> and
+        <code>lib/libhaskell-agent-bridge.dylib</code>. It is not the relocatable CLI
+        bundle, an application bundle, or a signed/notarized GUI release.</p>
+        <pre><code class="language-sh">{darwinArtifacts}</code></pre>
+        <p>Compile native consumers against that output's header, not a header from
+        another revision. For the <code>highlight.c</code> example in
+        <a href="/reference/native-integration/#first-host-call">native integration</a>,
+        a linker invocation is:</p>
+        <pre><code class="language-sh">{"nix develop -c cc -I \"$bridge/include\" highlight.c \\\n  -L \"$bridge/lib\" -lhaskell-agent-bridge \\\n  -Wl,-rpath,\"$bridge/lib\" -o highlight" :: Text}</code></pre>
+        <p>Inspect <code>otool -L</code> output before distribution: the foreign-library
+        output preserves its Nix dependency closure and is not independently portable.
+        Keep that closure available on the development host. A distributing native
+        application must separately supply data files, dependency relocation, signing
+        and entitlement policy, and the host callbacks documented by the bridge.
+        This command is a build recipe, not evidence that an external application was tested.</p>
+        <h3 id="portable-cli-installation">Install the complete portable CLI directory</h3>
+        <p>The CLI archive is <code>haskell-agent-macos-arm64.tar.gz</code> on Apple
+        Silicon or <code>haskell-agent-macos-x86_64.tar.gz</code> on Intel, if that
+        architecture is supported by the pinned Nixpkgs. A sibling <code>.sha256</code>
+        file accompanies it. Verify the release source independently; a checksum
+        detects corruption but is not a publisher signature.</p>
+        <pre><code class="language-sh">{portableInstallation}</code></pre>
+        <p>The example assumes an Apple Silicon archive copied into the current
+        directory and a previously unused installation destination. Use a fresh
+        versioned destination for upgrades rather than merging two releases.
+        Keep the complete extracted tree: <code>bin</code> includes agent-cli,
+        FFmpeg, Bun, ripgrep and zstd; <code>lib/deps</code> contains relocated libraries;
+        <code>libexec/postgresql</code> contains PostgreSQL 18; <code>share</code> contains
+        prompts, skills, runtime configuration, syntax definitions, time zones, the
+        portable marker and license notices. Copying only agent-cli loses these
+        runtime dependencies. The bundle build applies ad-hoc signatures, not an
+        Apple Developer ID/notarization guarantee. Do not instruct users to disable
+        Gatekeeper; verify the distributor's release/signing procedure.</p>
+        <p>The archive targets the CLI, not an installable conversation GUI. Nix is
+        needed to build these artifacts; the portable archive is designed to run
+        without a Nix installation. Project-specific tools, provider access and
+        operating-system permissions remain separate prerequisites. Preserve user
+        data and back it up before changing application or database versions.
+        These artifact and sandbox recipes were checked against source, not deployed
+        to a Linux host or a clean non-Nix Mac as part of this documentation change.</p>
         <h2 id="documentation">Host the documentation</h2>
         <p>For the full deployment and upgrade walkthrough, see
         <a href="/guides/documentation/">self-hosting the documentation</a>.
@@ -187,3 +300,38 @@ documentationService = "{ pkgs, haskell-agent, ... }: {\n\
     \    };\n\
     \  };\n\
     \}"
+
+sandboxArtifacts :: Text
+sandboxArtifacts = "runner=$(nix build .#agent-sandbox-runner --no-link --print-out-paths)\n\
+    \rootfs=$(nix build .#agent-sandbox-rootfs --no-link --print-out-paths)\n\
+    \test -x \"$runner/bin/agent-sandbox-runner\"\n\
+    \test -x \"$rootfs/bin/agent-sandbox-worker\"\n\
+    \test -s \"$rootfs/nix-state-seed/db/db.sqlite\""
+
+sandboxService :: Text
+sandboxService = "{ haskell-agent, ... }: {\n\
+    \  imports = [ haskell-agent.nixosModules.agent-server ];\n\
+    \  services.haskell-agent.server = {\n\
+    \    enable = true;\n\
+    \    tenantRegistryFile = \"/run/credentials/agent-tenants.json\";\n\
+    \    workspaceRoots = [ \"/srv/agent-workspaces/acme\" ];\n\
+    \    host = \"127.0.0.1\";\n\
+    \    maxActiveTenants = 16;\n\
+    \  };\n\
+    \}"
+
+darwinArtifacts :: Text
+darwinArtifacts = "bridge=$(nix build .#agent-native-bridge --no-link --print-out-paths)\n\
+    \bundle=$(nix build .#agent-cli-macos-bundle --no-link --print-out-paths)\n\
+    \archive=$(nix build .#agent-cli-macos-archive --no-link --print-out-paths)\n\
+    \test -f \"$bridge/include/HaskellAgentBridge.h\"\n\
+    \otool -L \"$bridge/lib/libhaskell-agent-bridge.dylib\"\n\
+    \\"$bundle/bin/agent-cli\" --version\n\
+    \ls \"$archive\""
+
+portableInstallation :: Text
+portableInstallation = "shasum -a 256 -c haskell-agent-macos-arm64.tar.gz.sha256\n\
+    \mkdir -p \"$HOME/Applications\"\n\
+    \test ! -e \"$HOME/Applications/haskell-agent-macos-arm64\" && \\\n\
+    \  tar -xzf haskell-agent-macos-arm64.tar.gz -C \"$HOME/Applications\"\n\
+    \\"$HOME/Applications/haskell-agent-macos-arm64/bin/agent-cli\" --version"
