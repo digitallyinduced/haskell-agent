@@ -79,7 +79,7 @@ page = Page
             <tr><td>Readiness</td><td><code>type: ready</code>, version, tenantId, generation UUID, workspace <code>/workspace</code> and state <code>/state</code>. The broker validates identity and mounts before admitting tools.</td></tr>
             <tr><td>Request</td><td><code>type: tool</code>, version, tenantId, generation, requestId, sessionId, cwd, dialect and call. The call carries id, name, arguments, kind and argumentsEncrypted; async is optional. Encrypted arguments are rejected.</td></tr>
             <tr><td>Progress and completion</td><td><code>output</code> frames carry output; <code>result</code> frames carry ok/output and optional images. Both bind tenantId, generation and requestId. A progress frame is not successful completion.</td></tr>
-            <tr><td>Limits</td><td>4 MiB requests, 16 MiB response frames and accumulated streamed output, 60-second readiness and 15-minute tool deadlines. Schema, identity, timeout or transport failures fail closed, never executing the tool on the host instead.</td></tr>
+            <tr><td>Limits</td><td>4 MiB requests and 16 MiB response frames. The worker stops emitting progress frames after 8 MiB of accumulated streamed output; the broker has a separate 16 MiB defensive streaming limit. Readiness has a 60-second deadline and tools have a 15-minute deadline. Schema, identity, timeout or transport failures fail closed, never executing the tool on the host instead.</td></tr>
         </tbody></table>
         <p>Only the tenant workspace and guest-data directory are writable host binds.
         The runner pins their directory descriptors and rejects workspace device/inode
