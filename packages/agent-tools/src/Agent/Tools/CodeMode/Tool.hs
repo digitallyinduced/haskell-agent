@@ -753,6 +753,7 @@ execDescriptionTemplate detailVisibility =
         , "- `exit()`: Immediately ends the current script successfully (like an early return from the top level)."
         , "- `text(value: string | number | boolean | undefined | null)`: Appends a text item. Non-string values are stringified with `JSON.stringify(...)` when possible."
         , imageHelperDescription detailVisibility
+        , "- Native image tools such as `view_image` return an `{ image_url, output_hint? }` object, not MCP `content` blocks: use `image(await tools.view_image({ path: \"/absolute/path.png\" }))`. Do not construct image data URLs from formatted shell output."
         , "- `audio(audioUrlOrItem: string | { audio_url: string } | AudioContent)`: Appends an audio item. `audio_url` should be a base64-encoded `data:` URL. To forward an MCP tool audio block, pass an individual `AudioContent` block from `result.content`, for example `audio(result.content[0])`."
         , "- `generatedImage(result: { image_url: string; output_hint?: string })`: Appends an image-generation result and its optional output hint. HTTP(S) URLs are not supported."
         , "- `store(key: string, value: any)`: stores a serializable value under a string key for later `exec` calls in the same session."

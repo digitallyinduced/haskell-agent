@@ -717,6 +717,40 @@ spec = describe "code-mode Bun host" do
             _ -> False
         closeCodeModeHost host
 
+    mapM_ (\(label, source) ->
+        it ("rejects malformed image content from " <> label <> " without invalidating the next cell") do
+            let config = defaultCodeModeConfig
+                    "data/code-mode/worker.mjs"
+                    (\_ _ -> pure $ Left "no tools")
+            host <- newCodeModeHost config
+            failed <- execCodeCell host ("text(\"before\"); " <> source) [] 3000
+            failed `shouldSatisfy` \case
+                Right CodeModeFailed
+                    { cellValue = value
+                    , cellError = errorText
+                    } ->
+                        value == textContent "before"
+                            && "base64" `Text.isInfixOf` errorText
+                _ -> False
+            recovered <- execCodeCell host "text(\"recovered\");" [] 3000
+            recovered `shouldBe`
+                Right CodeModeFinished
+                    { cellId = "2"
+                    , cellValue = textContent "recovered"
+                    }
+            closeCodeModeHost host
+        )
+        [ ("a concatenated shell result", "image(\"data:image/png;base64,\" + { stdout: \"AA==\" });")
+        , ("formatted shell output", "image(\"data:image/png;base64,\" + \"Exit code: 0\\nOutput:\\nAA==\");")
+        , ("an image_url object", "image({ image_url: \"data:image/png;base64,not base64\" });")
+        , ("a raw MCP image", "image({ type: \"image\", mimeType: \"image/png\", data: \"not base64\" });")
+        , ("an MCP image data URL", "image({ type: \"image\", data: \"data:image/png;base64,not base64\" });")
+        , ("generatedImage", "generatedImage({ image_url: \"data:image/png;base64,not base64\" });")
+        , ("an empty payload", "image(\"data:image/png;base64,\");")
+        , ("a non-image MIME type", "image(\"data:text/plain;base64,AA==\");")
+        , ("invalid padding", "image(\"data:image/png;base64,A===\");")
+        ]
+
     it "validates generated image metadata before emitting image content" do
         let config = defaultCodeModeConfig
                 "data/code-mode/worker.mjs"
