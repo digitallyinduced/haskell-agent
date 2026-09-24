@@ -717,11 +717,11 @@
                         agent-responses-types = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-responses-types/package.nix { }) {
                             src = agentResponsesTypesSource;
                         });
-                        agent-codex-dialect = localPackage (pkgs.haskell.lib.overrideSrc
+                        agent-codex-dialect = localPackage (pkgs.haskell.lib.addTestToolDepends (pkgs.haskell.lib.overrideSrc
                             (final.callPackage ./packages/agent-codex-dialect/package.nix { })
                             {
                                 src = agentCodexDialectSource;
-                            });
+                            }) [ pkgs.ripgrep ]);
                         agent-grok-build-dialect = localPackage (
                             pkgs.haskell.lib.overrideSrc
                                 (final.callPackage ./packages/agent-grok-build-dialect/package.nix { })

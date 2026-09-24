@@ -19,12 +19,14 @@ import Agent.Codex.Dialect.Shell
     , newCodexShellSession
     , resetCodexShellSession
     , startCodexShellCommand
+    , startCodexShellCommandWithInputAuthorized
     )
 import Agent.Codex.Dialect.Tools (shellCommandIsReadOnly)
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
 import Agent.Tools.Background
     ( BackgroundTaskStatus(..), readBackgroundTasks, readBackgroundTasksSTM, setBackgroundTaskHooks )
 import Agent.Tools.IO (CommandResult(..))
+import Agent.Tools.ShellPermission (defaultShellExecutionAuthorization)
 import Agent.ToolDispatch
     ( ToolOutcome(..)
     , toolCallResultOutcome
@@ -148,7 +150,7 @@ spec = describe "Codex dialect" do
                 let handlers = appToolHandlers coding.codexAppTools
                 started <- dispatchApprovedRegisteredToolCall testDispatchConfig registry
                     (functionToolCall "start" "shell_command"
-                        "{\"command\":\"cat\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Test interactive approval\",\"yield_time_ms\":1}")
+                        "{\"command\":\"cat\",\"interactive\":true,\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Test interactive approval\",\"yield_time_ms\":1}")
                 case toolCallResultOutcome started of
                     Just (ShellRunning sessionId) -> do
                         let input = functionToolCall "input" "write_stdin"
@@ -175,6 +177,55 @@ spec = describe "Codex dialect" do
                             (functionToolCall "cancel" "write_stdin"
                                 ("{\"session_id\":" <> Text.pack (show sessionId) <> ",\"chars\":\"\\u0003\",\"yield_time_ms\":1000}"))
                         interrupted.output `shouldNotSatisfy` Text.isInfixOf "fresh user approval"
+                    _ -> expectationFailure (Text.unpack started.output)
+
+    it "searches files with pathless ripgrep in managed and timed commands" do
+        requireProcessSandbox
+        withTempDir \dir -> do
+            writeFile (dir </> "Example.hs") "claimNextLocalBrowserCommand = pure ()\n"
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket (newCodexCodingTools env Nothing Nothing) (.codexClose) \coding -> do
+                let check timing = do
+                        result <- dispatchToolCall testDispatchConfig
+                            (appToolHandlers coding.codexAppTools)
+                            (functionToolCall "directory-search" "shell_command"
+                                ("{\"command\":\"rg -n claimNextLocalBrowserCommand --glob '*.hs'; printf sequence-finished\""
+                                    <> timing <> "}"))
+                        toolCallResultOutcome result `shouldBe` Just (ShellExited 0)
+                        result.output `shouldSatisfy` Text.isInfixOf "Example.hs:1:claimNextLocalBrowserCommand"
+                        result.output `shouldSatisfy` Text.isInfixOf "sequence-finished"
+                mapM_ check ["", ",\"interactive\":false,\"yield_time_ms\":2000", ",\"timeout_ms\":2000"]
+                readBackgroundTasks env `shouldReturn` []
+
+    it "rejects interactive input combined with a fixed timeout before launching" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket (newCodexCodingTools env Nothing Nothing) (.codexClose) \coding -> do
+                result <- dispatchToolCall testDispatchConfig
+                    (appToolHandlers coding.codexAppTools)
+                    (functionToolCall "invalid-input-mode" "shell_command"
+                        "{\"command\":\"touch launched\",\"interactive\":true,\"timeout_ms\":1000}")
+                toolCallResultOutcome result `shouldBe` Just ToolFailed
+                result.output `shouldSatisfy` Text.isInfixOf "cannot be combined"
+                doesFileExist (dir </> "launched") `shouldReturn` False
+
+    it "sends input to a shell only when interactive mode is requested" do
+        requireProcessSandbox
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket (newCodexCodingTools env Nothing Nothing) (.codexClose) \coding -> do
+                let handlers = appToolHandlers coding.codexAppTools
+                started <- dispatchToolCall testDispatchConfig handlers
+                    (functionToolCall "interactive-start" "shell_command"
+                        "{\"command\":\"IFS= read -r value; printf 'received:%s' \\\"$value\\\"\",\"interactive\":true,\"yield_time_ms\":1}")
+                case toolCallResultOutcome started of
+                    Just (ShellRunning identifier) -> do
+                        completed <- dispatchToolCall testDispatchConfig handlers
+                            (functionToolCall "interactive-input" "write_stdin"
+                                ("{\"session_id\":" <> Text.pack (show identifier)
+                                    <> ",\"chars\":\"confirmed\\n\",\"yield_time_ms\":2000}"))
+                        toolCallResultOutcome completed `shouldBe` Just (ShellExited 0)
+                        completed.output `shouldSatisfy` Text.isInfixOf "received:confirmed"
                     _ -> expectationFailure (Text.unpack started.output)
 
     it "renders the Codex tool contract" do
@@ -749,7 +800,7 @@ spec = describe "Codex dialect" do
             setToolSteeringWait env (pure ())
             bracket (newCodexShellSession env) closeCodexShellSession \session -> do
                 started <- timeout 2000000 $
-                    startCodexShellCommand session env.toolCwd
+                    startCodexShellCommandWithInputAuthorized defaultShellExecutionAuthorization True session env.toolCwd
                         "read value; printf '%s' \"$value\"" 300000
                         (\_ _ -> pure ())
                 case started of
@@ -765,7 +816,7 @@ spec = describe "Codex dialect" do
             pending <- newTVarIO False
             setToolSteeringWait env (readTVar pending >>= check)
             bracket (newCodexShellSession env) closeCodexShellSession \session -> do
-                started <- startCodexShellCommand session env.toolCwd
+                started <- startCodexShellCommandWithInputAuthorized defaultShellExecutionAuthorization True session env.toolCwd
                     "read value; printf '%s' \"$value\"" 1 (\_ _ -> pure ())
                 commandId <- case started of
                     Right CodexShellRunning { codexShellSessionId = identifier } ->
@@ -831,7 +882,7 @@ spec = describe "Codex dialect" do
         withTempDir \dir -> do
             env <- defaultToolEnv (unsafeEncodeUtf dir)
             bracket (newCodexShellSession env) closeCodexShellSession \session -> do
-                started <- startCodexShellCommand session env.toolCwd
+                started <- startCodexShellCommandWithInputAuthorized defaultShellExecutionAuthorization True session env.toolCwd
                     "read value; printf '%s' \"$value\"" 1 (\_ _ -> pure ())
                 commandId <- case started of
                     Right CodexShellRunning { codexShellSessionId = identifier } ->

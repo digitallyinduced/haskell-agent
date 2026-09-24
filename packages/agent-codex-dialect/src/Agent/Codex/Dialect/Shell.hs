@@ -2,7 +2,8 @@
 --
 -- Each command still starts in a fresh shell. Commands that outlive their
 -- initial yield are retained under a numeric session id, report completion
--- automatically, and may still receive input through @write_stdin@.
+-- automatically, and, when explicitly interactive, may receive input through
+-- @write_stdin@.
 module Agent.Codex.Dialect.Shell
     ( CodexShellSession
     , CodexShellResult(..)
@@ -11,6 +12,7 @@ module Agent.Codex.Dialect.Shell
     , closeCodexShellSession
     , startCodexShellCommand
     , startCodexShellCommandAuthorized
+    , startCodexShellCommandWithInputAuthorized
     , continueCodexShellCommand
     , continueCodexShellCommandAuthorized
     , codexShellCommandIsEscalated
@@ -48,6 +50,7 @@ import Agent.Tools.IO
     , runningLiveOutput
     , runningOutputSince
     , startShellCommandWithInputAndCompletionAuthorized
+    , startShellCommandWithCompletionAuthorized
     , stopShellCommand
     , writeShellCommandInput
     )
@@ -175,9 +178,21 @@ startCodexShellCommandAuthorized
     -> Int
     -> (Text -> Text -> IO ())
     -> IO (Either Text CodexShellResult)
-startCodexShellCommandAuthorized authorization session workdir command yieldMs onSnapshot =
+startCodexShellCommandAuthorized authorization =
+    startCodexShellCommandWithInputAuthorized authorization False
+
+startCodexShellCommandWithInputAuthorized
+    :: ShellExecutionAuthorization
+    -> Bool
+    -> CodexShellSession
+    -> OsPath
+    -> Text
+    -> Int
+    -> (Text -> Text -> IO ())
+    -> IO (Either Text CodexShellResult)
+startCodexShellCommandWithInputAuthorized authorization keepStdin session workdir command yieldMs onSnapshot =
     mask \restore -> do
-        startManagedCommand authorization session workdir command >>= \case
+        startManagedCommand authorization keepStdin session workdir command >>= \case
             Left err -> pure (Left err)
             Right (commandId, task) ->
                 restore
@@ -351,11 +366,12 @@ takeRunningOutput task =
 
 startManagedCommand
     :: ShellExecutionAuthorization
+    -> Bool
     -> CodexShellSession
     -> OsPath
     -> Text
     -> IO (Either Text (Int, ManagedCommand))
-startManagedCommand authorization session workdir command =
+startManagedCommand authorization keepStdin session workdir command =
     do
         (stale, result) <-
             modifyMVar session.sessionCommands \case
@@ -412,7 +428,10 @@ startManagedCommand authorization session workdir command =
                                                     })
                             registerBackgroundTask
                                 session.sessionEnv key command True
-                            (startShellCommandWithInputAndCompletionAuthorized
+                            let startCommand = if keepStdin
+                                    then startShellCommandWithInputAndCompletionAuthorized
+                                    else startShellCommandWithCompletionAuthorized
+                            (startCommand
                                 authorization
                                 session.sessionEnv
                                 workdir

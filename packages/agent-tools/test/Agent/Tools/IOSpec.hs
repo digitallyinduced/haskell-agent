@@ -718,6 +718,25 @@ spec = describe "Agent.Tools.IO" do
             result <- readMVar running.runningResult
             result.commandStdout `shouldBe` "eof"
 
+    it "uses a null device rather than a closed pipe for background-command stdin" do
+        withTempDir \dir -> do
+            let osDir = fromFilePath dir
+            env <- defaultToolEnv osDir
+            Right running <- startShellCommand env osDir
+                "test -c /dev/stdin && printf null-device"
+            flip finally (stopShellCommand running) do
+                result <- timeout 2000000 (readMVar running.runningResult)
+                fmap (.commandStdout) result `shouldBe` Just "null-device"
+
+    it "uses a null device for foreground-command stdin" do
+        withTempDir \dir -> do
+            let osDir = fromFilePath dir
+            env <- defaultToolEnv osDir
+            result <- runShellCommandStreaming env osDir
+                "test -c /dev/stdin && printf null-device" 2000 (\_ _ -> pure ())
+            result.commandExitCode `shouldBe` Just 0
+            result.commandStdout `shouldBe` "null-device"
+
     it "writes to retained background-command stdin" do
         withTempDir \dir -> do
             let osDir = fromFilePath dir

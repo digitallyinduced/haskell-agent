@@ -124,7 +124,7 @@ import System.FilePath
 import qualified System.Directory as Directory
 import System.Posix.User (getRealUserID)
 #endif
-import System.IO (Handle, hClose, hFlush)
+import System.IO (Handle, IOMode(ReadMode), hClose, hFlush, withFile)
 import System.Posix.Signals
     ( sigINT
     , signalProcessGroup
@@ -291,7 +291,9 @@ runShellCommandStreamingAuthorized authorization env workdir command timeoutMs o
             , create_group = True
             }
     try @_ @SomeException
-        (configuredProcessAuthorized authorization env baseSpec >>= createProcess) >>= \case
+        (configuredProcessAuthorized authorization env baseSpec >>= \spec ->
+            withCommandStdin False \stdin ->
+                createProcess spec { std_in = stdin }) >>= \case
         Left err -> pure CommandResult
             { commandExitCode = Just 127
             , commandStdout = ""
@@ -301,14 +303,13 @@ runShellCommandStreamingAuthorized authorization env workdir command timeoutMs o
             , commandTimedOut = False
             , commandCancelled = False
             }
-        Right (Just hin, Just hout, Just herr, processHandle) -> do
+        Right (hin, Just hout, Just herr, processHandle) -> do
             groupId <- getPid processHandle
             let closePipes =
-                    mapM_ (void . try @_ @SomeException . hClose) [hin, hout, herr]
+                    closeOptionalPipes [hin, Just hout, Just herr]
                 stopCommand = do
                     terminateProcessGroup groupId processHandle
                     closePipes
-            hClose hin `onException` stopCommand
             stdoutRef <- newIORef emptyCapturedBytes
             stderrRef <- newIORef emptyCapturedBytes
             lastSnapshotRef <- newIORef Nothing
@@ -643,18 +644,12 @@ acquireRunningCommand
     -> (CommandResult -> IO ())
     -> IO RunningCommand
 acquireRunningCommand env spec keepStdin onComplete = mask \restore -> do
-    created@(_, _, _, processHandle) <- createProcess spec
+    created@(_, _, _, processHandle) <- withCommandStdin keepStdin \stdin ->
+        createProcess spec { std_in = stdin }
     groupId <- getPid processHandle
     case created of
-        (Just hin, Just hout, Just herr, _) -> do
-            stdinVar <- newMVar (if keepStdin then Just hin else Nothing)
-            let closePipes =
-                    mapM_ (void . try @_ @SomeException . hClose) [hin, hout, herr]
-                stopCreated = do
-                    terminateProcessGroup groupId processHandle
-                    closePipes
-            unless keepStdin $
-                hClose hin `onException` stopCreated
+        (hin, Just hout, Just herr, _) -> do
+            stdinVar <- newMVar hin
             resultVar <- newEmptyMVar
             stdoutRef <- newIORef emptyCapturedBytes
             stderrRef <- newIORef emptyCapturedBytes
@@ -720,6 +715,14 @@ acquireRunningCommand env spec keepStdin onComplete = mask \restore -> do
             terminateProcessGroup groupId processHandle
             closeOptionalPipes [hin, hout, herr]
             fail "Failed to capture command output"
+
+-- A closed pipe is not equivalent to the null device: programs such as
+-- ripgrep select stdin instead of directory traversal when fd 0 is a pipe.
+-- Retain a pipe only when the caller explicitly requests subsequent input.
+withCommandStdin :: Bool -> (StdStream -> IO a) -> IO a
+withCommandStdin True action = action CreatePipe
+withCommandStdin False action =
+    withFile "/dev/null" ReadMode (action . UseHandle)
 
 -- | Write input to a running command. The command must have been started with
 -- 'startShellCommandWithInput'.
