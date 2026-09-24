@@ -519,6 +519,9 @@ coreMigrations =
               \ DECLARE\
               \   rec record;\
               \ BEGIN\
+              \   IF to_regclass('harness.custom_scopes') IS NULL THEN\
+              \     RETURN;\
+              \   END IF;\
               \   FOR rec IN\
               \     SELECT role_name::text AS role_name\
               \     FROM harness.custom_scopes\
