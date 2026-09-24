@@ -21,11 +21,6 @@ import qualified Hasql.Encoders as Encoders
 import qualified Hasql.Session as Session
 import Hasql.Statement (Statement)
 import qualified Hasql.Statement as Statement
-import System.Directory
-    ( createDirectoryIfMissing
-    , getTemporaryDirectory
-    , removePathForcibly
-    )
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Posix.Process (getProcessGroupID, getProcessGroupIDOf)
@@ -331,7 +326,7 @@ spec =
                     ) `finally` cleanup
 
         it "detaches the postmaster from the caller's process group" $
-            withPrivateStateDirectory "pg-a" \stateDirectory -> do
+            withSystemTempDirectory "ha" \stateDirectory -> do
                 let
                     config = shortSocketPostgresConfig stateDirectory
                     cleanup = void (stopManagedPostgres config)
@@ -345,7 +340,7 @@ spec =
                     ) `finally` cleanup
 
         it "restarts a cluster stuck in smart shutdown while another client is connected" $
-            withPrivateStateDirectory "pg-b" \stateDirectory -> do
+            withSystemTempDirectory "ha" \stateDirectory -> do
                 let
                     config = shortSocketPostgresConfig stateDirectory
                     probe = Session.statement () probeStatement
@@ -1024,22 +1019,6 @@ applicationNameStatement = Statement.preparable
     Encoders.noParams
     (Decoders.singleRow $
         Decoders.column (Decoders.nonNullable Decoders.text))
-
--- | Keep the state directory name short enough for Darwin's Unix socket limit
--- even when TMPDIR is a long session path.
-withPrivateStateDirectory :: FilePath -> (FilePath -> IO a) -> IO a
-withPrivateStateDirectory name action = do
-    parent <- getTemporaryDirectory
-    let path = parent </> name
-        socketDirectory = path </> "s"
-    if length socketDirectory > 90
-        then fail
-            ("PostgreSQL socket directory would be too long: "
-                <> socketDirectory)
-        else do
-            removePathForcibly path
-            createDirectoryIfMissing True path
-            action path `finally` removePathForcibly path
 
 postmasterProcessId :: ManagedPostgresConfig -> IO CPid
 postmasterProcessId config = do
