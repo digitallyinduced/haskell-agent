@@ -129,6 +129,10 @@ motionDemandForTerminalFocus
             completionFlashing
             ui
 
+clipboardImageTipMotionDemand :: Maybe Int -> MotionDemand
+clipboardImageTipMotionDemand remaining =
+    if isJust remaining then MotionSlow else MotionNone
+
 -- | Unfocused terminals retain only the one-second off-mode cadence, bounded
 -- by any earlier semantic deadline.
 motionModeForTerminalFocus :: TerminalFocus -> MotionMode -> MotionMode
@@ -138,13 +142,17 @@ motionModeForTerminalFocus focus mode
 
 appMotionDemand :: AppState -> MotionDemand
 appMotionDemand state =
-    motionDemandForTerminalFocus
-        state.appTerminalFocus
-        state.appRuntime.runtimeMotionMode
-        (userActionPending state)
-        (hasBackgroundActivity state.appAgentEntries)
-        (not (Map.null state.appCompletionFlashes))
-        state.appUi
+    maximum
+        [ motionDemandForTerminalFocus
+            state.appTerminalFocus
+            state.appRuntime.runtimeMotionMode
+            (userActionPending state)
+            (hasBackgroundActivity state.appAgentEntries)
+            (not (Map.null state.appCompletionFlashes))
+            state.appUi
+        , clipboardImageTipMotionDemand
+            state.appClipboardTipRemainingMillis
+        ]
 
 appMotionTiming :: AppState -> (MotionDemand, Int)
 appMotionTiming state =
@@ -166,6 +174,7 @@ appNextDeadlineMillis state =
     minimumMaybe $
         maybeToList (uiNextDeadlineMillis state.appUi)
             <> Map.elems state.appCompletionFlashes
+            <> maybeToList state.appClipboardTipRemainingMillis
   where
     maybeToList = maybe [] pure
     minimumMaybe [] = Nothing

@@ -1,6 +1,7 @@
 -- | Read images, text, and file paths from the system clipboard.
 module Agent.CLI.Clipboard
     ( ClipboardContent(..)
+    , ClipboardImageSnapshot(..)
     , readClipboard
     , readClipboardImage
     , readClipboardImages
@@ -8,6 +9,10 @@ module Agent.CLI.Clipboard
     , readClipboardImagesImageFirstWith
     , readClipboardImagesForPaste
     , readClipboardText
+    , clipboardImageProbeSupported
+    , clipboardChangeCount
+    , clipboardImageSnapshot
+    , clipboardImagePasteableFromTypes
     , nonEmptyClipboardImages
     , nonEmptyClipboardText
     , appendUniqueImageAttachments
@@ -25,6 +30,8 @@ import Agent.CLI.Clipboard.Linux
 import Agent.CLI.Clipboard.MacOS
     ( readMacClipboardImage
     , readMacClipboardMayContainImages
+    , readMacClipboardChangeCount
+    , readMacClipboardImageSnapshot
     , readMacClipboardPaths
     , readMacClipboardText
     )
@@ -36,6 +43,7 @@ import qualified Data.ByteString as BS
 import Data.Char (toLower)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Word (Word64)
 import System.Directory (doesFileExist)
 import System.FilePath (takeExtension)
 import System.Info (os)
@@ -48,6 +56,61 @@ data ClipboardContent
     | ClipboardPaths [FilePath]
     | ClipboardEmpty
     deriving (Eq, Show)
+
+-- | Metadata-only pasteboard classification for the clipboard-image tip.
+-- 'snapshotChangeCount' is a monotonic generation, not image bytes.
+data ClipboardImageSnapshot = ClipboardImageSnapshot
+    { snapshotChangeCount :: !(Maybe Word64)
+    , snapshotHasPasteableImage :: !Bool
+    }
+    deriving (Eq, Show)
+
+emptyClipboardImageSnapshot :: ClipboardImageSnapshot
+emptyClipboardImageSnapshot =
+    ClipboardImageSnapshot
+        { snapshotChangeCount = Nothing
+        , snapshotHasPasteableImage = False
+        }
+
+-- | The fast image-tip probe exists only on macOS. Other platforms never
+-- inspect the pasteboard for this hint.
+clipboardImageProbeSupported :: Bool
+clipboardImageProbeSupported = os == "darwin"
+
+-- | Cheap pasteboard generation. 'Nothing' off macOS or when inspection fails.
+clipboardChangeCount :: IO (Maybe Word64)
+clipboardChangeCount
+    | os == "darwin" = readMacClipboardChangeCount
+    | otherwise = pure Nothing
+
+-- | Advertised raster types with no file-URL types alongside. File-manager
+-- copies put a file-icon raster next to file URLs, but Ctrl+V routes those
+-- through path handling, so they must not fire an image-paste tip.
+clipboardImageSnapshot :: IO ClipboardImageSnapshot
+clipboardImageSnapshot
+    | os == "darwin" = do
+        (changeCount, hasImage) <- readMacClipboardImageSnapshot
+        pure ClipboardImageSnapshot
+            { snapshotChangeCount = changeCount
+            , snapshotHasPasteableImage = hasImage
+            }
+    | otherwise = pure emptyClipboardImageSnapshot
+
+-- | Portable type-list rule matching the macOS snapshot classifier.
+clipboardImagePasteableFromTypes :: [Text] -> Bool
+clipboardImagePasteableFromTypes types
+    | any isClipboardFileUrlType types = False
+    | otherwise = any isClipboardRasterType types
+
+isClipboardFileUrlType :: Text -> Bool
+isClipboardFileUrlType typeName =
+    typeName == "public.file-url" || typeName == "NSFilenamesPboardType"
+
+isClipboardRasterType :: Text -> Bool
+isClipboardRasterType typeName =
+    typeName == "public.png"
+        || typeName == "public.tiff"
+        || typeName == "public.jpeg"
 
 -- | Prefer file paths (images first), then image bytes, then plain text.
 readClipboard :: IO ClipboardContent

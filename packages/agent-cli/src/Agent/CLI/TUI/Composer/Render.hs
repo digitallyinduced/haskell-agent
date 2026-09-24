@@ -6,6 +6,7 @@ module Agent.CLI.TUI.Composer.Render
     , drawQueuedInputs
     , drawBackgroundTaskStatus
     , drawComposer
+    , drawClipboardImageTip
     , controlAttr
     , controlInteractionAttr
     ) where
@@ -17,6 +18,11 @@ import Agent.CLI.Command
     )
 import Agent.CLI.Input (truncateDisplayText, displayEditorText)
 import Agent.CLI.Style (motionGlyphSet)
+import Agent.CLI.TUI.ClipboardTip
+    ( clipboardImageTipChord
+    , clipboardImageTipPrefix
+    , clipboardImageTipSuffix
+    )
 import Agent.CLI.TUI.Composer.Edit (draftWindowStart, wrapDraftWindow)
 import Agent.CLI.TUI.Composer.Logic (currentSlashMenu)
 import Agent.CLI.TUI.History (HistoryWindow, historyWindowHasBlocks)
@@ -160,6 +166,19 @@ drawBackgroundTaskStatus state
                 state.appTerminalFocus
                 state.appRuntime.runtimeMotionMode)
             state.appMotionElapsedMillis
+
+drawClipboardImageTip :: AppState -> Widget Name
+drawClipboardImageTip state =
+    case state.appClipboardTipRemainingMillis of
+        Nothing -> emptyWidget
+        Just _ ->
+            padLeftRight 2 $
+                vLimit 1 $
+                    hBox
+                        [ withAttr Theme.mutedAttr (txt clipboardImageTipPrefix)
+                        , withAttr Theme.strongAttr (txt clipboardImageTipChord)
+                        , withAttr Theme.mutedAttr (txt clipboardImageTipSuffix)
+                        ]
 
 drawComposer :: AppState -> Widget Name
 drawComposer appState =

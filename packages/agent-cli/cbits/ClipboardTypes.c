@@ -8,6 +8,8 @@
  */
 #include <ApplicationServices/../Frameworks/HIServices.framework/Headers/Pasteboard.h>
 #include <CoreServices/../Frameworks/LaunchServices.framework/Headers/UTType.h>
+#include <pthread.h>
+#include <stdint.h>
 
 int agent_cli_clipboard_flavor_may_contain_images(CFStringRef flavor)
 {
@@ -70,4 +72,140 @@ int agent_cli_pasteboard_may_contain_images(CFStringRef pasteboard_name)
 int agent_cli_clipboard_may_contain_images(void)
 {
     return agent_cli_pasteboard_may_contain_images(kPasteboardClipboard);
+}
+
+/* Cached pasteboard for the focus-driven image tip. PasteboardSynchronize on
+ * a retained reference reports kPasteboardModified, which is the Carbon
+ * equivalent of NSPasteboard.changeCount. Classification inspects advertised
+ * types only: no payload coercion and no AppKit linkage.
+ */
+static pthread_mutex_t clipboard_snapshot_lock = PTHREAD_MUTEX_INITIALIZER;
+static PasteboardRef clipboard_snapshot_ref = NULL;
+static uint64_t clipboard_snapshot_generation = 0;
+static int clipboard_snapshot_generation_initialized = 0;
+
+static int flavor_is_file_url(CFStringRef flavor)
+{
+    return flavor != NULL &&
+           (UTTypeConformsTo(flavor, CFSTR("public.file-url")) ||
+            CFEqual(flavor, CFSTR("public.file-url")) ||
+            CFEqual(flavor, CFSTR("NSFilenamesPboardType")));
+}
+
+static int flavor_is_raster(CFStringRef flavor)
+{
+    return flavor != NULL &&
+           (UTTypeConformsTo(flavor, CFSTR("public.png")) ||
+            UTTypeConformsTo(flavor, CFSTR("public.tiff")) ||
+            UTTypeConformsTo(flavor, CFSTR("public.jpeg")) ||
+            CFEqual(flavor, CFSTR("public.png")) ||
+            CFEqual(flavor, CFSTR("public.tiff")) ||
+            CFEqual(flavor, CFSTR("public.jpeg")));
+}
+
+static PasteboardRef clipboard_snapshot_pasteboard(void)
+{
+    if (clipboard_snapshot_ref == NULL &&
+        PasteboardCreate(kPasteboardClipboard, &clipboard_snapshot_ref) != noErr)
+        return NULL;
+    return clipboard_snapshot_ref;
+}
+
+static uint64_t clipboard_snapshot_sync_generation(PasteboardRef clipboard)
+{
+    PasteboardSyncFlags flags = PasteboardSynchronize(clipboard);
+    if (!clipboard_snapshot_generation_initialized) {
+        clipboard_snapshot_generation = 1;
+        clipboard_snapshot_generation_initialized = 1;
+    } else if (flags & kPasteboardModified) {
+        clipboard_snapshot_generation += 1;
+    }
+    return clipboard_snapshot_generation;
+}
+
+static int clipboard_snapshot_classify(PasteboardRef clipboard, int *out_has_image)
+{
+    ItemCount item_count = 0;
+    int has_file_url = 0;
+    int has_raster = 0;
+
+    if (PasteboardGetItemCount(clipboard, &item_count) != noErr)
+        return 0;
+
+    for (ItemCount item_index = 1; item_index <= item_count; ++item_index) {
+        PasteboardItemID item_identifier;
+        CFArrayRef flavors = NULL;
+        if (PasteboardGetItemIdentifier(clipboard, item_index,
+                                       &item_identifier) != noErr ||
+            PasteboardCopyItemFlavors(clipboard, item_identifier,
+                                     &flavors) != noErr)
+            return 0;
+        for (CFIndex flavor_index = 0;
+             flavor_index < CFArrayGetCount(flavors); ++flavor_index) {
+            CFStringRef flavor = CFArrayGetValueAtIndex(flavors, flavor_index);
+            if (flavor_is_file_url(flavor))
+                has_file_url = 1;
+            if (flavor_is_raster(flavor))
+                has_raster = 1;
+        }
+        CFRelease(flavors);
+        if (has_file_url && has_raster)
+            break;
+    }
+
+    *out_has_image = has_raster && !has_file_url;
+    return 1;
+}
+
+/* Return 1 and write the monotonic generation; 0 when the pasteboard is
+ * unavailable. The generation is metadata-only.
+ */
+int agent_cli_clipboard_change_count(unsigned long long *out_count)
+{
+    PasteboardRef clipboard;
+    uint64_t generation;
+
+    if (out_count == NULL)
+        return 0;
+    pthread_mutex_lock(&clipboard_snapshot_lock);
+    clipboard = clipboard_snapshot_pasteboard();
+    if (clipboard == NULL) {
+        pthread_mutex_unlock(&clipboard_snapshot_lock);
+        return 0;
+    }
+    generation = clipboard_snapshot_sync_generation(clipboard);
+    pthread_mutex_unlock(&clipboard_snapshot_lock);
+    *out_count = generation;
+    return 1;
+}
+
+/* Return 1 and write generation plus whether a pasteable raster is advertised
+ * without file-URL types. Finder copies advertise a file-icon raster next to
+ * file URLs; Ctrl+V routes those through path handling, so they must not fire
+ * the image-paste tip. Return 0 when inspection fails.
+ */
+int agent_cli_clipboard_image_snapshot(unsigned long long *out_count,
+                                       int *out_has_image)
+{
+    PasteboardRef clipboard;
+    uint64_t generation;
+    int has_image = 0;
+
+    if (out_count == NULL || out_has_image == NULL)
+        return 0;
+    pthread_mutex_lock(&clipboard_snapshot_lock);
+    clipboard = clipboard_snapshot_pasteboard();
+    if (clipboard == NULL) {
+        pthread_mutex_unlock(&clipboard_snapshot_lock);
+        return 0;
+    }
+    generation = clipboard_snapshot_sync_generation(clipboard);
+    if (!clipboard_snapshot_classify(clipboard, &has_image)) {
+        pthread_mutex_unlock(&clipboard_snapshot_lock);
+        return 0;
+    }
+    pthread_mutex_unlock(&clipboard_snapshot_lock);
+    *out_count = generation;
+    *out_has_image = has_image;
+    return 1;
 }

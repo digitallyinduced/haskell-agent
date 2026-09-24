@@ -74,6 +74,7 @@ import Agent.CLI.Terminal ( TerminalCapabilities(..)
 import qualified Agent.TUI.Theme as Theme
 import qualified Agent.CLI.TUI.Bridge as Bridge
 import qualified Agent.CLI.TUI.Composer as Composer
+import Agent.CLI.TUI.ClipboardTip (advanceClipboardImageTip)
 import Agent.CLI.TUI.History ( HistoryCursor(..)
     , HistoryDirection(..)
     , HistoryGeneration(..)
@@ -457,6 +458,10 @@ advanceAppTime now state =
             advanceCompletionFlashes
                 elapsedMillis
                 state.appCompletionFlashes
+        , appClipboardTipRemainingMillis =
+            advanceClipboardImageTip
+                elapsedMillis
+                state.appClipboardTipRemainingMillis
         , appClockNanos = nextClock
         }
 

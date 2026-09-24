@@ -162,6 +162,7 @@ import qualified Agent.CLI.TUI.Composer as Composer
     ( drawSlashMenu,
       drawBackgroundTaskStatus,
       drawQueuedInputs,
+      drawClipboardImageTip,
       drawComposer )
 import qualified Data.Map.Strict as Map ()
 import qualified Agent.CLI.TUI.Scroll as Scroll ()
@@ -265,6 +266,7 @@ drawMain state =
                 , drawLiveTodos (activeConversationUi state)
                 , drawPromptActivity state
                 , Composer.drawBackgroundTaskStatus state
+                , Composer.drawClipboardImageTip state
                 , case textOverlay state of
                     Just prompt
                         | prompt.textInputMode == TextInputPlanning ->

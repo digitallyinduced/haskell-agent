@@ -5,6 +5,8 @@
 module Agent.CLI.Clipboard.MacOS
     ( readMacClipboardImage
     , readMacClipboardMayContainImages
+    , readMacClipboardChangeCount
+    , readMacClipboardImageSnapshot
     , readMacClipboardPaths
     , readMacClipboardText
     ) where
@@ -19,6 +21,7 @@ import qualified Data.ByteString as BS
 import Data.Char (toLower)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Word (Word64)
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.Exit (ExitCode(..))
 import System.IO
@@ -31,9 +34,18 @@ import System.Process (readProcessWithExitCode)
 
 #if defined(darwin_HOST_OS)
 import Foreign.C.Types (CInt(..))
+import Foreign.Marshal.Alloc (alloca)
+import Foreign.Ptr (Ptr)
+import Foreign.Storable (peek)
 
 foreign import ccall safe "agent_cli_clipboard_may_contain_images"
     clipboardMayContainImages :: IO CInt
+
+foreign import ccall safe "agent_cli_clipboard_change_count"
+    clipboardChangeCountImpl :: Ptr Word64 -> IO CInt
+
+foreign import ccall safe "agent_cli_clipboard_image_snapshot"
+    clipboardImageSnapshotImpl :: Ptr Word64 -> Ptr CInt -> IO CInt
 #endif
 
 -- | Check advertised types without coercing or reading clipboard payloads.
@@ -43,6 +55,37 @@ readMacClipboardMayContainImages :: IO Bool
 readMacClipboardMayContainImages = (/= 0) <$> clipboardMayContainImages
 #else
 readMacClipboardMayContainImages = pure True
+#endif
+
+-- | Cheap pasteboard generation. 'Nothing' when inspection is unavailable.
+readMacClipboardChangeCount :: IO (Maybe Word64)
+#if defined(darwin_HOST_OS)
+readMacClipboardChangeCount =
+    alloca \countPtr -> do
+        ok <- clipboardChangeCountImpl countPtr
+        if ok == 0
+            then pure Nothing
+            else Just <$> peek countPtr
+#else
+readMacClipboardChangeCount = pure Nothing
+#endif
+
+-- | Metadata-only snapshot: generation plus whether a pasteable raster is
+-- advertised without file-URL types. Does not coerce or read image bytes.
+readMacClipboardImageSnapshot :: IO (Maybe Word64, Bool)
+#if defined(darwin_HOST_OS)
+readMacClipboardImageSnapshot =
+    alloca \countPtr ->
+        alloca \hasPtr -> do
+            ok <- clipboardImageSnapshotImpl countPtr hasPtr
+            if ok == 0
+                then pure (Nothing, False)
+                else do
+                    count <- peek countPtr
+                    hasImage <- peek hasPtr
+                    pure (Just count, hasImage /= 0)
+#else
+readMacClipboardImageSnapshot = pure (Nothing, False)
 #endif
 
 readMacClipboardImage :: IO (Either Text ImageAttachment)

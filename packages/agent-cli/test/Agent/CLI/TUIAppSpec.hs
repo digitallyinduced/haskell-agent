@@ -55,6 +55,8 @@ import Agent.CLI.TUI.App
     , mergeConversationView
     , newFullscreenInputBuffer
     , newFullscreenRuntime
+    , ClipboardImageProbe(..)
+    , clipboardImageTipLabel
     , withTrackedVtyBuilder
     , wrapFullscreenKeyboardVty
     , wrapMarkdownLinkCursorVty
@@ -110,6 +112,7 @@ import Agent.CLI.TUI.Types
     , TextInputMode(..)
     , TextOverlay(..)
     )
+import Agent.CLI.Clipboard (ClipboardImageSnapshot(..))
 import Agent.CLI.TUI.History
     ( HistoryCursor(..)
     , HistoryDirection(..)
@@ -583,6 +586,60 @@ spec = do
                 pasted.appUi.uiCursor `shouldBe` 25
                 length pasted.appImagePreviews `shouldBe` 1
                 pasted.appUi.uiAwaitingInput `shouldBe` True
+
+    describe "clipboard image tip" do
+        it "renders the paste hint above the composer" do
+            runtime <- newScriptRuntime initialUiState
+            let state =
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                        { appClipboardTipRemainingMillis = Just 3000 }
+            renderedAppText (80, 24) state
+                `shouldSatisfy` Text.isInfixOf clipboardImageTipLabel
+
+        it "shows the hint when a pasteable clipboard image is advertised" do
+            runtime <- newScriptRuntime initialUiState
+            let probe =
+                    ClipboardImageProbe
+                        { clipboardProbeChangeCount = pure (Just 1)
+                        , clipboardProbeSnapshot =
+                            pure (ClipboardImageSnapshot (Just 1) True)
+                        }
+                initial =
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                        { appClipboardImageProbe = probe }
+            (_, shown) <- runFullscreenScriptWithState initial
+                [ FullscreenScriptApp AppMotionTick
+                , FullscreenScriptHalt
+                ]
+            shown.appClipboardTipRemainingMillis `shouldBe` Just 3000
+            renderedAppText (80, 24) shown
+                `shouldSatisfy` Text.isInfixOf clipboardImageTipLabel
+
+        it "does not show the hint when an image is already attached" do
+            runtime <- newScriptRuntime initialUiState
+            let probe =
+                    ClipboardImageProbe
+                        { clipboardProbeChangeCount = pure (Just 1)
+                        , clipboardProbeSnapshot =
+                            pure (ClipboardImageSnapshot (Just 1) True)
+                        }
+                ui =
+                    reduceUi
+                        (UiSetPrompt
+                            initialUiState.uiPrompt { promptAttachments = 1 })
+                        initialUiState
+                initial =
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                        { appUi = ui
+                        , appClipboardImageProbe = probe
+                        }
+            (_, shown) <- runFullscreenScriptWithState initial
+                [ FullscreenScriptApp AppMotionTick
+                , FullscreenScriptHalt
+                ]
+            shown.appClipboardTipRemainingMillis `shouldBe` Nothing
+            renderedAppText (80, 24) shown
+                `shouldSatisfy` (not . Text.isInfixOf clipboardImageTipLabel)
 
     describe "dynamic model choice" do
         it "preserves filter, selected identity, and effort across reordered rows" do
