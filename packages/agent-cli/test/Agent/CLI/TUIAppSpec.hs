@@ -2,7 +2,8 @@ module Agent.CLI.TUIAppSpec (spec) where
 
 import qualified Agent.TUI.Theme as Theme
 import Agent.CLI.TUI.Keyboard
-    ( CursorFrameState(..)
+    ( CursorCapabilities(..)
+    , CursorFrameState(..)
     , classifyKeyboard
     , decodeKeyboardBody
     , preserveCursorBlinkOutput
@@ -2422,6 +2423,23 @@ spec = do
             let hide = "\ESC[?25l"
                 showCursor = "\ESC[?25h"
                 disableBlink = "\ESC[?12l"
+                xterm =
+                    CursorCapabilities
+                        { cursorHide = hide
+                        , cursorShow = disableBlink <> showCursor
+                        }
+                tmux =
+                    CursorCapabilities
+                        { cursorHide = hide
+                        , cursorShow = "\ESC[34h" <> showCursor
+                        }
+                linuxHide = "\ESC[?25l\ESC[?1c"
+                linuxShow = "\ESC[?25h\ESC[?0c"
+                linux =
+                    CursorCapabilities
+                        { cursorHide = linuxHide
+                        , cursorShow = linuxShow
+                        }
                 caret = "\ESC[2;4H"
                 movedCaret = "\ESC[2;5H"
                 idle = hide <> disableBlink <> showCursor <> caret
@@ -2429,29 +2447,38 @@ spec = do
                 moved = hide <> disableBlink <> showCursor <> movedCaret
                 synchronize payload =
                     "\ESC[?2026h" <> payload <> "\ESC[?2026l"
-                step state bytes = preserveCursorFrame state bytes
-            step initialCursorFrameState (disableBlink <> showCursor)
+                step capabilities state bytes =
+                    preserveCursorFrame capabilities state bytes
+            step xterm initialCursorFrameState (disableBlink <> showCursor)
                 `shouldBe` (showCursor, initialCursorFrameState)
-            let (revealed, visible) = step initialCursorFrameState idle
+            let (revealed, visible) = step xterm initialCursorFrameState idle
             revealed `shouldBe` synchronize (caret <> showCursor)
             visible `shouldBe` CursorVisible 4 2
-            step visible idle `shouldBe` (mempty, visible)
-            let tmuxIdle = hide <> "\ESC[34h" <> showCursor <> caret
+            step xterm visible idle `shouldBe` (mempty, visible)
+            let tmuxIdle = tmux.cursorHide <> tmux.cursorShow <> caret
                 (tmuxRevealed, tmuxVisible) =
-                    step initialCursorFrameState tmuxIdle
-            tmuxRevealed `shouldBe` synchronize (caret <> showCursor)
+                    step tmux initialCursorFrameState tmuxIdle
+            tmuxRevealed `shouldBe` synchronize (caret <> tmux.cursorShow)
             tmuxVisible `shouldBe` visible
-            step tmuxVisible tmuxIdle `shouldBe` (mempty, tmuxVisible)
-            step visible changed
+            step tmux tmuxVisible tmuxIdle `shouldBe` (mempty, tmuxVisible)
+            let linuxIdle = linuxHide <> linuxShow <> caret
+                (linuxRevealed, linuxVisible) =
+                    step linux initialCursorFrameState linuxIdle
+            linuxRevealed `shouldBe` synchronize (caret <> linuxShow)
+            linuxVisible `shouldBe` CursorVisible 4 2
+            step linux linuxVisible linuxIdle `shouldBe` (mempty, linuxVisible)
+            step linux linuxVisible (linuxHide <> "cells" <> linuxShow <> caret)
+                `shouldBe` (synchronize ("cells" <> caret), linuxVisible)
+            step xterm visible changed
                 `shouldBe` (synchronize ("cells" <> caret), visible)
-            let (relocated, relocatedState) = step visible moved
+            let (relocated, relocatedState) = step xterm visible moved
             relocated `shouldBe` synchronize movedCaret
             relocatedState `shouldBe` CursorVisible 5 2
-            step relocatedState (hide <> "kept \ESC[?12l")
+            step xterm relocatedState (hide <> "kept \ESC[?12l")
                 `shouldBe`
                     (synchronize ("kept \ESC[?12l" <> hide), CursorHidden)
-            step CursorHidden hide `shouldBe` (mempty, CursorHidden)
-            step CursorHidden "\ESC]0;title\BEL"
+            step xterm CursorHidden hide `shouldBe` (mempty, CursorHidden)
+            step xterm CursorHidden "\ESC]0;title\BEL"
                 `shouldBe` ("\ESC]0;title\BEL", CursorHidden)
             events <- newIORef ([] :: [ByteString.ByteString])
             (_, output) <- VMock.mockTerminal (10, 2)

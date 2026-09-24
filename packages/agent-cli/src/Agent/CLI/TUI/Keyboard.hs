@@ -4,6 +4,7 @@ module Agent.CLI.TUI.Keyboard
     ( mkKeyboardVty
     , classifyKeyboard
     , decodeKeyboardBody
+    , CursorCapabilities(..)
     , CursorFrameState(..)
     , initialCursorFrameState
     , preserveCursorFrame
@@ -17,7 +18,8 @@ import Agent.CLI.Input.Types (KittyKey(..))
 import Control.Concurrent (threadWaitRead)
 import qualified Control.Concurrent.Async as Async
 import Control.Concurrent.STM
-import Control.Exception.Safe (mask, onException, finally, throwIO)
+import Control.Exception (IOException)
+import Control.Exception.Safe (catch, mask, onException, finally, throwIO)
 import Control.Monad (unless, when, void)
 import Data.Bits (testBit, (.&.))
 import qualified Data.ByteString as BS
@@ -118,6 +120,16 @@ mkKeyboardVty config = mask \restore -> do
         (shutdownInput input `finally`
             (V.releaseDisplay output `finally` V.releaseTerminal output))
 
+-- | Terminfo @civis@ and @cnorm@ for this terminal. Vty writes those exact
+-- byte strings around every picture. They are not always a single private-mode
+-- sequence: the Linux console hides with @CSI ? 25 l CSI ? 1 c@ and shows with
+-- @CSI ? 25 h CSI ? 0 c@.
+data CursorCapabilities = CursorCapabilities
+    { cursorHide :: !BS.ByteString
+    , cursorShow :: !BS.ByteString
+    }
+    deriving (Eq, Show)
+
 -- | Last hardware-cursor placement written to the terminal.
 -- 'CursorVisible' is the 1-based column and row emitted by terminfo @cup@.
 -- 'CursorUnsynchronized' means this process has not placed the cursor yet, so
@@ -131,29 +143,36 @@ data CursorFrameState
 initialCursorFrameState :: CursorFrameState
 initialCursorFrameState = CursorUnsynchronized
 
--- | Keep the terminal's own cursor blink. Vty's @cnorm@ repeats on every
--- refresh: xterm and Ghostty send @CSI ? 12 l@, which turns blinking off, and
--- tmux and screen send @CSI 34 h@. 'outputPicture' also hides and moves the
--- cursor every frame. Repeating show or move restarts the blink timer, so an
--- otherwise idle caret never finishes a blink. Drop those cursor-style
--- sequences. Emit show or hide only when visibility changes, and emit a move
--- only when the cell changed or the caret moved.
+-- | Keep the terminal's own cursor blink. 'outputPicture' writes @civis@,
+-- changed cells, then @cnorm@ and a cursor address on every refresh. xterm
+-- and Ghostty put @CSI ? 12 l@ in @cnorm@, which turns blinking off. tmux
+-- prepends @CSI 34 h@, and the Linux console appends a cursor-shape sequence
+-- after @CSI ? 25 h@. Repeating show or move restarts the blink timer, and
+-- failing to recognize a multi-part @cnorm@ makes the caret look hidden.
+-- Strip the terminal's own sequences. Emit show or hide only when visibility
+-- changes, and emit a move only when the cell changed or the caret moved.
 -- Picture bytes are wrapped in a synchronized update so the caret is not
 -- painted at intermediate cells.
-preserveCursorFrame :: CursorFrameState -> BS.ByteString -> (BS.ByteString, CursorFrameState)
-preserveCursorFrame state bytes =
-    case BS.stripPrefix hideCursor bytes of
+preserveCursorFrame
+    :: CursorCapabilities
+    -> CursorFrameState
+    -> BS.ByteString
+    -> (BS.ByteString, CursorFrameState)
+preserveCursorFrame capabilities state bytes =
+    case BS.stripPrefix capabilities.cursorHide bytes of
         Nothing -> (stripDisableBlink bytes, state)
         Just rest ->
-            case splitVisibleSuffix rest of
-                Just (content, column, row) -> visibleFrame state content column row
-                Nothing -> hiddenFrame state rest
+            case splitVisibleSuffix capabilities.cursorShow rest of
+                Just (content, column, row) ->
+                    visibleFrame capabilities state content column row
+                Nothing -> hiddenFrame capabilities state rest
 
 -- | Apply 'preserveCursorFrame' to bytes actually written for a picture.
 -- Vty's display context otherwise retains the unwrapped output and would keep
 -- sending the terminfo sequence that disables blinking.
 preserveCursorBlinkOutput :: V.Output -> IO V.Output
 preserveCursorBlinkOutput output = do
+    capabilities <- loadCursorCapabilities (V.terminalID output)
     cursorState <- newIORef initialCursorFrameState
     let wrapped =
             output
@@ -164,14 +183,57 @@ preserveCursorBlinkOutput output = do
                 }
         writeCursor cursorRef nextBytes = do
             emitted <- atomicModifyIORef' cursorRef \current ->
-                let (revised, next) = preserveCursorFrame current nextBytes
+                let (revised, next) =
+                        preserveCursorFrame capabilities current nextBytes
                 in (next, revised)
             unless (BS.null emitted) $
                 V.outputByteBuffer output emitted
     pure wrapped
 
-visibleFrame :: CursorFrameState -> BS.ByteString -> Int -> Int -> (BS.ByteString, CursorFrameState)
-visibleFrame state content column row =
+loadCursorCapabilities :: String -> IO CursorCapabilities
+loadCursorCapabilities name =
+    (cursorCapabilities <$> Terminfo.setupTerm name)
+        `catch` \(_ :: IOException) -> pure fallbackCursorCapabilities
+
+cursorCapabilities :: Terminfo.Terminal -> CursorCapabilities
+cursorCapabilities terminal =
+    CursorCapabilities
+        { cursorHide =
+            fromMaybe fallbackCursorCapabilities.cursorHide
+                (plainCapability terminal "civis")
+        , cursorShow =
+            fromMaybe fallbackCursorCapabilities.cursorShow
+                (plainCapability terminal "cnorm")
+        }
+
+-- | xterm and Ghostty. Used when the output has no terminfo entry, including
+-- Vty's mock terminal.
+fallbackCursorCapabilities :: CursorCapabilities
+fallbackCursorCapabilities =
+    CursorCapabilities
+        { cursorHide = "\ESC[?25l"
+        , cursorShow = "\ESC[?12l\ESC[?25h"
+        }
+
+-- | Unpadded terminfo output. Padded capabilities cannot be compared with the
+-- bytes Vty writes, so those stay on the fallback sequences.
+plainCapability :: Terminfo.Terminal -> String -> Maybe BS.ByteString
+plainCapability terminal name =
+    case Terminfo.getCapability terminal capability of
+        Just value | not (null value) -> Just (BS8.pack value)
+        _ -> Nothing
+  where
+    capability :: Terminfo.Capability String
+    capability = Terminfo.tiGetOutput1 name
+
+visibleFrame
+    :: CursorCapabilities
+    -> CursorFrameState
+    -> BS.ByteString
+    -> Int
+    -> Int
+    -> (BS.ByteString, CursorFrameState)
+visibleFrame capabilities state content column row =
     let placement = CursorVisible column row
         reposition = content <> moveCursor column row
     in case state of
@@ -179,33 +241,33 @@ visibleFrame state content column row =
             | currentColumn == column && currentRow == row && BS.null content ->
                 (mempty, state)
             | otherwise -> (synchronize reposition, placement)
-        _ -> (synchronize (reposition <> showCursor), placement)
+        _ ->
+            ( synchronize (reposition <> stripDisableBlink capabilities.cursorShow)
+            , placement
+            )
 
-hiddenFrame :: CursorFrameState -> BS.ByteString -> (BS.ByteString, CursorFrameState)
-hiddenFrame state content =
+hiddenFrame
+    :: CursorCapabilities
+    -> CursorFrameState
+    -> BS.ByteString
+    -> (BS.ByteString, CursorFrameState)
+hiddenFrame capabilities state content =
     case state of
         CursorHidden
             | BS.null content -> (mempty, state)
             | otherwise -> (synchronize content, state)
-        _ -> (synchronize (content <> hideCursor), CursorHidden)
+        _ -> (synchronize (content <> capabilities.cursorHide), CursorHidden)
 
--- | Terminfo @cup@ is @CSI row ; column H@. The trailing numbers are the caret.
-splitVisibleSuffix :: BS.ByteString -> Maybe (BS.ByteString, Int, Int)
-splitVisibleSuffix rest = do
+-- | Terminfo @cup@ is @CSI row ; column H@. The show sequence sits immediately
+-- before that address, including any cursor-shape suffix after @CSI ? 25 h@.
+splitVisibleSuffix
+    :: BS.ByteString
+    -> BS.ByteString
+    -> Maybe (BS.ByteString, Int, Int)
+splitVisibleSuffix showSequence rest = do
     (beforeMove, column, row) <- splitCupSuffix rest
-    beforeShow <- BS.stripSuffix showCursor beforeMove
-    pure (stripShowPrefix beforeShow, column, row)
-
--- | Terminfo @cnorm@ is not only @CSI ? 25 h@. xterm and Ghostty prepend
--- @CSI ? 12 l@, which disables blinking. tmux and screen prepend @CSI 34 h@.
--- Both sit immediately before show-cursor, so they are not cell text. Leaving
--- them in the frame makes every refresh look changed and reissues the move
--- that restarts the blink timer.
-stripShowPrefix :: BS.ByteString -> BS.ByteString
-stripShowPrefix bytes =
-    case BS.stripSuffix disableCursorBlink bytes of
-        Just content -> content
-        Nothing -> fromMaybe bytes (BS.stripSuffix normalCursor bytes)
+    content <- BS.stripSuffix showSequence beforeMove
+    pure (content, column, row)
 
 splitCupSuffix :: BS.ByteString -> Maybe (BS.ByteString, Int, Int)
 splitCupSuffix bytes = do
@@ -260,15 +322,6 @@ replaceBytes needle replacement bytes =
 
 disableCursorBlink :: BS.ByteString
 disableCursorBlink = "\ESC[?12l"
-
-normalCursor :: BS.ByteString
-normalCursor = "\ESC[34h"
-
-showCursor :: BS.ByteString
-showCursor = "\ESC[?25h"
-
-hideCursor :: BS.ByteString
-hideCursor = "\ESC[?25l"
 
 buildKeyboardInput :: V.VtyUserConfig -> UnixSettings -> IO Input
 buildKeyboardInput config settings = mask \restore -> do
