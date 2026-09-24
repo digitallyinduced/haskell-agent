@@ -53,7 +53,7 @@ import Agent.TUI.Motion
 import Data.Foldable (toList)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, isNothing)
 import qualified Data.Text as Text
 import Data.Word (Word64)
 
@@ -159,8 +159,22 @@ appMotionDemand state =
 pullRequestChecksMotionDemand :: AppState -> MotionDemand
 pullRequestChecksMotionDemand state
     | state.appTerminalFocus == TerminalUnfocused = MotionNone
-    | state.appPullRequestCI == PullRequestChecksPending = MotionSlow
-    | otherwise = MotionNone
+    | state.appRuntime.runtimeMotionMode /= MotionFull = MotionNone
+    | state.appPullRequestCI /= PullRequestChecksPending = MotionNone
+    | isNothing state.appPullRequestURL = MotionNone
+    | not (pullRequestChecksPaneVisible state) = MotionNone
+    | otherwise = MotionSlow
+
+-- Same breakpoints as Workspace.workspaceSidePaneVisible. The pending CI
+-- spinner is a quietIndicator, which only animates in MotionFull, and the
+-- pane is omitted below these dimensions.
+pullRequestChecksPaneVisible :: AppState -> Bool
+pullRequestChecksPaneVisible state =
+    case state.appTerminalSize of
+        Just (width, height) ->
+            width >= 72 && height >= 10
+        Nothing ->
+            False
 
 appMotionTiming :: AppState -> (MotionDemand, Int)
 appMotionTiming state =

@@ -616,6 +616,8 @@ data AppState = AppState
     , appSyntaxHighlighter :: !(Maybe SyntaxHighlighter)
     , appSyntaxRequested :: !(Set.Set Text)
     , appTerminalFocus :: !TerminalFocus
+      -- | Latest EvResize columns and rows. Nothing until Brick reports a size.
+    , appTerminalSize :: !(Maybe (Int, Int))
     , appClipboardTip :: !ClipboardFocusTipState
     , appClipboardImageProbe :: !ClipboardImageProbe
     , appClipboardTipRemainingMillis :: !(Maybe Int)

@@ -1473,13 +1473,15 @@ handleVtyEvent = \case
         noteTerminalFocusGained
             >> resolveConversationFollow
             >> queueConversationReflow
-    V.EvResize{} ->
-        handleResizeEvent
+    V.EvResize width height ->
+        handleResizeEvent width height
     event ->
         handleInputEvent event
 
-handleResizeEvent :: EventM Name AppState ()
-handleResizeEvent = do
+handleResizeEvent :: Int -> Int -> EventM Name AppState ()
+handleResizeEvent width height = do
+    modify' \state ->
+        state { appTerminalSize = Just (width, height) }
     clearAgentHover
     setHoveredControl Nothing
     invalidateCache

@@ -3206,14 +3206,18 @@ spec = do
 
         it "animates while pull request checks are pending" do
             runtime <- newScriptRuntime initialUiState
+            reducedRuntime <- newScriptRuntime initialUiState
             let idle = reduceUi (UiUserSubmitted "done") initialUiState
-                state checks =
+                visibleSize = Just (120, 35)
+                stateFor runtime checks =
                     (initialFullscreenAppState runtime [] AgentRoot [] 0)
                         { appUi = idle
                         , appPullRequestURL =
                             Just "https://github.com/owner/repository/pull/42"
                         , appPullRequestCI = checks
+                        , appTerminalSize = visibleSize
                         }
+                state = stateFor runtime
             appMotionDemand (state PullRequestChecksPending)
                 `shouldBe` MotionSlow
             appMotionDemand (state PullRequestChecksPassed)
@@ -3222,6 +3226,34 @@ spec = do
                 ((state PullRequestChecksPending)
                     { appTerminalFocus = TerminalUnfocused })
                 `shouldBe` MotionNone
+            appMotionDemand
+                ((state PullRequestChecksPending)
+                    { appTerminalSize = Nothing })
+                `shouldBe` MotionNone
+            appMotionDemand
+                ((state PullRequestChecksPending)
+                    { appTerminalSize = Just (71, 35) })
+                `shouldBe` MotionNone
+            appMotionDemand
+                ((state PullRequestChecksPending)
+                    { appTerminalSize = Just (120, 9) })
+                `shouldBe` MotionNone
+            appMotionDemand
+                (stateFor
+                    (reducedRuntime { runtimeMotionMode = MotionReduced })
+                    PullRequestChecksPending)
+                `shouldBe` MotionNone
+            appMotionDemand
+                (stateFor
+                    (reducedRuntime { runtimeMotionMode = MotionOff })
+                    PullRequestChecksPending)
+                `shouldBe` MotionNone
+            (_, resized) <- runFullscreenScriptWithState
+                (state PullRequestChecksPending)
+                [ FullscreenScriptVty (V.EvResize 80 24)
+                , FullscreenScriptHalt
+                ]
+            resized.appTerminalSize `shouldBe` Just (80, 24)
 
         it "hides the pull request in narrow terminals and when absent" do
             runtime <- newScriptRuntime initialUiState

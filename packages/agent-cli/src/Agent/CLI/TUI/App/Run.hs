@@ -518,6 +518,7 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appSyntaxHighlighter = Nothing
         , appSyntaxRequested = Set.empty
         , appTerminalFocus = TerminalFocusUnknown
+        , appTerminalSize = Nothing
         , appClipboardTip = emptyClipboardFocusTipState
         , appClipboardImageProbe = inactiveClipboardImageProbe
         , appClipboardTipRemainingMillis = Nothing
