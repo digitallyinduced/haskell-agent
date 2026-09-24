@@ -11,6 +11,7 @@ import qualified Agent.Loop.EventDeliverySpec as EventDelivery
 import qualified Agent.Loop.FailedDisplaySpec as FailedDisplay
 import Agent.Responses.Types
     ( FunctionCallOutput(..)
+    , CustomToolCallOutput(..)
     , MessageContent(..)
     , ReasoningItem(..)
     , ResponseContentPart(..)
@@ -525,6 +526,157 @@ spec = describe "runLoop" do
             submissionsSeen ->
                 expectationFailure $
                     "unexpected submissions: " <> show submissionsSeen
+
+    describe "shared image preparation" do
+        let imageProcessingErrorPlaceholder =
+                "image content omitted because it could not be processed"
+            prepareHistory items = do
+                submitted <- newIORef []
+                let backend = Backend \state _ _ _ -> do
+                        writeIORef submitted state.backendItems
+                        pure (Left (ConnectionError "test complete"))
+                config <- testConfig backend
+                let initialState = initialBackendSnapshot items
+                _ <- runLoop
+                    config
+                        { loopBackendState = BackendStateStore
+                            { readBackendState = pure initialState
+                            , commitBackendState = pure
+                            }
+                        }
+                    Nothing "continue"
+                readIORef submitted
+            message parts = MessageItem ResponseMessage
+                { messageId = Just "message"
+                , content = MessageContentParts parts
+                , role = RoleUser
+                , status = Nothing
+                , phase = Nothing
+                , passthrough = Nothing
+                }
+            imagePart url = InputImagePart Nothing Nothing (Just url) Nothing
+            validImageBytes = LazyByteString.toStrict $
+                encodePng (generateImage (\_ _ -> PixelRGB8 10 20 30) 2 2)
+            validImageUrl = imageDataUrl "image/png" validImageBytes
+            invalidImageUrls =
+                [ "data:image/png;base64,%%%"
+                , "data:image/png;base64,"
+                , "data:image/png;base64,bm90IGFuIGltYWdl"
+                , "data:text/plain;base64,YWJj"
+                , "data:image/;base64,YWJj"
+                , "data:image/png;unexpected;base64,YWJj"
+                , "data:image/png;base64,YQ="
+                , "data:image/webp;base64,YR=="
+                , "data:image/png;base64,Wall time: 0.1 seconds\nYWJj"
+                , imageDataUrl "image/png" (ByteString.take 40 validImageBytes)
+                ]
+        it "rejects malformed inline images without exposing their payload" do
+            prepareHistory [message (map imagePart invalidImageUrls)]
+                `shouldReturn`
+                    [message (replicate (length invalidImageUrls)
+                        (InputTextPart imageProcessingErrorPlaceholder Nothing))]
+
+        it "preserves valid small images, remote URLs and file references" do
+            let items = [message
+                    [ imagePart validImageUrl
+                    , imagePart "https://example.com/image.png"
+                    , InputImagePart Nothing (Just "file-image") Nothing Nothing
+                    ]]
+            prepareHistory items `shouldReturn` items
+
+        it "rejects unsafe inline dimensions and inflation without decoding unbounded rasters" do
+            let images =
+                    [ unsafeDimensionPng
+                    , pngInflationBomb
+                    , pngWithExcessiveImageDataChunks
+                    ]
+                expected = [message (replicate (length images)
+                    (InputTextPart imageProcessingErrorPlaceholder Nothing))]
+            _ <- Exception.evaluate (sum (map ByteString.length images))
+            finished <- timeout 2000000 do
+                prepared <- prepareHistory
+                    [message (map (imagePart . imageDataUrl "image/png") images)]
+                -- The captured snapshot is lazy; force comparison inside the
+                -- deadline so the preflight, not just submission, is bounded.
+                Exception.evaluate (prepared == expected)
+            finished `shouldBe` Just True
+
+        it "replaces malformed restored message images without changing neighboring parts" do
+            let before = InputTextPart "before" Nothing
+                after = InputTextPart "after" Nothing
+                valid = InputImagePart (Just "high") Nothing (Just validImageUrl) Nothing
+                invalid = InputImagePart Nothing Nothing
+                    (Just "data:image/png;base64,%%%") Nothing
+            prepareHistory [message [before, invalid, valid, after]]
+                `shouldReturn` [message
+                    [ before
+                    , InputTextPart imageProcessingErrorPlaceholder Nothing
+                    , valid
+                    , after
+                    ]]
+
+        it "continues after a malformed tool image while retaining text and valid images" do
+            submissions <- newIORef []
+            backend <- scriptedBackend submissions
+                [ Right $ emptyTurnOutput "image-call"
+                    [functionToolCall "c1" "image" "{}"] Nothing
+                , Right $ emptyTurnOutput "completed" [] (Just "continued")
+                ]
+            let imageTool = passthroughTool "image" \_ _ ->
+                    pure . Right $ ToolHandlerResult
+                        { resultText = "retained text"
+                        , resultImages =
+                            [ ToolResultImage "data:image/png;base64,%%%" Nothing
+                            , ToolResultImage validImageUrl (Just "high")
+                            ]
+                        }
+            config <- testConfig backend
+            result <- runLoop
+                config { loopTools = registryFromHandlers [imageTool] }
+                Nothing "inspect image"
+            result `shouldSatisfy` \case
+                Right LoopResult{finalText = Just "continued", turnsUsed = 2} -> True
+                _ -> False
+            readIORef submissions >>= \case
+                [_, (_, [CompletedTool result])] -> do
+                    result.output `shouldBe`
+                        "retained text\n" <> imageProcessingErrorPlaceholder
+                    result.callId `shouldBe` "c1"
+                    result.toolResultImages `shouldBe`
+                        [ToolResultImage validImageUrl (Just "high")]
+                other -> expectationFailure (show other)
+
+        it "replaces only invalid images in restored function and custom tool output" do
+            let rawOutput = rawJsonFixture
+                    "[{\"type\":\"input_text\",\"text\":\"before\"},{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,%%%\"},{\"type\":\"input_text\",\"text\":\"after\"}]"
+                expected = Aeson.toJSON
+                    [ Aeson.object ["type" Aeson..= ("input_text" :: Text), "text" Aeson..= ("before" :: Text)]
+                    , Aeson.object ["type" Aeson..= ("input_text" :: Text), "text" Aeson..= imageProcessingErrorPlaceholder]
+                    , Aeson.object ["type" Aeson..= ("input_text" :: Text), "text" Aeson..= ("after" :: Text)]
+                    ]
+                functionOutput = rawJsonFixture
+                    "{\"type\":\"function_call_output\",\"call_id\":\"c1\",\"output\":[]}"
+                customOutput = rawJsonFixture
+                    "{\"type\":\"custom_tool_call_output\",\"call_id\":\"c2\",\"output\":[]}"
+                checkOutput raw = case Json.decodeEither responseItemDecoder (rawJsonBytes raw) of
+                    Left failure -> expectationFailure (show failure)
+                    Right item -> do
+                      prepared <- prepareHistory [case item of
+                            FunctionCallOutputItem value ->
+                                FunctionCallOutputItem value { output = rawOutput }
+                            CustomToolCallOutputItem value ->
+                                CustomToolCallOutputItem value { output = rawOutput }
+                            other -> other]
+                      case prepared of
+                        [FunctionCallOutputItem value] -> do
+                            value.callId `shouldBe` "c1"
+                            Aeson.decodeStrict' (rawJsonBytes value.output) `shouldBe` Just expected
+                        [CustomToolCallOutputItem value] -> do
+                            value.callId `shouldBe` "c2"
+                            Aeson.decodeStrict' (rawJsonBytes value.output) `shouldBe` Just expected
+                        other -> expectationFailure (show other)
+            checkOutput functionOutput
+            checkOutput customOutput
 
     it "rejects unsafe encoded dimensions before decoding a raster" do
         finished <-

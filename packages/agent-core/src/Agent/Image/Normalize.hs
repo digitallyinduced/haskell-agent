@@ -3,6 +3,8 @@ module Agent.Image.Normalize
     ( NormalizedImage(..)
     , normalizeImageForPrompt
     , normalizeImageDataUrl
+    , prepareImageDataUrl
+    , imageProcessingErrorPlaceholder
     ) where
 
 import Codec.Picture
@@ -568,6 +570,60 @@ normalizeImageDataUrl url =
                             <> ";base64,"
                             <> TextEncoding.decodeUtf8
                                 (Base64.encode normalizedBytes)
+
+-- | A recoverable replacement, deliberately independent of tool/provider
+-- names. Never include the original payload in the error.
+imageProcessingErrorPlaceholder :: Text
+imageProcessingErrorPlaceholder =
+    "image content omitted because it could not be processed"
+
+-- | Prepare inline image content at the shared model-input boundary. Remote
+-- URLs retain their existing provider-specific behavior. Formats supported by
+-- our bounded decoder are checked even when already small enough; resizing
+-- alone is not validation. Other formats retain the existing pass-through
+-- behavior after base64 validation.
+prepareImageDataUrl :: Text -> Either Text Text
+prepareImageDataUrl url
+    | not ("data:" `Text.isPrefixOf` Text.toLower url) = Right url
+    | otherwise =
+        case parseImageDataUrl url of
+            Nothing -> Left imageProcessingErrorPlaceholder
+            Just (mime, bytes)
+                | ByteString.null bytes
+                    || not (validImageMime mime)
+                    || TextEncoding.decodeUtf8 (Base64.encode bytes)
+                        /= Text.drop 1 (snd (Text.breakOn "," url)) ->
+                        Left imageProcessingErrorPlaceholder
+                | otherwise ->
+                    case encodedImageHeader bytes of
+                        Nothing
+                            | Text.toLower mime `elem`
+                                ["image/png", "image/jpeg", "image/jpg", "image/bmp"] ->
+                                    Left imageProcessingErrorPlaceholder
+                            | otherwise -> Right url
+                        Just header
+                            | not (headerSafeToDecode bytes header)
+                                || not (encodedPayloadSafeToDecode bytes header) ->
+                                    Left imageProcessingErrorPlaceholder
+                            | otherwise ->
+                                case decodeSupportedImage header.encodedImageFormat bytes of
+                                    Left _ -> Left imageProcessingErrorPlaceholder
+                                    Right (decoded, _)
+                                        | dynamicImageSafeToProcess decoded ->
+                                            Right (normalizeImageDataUrl url)
+                                        | otherwise ->
+                                            Left imageProcessingErrorPlaceholder
+  where
+    validImageMime mime =
+        let subtype = Text.drop 6 mime
+        in not (Text.null subtype)
+            && Text.all
+                (\character ->
+                    (character >= 'a' && character <= 'z')
+                        || (character >= 'A' && character <= 'Z')
+                        || (character >= '0' && character <= '9')
+                        || Text.any (== character) "!#$%&'*+-.^_`|~")
+                subtype
 
 parseImageDataUrl :: Text -> Maybe (Text, ByteString)
 parseImageDataUrl url = do

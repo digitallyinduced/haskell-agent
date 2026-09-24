@@ -88,8 +88,6 @@ data CodeModeResult
 data CellOutcome
     = CellSucceeded !Value
     | CellFailed !Value !Text
-    -- Host-side rejection: the worker may still be executing and must not be reused.
-    | CellRejected !Value !Text
 
 data CellObservation
     = CellIdle
