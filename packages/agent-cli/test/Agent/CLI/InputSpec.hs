@@ -1,6 +1,9 @@
 module Agent.CLI.InputSpec (spec) where
 
 import Agent.CLI.Command (defaultSlashCatalog)
+import Agent.CLI.Dictation (DictationTarget(..))
+import Agent.CLI.Interrupt (newInterruptState)
+import Agent.Provider (Provider(OpenAIProvider))
 import Agent.CLI.Input
     ( ChoiceKey(..)
     , approvalKeyText
@@ -15,6 +18,7 @@ import Agent.CLI.Input
     , isShiftTabCsiBody
     , parseChoiceKey
     , replHistoryPath
+    , readReplLineOrWithCatalogForTarget
     , submissionPromptText
     , terminalTextWidth
     , truncateDisplayText
@@ -36,9 +40,19 @@ import Agent.CLI.Input.Types
 import Data.Char (isControl)
 import Data.Either (isLeft)
 import Data.List (mapAccumL)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (withAsync, wait)
+import Control.Concurrent.STM (STM, atomically, newEmptyTMVarIO, putTMVar, readTMVar, retry)
+import Control.Exception.Safe (bracket, finally)
 import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
 import qualified Graphics.Vty as V
+import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.FilePath ((</>))
+import System.IO (Handle, SeekMode(AbsoluteSeek), hClose, hFlush, hSeek, hGetEncoding, hSetBinaryMode, hSetEncoding, stdin, stdout, utf8)
+import System.IO.Temp (withSystemTempFile)
+import System.Posix.IO (createPipe, fdToHandle)
+import System.Timeout (timeout)
 import Test.Hspec
 import Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
 import Test.QuickCheck
@@ -59,8 +73,107 @@ data EditorViewportCase = EditorViewportCase !Int !Text.Text !Int
 newtype EditorKeySequence = EditorKeySequence [EditorKey]
     deriving (Show)
 
+withPromptInputPipe :: (Handle -> IO a) -> IO a
+withPromptInputPipe action =
+    bracket
+        (do
+            (reader, writer) <- createPipe
+            readerHandle <- fdToHandle reader
+            writerHandle <- fdToHandle writer
+            hSetEncoding readerHandle utf8
+            hSetEncoding writerHandle utf8
+            pure (readerHandle, writerHandle))
+        (\(reader, writer) -> hClose reader `finally` hClose writer)
+        \(reader, writer) ->
+            withPromptHandles reader (action writer)
+
+withPromptHandles :: Handle -> IO a -> IO a
+withPromptHandles reader action =
+    withSystemTempFile "prompt-output" \_ output -> do
+        let redirect target replacement inner =
+                bracket ((,) <$> hDuplicate target <*> hGetEncoding target)
+                    (\(saved, encoding) ->
+                        (hDuplicateTo saved target >> setEncoding target encoding)
+                            `finally` hClose saved)
+                    (\_ -> do
+                        encoding <- hGetEncoding replacement
+                        hDuplicateTo replacement target
+                        setEncoding target encoding
+                        inner)
+            setEncoding target = maybe
+                (hSetBinaryMode target True)
+                (hSetEncoding target)
+        redirect stdin reader $ redirect stdout output action
+
 spec :: Spec
 spec = do
+    describe "externally resumed prompt" do
+        it "wakes without input and returns the unsubmitted draft" do
+            result <- withPromptInputPipe \_ -> do
+                interrupt <- newInterruptState (const (pure ()))
+                timeout 1000000 $
+                    readReplLineOrWithCatalogForTarget
+                        (DirectDictation OpenAIProvider) defaultSlashCatalog
+                        interrupt "" "unsubmitted draft" (pure ())
+            result `shouldBe` Just (Left ((), "unsubmitted draft"))
+
+        it "submits input normally when the wake is disabled" do
+            result <- withSystemTempFile "prompt-input" \_ input -> do
+                Text.hPutStrLn input "submitted text"
+                hFlush input
+                hSeek input AbsoluteSeek 0
+                withPromptHandles input do
+                    interrupt <- newInterruptState (const (pure ()))
+                    timeout 1000000 $
+                        readReplLineOrWithCatalogForTarget
+                            (DirectDictation OpenAIProvider) defaultSlashCatalog
+                            interrupt "" "" (retry :: STM ())
+            result `shouldBe` Just (Right (ReplText "submitted text"))
+
+        it "retains a partial pipe line across wake-up and resumes without duplication" do
+            result <- withPromptInputPipe \writer -> do
+                interrupt <- newInterruptState (const (pure ()))
+                wake <- newEmptyTMVarIO
+                Text.hPutStr writer "partial λ "
+                hFlush writer
+                let readPrompt draft signal =
+                        readReplLineOrWithCatalogForTarget
+                            (DirectDictation OpenAIProvider) defaultSlashCatalog
+                            interrupt "" draft signal
+                timeout 5000000 $
+                    withAsync (readPrompt "initial " (readTMVar wake)) \reader -> do
+                        -- Give the reader time to consume a prefix while the
+                        -- writer remains open without a newline. Any unread
+                        -- suffix must also survive the wake and restoration.
+                        threadDelay 100000
+                        atomically (putTMVar wake ())
+                        suspended <- wait reader
+                        case suspended of
+                            Left ((), draft) -> do
+                                draft `shouldSatisfy` ("initial " `Text.isPrefixOf`)
+                                Text.hPutStrLn writer "remainder"
+                                hFlush writer
+                                readPrompt draft (retry :: STM ())
+                            Right line -> do
+                                expectationFailure ("Unexpected submission: " <> show line)
+                                pure (Right line)
+            result `shouldBe` Just (Right (ReplText "initial partial λ remainder"))
+
+        it "submits an unterminated pipe line at EOF and then reports EOF" do
+            result <- withSystemTempFile "prompt-input" \_ input -> do
+                Text.hPutStr input "unterminated"
+                hFlush input
+                hSeek input AbsoluteSeek 0
+                withPromptHandles input do
+                    interrupt <- newInterruptState (const (pure ()))
+                    let readPrompt =
+                            readReplLineOrWithCatalogForTarget
+                                (DirectDictation OpenAIProvider) defaultSlashCatalog
+                                interrupt "" "" (retry :: STM ())
+                    timeout 1000000 ((,) <$> readPrompt <*> readPrompt)
+            result `shouldBe` Just
+                (Right (ReplText "unterminated"), Right ReplEof)
+
     describe "replHistoryPath" do
         it "is ~/.haskell-agent/history" do
             replHistoryPath "/home/marc"

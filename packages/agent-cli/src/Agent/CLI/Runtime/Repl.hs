@@ -31,13 +31,13 @@ import Agent.Runtime.GatewayClient
     )
 import Agent.CLI.Input
     ( ReplLine(ReplText)
-    , readReplLineWithCatalogForProvider
-    , readReplLineWithCatalogForTarget
+    , readReplLineOrWithCatalogForTarget
     )
 import Agent.OpenAI.Models.Types (ModelInfo(..), modelServiceTierForRequest)
 import Agent.Runtime.Models ( catalogModelIds )
 import Agent.CLI.SteeringInputs
     ( awaitSteeringInput
+    , awaitSteeringInputReady
     , readSteeringTurn
     )
 import Agent.CLI.Provider.Switch
@@ -63,6 +63,7 @@ import Agent.CLI.Session.Interaction
     , syncFullscreenContext
     )
 import Agent.CLI.Session.Lifecycle ( SessionContinuation(..) )
+import Agent.CLI.SessionState (restoreSessionDraft, suspendSessionDraft)
 import Agent.CLI.SessionEnv ( SessionEnv(..), SessionInboxRuntime(..) )
 import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.CLI.Skills ( skillInvocationCommand )
@@ -111,11 +112,11 @@ import Agent.Tools.PlanMode
     ( PlanModeEnv(planStateRef),
       PlanModeState(PlanPending, PlanActive) )
 import Agent.Runtime.Session.Inbox (releaseInboxPending)
-import Control.Concurrent.Async ( race, withAsync )
+import Control.Concurrent.Async ( withAsync )
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (bracket_, finally)
 import Control.Concurrent.MVar ( withMVar )
-import Control.Concurrent.STM (atomically, orElse, retry, takeTMVar, tryTakeTMVar)
+import Control.Concurrent.STM (atomically, orElse, retry, readTMVar, takeTMVar, tryTakeTMVar)
 import Control.Monad ( when, forM_, unless )
 import Data.IORef ( atomicModifyIORef', readIORef, writeIORef )
 import Data.Maybe ( fromMaybe, isJust )
@@ -141,7 +142,7 @@ sessionContinuation =
 
 data ReplWake
     = ProviderUnavailableWake !ApiError
-    | SteeringInputWake
+    | SteeringInputWake !Text
 
 runPendingTurn
     :: PendingTurnPresentation
@@ -182,8 +183,11 @@ replWithDraft env@SessionEnv
     , sessionTerminal = terminal
     , sessionFullscreen = fullscreen
     , sessionAgentViewport = agentViewport
-    } draft = do
-    writeIORef draftRef draft
+    } requestedDraft = do
+    -- Both lifecycle continuations (including those rebuilt after a provider
+    -- switch) reopen here. A suspended composer takes precedence over the
+    -- synthetic turn's recovery prompt until this point.
+    draft <- restoreSessionDraft draftRef env.sessionSuspendedDraft requestedDraft
     refreshSkills False
     skillInvocations <- readIORef skillInvocationsRef
     let skillCommands =
@@ -236,7 +240,7 @@ replWithDraft env@SessionEnv
                 draft
                 gatewayAccess
                 (currentModel params)
-        Nothing -> Right <$> withMVar render.renderLock \_ -> do
+        Nothing -> withMVar render.renderLock \_ -> do
             let inbox = env.sessionInboxRuntime.inboxInline
             -- The inline editor redraws its ANSI frame with several writes.
             -- Keep the renderer out for the complete prompt lifetime so a
@@ -293,36 +297,42 @@ replWithDraft env@SessionEnv
                         emitTerminalSequence terminal stdout osc133PromptEnd
                     Text.putStr (endBackground stdoutColor)
                     hFlush stdout
-                readLine = case gatewayAccess of
-                    Just gateway ->
-                        readReplLineWithCatalogForTarget
-                            (dictationTargetForSession
-                                env.sessionProvider
-                                (Just gateway))
-                            slashCatalog
-                            interrupt chromePrompt draft
-                    Nothing ->
-                        readReplLineWithCatalogForProvider
-                            provider
-                            slashCatalog
-                            interrupt chromePrompt draft
+            failedTurn <- readIORef env.sessionLastFailedTurn
+            let steeringWake = case failedTurn of
+                    Just _ -> retry
+                    Nothing -> Right <$> awaitSteeringInputReady env.sessionSteeringInputs
+                -- Readiness must not consume the inbox: keyboard readiness
+                -- can win the editor's race after this transaction commits.
+                wake = (Left <$> readTMVar inbox) `orElse` steeringWake
+                readLine =
+                    readReplLineOrWithCatalogForTarget
+                        (dictationTargetForSession provider gatewayAccess)
+                        slashCatalog interrupt chromePrompt draft wake
             queued <- atomically (tryTakeTMVar inbox)
             case queued of
                 Just text -> do
                     finishChrome
-                    pure (ReplText text, True)
+                    pure (Right (ReplText text, True))
                 Nothing -> do
-                    outcome <- race (atomically (takeTMVar inbox)) readLine
+                    outcome <- readLine
                     finishChrome
-                    pure $ case outcome of
-                        Left text -> (ReplText text, True)
-                        Right line -> (line, False)
+                    case outcome of
+                        Left (Left _, _) -> do
+                            text <- atomically (takeTMVar inbox)
+                            pure (Right (ReplText text, True))
+                        Left (Right (), suspendedDraft) -> do
+                            atomically $
+                                awaitSteeringInput env.sessionSteeringInputs
+                                    `orElse` pure ()
+                            pure (Left (SteeringInputWake suspendedDraft))
+                        Right line -> pure (Right (line, False))
     case mlineResult of
-        Left SteeringInputWake -> do
+        Left (SteeringInputWake suspendedDraft) -> do
+            suspendSessionDraft env.sessionDraft env.sessionSuspendedDraft suspendedDraft
             (promptText, pending) <-
                 readSteeringTurn env.sessionSteeringInputs
             if null pending
-                then replWithDraft env draft
+                then replWithDraft env suspendedDraft
                 else do
                     forM_ fullscreen \runtime ->
                         emitUiEvent runtime
@@ -333,7 +343,9 @@ replWithDraft env@SessionEnv
                     -- prompt text preserves user guidance in durable history;
                     -- it does not add a second copy to provider inputs.
                     result <- runOneTurn env promptText []
-                    finishTurn env False result
+                    SessionLifecycle.finishTurn
+                        sessionContinuation
+                        env False result
         Left (ProviderUnavailableWake apiError) -> do
             -- The startup check is one-shot. If no fallback account is usable,
             -- leave request-time error handling in charge of later submits.
@@ -403,7 +415,7 @@ readFullscreenPrompt
                         -- input through normal steering.
                         Just _ -> retry
                         Nothing ->
-                            SteeringInputWake
+                            SteeringInputWake draft
                                 <$ awaitSteeringInput
                                     env.sessionSteeringInputs
                 wake = case startupUnavailable of
