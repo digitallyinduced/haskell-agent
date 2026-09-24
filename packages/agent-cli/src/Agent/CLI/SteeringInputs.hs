@@ -1,7 +1,8 @@
--- | A bounded queue of steering inputs retained while a turn is active.
+-- | Bounded steering delivery with retained background completion overflow.
 module Agent.CLI.SteeringInputs
     ( SteeringInputs
     , awaitSteeringInput
+    , awaitSteeringInputReady
     , awaitUserSteering
     , clearSteeringInputs
     , commitSteeringInputs
@@ -55,6 +56,9 @@ data SteeringEntry = SteeringEntry
 
 data SteeringState = SteeringState
     { steeringQueue :: !(Seq.Seq SteeringEntry)
+    -- Completion callbacks cannot block while holding their delivery gate.
+    -- Retain overflow separately until acknowledgement frees delivery space.
+    , deferredCompletions :: !(Seq.Seq SteeringEntry)
     , steeringBytes :: !Int
     , steeringEpoch :: !Word
     }
@@ -63,7 +67,7 @@ newtype SteeringInputs = SteeringInputs (TVar SteeringState)
 
 newSteeringInputs :: IO SteeringInputs
 newSteeringInputs =
-    SteeringInputs <$> newTVarIO (SteeringState Seq.empty 0 0)
+    SteeringInputs <$> newTVarIO (SteeringState Seq.empty Seq.empty 0 0)
 
 enqueueSteeringInputs
     :: SteeringInputs
@@ -103,7 +107,10 @@ enqueueSteeringInputs (SteeringInputs ref) inputs =
                 pure (Right ())
 
 -- | Queue one generated completion notice, suppressing duplicate publication
--- for the same managed task while the notice is still pending.
+-- for the same managed task while the notice is still pending. Queue
+-- saturation defers delivery rather than rejecting a completed task's result.
+-- Individual notices must fit the byte budget; managed shell notices already
+-- bound their output well below this limit.
 enqueueBackgroundCompletion
     :: SteeringInputs
     -> Text
@@ -131,29 +138,42 @@ enqueueBackgroundCompletionForEpoch epoch (SteeringInputs ref) key input =
         state <- readTVar ref
         if maybe False (/= state.steeringEpoch) epoch
                 || any ((== Just key) . (.steeringBackgroundKey))
-                    state.steeringQueue
+                    (state.steeringQueue Seq.>< state.deferredCompletions)
             then pure (Right False)
             else do
                 let bytes = logicalTurnInputBytes input
-                    nextCount = Seq.length state.steeringQueue + 1
-                    nextBytes = state.steeringBytes `saturatingAdd` bytes
-                if nextCount > steeringInputCountLimit
-                        || nextBytes > steeringInputByteLimit
+                if bytes > steeringInputByteLimit
                     then
                         pure $ Left
-                            "Steering queue is full; a background completion notice could not be queued."
+                            "Background completion notice exceeds the steering input byte limit."
                     else do
-                        writeTVar ref state
-                            { steeringQueue =
-                                state.steeringQueue
+                        writeTVar ref $ promoteDeferredCompletions state
+                            { deferredCompletions =
+                                state.deferredCompletions
                                     Seq.|> SteeringEntry
                                         input
                                         bytes
                                         (Just key)
                                         True
-                            , steeringBytes = nextBytes
                             }
                         pure (Right True)
+
+-- | Fill the bounded provider-delivery queue without changing its existing
+-- prefix: a provider acknowledgement still commits precisely its snapshot.
+promoteDeferredCompletions :: SteeringState -> SteeringState
+promoteDeferredCompletions state =
+    case Seq.viewl state.deferredCompletions of
+        Seq.EmptyL -> state
+        entry Seq.:< remaining
+            | Seq.length state.steeringQueue < steeringInputCountLimit
+            , let nextBytes = state.steeringBytes `saturatingAdd` entry.steeringBytes
+            , nextBytes <= steeringInputByteLimit ->
+                promoteDeferredCompletions state
+                    { steeringQueue = state.steeringQueue Seq.|> entry { steeringWake = True }
+                    , deferredCompletions = remaining
+                    , steeringBytes = nextBytes
+                    }
+            | otherwise -> state
 
 readSteeringInputs :: SteeringInputs -> IO [TurnInput]
 readSteeringInputs (SteeringInputs ref) = do
@@ -182,13 +202,24 @@ hasBackgroundCompletions :: SteeringInputs -> IO Bool
 hasBackgroundCompletions (SteeringInputs ref) = do
     state <- readTVarIO ref
     pure $
-        any (maybe False (const True) . (.steeringBackgroundKey))
+        not (Seq.null state.deferredCompletions)
+        || any (maybe False (const True) . (.steeringBackgroundKey))
             state.steeringQueue
 
 hasSteeringInputWake :: SteeringInputs -> IO Bool
 hasSteeringInputWake (SteeringInputs ref) = do
     state <- readTVarIO ref
-    pure $ any (.steeringWake) state.steeringQueue
+    pure $ any (.steeringWake)
+        (state.steeringQueue Seq.>< state.deferredCompletions)
+
+-- | Observe an idle wake without claiming it. Competing keyboard/inbox waits
+-- may win after this transaction succeeds, so the winning owner must consume
+-- the edge separately rather than losing it in a cancelled racing action.
+awaitSteeringInputReady :: SteeringInputs -> STM ()
+awaitSteeringInputReady (SteeringInputs ref) = do
+    state <- readTVar ref
+    check $ any (.steeringWake)
+        (state.steeringQueue Seq.>< state.deferredCompletions)
 
 -- | Consume pending idle-wake edges without removing their inputs. Every
 -- accepted input has an edge: guidance arriving after the active loop's final
@@ -198,12 +229,17 @@ hasSteeringInputWake (SteeringInputs ref) = do
 awaitSteeringInput :: SteeringInputs -> STM ()
 awaitSteeringInput (SteeringInputs ref) = do
     state <- readTVar ref
-    check $ any (.steeringWake) state.steeringQueue
+    check $ any (.steeringWake)
+        (state.steeringQueue Seq.>< state.deferredCompletions)
     writeTVar ref state
         { steeringQueue =
             fmap
                 (\entry -> entry { steeringWake = False })
                 state.steeringQueue
+        , deferredCompletions =
+            fmap
+                (\entry -> entry { steeringWake = False })
+                state.deferredCompletions
         }
 
 -- | Wake passive tool waits without consuming guidance or its idle-wake edge.
@@ -228,9 +264,12 @@ dismissBackgroundCompletion (SteeringInputs ref) key =
                         entry.steeringBytes `saturatingAdd` total)
                     0
                     kept
-        in state
+        in promoteDeferredCompletions state
             { steeringQueue = kept
             , steeringBytes = keptBytes
+            , deferredCompletions = Seq.filter
+                ((/= Just key) . (.steeringBackgroundKey))
+                state.deferredCompletions
             }
 
 -- | Cancelling a turn must not immediately restart it with earlier guidance.
@@ -256,7 +295,7 @@ commitSteeringInputs (SteeringInputs ref) count =
                     entry.steeringBytes `saturatingAdd` total)
                 0
                 removed
-        in state
+        in promoteDeferredCompletions state
             { steeringQueue = remaining
             , steeringBytes = max 0 (state.steeringBytes - removedBytes)
             }
@@ -264,4 +303,4 @@ commitSteeringInputs (SteeringInputs ref) count =
 clearSteeringInputs :: SteeringInputs -> IO ()
 clearSteeringInputs (SteeringInputs ref) =
     atomically $ modifyTVar' ref \state ->
-        SteeringState Seq.empty 0 (state.steeringEpoch + 1)
+        SteeringState Seq.empty Seq.empty 0 (state.steeringEpoch + 1)
