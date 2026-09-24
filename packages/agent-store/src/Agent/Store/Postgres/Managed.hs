@@ -9,7 +9,10 @@
 --
 -- The server is deliberately long-lived: releasing a Hasql pool does not stop
 -- it. A filesystem lock serializes concurrent harness processes during first
--- start and recovery.
+-- start and recovery. Lifecycle commands run in a new session so a CLI
+-- SIGTERM cannot put a shared postmaster into smart shutdown while another
+-- client, such as the desktop app, still holds a connection. If that stuck
+-- state is observed anyway, startup escalates to a fast restart.
 module Agent.Store.Postgres.Managed
     ( ManagedPostgresStatus(..)
     , prepareManagedPostgres
@@ -34,7 +37,11 @@ import System.Exit (ExitCode(..))
 import qualified System.FileLock as FileLock
 import System.FilePath ((</>))
 import System.Posix.Files (setFileMode)
-import System.Process (readProcessWithExitCode)
+import System.Process
+    ( CreateProcess(..)
+    , proc
+    , readCreateProcessWithExitCode
+    )
 
 import Agent.Store.Postgres.Config
 import Agent.Store.Types
@@ -101,7 +108,7 @@ ensureManagedPostgres config =
                             Right PostgresStopped ->
                                 startCluster config >>= continueAfterStart
                             Right PostgresRunning ->
-                                ensureDatabase config >>= finish
+                                ensureRunningCluster config >>= finish
   where
     continueAfterInitialization = \case
         Left err -> pure (Left err)
@@ -152,13 +159,7 @@ stopManagedPostgres config = do
     withLifecycleLock config do
         managedPostgresStatus config >>= \case
             Left err -> pure (Left err)
-            Right PostgresRunning ->
-                runCommand config "pg_ctl"
-                    [ "-D", config.postgresPaths.postgresDataDirectory
-                    , "-m", "fast"
-                    , "-w"
-                    , "stop"
-                    ] >>= expectSuccess "pg_ctl stop"
+            Right PostgresRunning -> stopCluster config
             Right _ -> pure (Right ())
 
 validateConfig :: ManagedPostgresConfig -> Either StoreError ()
@@ -227,6 +228,82 @@ initializeCluster config = do
                 (config.postgresPaths.postgresDataDirectory </> "pg_hba.conf")
                 (Text.unpack pgHbaConf)
             pure (Right ())
+
+-- | Confirm a reported-running postmaster still accepts connections.
+--
+-- SIGTERM is PostgreSQL smart shutdown: new sessions are refused while
+-- existing ones continue. A CLI process-group signal can therefore leave a
+-- shared cluster unusable by the next client until the desktop disconnects.
+-- Escalate that stuck state to a fast stop and start so callers can proceed.
+ensureRunningCluster
+    :: ManagedPostgresConfig
+    -> IO (Either StoreError ())
+ensureRunningCluster config =
+    ensureDatabase config >>= \case
+        Left err | isClusterShuttingDownError err ->
+            restartStuckCluster config >>= \case
+                Left restartErr -> pure (Left restartErr)
+                Right () -> ensureDatabase config
+        result -> pure result
+
+restartStuckCluster
+    :: ManagedPostgresConfig
+    -> IO (Either StoreError ())
+restartStuckCluster config =
+    stopClusterWithMode config FastStop >>= \case
+        Right () -> startCluster config
+        Left _ ->
+            managedPostgresStatus config >>= \case
+                Left err -> pure (Left err)
+                Right PostgresRunning ->
+                    stopClusterWithMode config ImmediateStop >>= \case
+                        Left err -> pure (Left err)
+                        Right () -> startCluster config
+                Right _ -> startCluster config
+
+stopCluster :: ManagedPostgresConfig -> IO (Either StoreError ())
+stopCluster config =
+    stopClusterWithMode config FastStop
+
+data StopMode
+    = FastStop
+    | ImmediateStop
+
+stopClusterWithMode
+    :: ManagedPostgresConfig
+    -> StopMode
+    -> IO (Either StoreError ())
+stopClusterWithMode config mode =
+    runCommand config "pg_ctl"
+        ( [ "-D", config.postgresPaths.postgresDataDirectory ]
+            <> stopModeArguments mode
+            <> [ "-w"
+               , "-t", stopTimeoutSeconds mode
+               , "stop"
+               ]
+        )
+        >>= expectSuccess "pg_ctl stop"
+
+stopModeArguments :: StopMode -> [String]
+stopModeArguments = \case
+    FastStop -> ["-m", "fast"]
+    ImmediateStop -> ["-m", "immediate"]
+
+stopTimeoutSeconds :: StopMode -> String
+stopTimeoutSeconds = \case
+    FastStop -> "15"
+    ImmediateStop -> "5"
+
+isClusterShuttingDownError :: StoreError -> Bool
+isClusterShuttingDownError = \case
+    StoreProcessError message -> mentionsShuttingDown message
+    StoreConnectionError message -> mentionsShuttingDown message
+    _ -> False
+  where
+    mentionsShuttingDown message =
+        Text.isInfixOf
+            "the database system is shutting down"
+            (Text.toLower message)
 
 startCluster :: ManagedPostgresConfig -> IO (Either StoreError ())
 startCluster config = do
@@ -299,14 +376,21 @@ runCommand
     -> IO (Either StoreError (ExitCode, String, String))
 runCommand config executable arguments =
     try
-        (readProcessWithExitCode
-            (postgresExecutable config executable)
-            arguments
-            "") >>= \case
+        (readCreateProcessWithExitCode processSpec "") >>= \case
                 Left (exception :: SomeException) -> pure $ Left $ StoreProcessError $
                     "Could not run " <> Text.pack executable <> ": "
                         <> Text.pack (show exception)
                 Right result -> pure (Right result)
+  where
+    -- Keep pg_ctl/initdb/psql out of the caller's session. PostgreSQL smart
+    -- shutdown (SIGTERM) refuses new connections until every existing client
+    -- disconnects, so a terminal SIGTERM/SIGINT that reaches the postmaster
+    -- leaves a desktop session holding the cluster in shutdown indefinitely.
+    processSpec =
+        (proc (postgresExecutable config executable) arguments)
+            { create_group = True
+            , new_session = True
+            }
 
 expectSuccess
     :: Text
