@@ -3377,8 +3377,105 @@ spec = do
                 Text.isInfixOf "exec-output-marker"
             failedText `shouldSatisfy`
                 Text.isInfixOf "› ✗ $ false"
-            failedText `shouldNotSatisfy`
+            failedText `shouldSatisfy`
                 Text.isInfixOf "failed-output-marker"
+
+    describe "compact action rendering" do
+        it "hides a model-derived singleton path until its inspection is expanded" do
+            let completed = foldl (flip reduceUi) initialUiState
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted
+                        (functionToolCall "singleton-read" "read_file"
+                            "{\"target_file\":\"singleton-path-marker.hs\"}"))
+                    , UiLoop (ToolFinished ToolCallResult
+                        { callId = "singleton-read"
+                        , toolResultMode = BlockingToolCall
+                        , toolResultImages = []
+                        , toolResultOutcome = Nothing
+                        , output = "singleton-body-marker"
+                        , callKind = FunctionCallKind
+                        })
+                    ]
+            runtime <- newScriptRuntime completed
+            let render ui = renderedConversationText (100, 30) $
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                        { appUi = ui }
+                collapsed = render completed
+                restored = render completed { uiInspectionGroups = Map.empty }
+                expanded = render (reduceUi UiToggleSelected completed)
+            collapsed `shouldSatisfy` Text.isInfixOf "Read 1 file"
+            collapsed `shouldNotSatisfy` Text.isInfixOf "singleton-path-marker"
+            collapsed `shouldNotSatisfy` Text.isInfixOf "singleton-body-marker"
+            restored `shouldSatisfy` Text.isInfixOf "Read 1 file"
+            restored `shouldNotSatisfy` Text.isInfixOf "singleton-path-marker"
+            expanded `shouldSatisfy` Text.isInfixOf "singleton-path-marker"
+            expanded `shouldSatisfy` Text.isInfixOf "singleton-body-marker"
+
+        it "keeps long multiline action titles on a single row" do
+            runtime <- newScriptRuntime initialUiState
+            let block = (markerBlock (BlockId 1) "hidden-body")
+                    { blockKind = BlockTool
+                    , blockTitle = "title-start\n" <> Text.replicate 80 "long "
+                    }
+                state = (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    { appUi = initialUiState
+                        { uiBlocks = Seq.fromList
+                            [block, markerBlock (BlockId 2) "following-prose"]
+                        }
+                    }
+                rows = map Text.strip $ Text.lines $ renderedConversationText (60, 30) state
+                actionRows = take 3 $ dropWhile (not . Text.isInfixOf "title-start") rows
+            length actionRows `shouldBe` 3
+            drop 1 actionRows `shouldBe` ["", "following-prose"]
+
+        it "hides action bodies and rails until expanded, without hiding failures" do
+            runtime <- newScriptRuntime initialUiState
+            let renderBlock block =
+                    renderedConversationText (100, 30) $
+                        (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                            { appUi = initialUiState
+                                { uiBlocks = Seq.singleton block }
+                            }
+            forM_ [BlockTool, BlockInspect, BlockEdit, BlockThinking] \kind -> do
+                let block = (markerBlock (BlockId 1) "body-marker")
+                        { blockKind = kind
+                        , blockTitle = "action-marker"
+                        , blockExpanded = False
+                        }
+                    collapsed = renderBlock block
+                    expanded = renderBlock block { blockExpanded = True }
+                    failed = renderBlock block { blockState = BlockFailed }
+                collapsed `shouldSatisfy` Text.isInfixOf "action-marker"
+                collapsed `shouldNotSatisfy` Text.isInfixOf "body-marker"
+                collapsed `shouldNotSatisfy` Text.isInfixOf "│"
+                expanded `shouldSatisfy` Text.isInfixOf "body-marker"
+                failed `shouldSatisfy` Text.isInfixOf "body-marker"
+
+        it "keeps consecutive actions adjacent and separates the following prose" do
+            runtime <- newScriptRuntime initialUiState
+            let action ident title = (markerBlock (BlockId ident) "hidden-body")
+                    { blockKind = BlockTool
+                    , blockTitle = title
+                    , blockExpanded = False
+                    }
+                state prefixCount = (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    { appUi = initialUiState
+                        { uiBlocks = Seq.fromList
+                            ( [action ident "earlier-action" | ident <- [1 .. prefixCount]]
+                                <> [ action (prefixCount + 1) "first-action"
+                                   , action (prefixCount + 2) "second-action"
+                                   , markerBlock (BlockId (prefixCount + 3)) "following-prose"
+                                   ])
+                        }
+                    }
+            -- Exercise both an ordinary boundary and a boundary after the
+            -- final action in a full 32-block cached chunk.
+            forM_ [0, 30, 31] \prefixCount -> do
+                let rows = map Text.strip $
+                        Text.lines (renderedConversationText (100, 80) (state prefixCount))
+                    actionRows = dropWhile (not . Text.isInfixOf "first-action") rows
+                take 4 actionRows `shouldBe`
+                    ["◆ first-action", "◆ second-action", "", "following-prose"]
 
     describe "background task prompt status" do
         it "renders idle work above the editable prompt and hides it during a turn" do
@@ -4458,7 +4555,7 @@ cachedHistorySelectionRenders = do
                 ( Text.isInfixOf "❯ " line
                     && any
                         (Text.isInfixOf "cached selection")
-                        (take 2 rest)
+                        (line : take 2 rest)
                 )
                     || markerBeforeTitle rest
     pure $ case rendered of
@@ -4577,6 +4674,12 @@ visiblePromptRepairsStaleAnchor = do
 renderedAppText :: (Int, Int) -> AppState -> Text
 renderedAppText size state =
     renderedPictureTextAt size (renderWidget Nothing (drawApp state) size)
+
+renderedConversationText :: (Int, Int) -> AppState -> Text
+renderedConversationText size state =
+    renderedPictureTextAt size $
+        renderWidget Nothing
+            [History.drawConversationBlocks state AgentRoot state.appUi] size
 
 renderedPictureText :: V.Picture -> Text
 renderedPictureText picture =

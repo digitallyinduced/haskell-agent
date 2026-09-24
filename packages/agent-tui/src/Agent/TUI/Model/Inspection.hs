@@ -95,8 +95,7 @@ startInspectionCall call state =
         in appended
             { uiBlocks =
                 Seq.adjust
-                    (\block ->
-                        block { blockInspectionGroupable = True })
+                    (renderInspectionGroup group)
                     blockIndex
                     appended.uiBlocks
             , uiInspectionGroups =
@@ -116,15 +115,15 @@ renderInspectionGroup group block =
         , blockState = inspectionGroupState items
         , blockDetail = inspectionGroupDetail items
         , blockCallId = (.inspectionCallId) <$> listToMaybe items
-        , blockInspectionGroupable =
-            block.blockInspectionGroupable && length items == 1
+        -- Structured groups already have exact counts and nouns. The legacy
+        -- title-based projection must not regroup them as unclassified calls.
+        , blockInspectionGroupable = False
         }
   where
     items = group.inspectionGroupItems
 
 inspectionGroupTitle :: [InspectionItem] -> Text
 inspectionGroupTitle [] = "Inspected"
-inspectionGroupTitle [item] = item.inspectionTitle
 inspectionGroupTitle items =
     Text.intercalate ", " (inspectionSummaries items)
         <> statusSuffix
@@ -156,38 +155,41 @@ inspectionSummaries =
     map render . foldl add []
   where
     add counts item =
-        let label = inspectionSummaryLabel item.inspectionToolName
+        let label = inspectionSummaryCategory item.inspectionToolName
         in case break ((== label) . fst) counts of
             (before, (_, count) : after) ->
                 before <> [(label, count + 1)] <> after
             _ -> counts <> [(label, 1)]
-    render :: (Text, Int) -> Text
-    render (label, count) =
+    render :: ((Text, Text, Text), Int) -> Text
+    render ((label, singular, plural), count) =
         label
             <> " "
             <> Text.pack (show count)
-            <> if count == 1 then " item" else " items"
+            <> " "
+            <> if count == 1 then singular else plural
 
-inspectionSummaryLabel :: Text -> Text
-inspectionSummaryLabel name
-    | name `elem` ["read_file", "read_tool_output", "mcp_read_resource"] =
-        "Read"
-    | name
-        `elem` ["list_dir", "mcp_list_resources", "list_agents", "ListAgents", "Glob"] =
-        "Listed"
-    | name
-        `elem`
-            [ "grep"
-            , "search_tool_output"
-            , "mcp_search"
-            , "search_tool"
-            , "conversation_search"
-            , "skill_search"
-            , "WebSearch"
-            , "ToolSearch"
-            ] =
-        "Searched"
-    | otherwise = "Inspected"
+-- Counts describe invocations, not result rows or distinct paths. Keep output
+-- and resource reads separate from filesystem reads.
+inspectionSummaryCategory :: Text -> (Text, Text, Text)
+inspectionSummaryCategory name = case name of
+    "read_file" -> ("Read", "file", "files")
+    "read_tool_output" -> ("Read", "output", "outputs")
+    "mcp_read_resource" -> ("Read", "resource", "resources")
+    "list_dir" -> ("Listed", "directory", "directories")
+    "grep" -> ("Searched", "pattern", "patterns")
+    "search_tool_output" -> ("Searched", "output", "outputs")
+    "Glob" -> ("Searched", "file pattern", "file patterns")
+    "view_skill" -> ("Read", "skill", "skills")
+    "mcp_list_resources" -> ("Requested", "resource listing", "resource listings")
+    "list_agents" -> ("Requested", "agent listing", "agent listings")
+    "ListAgents" -> ("Requested", "agent listing", "agent listings")
+    "mcp_search" -> ("Performed", "tool search", "tool searches")
+    "search_tool" -> ("Performed", "tool search", "tool searches")
+    "ToolSearch" -> ("Performed", "tool search", "tool searches")
+    "WebSearch" -> ("Performed", "web search", "web searches")
+    "conversation_search" -> ("Performed", "conversation search", "conversation searches")
+    "skill_search" -> ("Performed", "skill search", "skill searches")
+    _ -> ("Inspected", "item", "items")
 
 -- Image rendering and long-running task-output polling attach lifecycle data
 -- to one exact block, so only compact read/list/search calls join a burst.
@@ -215,7 +217,10 @@ isGroupableInspectionTool rawName =
             ]
 
 inspectionGroupBody :: [InspectionItem] -> Text
-inspectionGroupBody [item] = item.inspectionBody
+inspectionGroupBody [item]
+    | Text.null item.inspectionDetail =
+        inspectionItemTitle item <> "\n\n" <> item.inspectionBody
+    | otherwise = item.inspectionBody
 inspectionGroupBody items =
     Text.intercalate "\n" headers
         <> if null details

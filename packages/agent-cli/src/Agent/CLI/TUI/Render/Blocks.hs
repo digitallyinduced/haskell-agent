@@ -2,6 +2,7 @@
 module Agent.CLI.TUI.Render.Blocks
     ( drawBlock
     , cacheableBlock
+    , compactActionBlock
     , todoStatusAttr
     ) where
 
@@ -367,7 +368,7 @@ drawBlock state target ui block =
                 withAttr Theme.errorAttr
                     (terminalTxtWrap block.blockBody)
         framed =
-            if highlighted
+            if highlighted && not (compactActionBlock block)
                 then
                     withBorderStyle unicodeRounded $
                         overrideAttr Border.borderAttr Theme.borderActiveAttr $
@@ -386,15 +387,15 @@ drawBlock state target ui block =
                         , framed
                         ]
         hoveredRow =
-            (if hovered
+            (if hovered || (highlighted && compactActionBlock block)
                 then
                     highlightWidgetRow
                         Theme.transcriptHoverAttr
-                        (fromMaybe 0 state.appHoveredLine)
+                        (if highlighted then 0 else fromMaybe 0 state.appHoveredLine)
                 else id) $
                 padRight Max blockRow
         rendered =
-            padBottom (Pad 1) $
+            padBottom (Pad (if compactActionBlock block then 0 else 1)) $
                 clickable
                     (ConversationBlock target block.blockId)
                     ((if block.blockKind == BlockUser || block.blockKind == BlockAssistant
@@ -818,8 +819,23 @@ accentBlockWithHeader
     accent
     title
     path
-    sections =
-    accentRail
+    sections
+    | compactActionBlock block =
+        padLeft (Pad 3) $
+            singleLineTitle
+                (\fittedTitle ->
+                    hBox
+                        [ hLimit 2 $
+                            withAttr accent (terminalTxtWrap (Text.take 2 fittedTitle))
+                        , withAttr
+                            (if block.blockState == BlockComplete
+                                then Theme.mutedAttr
+                                else accent)
+                            (terminalTxtWrap (Text.drop 2 fittedTitle))
+                        ])
+                (Text.unwords (Text.words (title <> compactDetail)))
+    | otherwise =
+      accentRail
         motionGlyphSet
         accent
         state.appRuntime.runtimeColor
@@ -829,6 +845,9 @@ accentBlockWithHeader
         padLeft (Pad 2) $
             vBox (titleWidget : bodyWidgets)
   where
+    compactDetail
+        | block.blockKind == BlockInspect = ""
+        | otherwise = maybe "" (" " <>) path
     theme = activeTheme state
     trough =
         Theme.waveTroughForTheme
@@ -908,7 +927,17 @@ accentWaveElapsed state target block
 visibleBody :: UiBlock -> Text
 visibleBody block
     | block.blockExpanded = block.blockBody
+    | compactActionBlock block = ""
     | otherwise = truncatedLines 3 block.blockBody
+
+-- Failed and interrupted calls retain their diagnostic preview. Approval
+-- prompts are separate widgets and are never projected into these rows.
+compactActionBlock :: UiBlock -> Bool
+compactActionBlock block =
+    not block.blockExpanded
+        && block.blockState `elem` [BlockRunning, BlockStreaming, BlockComplete]
+        && block.blockKind
+            `elem` [BlockTool, BlockInspect, BlockShell, BlockEdit, BlockThinking]
 
 todoBodyWidgets :: UiBlock -> [Widget Name]
 todoBodyWidgets block =
@@ -954,6 +983,8 @@ truncatedLines shownCount body =
 visibleShellBody :: UiBlock -> Text
 visibleShellBody block
     | block.blockExpanded = block.blockBody
+    | block.blockState `elem` [BlockFailed, BlockDenied, BlockCancelled] =
+        truncatedLines 3 block.blockBody
     | otherwise = ""
 
 detailSuffix :: UiBlock -> Text
