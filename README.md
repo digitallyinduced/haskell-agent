@@ -2,7 +2,7 @@
 
 An independent agent harness, written in Haskell.
 
-<img width="1426" height="871" alt="Screenshot 2026-08-23 at 10 43 49 PM" src="https://github.com/user-attachments/assets/9da99007-484a-4c8a-9bb1-ca35abf8ae05" />
+<img width="1433" height="816" alt="haskell-agent terminal" src="https://github.com/user-attachments/assets/d34fc005-131c-4af2-b300-6e2424fbb0b1" />
 
 ## Documentation
 
