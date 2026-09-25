@@ -429,8 +429,12 @@ runXaiBackendCompactHistoryWithContextWindow
     -> [ResponseItem]
     -> Maybe Text
     -> IO (Either ApiError CompactOutcome)
+-- Size rejections retry a smaller summary, up to three times. Zero retries
+-- would report the first 413 or context-window failure and leave the turn
+-- stuck on the same body.
 runXaiBackendCompactHistoryWithContextWindow contextWindow =
-    runBackendCompactHistoryPreparedWithLimits
+    runBackendCompactHistoryPreparedWithRetries
+        3
         prepareXaiBackendSummaryHistory
         contextWindow
         contextWindow
@@ -519,11 +523,12 @@ summarizeBackendLocalAttempt retries
                     Nothing
                     [UserMessage summaryPrompt]
                     (const (pure ())) >>= \case
-                        Left err@(ProviderError ContextWindowExceeded _ _)
-                            | remaining > 0
+                        Left err
+                            | oversizedSummaryRequest err
+                            , remaining > 0
                             -- Shrink relative to the rejected request, not
-                            -- the configured limit: a short request can also
-                            -- exceed Claude's actual tokenizer/framing budget.
+                            -- the configured limit. A short request can still
+                            -- exceed the provider's tokenizer or body budget.
                             -- Never replace useful history with an empty
                             -- summary, or repeat an unchanged request.
                             , let currentSize =
@@ -540,7 +545,8 @@ summarizeBackendLocalAttempt retries
                             , nextSize <= nextLimit
                             , nextSize < currentSize ->
                                 submitSummary (remaining - 1) nextHistory
-                            | otherwise -> pure (Left err)
+                            | oversizedSummaryRequest err ->
+                                pure (Left err)
                         other -> pure other
         if estimateRequestTokensWithItems
                 summaryParams
@@ -605,6 +611,15 @@ summarizeBackendLocalAttempt retries
     summaryInputLimit = min contextWindow inputLimit
     sourceHistory = stripTaskPlanContextItems history
     summaryHistory = prepareHistory sourceHistory
+
+-- | The summary request itself was rejected for size. Both the token window
+-- and a byte cap (HTTP 413) can shrink by resubmitting less history.
+oversizedSummaryRequest :: ApiError -> Bool
+oversizedSummaryRequest = \case
+    ProviderError ContextWindowExceeded _ _ -> True
+    ProviderError PayloadTooLargeError _ _ -> True
+    HttpError 413 _ -> True
+    _ -> False
 
 compactApiFailure :: Text -> CompactAttempt ApiError
 compactApiFailure message =

@@ -25,6 +25,7 @@ import Agent.XAI.Error
     , classifyFailure
     , isCapacityBody
     )
+import Agent.XAI.ImageBudget (omitInlineImages)
 import Agent.XAI.Options
 import Agent.XAI.Request
     ( buildRequest
@@ -119,11 +120,30 @@ createResponseWithMaybeEventsPolicy policy options credential request onEvent
         "agent-xai requires an xAI credential"
         Nothing
     | otherwise =
+        send request >>= \case
+            -- Byte-size rejection (HTTP 413 or a payload code). Token-window
+            -- errors are left to compaction. Images are omitted from this
+            -- retry only; stored history is not rewritten.
+            Left err
+                | isRequestImageStripFailure err
+                , Just stripped <- omitInlineImages request ->
+                    send stripped
+            result -> pure result
+  where
+    send current =
         createResponseWithProviderPolicy
             policy
-            (xaiProviderConfig options credential request)
-            request
+            (xaiProviderConfig options credential current)
+            current
             onEvent
+
+-- | A rejected body can shrink by dropping inline images. Context-window
+-- failures cannot; those stay on the compaction path.
+isRequestImageStripFailure :: ApiError -> Bool
+isRequestImageStripFailure = \case
+    ProviderError PayloadTooLargeError _ _ -> True
+    HttpError 413 _ -> True
+    _ -> False
 
 defaultTransientPolicy :: RetryPolicyM IO
 defaultTransientPolicy =

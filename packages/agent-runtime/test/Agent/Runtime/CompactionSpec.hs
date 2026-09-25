@@ -930,6 +930,56 @@ spec = do
                     previous `shouldBe` Nothing
                 _ -> expectationFailure "expected one xAI summary request"
 
+        it "shrinks an xAI summary after a payload rejection and retries" do
+            let history =
+                    [ userTextItem
+                        (Text.pack (show index) <> Text.replicate 2_000 "x")
+                    | index <- [1 .. 32 :: Int]
+                    ]
+                tooLarge =
+                    ProviderError PayloadTooLargeError
+                        "Request body exceeds the configured limit."
+                        Nothing
+                summaryOutput = TurnOutput
+                    { responseId = "xai-summary-session"
+                    , toolCalls = []
+                    , assistantText = Just "smaller summary"
+                    , tokenUsage = compactionUsage
+                    , contextUsage = Nothing
+                    , providerTelemetry = Nothing
+                    , completion = TurnCompleted
+                    }
+            requests <- newIORef []
+            let makeBackend summaryParams =
+                    Backend \snapshot previous inputs _onEvent -> do
+                        modifyIORef' requests
+                            (<> [(summaryParams, snapshot, previous, inputs)])
+                        prior <- readIORef requests
+                        pure $
+                            if length prior == 1
+                                then Left tooLarge
+                                else successful snapshot summaryOutput
+            result <-
+                runXaiBackendCompactHistoryWithContextWindow
+                    200_000
+                    makeBackend
+                    (const (pure ()))
+                    defaultResponseCreateParams
+                    history
+                    Nothing
+            result `shouldSatisfy` either (const False)
+                ((== "smaller summary") . (.compactSummary))
+            readIORef requests >>= \case
+                [(firstParams, first, _, _), (secondParams, second, previous, _)] -> do
+                    let size requestParams snapshot =
+                            estimateRequestTokensWithItems requestParams
+                                (snapshot.backendItems
+                                    <> [userTextItem (summarizationPrompt Nothing)])
+                    size secondParams second `shouldSatisfy` (< size firstParams first)
+                    second.backendItems `shouldSatisfy` (not . null)
+                    previous `shouldBe` Nothing
+                _ -> expectationFailure "expected a shrunk xAI summary retry"
+
         it "applies a separate summary input limit" do
             let history =
                     [ userTextItem (Text.replicate 20_000 "old")
