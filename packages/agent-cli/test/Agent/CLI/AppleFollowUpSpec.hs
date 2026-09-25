@@ -98,32 +98,28 @@ spec = describe "Agent.CLI.AppleFollowUp" do
 serveScript :: String
 serveScript =
     unlines
-        [ "#!/usr/bin/env python3"
-        , "import sys"
-        , "sys.stdout.write('{\"ready\":true}\\n')"
-        , "sys.stdout.flush()"
-        , "for line in sys.stdin:"
-        , "    route = 'queue' if 'queue-me' in line else 'steer'"
-        , "    sys.stdout.write('{\"route\":\"%s\"}\\n' % route)"
-        , "    sys.stdout.flush()"
+        [ "#!/bin/sh"
+        , "printf '%s\\n' '{\"ready\":true}'"
+        , "while IFS= read -r line; do"
+        , "  case \"$line\" in"
+        , "    *queue-me*) printf '%s\\n' '{\"route\":\"queue\"}' ;;"
+        , "    *) printf '%s\\n' '{\"route\":\"steer\"}' ;;"
+        , "  esac"
+        , "done"
         ]
 
 classifyScript :: String
 classifyScript =
     unlines
-        [ "#!/usr/bin/env python3"
-        , "import sys"
-        , "sys.stdout.write('{\"ready\":true}\\n')"
-        , "sys.stdout.flush()"
-        , "for line in sys.stdin:"
-        , "    if 'bad' in line:"
-        , "        route = 'later'"
-        , "    elif 'queue-me' in line:"
-        , "        route = 'queue'"
-        , "    else:"
-        , "        route = 'steer'"
-        , "    sys.stdout.write('{\"route\":\"%s\"}\\n' % route)"
-        , "    sys.stdout.flush()"
+        [ "#!/bin/sh"
+        , "printf '%s\\n' '{\"ready\":true}'"
+        , "while IFS= read -r line; do"
+        , "  case \"$line\" in"
+        , "    *bad*) printf '%s\\n' '{\"route\":\"later\"}' ;;"
+        , "    *queue-me*) printf '%s\\n' '{\"route\":\"queue\"}' ;;"
+        , "    *) printf '%s\\n' '{\"route\":\"steer\"}' ;;"
+        , "  esac"
+        , "done"
         ]
 
 withHelper :: String -> (FilePath -> IO a) -> IO a
