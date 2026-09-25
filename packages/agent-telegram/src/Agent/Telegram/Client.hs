@@ -11,7 +11,9 @@ module Agent.Telegram.Client
     , sendTypingAction
     , sendThinkingDraft
     , sendStreamingDraft
+    , clearStreamingDraft
     , setMessageReaction
+    , deleteMessage
     , sendRichMessage
     , sendMessageWithKeyboard
     , editMessageText
@@ -337,6 +339,27 @@ sendThinkingDraft client key status =
                 ]
             ]
                 <> threadParameters key
+
+clearStreamingDraft :: TelegramClient -> TelegramChatKey -> IO ()
+clearStreamingDraft client key =
+    expectBool client "sendRichMessageDraft" $
+        object $
+            [ "chat_id" .= key.chatId
+            , "draft_id" .= (1 :: Int)
+            , "rich_message" .= object ["html" .= ("" :: Text)]
+            ]
+                <> threadParameters key
+
+deleteMessage
+    :: TelegramClient
+    -> TelegramChatKey
+    -> Integer
+    -> IO (Either Text ())
+deleteMessage client key messageId =
+    requestUnit client "deleteMessage" $ object
+        [ "chat_id" .= key.chatId
+        , "message_id" .= messageId
+        ]
 
 setMessageReaction
     :: TelegramClient

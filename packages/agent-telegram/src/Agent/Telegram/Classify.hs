@@ -17,6 +17,7 @@ module Agent.Telegram.Classify
     , telegramCommandArguments
     , telegramReactionEmoji
     , telegramReplyText
+    , isTelegramNoReplyText
     , telegramUserLabel
     , telegramReplyUserIdFromPrompt
     , recordSeenTelegramUsers
@@ -29,6 +30,7 @@ module Agent.Telegram.Classify
 import Agent.Telegram.Types
 import Agent.Telegram.Classify.Media
 import Agent.Telegram.Classify.User
+import Agent.Telegram.Markdown (markdownToTelegramHtml)
 import Control.Applicative ((<|>))
 import Data.Char (isDigit)
 import qualified Data.Map.Strict as Map
@@ -837,11 +839,17 @@ ambientGroupPromptSuffix =
 telegramNoReplyToken :: Text
 telegramNoReplyToken = "[[TELEGRAM_NO_REPLY]]"
 
+-- Swallow only the exact token after strip, for every prompt type.
 telegramReplyText :: Text -> Text -> Maybe Text
-telegramReplyText prompt response
-    | isAmbientGroupPrompt prompt
-    , Text.strip response == telegramNoReplyToken = Nothing
+telegramReplyText _prompt response
+    | isTelegramNoReplyText response = Nothing
     | otherwise = Just response
+
+isTelegramNoReplyText :: Text -> Bool
+isTelegramNoReplyText response =
+    let stripped = Text.strip response
+    in stripped == telegramNoReplyToken
+        || stripped == markdownToTelegramHtml telegramNoReplyToken
 
 isAmbientGroupPrompt :: Text -> Bool
 isAmbientGroupPrompt prompt =
