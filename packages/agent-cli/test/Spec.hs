@@ -34,6 +34,8 @@ import qualified Agent.CLI.AgentSessionsSpec as AgentSessionsSpec
 import qualified Agent.CLI.AgentSessionsWaitGraphSpec as AgentSessionsWaitGraphSpec
 import qualified Agent.CLI.AgentViewportSpec as AgentViewportSpec
 import qualified Agent.CLI.AgentViewportRuntimeSpec as AgentViewportRuntimeSpec
+import qualified Agent.CLI.AppleFollowUpEvalSpec as AppleFollowUpEvalSpec
+import qualified Agent.CLI.AppleFollowUpSpec as AppleFollowUpSpec
 import qualified Agent.CLI.AppleTitleSpec as AppleTitleSpec
 import qualified Agent.CLI.ApprovalSpec as ApprovalSpec
 import qualified Agent.CLI.ArtifactSpec as ArtifactSpec
@@ -250,6 +252,8 @@ specs = do
     TerminalDiagnosticsSpec.spec
     TextLayoutSpec.spec
     SessionStateSpec.spec
+    AppleFollowUpEvalSpec.spec
+    AppleFollowUpSpec.spec
     AppleTitleSpec.spec
     SessionTitleSpec.spec
     SkillsSpec.spec

@@ -25,6 +25,7 @@ import Agent.CLI.AgentViewport
     , AgentStepState(..)
     , AgentTarget(..)
     )
+import Agent.CLI.AppleFollowUp (FollowUpRoute(..))
 import Agent.CLI.Input (ReplLine(..), terminalTextWidth)
 import Agent.CLI.Interrupt (CtrlCDecision(..), catchUserInterrupt)
 import Agent.CLI.Command
@@ -326,6 +327,67 @@ spec = do
                                             else [(False, "inspect the tests")]
                                     submitted.appUi.uiDraft `shouldBe` ""
                                     submitted.appUi.uiRunning `shouldBe` True
+                                completed `shouldBe` Just ()
+
+        it "queues a plain follow-up when routing says queue and still steers /steer" $
+            withSystemTempDirectory "agent-tui-follow-up-routing" \directory ->
+                bracket
+                    (lookupEnv "HOME")
+                    (\previous -> maybe (unsetEnv "HOME") (setEnv "HOME") previous)
+                    \_ -> do
+                        setEnv "HOME" directory
+                        forM_
+                            [ ("/steer inspect the tests", False, False)
+                            , ("inspect the tests", True, True)
+                            ]
+                            \(draft, expectQueued, expectRouted) -> do
+                                completed <- timeout 5_000_000 do
+                                    steeringCalls <- newIORef []
+                                    routeCalls <- newIORef ([] :: [(Text, Text)])
+                                    let running = reduceUi
+                                            (UiSetDraft draft (Text.length draft)) $
+                                                reduceUi
+                                                    (UiUserSubmitted "Add validation") $
+                                                        reduceUi
+                                                            (UiLoop TurnStarted)
+                                                            initialUiState
+                                    baseRuntime <- newScriptRuntime running
+                                    writeIORef
+                                        baseRuntime.runtimeRouteFollowUp
+                                        \task message -> do
+                                            modifyIORef'
+                                                routeCalls
+                                                (<> [(task, message)])
+                                            pure FollowUpQueue
+                                    let runtime = baseRuntime
+                                            { runtimeSteer = \pasted prompt -> do
+                                                modifyIORef' steeringCalls (<> [(pasted, prompt)])
+                                                pure (Right ())
+                                            }
+                                    (_, submitted) <- runFullscreenScriptWithState
+                                        (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                                        [ FullscreenScriptVty (V.EvKey V.KEnter [])
+                                        , FullscreenScriptHalt
+                                        ]
+                                    queued <- toList <$> atomically
+                                        (Composer.readFullscreenInputs runtime.runtimeInput)
+                                    map (.fullscreenInputLine) queued `shouldBe`
+                                        if expectQueued then [ReplText draft] else []
+                                    readIORef steeringCalls `shouldReturn`
+                                        if expectQueued
+                                            then []
+                                            else [(False, "inspect the tests")]
+                                    readIORef routeCalls `shouldReturn`
+                                        if expectRouted
+                                            then [("Add validation", "inspect the tests")]
+                                            else []
+                                    submitted.appUi.uiDraft `shouldBe` ""
+                                    if expectQueued
+                                        then submitted.appUi.uiNotice
+                                            `shouldBe` Just
+                                                (progressNotice
+                                                    "Queued until this turn finishes.")
+                                        else pure ()
                                 completed `shouldBe` Just ()
 
     describe "active-turn image paste" do

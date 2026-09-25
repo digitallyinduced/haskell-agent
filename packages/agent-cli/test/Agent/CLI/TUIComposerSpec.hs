@@ -33,13 +33,16 @@ import Agent.CLI.SteeringInputs
     , newSteeringInputs
     , readSteeringInputs
     )
-import Agent.Loop (ImageAttachment(..), TurnInput(..))
+import Agent.Loop (ImageAttachment(..), LoopEvent(..), TurnInput(..))
+import Agent.ToolDispatch (functionToolCall)
 import Agent.TUI.Model
     ( NoticeKind(..)
     , PromptState(..)
+    , UiEvent(..)
     , UiNotice(..)
     , UiState(..)
     , initialUiState
+    , reduceUi
     )
 import Agent.TUI.TextWidth
     ( clampGraphemeCursor
@@ -165,6 +168,44 @@ spec = describe "fullscreen composer" do
             `shouldBe` Nothing
         immediateBtwQuestion running (ReplText "/queue inspect the tests")
             `shouldBe` Nothing
+
+    it "recognizes an explicit steer command without treating a path as one" do
+        explicitSteerCommand "/steer keep the names" `shouldBe` True
+        explicitSteerCommand "  /STEER keep the names" `shouldBe` True
+        explicitSteerCommand "/steer/keep" `shouldBe` False
+        explicitSteerCommand "keep the names" `shouldBe` False
+
+    it "uses the prompt that started the running turn as routing context" do
+        let started =
+                reduceUi (UiLoop TurnStarted) $
+                    reduceUi (UiUserSubmitted "Add validation") initialUiState
+            steered = reduceUi (UiInputSteered "keep the names") started
+        currentTurnTaskText started `shouldBe` "Add validation"
+        currentTurnTaskText steered
+            `shouldBe` "Add validation\nkeep the names"
+
+    it "adds recent assistant text and tool titles without tool bodies" do
+        let padding = Text.replicate 400 " word"
+            answer = "HEAD_SHOULD_BE_DROPPED" <> padding <> " TAIL_SHOULD_REMAIN"
+            command = Text.replicate 100 "x" <> "UNIQUE_BODY"
+            arguments =
+                "{\"command\":\""
+                    <> command
+                    <> "\",\"description\":\"focused parser tests\"}"
+            call = functionToolCall "run" "shell_command" arguments
+            started =
+                reduceUi (UiLoop TurnStarted) $
+                    reduceUi (UiUserSubmitted "Add validation") initialUiState
+            working =
+                reduceUi (UiLoop (ToolStarted call)) $
+                    reduceUi (UiLoop (TextDelta answer)) started
+            context = currentTurnTaskText working
+        Text.isInfixOf "Add validation" context `shouldBe` True
+        Text.isInfixOf "Recent work:" context `shouldBe` True
+        Text.isInfixOf "TAIL_SHOULD_REMAIN" context `shouldBe` True
+        Text.isInfixOf "HEAD_SHOULD_BE_DROPPED" context `shouldBe` False
+        Text.isInfixOf "Run focused parser tests" context `shouldBe` True
+        Text.isInfixOf "UNIQUE_BODY" context `shouldBe` False
 
     it "keeps prompts with images out of text-only steering" do
         let prompt = initialUiState.uiPrompt

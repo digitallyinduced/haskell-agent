@@ -763,6 +763,7 @@ appEventLogicalBytes = \case
             entries
     AppSetWindowTitle text -> logicalTextBytes text
     AppSetMouseCapture _ -> 128
+    AppSetFollowUpRouting _ -> 128
     AppDictationRecording _ -> 256
     AppDictationPartial text -> logicalTextBytes text
     AppDictationFinished result ->

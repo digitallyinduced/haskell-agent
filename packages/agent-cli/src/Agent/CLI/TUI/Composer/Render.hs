@@ -215,6 +215,7 @@ drawComposer appState =
                     , if Seq.null state.uiQueuedInputs
                         then
                             if not state.uiAwaitingInput
+                                && not appState.appFollowUpRouting
                                 then "steer"
                                 else ""
                         else "queued "

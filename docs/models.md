@@ -117,3 +117,8 @@ with `/title-model apple-foundationmodel`, or restore the automatic choice
 with `/title-model --auto`. The selection is stored as `titleModel` in
 `~/.haskell-agent/settings.json`. A pinned provider model is used only while
 its provider matches the current session.
+
+The same helper also decides whether a plain fullscreen follow-up steers the running
+turn or waits until that turn finishes. That choice uses schema-guided generation on
+the default on-device model, because permissive content transformations apply only to
+plain text. If the helper is missing or the request fails, the follow-up steers.

@@ -70,6 +70,7 @@ import Agent.CLI.TUI.ImagePreview
     ( NativePreviewPlacement
     , TuiImagePreview
     )
+import Agent.CLI.AppleFollowUp (FollowUpRoute)
 import Agent.CLI.TUI.History
     ( HistoryGeneration
     , HistoryPage
@@ -233,6 +234,7 @@ data AppEvent
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
     | AppSetWindowTitle !Text
     | AppSetMouseCapture !Bool
+    | AppSetFollowUpRouting !Bool
     | AppSetPullRequestURLs !HistoryGeneration ![Text]
     | AppSetPullRequestCI !HistoryGeneration !Text !PullRequestChecks
     | AppSyntaxHighlighterChanged
@@ -436,6 +438,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeInput :: !FullscreenInputBuffer
     , runtimeCancel :: !(IO ())
     , runtimeSteer :: !(Bool -> Text -> IO (Either Text ()))
+    , runtimeRouteFollowUp :: !(IORef (Text -> Text -> IO FollowUpRoute))
     , runtimeBtw :: !(Text -> IO ())
     , runtimeImmediateCommand :: !(ReplAction -> IO ())
     , runtimeRecap :: !(IO ())
@@ -606,6 +609,8 @@ data AppState = AppState
     , appClipboardTip :: !ClipboardFocusTipState
     , appClipboardImageProbe :: !ClipboardImageProbe
     , appClipboardTipRemainingMillis :: !(Maybe Int)
+    -- | True while on-device Apple Intelligence is choosing steer or queue.
+    , appFollowUpRouting :: !Bool
     }
 
 -- | Best-effort focus state reported by the terminal. Unknown preserves the

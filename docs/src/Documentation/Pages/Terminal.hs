@@ -32,8 +32,12 @@ page = Page
         <p>For example, if an implementation starts changing unrelated code, send the
         steering instruction below. The queued review is a separate follow-up, not
         a request to interrupt the current test run.</p>
-        <p>While a fullscreen turn is running, a plain text prompt steers the current
-        turn. Use explicit commands to make your intention clear:</p>
+        <p>While a fullscreen turn is running, a plain text prompt normally steers the
+        current turn. On macOS, when Apple Intelligence is available, the on-device
+        model chooses instead: a correction, constraint, or missing detail of the
+        running task steers it, and a separate later task is queued until the turn
+        finishes. If Apple Intelligence is unavailable, or the request fails, the
+        prompt steers. Use explicit commands to make your intention clear:</p>
         <pre><code>{"/steer Keep the existing public function names.\n/queue After the tests finish, review the documentation changes." :: Text}</code></pre>
         <p><code>/queue</code> without a prompt lists waiting prompts. When the agent is idle, either
         prompt command starts a new turn.</p>
