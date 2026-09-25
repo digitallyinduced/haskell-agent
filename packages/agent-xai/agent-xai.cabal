@@ -41,6 +41,7 @@ library
                     , Agent.XAI.Auth
                     , Agent.XAI.Client
                     , Agent.XAI.Error
+                    , Agent.XAI.ImageBudget
                     , Agent.XAI.LoopBackend
                     , Agent.XAI.Options
                     , Agent.XAI.ReasoningEffort
@@ -66,6 +67,7 @@ library
                     , safe-exceptions
                     , process
                     , time
+                    , vector >= 0.13 && < 0.14
                     , websockets
                     , wuss
 
@@ -77,6 +79,7 @@ test-suite agent-xai-test
     other-modules:    Agent.XAI.AuthSpec
                     , Agent.XAI.ClientSpec
                     , Agent.XAI.FunctionalSpec
+                    , Agent.XAI.ImageBudgetSpec
                     , Agent.XAI.ResponsesSpec
                     , Agent.XAI.TestSupport
                     , Agent.XAI.TranscriptionSpec

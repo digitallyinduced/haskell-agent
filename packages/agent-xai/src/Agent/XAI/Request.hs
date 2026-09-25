@@ -24,6 +24,7 @@ import Agent.XAI.ReasoningEffort
     , grokReasoningEffortText
     )
 import Agent.Responses.Types
+import Agent.XAI.ImageBudget (applyImageBudget)
 import Agent.XAI.Options (ClientOptions(..))
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
@@ -51,7 +52,8 @@ buildRequest :: ClientOptions -> ResponseCreateParams -> ResponseCreateParams
 buildRequest options request =
     let projectedHistory =
             projectXaiOrLegacyCompactionHistory request
-    in stripLocalCompactionMarker $
+    in applyImageBudget options.maxRequestBytes $
+        stripLocalCompactionMarker $
         (if options.hostedXSearchEnabled then withHostedXSearch else id) $
             mapResponseTools xaiTool $
                 forceStatelessStreaming defaultResponseCreateParams

@@ -13,6 +13,7 @@ import Agent.Loop
 import qualified Agent.Responses.Codec as ResponsesCodec
 import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.XAI.Client
+import Agent.XAI.ImageBudget (imageStripPlaceholder)
 import Agent.XAI.LoopBackend
 import Agent.XAI.Options
 import Agent.XAI.TestSupport (withLoopbackApplication)
@@ -711,6 +712,65 @@ spec = do
             result `shouldBe` Left quota
             readIORef attempts `shouldReturn` 1
 
+    describe "payload rejection" do
+        let imagePayload = "data:image/png;base64," <> Text.replicate 80 "A"
+            imageRequest =
+                withRequestInput
+                    (helloRequest "see this")
+                    [userImageItem imagePayload]
+            tooLarge = Wai.responseLBS HTTP.status413 [] "too large"
+            gatewayTooLarge = Wai.responseLBS HTTP.status413
+                [("Content-Type", "application/json")]
+                "{\"error\":{\"message\":\"Request body exceeds the configured limit.\",\"type\":\"invalid_request_error\",\"code\":\"request_too_large\",\"param\":null}}"
+            ok = sseResponse
+                [ outputItemDone (assistantMessage "kept going")
+                , completedEvent "resp-stripped" []
+                ]
+
+        it "retries HTTP 413 once with inline images omitted" do
+            recorded <- newIORef []
+            let handler _request = do
+                    sent <- readIORef recorded
+                    pure $ if length sent == 1 then tooLarge else ok
+            withMockGrok recorded handler \options -> do
+                response <- createResponseWith options
+                    (xaiCredential "token") imageRequest >>= expectRight
+                response.responseId `shouldBe` "resp-stripped"
+            sent <- readIORef recorded
+            case sent of
+                [first, second] -> do
+                    Text.isInfixOf imagePayload (bodyText first) `shouldBe` True
+                    Text.isInfixOf imagePayload (bodyText second) `shouldBe` False
+                    Text.isInfixOf imageStripPlaceholder (bodyText second)
+                        `shouldBe` True
+                _ -> expectationFailure "expected the rejected request and one retry"
+
+        it "retries a gateway request_too_large body once without images" do
+            recorded <- newIORef []
+            let handler _request = do
+                    sent <- readIORef recorded
+                    pure $ if length sent == 1 then gatewayTooLarge else ok
+            withMockGrok recorded handler \options ->
+                void $ createResponseWith options
+                    (xaiCredential "token") imageRequest >>= expectRight
+            sent <- readIORef recorded
+            case sent of
+                [_, second] ->
+                    Text.isInfixOf imagePayload (bodyText second) `shouldBe` False
+                _ -> expectationFailure "expected the rejected request and one retry"
+
+        it "does not retry HTTP 413 when the request has no inline image" do
+            recorded <- newIORef []
+            let handler _request = pure tooLarge
+            withMockGrok recorded handler \options -> do
+                result <- createResponseWith options
+                    (xaiCredential "token") (helloRequest "hi")
+                case result of
+                    Left (HttpError 413 _) -> pure ()
+                    other -> expectationFailure ("expected HTTP 413, got " <> show other)
+            sent <- readIORef recorded
+            length sent `shouldBe` 1
+
     describe "Grok automatic compaction policy" do
         it "uses the current 80% model override and 85% fallback" do
             grokAutoCompactTokenLimit "grok-4.7" 500_000
@@ -869,6 +929,34 @@ xaiCredential token = Credential
 --------------------------------------------------------------------------------
 -- Request/response helpers
 --------------------------------------------------------------------------------
+
+bodyText :: RecordedRequest -> Text
+bodyText request = Text.decodeUtf8 (LBS.toStrict request.body)
+
+userImageItem :: Text -> ResponseItem
+userImageItem imageUrl =
+    MessageItem ResponseMessage
+        { messageId = Nothing
+        , content = MessageContentParts
+            [ InputImagePart
+                { detail = Nothing
+                , fileId = Nothing
+                , imageUrl = Just imageUrl
+                , promptCacheBreakpoint = Nothing
+                }
+            ]
+        , role = RoleUser
+        , status = Nothing
+        , phase = Nothing
+        , passthrough = Nothing
+        }
+
+withRequestInput :: ResponseCreateParams -> [ResponseItem] -> ResponseCreateParams
+withRequestInput ResponseCreateParams {..} items =
+    ResponseCreateParams
+        { input = Just (ResponseInputItems items)
+        , ..
+        }
 
 helloRequest :: Text -> ResponseCreateParams
 helloRequest prompt = defaultResponseCreateParams

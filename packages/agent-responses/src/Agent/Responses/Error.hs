@@ -57,6 +57,10 @@ classifyErrorType errorType message code
     | isPreviousResponseNotFound errorType message code = PreviousResponseNotFound
     | normalizedCode `elem` map Just ["context_length_exceeded", "model_context_window_exceeded"] =
         ContextWindowExceeded
+    -- Byte caps, as opposed to token-window codes. Image stripping can
+    -- shrink these; a context-length code cannot.
+    | normalizedCode `elem` map Just ["payload_too_large", "request_too_large", "413"] =
+        PayloadTooLargeError
     | normalizedCode == Just "invalid_image" = InvalidImageError
     | normalizedCode `elem` map Just ["invalid_api_key", "token_expired"] =
         AuthenticationError

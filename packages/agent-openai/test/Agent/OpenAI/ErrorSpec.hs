@@ -117,6 +117,12 @@ spec = do
             classify "context_length_exceeded"
                 `shouldBe` ProviderError ContextWindowExceeded
                     "failed (code: context_length_exceeded)" Nothing
+            classify "request_too_large"
+                `shouldBe` ProviderError PayloadTooLargeError
+                    "failed (code: request_too_large)" Nothing
+            classify "payload_too_large"
+                `shouldBe` ProviderError PayloadTooLargeError
+                    "failed (code: payload_too_large)" Nothing
             classify "invalid_image"
                 `shouldBe` ProviderError InvalidImageError
                     "failed (code: invalid_image)" Nothing

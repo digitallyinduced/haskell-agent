@@ -122,6 +122,10 @@ data ClientOptions = ClientOptions
       -- ^ Value for @x-grok-client-version@.
     , hostedXSearchEnabled :: !Bool
       -- ^ Whether the wire adapter may inject provider-hosted @x_search@.
+    , maxRequestBytes :: !(Maybe Int)
+      -- ^ Provider request-body cap. 'Nothing' uses the 50 MiB xAI proxy
+      -- default. Inline images are evicted on the wire request once the
+      -- encoded body reaches 3 MiB under this cap.
     } deriving (Eq, Show)
 
 defaultClientOptions :: ClientOptions
@@ -135,6 +139,7 @@ defaultClientOptions = ClientOptions
     , requestTimeoutSeconds = 600
     , clientVersion = defaultGrokClientVersion
     , hostedXSearchEnabled = True
+    , maxRequestBytes = Nothing
     }
 
 -- | Use the native xAI protocol through an organization gateway. Routing and
@@ -156,6 +161,7 @@ clientOptionsFromEnv = do
     defaultModel <- lookupNonEmptyEnv "XAI_GROK_DEFAULT_MODEL"
     timeoutSeconds <- lookupIntEnv "XAI_GROK_TIMEOUT_SECONDS"
     clientVersion <- lookupNonEmptyEnv "XAI_GROK_CLIENT_VERSION"
+    maxRequestBytes <- lookupIntEnv "XAI_GROK_MAX_REQUEST_BYTES"
     pure ClientOptions
         { baseUrl = Maybe.fromMaybe defaultClientOptions.baseUrl baseUrl
         , modelOverrides = maybe Map.empty (parseModelOverrides . Text.pack) modelMap
@@ -167,4 +173,5 @@ clientOptionsFromEnv = do
             timeoutSeconds
         , clientVersion = maybe defaultClientOptions.clientVersion Text.pack clientVersion
         , hostedXSearchEnabled = defaultClientOptions.hostedXSearchEnabled
+        , maxRequestBytes
         }
