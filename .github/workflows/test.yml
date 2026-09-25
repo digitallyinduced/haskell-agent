@@ -28,6 +28,10 @@ jobs:
             timeout_minutes: 60
           - name: Telegram package tests
             targets: .#checks.x86_64-linux.agent-telegram
+          - name: Terminal-Bench adapter tests
+            targets: >-
+              path:./benchmarks/terminal-bench#checks.x86_64-linux.harbor-cli
+              path:./benchmarks/terminal-bench#checks.x86_64-linux.adapter-tests
           - name: Server package tests
             targets: .#checks.x86_64-linux.agent-server
           - name: Runtime daemon package tests
