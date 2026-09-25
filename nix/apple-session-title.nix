@@ -18,7 +18,8 @@ pkgs.stdenv.mkDerivation {
 
     buildInputs = [ (pkgs.darwinMinVersionHook "26.0") ];
 
-    # The wrapper fails in a sandbox. Host Xcode stays outside the store.
+    # The wrapper fails in a strict sandbox. Host Xcode stays outside
+    # the store. Darwin CI passes `--option sandbox relaxed`.
     __noChroot = true;
     preferLocalBuild = true;
     allowSubstitutes = false;
