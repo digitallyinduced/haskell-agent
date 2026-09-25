@@ -1111,7 +1111,7 @@
                                     haskellPackages.ghc
                                     (old.disallowedRequisites or [ ]);
                             });
-                wrapAgentCli = mediaHelper: package:
+                wrapAgentCli = { mediaHelper ? false, appleSessionTitle ? null }: package:
                     package.overrideAttrs
                         (old: {
                             nativeBuildInputs =
@@ -1124,6 +1124,9 @@
                                 ''
                                 + pkgs.lib.optionalString mediaHelper ''
                                     computerUseWrapperArgs+=(--set AGENT_MEDIA_HELPER ${agentMediaHelper}/bin/agent-media-helper)
+                                ''
+                                + pkgs.lib.optionalString (appleSessionTitle != null) ''
+                                    computerUseWrapperArgs+=(--set HASKELL_AGENT_APPLE_SESSION_TITLE ${appleSessionTitle}/bin/apple-session-title)
                                 ''
                                 + ''
                                         computerUseWrapperArgs+=(
@@ -1147,15 +1150,24 @@
                 agentCliBareExecutable =
                     prepareAgentCli
                         (pkgs.haskell.lib.justStaticExecutables agentCliPackage);
+                appleSessionTitle =
+                    if pkgs.stdenv.hostPlatform.isDarwin then
+                        import ./nix/apple-session-title.nix {
+                            inherit pkgs;
+                            source = agentCliProductionSource;
+                        }
+                    else
+                        null;
                 agentCliStaticExecutable =
                     if pkgs.stdenv.hostPlatform.isLinux then
-                        wrapAgentCli true
+                        wrapAgentCli { mediaHelper = true; }
                             (pkgs.haskell.lib.justStaticExecutables
                                 staticHaskellPackages.agent-cli)
                     else
                         agentCliExecutable;
                 agentCliExecutable =
-                    wrapAgentCli false agentCliBareExecutable;
+                    wrapAgentCli { appleSessionTitle = appleSessionTitle; }
+                        agentCliBareExecutable;
                 agentMediaHelper = pkgs.stdenv.mkDerivation {
                     pname = "agent-media-helper";
                     version = "0.1.0";
@@ -1177,7 +1189,7 @@
                 agentCliMacosRelease =
                     if pkgs.stdenv.hostPlatform.isDarwin then
                         import ./nix/macos-bundle.nix {
-                            inherit pkgs skylightingSyntaxes;
+                            inherit pkgs skylightingSyntaxes appleSessionTitle;
                             agentCli = agentCliBareExecutable;
                             agentCliSource = agentCliProductionSource;
                             agentRuntimeSource =
@@ -1532,6 +1544,8 @@
                 };
                 packages.agent-cli-static = agentCliStaticExecutable;
                 packages.agent-cli = agentCliExecutable;
+                packages.${if pkgs.stdenv.hostPlatform.isDarwin
+                    then "apple-session-title" else null} = appleSessionTitle;
                 packages.agent-telegram = agentTelegramExecutable;
                 packages.agent-server = agentServerExecutable;
                 packages.agent-server-client = agentServerClientPackage;
@@ -1652,6 +1666,9 @@
                         export AGENT_SYNTAX_DIR=${skylightingSyntaxDirectory}
                         export AGENT_POSTGRES_BIN=${pkgs.postgresql_18}/bin
                         export GST_PLUGIN_SYSTEM_PATH_1_0=${pkgs.lib.makeSearchPath "lib/gstreamer-1.0" agentCliGstreamerPlugins}
+                        ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+                            export HASKELL_AGENT_APPLE_SESSION_TITLE=${appleSessionTitle}/bin/apple-session-title
+                        ''}
                         # Development builds embed the nix-fetched Codex catalog
                         # at compile time; provision it into the checkout.
                         if [ -d packages/agent-openai ]; then

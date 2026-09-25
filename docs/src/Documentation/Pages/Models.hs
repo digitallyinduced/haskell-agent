@@ -181,8 +181,9 @@ page = Page
         <code>titleModel</code> in <code>~/.haskell-agent/settings.json</code>. A pinned provider model
         is used only when its provider matches the current session.</p>
         <p>On supported macOS systems, automatic selection first tries Apple Intelligence through
-        <code>apple-session-title</code>. The helper is found on <code>PATH</code>, supplied through
-        <code>HASKELL_AGENT_APPLE_SESSION_TITLE</code>, or built with Xcode on first use. If unavailable
+        <code>apple-session-title</code>. The Darwin Nix package builds that helper with Xcode and
+        sets <code>HASKELL_AGENT_APPLE_SESSION_TITLE</code>. The macOS bundle installs it on
+        <code>PATH</code>. The CLI does not compile it. If unavailable
         or unsuccessful, naming falls back to the provider's inexpensive model. Other systems use
         provider selection directly. This fallback is for naming, not a switch of the coding model.
         The same helper also decides whether a plain follow-up steers the running fullscreen turn

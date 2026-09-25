@@ -12,37 +12,24 @@ import Control.Concurrent.Async (concurrently, withAsync)
 import Control.Exception.Safe (tryAny)
 import Control.Monad (void)
 import Data.IORef (newIORef, readIORef, writeIORef)
-import Crypto.Hash (Digest, SHA256, hash)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson (Value(..))
-import qualified Data.ByteString as ByteString
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.IO as TextIO
-import Paths_agent_cli (getDataFileName)
-import System.Directory
-    ( createDirectoryIfMissing
-    , doesDirectoryExist
-    , doesFileExist
-    , findExecutable
-    , getCurrentDirectory
-    , getHomeDirectory
-    , removeFile
-    , renameFile
-    )
-import System.Environment (getEnvironment, lookupEnv)
+import System.Directory (doesFileExist, findExecutable)
+import System.Environment (lookupEnv)
 import System.Exit (ExitCode(..))
-import System.FilePath (takeDirectory, (</>))
 import System.IO (hClose)
 import qualified System.Info
 import System.Posix.Signals (signalProcess, sigKILL)
 import System.Process
     ( CreateProcess(..)
     , ProcessHandle
-    , StdStream(CreatePipe, NoStream)
+    , StdStream(CreatePipe)
     , getPid
     , proc
     , terminateProcess
@@ -56,20 +43,11 @@ appleTitleHelperName = "apple-session-title"
 appleTitleHelperEnv :: String
 appleTitleHelperEnv = "HASKELL_AGENT_APPLE_SESSION_TITLE"
 
-appleTitleSourceName :: FilePath
-appleTitleSourceName = "helpers/apple-session-title/main.swift"
-
-xcodeDeveloperDir :: FilePath
-xcodeDeveloperDir = "/Applications/Xcode.app/Contents/Developer"
-
 appleTitleProcessTimeoutMicros :: Int
 appleTitleProcessTimeoutMicros = 20_000_000
 
 probeTimeoutMicros :: Int
 probeTimeoutMicros = 3_000_000
-
-compileTimeoutMicros :: Int
-compileTimeoutMicros = 60_000_000
 
 -- | Locate the Swift helper on macOS and confirm Apple Intelligence is available.
 probeAppleFoundationTitle :: IO (Maybe FilePath)
@@ -92,131 +70,19 @@ probeAppleFoundationTitle
                     _ ->
                         Nothing
 
+-- | The Nix package and the macOS bundle install this binary. The CLI does not
+-- compile it.
 resolveAppleSessionTitleHelper :: IO (Maybe FilePath)
 resolveAppleSessionTitleHelper = do
     envPath <- lookupEnv appleTitleHelperEnv
     case envPath of
         Just path | not (null path) -> do
             exists <- doesFileExist path
-            if exists then pure (Just path) else fromPathOrCompile
+            if exists then pure (Just path) else findOnPath
         _ ->
-            fromPathOrCompile
+            findOnPath
   where
-    fromPathOrCompile =
-        findExecutable appleTitleHelperName >>= \case
-            Just path -> pure (Just path)
-            Nothing -> compileBundledHelper
-
-compileBundledHelper :: IO (Maybe FilePath)
-compileBundledHelper = do
-    xcode <- doesDirectoryExist xcodeDeveloperDir
-    if not xcode
-        then pure Nothing
-        else locateAppleTitleSource >>= \case
-            Nothing -> pure Nothing
-            Just sourcePath -> do
-                bytes <- ByteString.readFile sourcePath
-                home <- getHomeDirectory
-                let digest = take 16 (show (hash bytes :: Digest SHA256))
-                    cacheDir = home </> ".haskell-agent" </> "helpers"
-                    dest = cacheDir </> (appleTitleHelperName <> "-" <> digest)
-                cached <- doesFileExist dest
-                if cached
-                    then pure (Just dest)
-                    else do
-                        createDirectoryIfMissing True cacheDir
-                        compiled <- runSwiftc sourcePath dest
-                        pure $ if compiled then Just dest else Nothing
-
-locateAppleTitleSource :: IO (Maybe FilePath)
-locateAppleTitleSource = do
-    packaged <- tryAny (getDataFileName appleTitleSourceName)
-    cwd <- getCurrentDirectory
-    ancestors <- ancestorDirectories cwd 6
-    let packagedPath =
-            case packaged of
-                Right path -> [path]
-                Left _ -> []
-        searchRoots = cwd : ancestors
-        candidates =
-            packagedPath
-                ++ [dir </> "packages/agent-cli" </> appleTitleSourceName | dir <- searchRoots]
-                ++ [dir </> appleTitleSourceName | dir <- searchRoots]
-    firstExistingFile candidates
-
-ancestorDirectories :: FilePath -> Int -> IO [FilePath]
-ancestorDirectories start remaining
-    | remaining <= 0 = pure []
-    | otherwise = do
-        let parent = takeDirectory start
-        if parent == start
-            then pure []
-            else (parent :) <$> ancestorDirectories parent (remaining - 1)
-
-firstExistingFile :: [FilePath] -> IO (Maybe FilePath)
-firstExistingFile = \case
-    [] -> pure Nothing
-    path : rest -> do
-        exists <- doesFileExist path
-        if exists then pure (Just path) else firstExistingFile rest
-
-runSwiftc :: FilePath -> FilePath -> IO Bool
-runSwiftc source dest = do
-    environment <- swiftcEnvironment
-    let destTmp = dest <> ".tmp"
-        process =
-            (proc
-                "/usr/bin/xcrun"
-                [ "--sdk"
-                , "macosx"
-                , "swiftc"
-                , "-parse-as-library"
-                , "-O"
-                , "-target"
-                , swiftTarget
-                , "-o"
-                , destTmp
-                , source
-                ])
-                { env = Just environment
-                , std_in = NoStream
-                , std_out = CreatePipe
-                , std_err = CreatePipe
-                , close_fds = True
-                }
-    _ <- tryAny (removeFile destTmp)
-    result <- runCreateProcessTimed compileTimeoutMicros process Nothing
-    case result of
-        Just (ExitSuccess, _, _) -> do
-            exists <- doesFileExist destTmp
-            if exists
-                then True <$ renameFile destTmp dest
-                else pure False
-        _ -> do
-            _ <- tryAny (removeFile destTmp)
-            pure False
-
--- | Nix leaks SDKROOT, LD_DYLD_PATH, and NIX_LDFLAGS. Xcode's Swift macro
--- plugin then loads the wrong runtime and rejects @Generable.
-swiftcEnvironment :: IO [(String, String)]
-swiftcEnvironment = do
-    environment <- getEnvironment
-    let preserved =
-            [ (name, value)
-            | name <- ["HOME", "TMPDIR", "USER", "LOGNAME", "LANG"]
-            , Just value <- [lookup name environment]
-            ]
-    pure $
-        ("DEVELOPER_DIR", xcodeDeveloperDir)
-            : ("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-            : preserved
-
-swiftTarget :: String
-swiftTarget =
-    case System.Info.arch of
-        "aarch64" -> "arm64-apple-macos26.0"
-        "x86_64" -> "x86_64-apple-macos26.0"
-        other -> other <> "-apple-macos26.0"
+    findOnPath = findExecutable appleTitleHelperName
 
 generateAppleFoundationTitle
     :: FilePath

@@ -103,9 +103,9 @@ Without a manual override, session titles default to automatic selection,
 independently of the live coding model. On macOS, auto uses on-device Apple Intelligence
 (`apple-foundationmodel`) through a bundled Swift helper when Apple
 Intelligence reports as available, and falls back to the provider cheap model
-if that helper is missing or fails. The helper is `apple-session-title`; the
-CLI builds it from source with Xcode on first use, or uses a copy already on
-`PATH` / `HASKELL_AGENT_APPLE_SESSION_TITLE`.
+if that helper is missing or fails. The helper is `apple-session-title`. The Darwin Nix package builds it with
+Xcode and points `HASKELL_AGENT_APPLE_SESSION_TITLE` at that binary. The macOS
+bundle installs the same binary on `PATH`. The CLI does not compile it.
 The helper uses Apple's permissive content-transformation guardrails with plain-text
 generation, then encodes the title as JSON itself. Schema-guided generation does not
 benefit from this guardrail mode.

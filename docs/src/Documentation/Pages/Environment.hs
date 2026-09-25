@@ -79,7 +79,7 @@ page = Page
         <h2 id="helpers">Local helpers and browser selection</h2>
         <table><thead><tr><th>Variable</th><th>Behavior</th></tr></thead><tbody>
             <tr><td><code>CLAUDE_CODE_EXECUTABLE</code></td><td>Select the Claude Code executable for authentication/runtime discovery; use a trusted installed program</td></tr>
-            <tr><td><code>HASKELL_AGENT_APPLE_SESSION_TITLE</code></td><td>Select the on-device title helper; normal discovery uses PATH or a supported local build</td></tr>
+            <tr><td><code>HASKELL_AGENT_APPLE_SESSION_TITLE</code></td><td>Select the on-device title helper. The Darwin package sets this to the binary built by Nix; otherwise discovery uses <code>apple-session-title</code> on <code>PATH</code></td></tr>
             <tr><td><code>BROWSER</code></td><td>Single executable name or path, launched with the authorization URL as one argument; not a shell command with flags</td></tr>
             <tr><td><code>XAI_STT_LANGUAGE</code></td><td>Dictation language; defaults to English, for example pt for Portuguese</td></tr>
         </tbody></table>
