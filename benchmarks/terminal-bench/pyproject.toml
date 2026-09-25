@@ -1,0 +1,9 @@
+[project]
+name = "haskell-agent-terminal-bench"
+version = "0.1.0"
+description = "Pinned Terminal-Bench evaluation environment for haskell-agent"
+requires-python = ">=3.13,<3.14"
+dependencies = ["harbor==0.23.0"]
+
+[tool.uv]
+package = false
