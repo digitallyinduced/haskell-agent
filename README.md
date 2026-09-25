@@ -6,8 +6,11 @@ An independent agent harness, written in Haskell.
 
 ## Documentation
 
-Build and serve the self-hosted documentation application, written in Haskell
-with WAI, Warp, and directly authored HTML using `ihp-hsx`:
+The documentation is published at
+[haskell-agent.digitallyinduced.com](https://haskell-agent.digitallyinduced.com).
+
+Build and serve the same application locally. It is written in Haskell with
+WAI, Warp, and directly authored HTML using `ihp-hsx`:
 
 ```bash
 nix build .#docs
