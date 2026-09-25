@@ -68,9 +68,15 @@ jobs:
             exit 1
           fi
 
+          # Same host-Xcode precondition as the Darwin binary-cache build.
+          scripts/ci/require-apple-session-title-builder.sh \
+            "$nix_bin" \
+            "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+
           archive_out=$(
             "$nix_bin" build \
               --accept-flake-config \
+              --option sandbox relaxed \
               --no-link \
               --print-out-paths \
               --max-jobs 1 \

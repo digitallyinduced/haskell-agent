@@ -184,16 +184,27 @@ jobs:
               # Never restore the Darwin output from the cache previously
               # populated by the affected Mac. Dependencies still come from
               # cache.nixos.org.
+              #
+              # Relaxed sandbox builds only __noChroot derivations on the
+              # host. apple-session-title and the Xcode wrapper require
+              # that. Every other derivation stays sandboxed.
               args+=(
                 --option accept-flake-config false
                 --option substituters https://cache.nixos.org/
                 --option extra-substituters ""
+                --option sandbox relaxed
               )
             else
               args+=(--accept-flake-config)
             fi
             "$nix_bin" "${args[@]}" > "$out_file"
           }
+
+          if [[ "$SYSTEM" == aarch64-darwin ]]; then
+            scripts/ci/require-apple-session-title-builder.sh \
+              "$nix_bin" \
+              "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          fi
 
           printf 'CACHE_EXTRA_FAILED=0\n' >> "$GITHUB_ENV"
 
