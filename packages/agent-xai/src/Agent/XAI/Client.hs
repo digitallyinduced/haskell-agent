@@ -5,6 +5,7 @@ module Agent.XAI.Client
     , createResponseWith
     , createResponseWithPolicy
     , createResponseWithEvents
+    , createResponseWithEventsNotifying
     , createResponseWithEventsPolicy
     , retryTransientXaiResultWithPolicy
     ) where
@@ -25,7 +26,7 @@ import Agent.XAI.Error
     , classifyFailure
     , isCapacityBody
     )
-import Agent.XAI.ImageBudget (omitInlineImages)
+import Agent.XAI.ImageBudget (imageStripNotice, omitInlineImages)
 import Agent.XAI.Options
 import Agent.XAI.Request
     ( buildRequest
@@ -40,6 +41,7 @@ import Control.Retry
     , retrying
     )
 import qualified Data.ByteString.Char8 as BS8
+import Data.Text (Text)
 import qualified Data.Text.Encoding as Text
 import Network.HTTP.Simple hiding (Response)
 import qualified Network.HTTP.Client as HttpClient
@@ -77,6 +79,7 @@ createResponseWithPolicy policy options credential request =
         credential
         request
         Nothing
+        (\_ -> pure ())
 
 -- | Send one request and deliver decoded typed Responses events incrementally
 -- in wire order before returning the assembled terminal response. Transient
@@ -107,6 +110,26 @@ createResponseWithEventsPolicy policy options credential request onEvent =
         credential
         request
         (Just onEvent)
+        (\_ -> pure ())
+
+-- | Same transport as 'createResponseWithEvents', plus a notice when a
+-- byte-size rejection is retried without inline images. The notice describes
+-- that request only; stored history is not rewritten.
+createResponseWithEventsNotifying
+    :: ClientOptions
+    -> Credential
+    -> ResponseCreateParams
+    -> StreamEventCallback
+    -> (Text -> IO ())
+    -> IO (Either ApiError Response)
+createResponseWithEventsNotifying options credential request onEvent onNotice =
+    createResponseWithMaybeEventsPolicy
+        defaultTransientPolicy
+        options
+        credential
+        request
+        (Just onEvent)
+        onNotice
 
 createResponseWithMaybeEventsPolicy
     :: RetryPolicyM IO
@@ -114,8 +137,9 @@ createResponseWithMaybeEventsPolicy
     -> Credential
     -> ResponseCreateParams
     -> Maybe StreamEventCallback
+    -> (Text -> IO ())
     -> IO (Either ApiError Response)
-createResponseWithMaybeEventsPolicy policy options credential request onEvent
+createResponseWithMaybeEventsPolicy policy options credential request onEvent onNotice
     | credential.provider /= XAIProvider = pure $ Left $ ProviderError ApiErrorType
         "agent-xai requires an xAI credential"
         Nothing
@@ -126,7 +150,8 @@ createResponseWithMaybeEventsPolicy policy options credential request onEvent
             -- retry only; stored history is not rewritten.
             Left err
                 | isRequestImageStripFailure err
-                , Just stripped <- omitInlineImages request ->
+                , Just (stripped, count) <- omitInlineImages request -> do
+                    onNotice (imageStripNotice count)
                     send stripped
             result -> pure result
   where

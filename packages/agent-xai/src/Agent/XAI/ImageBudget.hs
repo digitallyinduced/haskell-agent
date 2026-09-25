@@ -15,6 +15,7 @@ module Agent.XAI.ImageBudget
     , imageBudgetPlaceholder
     , toolImageBudgetNote
     , imageStripPlaceholder
+    , imageStripNotice
     ) where
 
 import Agent.Json (RawJson, rawJsonBytes, rawJsonFromEncoding)
@@ -56,6 +57,13 @@ toolImageBudgetNote =
 imageStripPlaceholder :: Text
 imageStripPlaceholder =
     "[image removed — the server could not process it; its contents are unavailable. Ask the user to re-attach the image if it is still needed.]"
+
+-- | Session note for a request-local strip. The stored transcript is unchanged.
+imageStripNotice :: Int -> Text
+imageStripNotice count =
+    "This request failed over its images (or was too large); "
+        <> Text.pack (show count)
+        <> " image(s) were left out of the retry."
 
 -- | Trigger and reclaim target for a provider request-body cap.
 -- 'Nothing' uses the 50 MiB proxy default. The trigger is one headroom under
@@ -101,15 +109,50 @@ applyImageBudgetWithLimits trigger reclaim request
                         )
 
 -- | Remove every inline image from a request. 'Nothing' when it had none, so
--- a payload rejection with no images is not retried.
-omitInlineImages :: ResponseCreateParams -> Maybe ResponseCreateParams
+-- a payload rejection with no images is not retried. The count is the number
+-- of images removed from this request only.
+omitInlineImages :: ResponseCreateParams -> Maybe (ResponseCreateParams, Int)
 omitInlineImages request =
     case request.input of
-        Just (ResponseInputItems items) ->
-            case traverseEdited editEveryItem items of
-                Nothing -> Nothing
-                Just items' -> Just (replaceInput request items')
+        Just (ResponseInputItems items)
+            | count > 0
+            , Just items' <- traverseEdited editEveryItem items ->
+                Just (replaceInput request items', count)
+          where
+            count = sum (map itemInlineImageCount items)
         _ -> Nothing
+
+itemInlineImageCount :: ResponseItem -> Int
+itemInlineImageCount = \case
+    MessageItem ResponseMessage { content = MessageContentParts parts } ->
+        length (filter isImagePart parts)
+    AgentMessageItem ResponseAgentMessage { content = parts } ->
+        length (filter isImagePart parts)
+    ReasoningItemValue ReasoningItem { content = Just parts } ->
+        length (filter isImagePart parts)
+    FunctionCallOutputItem FunctionCallOutput { output } ->
+        rawInlineImageCount output
+    CustomToolCallOutputItem CustomToolCallOutput { output } ->
+        rawInlineImageCount output
+    ComputerCallOutputItem ComputerCallOutput { screenshotDataUrl = url }
+        | isInlineImagePayload url -> 1
+    _ -> 0
+
+rawInlineImageCount :: RawJson -> Int
+rawInlineImageCount raw =
+    case Aeson.eitherDecodeStrict' (rawJsonBytes raw) of
+        Right value -> valueInlineImageCount value
+        Left _ -> 0
+
+valueInlineImageCount :: Aeson.Value -> Int
+valueInlineImageCount = \case
+    Aeson.Object object
+        | isImageObject (Aeson.Object object) -> 1
+        | otherwise ->
+            sum (map valueInlineImageCount (KeyMap.elems object))
+    Aeson.Array values ->
+        sum (map valueInlineImageCount (Vector.toList values))
+    _ -> 0
 
 -- | Encoded JSON size of a request, in bytes. This is the provider body,
 -- not the token estimate.

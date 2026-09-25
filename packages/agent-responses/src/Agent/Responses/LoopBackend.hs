@@ -10,6 +10,7 @@ module Agent.Responses.LoopBackend
     , statelessResponsesBackendWithRawReasoning
     , tokenProviderStatelessResponsesBackend
     , tokenProviderStatelessResponsesBackendPreservingCheckpointHistory
+    , tokenProviderStatelessResponsesBackendPreservingCheckpointHistoryNotifying
     , tokenProviderStatelessResponsesBackendPreservingHistory
     , turnInputsToItems
     , responseToTurnOutput
@@ -39,6 +40,7 @@ import Agent.Loop
     , BackendCallbacks(..)
     , BackendResult(..)
     , BackendSnapshot(..)
+    , LoopEvent(WarningRaised)
     , advanceBackendSnapshot
     , backendWithCallbacks
     )
@@ -56,6 +58,7 @@ import Agent.Responses.Request
     )
 import Agent.Responses.Types
 import Data.Maybe (fromMaybe)
+import Data.Text (Text)
 
 -- | Adapt a stateless Responses transport to the provider-neutral loop.
 statelessResponsesBackend
@@ -81,7 +84,7 @@ statelessResponsesBackendPreservingCheckpointHistory send getParams =
     statelessResponsesBackendWithMode
         PreservePreCheckpointHistoryAndCheckpoint
         True
-        send
+        (\request onEvent _notice -> send request onEvent)
         getParams
 
 -- | Adapt a stateless transport that cannot safely replay opaque server
@@ -98,7 +101,7 @@ statelessResponsesBackendPreservingHistory send getParams =
     statelessResponsesBackendWithMode
         PreservePreCheckpointHistory
         True
-        send
+        (\request onEvent _notice -> send request onEvent)
         getParams
 
 -- | Adapt a stateless Responses transport while optionally exposing raw
@@ -114,7 +117,7 @@ statelessResponsesBackendWithRawReasoning showRawReasoning send getParams =
     statelessResponsesBackendWithMode
         ReplacePreCheckpointHistory
         showRawReasoning
-        send
+        (\request onEvent _notice -> send request onEvent)
         getParams
 
 data ServerCheckpointMode
@@ -127,6 +130,7 @@ statelessResponsesBackendWithMode
     -> Bool
     -> (ResponseCreateParams
         -> (ResponseStreamEvent -> IO ())
+        -> (Text -> IO ())
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
     -> Backend
@@ -142,11 +146,12 @@ statelessResponsesBackendWithMode
         let newItems = turnInputsToItems inputs
             requestItems = snapshot.backendItems <> newItems
             request = withRequestInput baseParams requestItems
-        result <- send request \event -> do
+            notice = callbacks.onLoopEvent . WarningRaised
+        result <- send request (\event -> do
             projectEvent event >>= mapM_ callbacks.onLoopEvent
             case completedAsyncToolCall event of
                 Just call -> callbacks.onAsyncToolCall call
-                Nothing -> pure ()
+                Nothing -> pure ()) notice
         case result of
             Left err -> pure (Left err)
             Right response ->
@@ -220,6 +225,33 @@ tokenProviderStatelessResponsesBackendPreservingCheckpointHistory
     statelessResponsesBackendPreservingCheckpointHistory \params onEvent ->
         runWithTokenProviderStreaming provider streamOutputObserved
             (\credential -> send credential params) onEvent
+
+-- | Same history policy as
+-- 'tokenProviderStatelessResponsesBackendPreservingCheckpointHistory', with a
+-- request-local notice. Callers use it for a retry that changes the wire
+-- body without rewriting stored items.
+tokenProviderStatelessResponsesBackendPreservingCheckpointHistoryNotifying
+    :: TokenProvider
+    -> (Credential
+        -> ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> (Text -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+tokenProviderStatelessResponsesBackendPreservingCheckpointHistoryNotifying
+        provider
+        send
+        getParams =
+    statelessResponsesBackendWithMode
+        PreservePreCheckpointHistoryAndCheckpoint
+        True
+        (\request onEvent notice ->
+            runWithTokenProviderStreaming provider streamOutputObserved
+                (\credential streamEvent ->
+                    send credential request streamEvent notice)
+                onEvent)
+        getParams
 
 -- | Credentialed counterpart to
 -- 'statelessResponsesBackendPreservingHistory'.

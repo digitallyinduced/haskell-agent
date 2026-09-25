@@ -18,11 +18,11 @@ import Agent.Loop (Backend)
 import Agent.Responses.LoopBackend
     ( isServerCompactionCheckpoint
     , statelessResponsesBackendPreservingCheckpointHistory
-    , tokenProviderStatelessResponsesBackendPreservingCheckpointHistory
+    , tokenProviderStatelessResponsesBackendPreservingCheckpointHistoryNotifying
     )
 import Agent.Responses.Types
 import Agent.Provider (TokenProvider)
-import Agent.XAI.Client (createResponseWithEvents)
+import Agent.XAI.Client (createResponseWithEventsNotifying)
 import Agent.XAI.Options (ClientOptions)
 import Agent.XAI.Request (projectMarkedXaiCompactionHistory)
 
@@ -48,15 +48,17 @@ xaiBackendWithClientOptions
     -> IO ResponseCreateParams
     -> Backend
 xaiBackendWithClientOptions optionsForRequest provider =
-    tokenProviderStatelessResponsesBackendPreservingCheckpointHistory provider
-        (\credential request onEvent -> do
+    tokenProviderStatelessResponsesBackendPreservingCheckpointHistoryNotifying
+        provider
+        (\credential request onEvent onNotice -> do
             let projectedRequest = projectXaiCheckpoints request
             fmap (fmap markXaiServerCompactionCheckpoint) $
-                createResponseWithEvents
+                createResponseWithEventsNotifying
                     (optionsForRequest projectedRequest)
                     credential
                     projectedRequest
-                    onEvent)
+                    onEvent
+                    onNotice)
 
 -- | Same mapping as 'xaiBackend', with an injectable transport for tests and
 -- downstream integrations.

@@ -78,7 +78,8 @@ spec = do
             let request = requestWith [toolImage "tttt", userImage "uuuu"]
             case omitInlineImages request of
                 Nothing -> expectationFailure "expected images to be omitted"
-                Just stripped -> do
+                Just (stripped, count) -> do
+                    count `shouldBe` 2
                     let encoded = encodeText stripped
                     Text.isInfixOf (payload "tttt") encoded `shouldBe` False
                     Text.isInfixOf (payload "uuuu") encoded `shouldBe` False

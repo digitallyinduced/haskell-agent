@@ -6,14 +6,16 @@ import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
     , BackendSnapshot(..)
+    , LoopEvent(..)
     , TurnInput(..)
     , advanceBackendSnapshot
     , emptyBackendSnapshot
     )
 import qualified Agent.Responses.Codec as ResponsesCodec
 import Agent.Responses.LoopBackend (turnInputsToItems)
+import Agent.Provider (BillingMode(..), tokenProvider)
 import Agent.XAI.Client
-import Agent.XAI.ImageBudget (imageStripPlaceholder)
+import Agent.XAI.ImageBudget (imageStripNotice, imageStripPlaceholder)
 import Agent.XAI.LoopBackend
 import Agent.XAI.Options
 import Agent.XAI.TestSupport (withLoopbackApplication)
@@ -759,6 +761,43 @@ spec = do
                     Text.isInfixOf imagePayload (bodyText second) `shouldBe` False
                 _ -> expectationFailure "expected the rejected request and one retry"
 
+        it "tells the user which images were left out and keeps them in history" do
+            recorded <- newIORef []
+            events <- newIORef []
+            let handler _request = do
+                    sent <- readIORef recorded
+                    pure $ if length sent == 1 then tooLarge else ok
+                snapshot =
+                    advanceBackendSnapshot
+                        emptyBackendSnapshot
+                        [userImageItem imagePayload]
+                        Nothing
+            withMockGrok recorded handler \options -> do
+                let backend =
+                        xaiBackendWithClientOptions
+                            (const options)
+                            (tokenProvider SubscriptionBilled
+                                (\_failed -> pure (Right (xaiCredential "token"))))
+                            (pure (helloRequest "see this"))
+                result <- backend.submitTurn
+                    snapshot
+                    Nothing
+                    [UserMessage "continue"]
+                    (\event -> modifyIORef' events (<> [event]))
+                case result of
+                    Left err ->
+                        expectationFailure ("expected Right, got Left " <> show err)
+                    Right completed ->
+                        completed.backendState.backendItems
+                            `shouldSatisfy` elem (userImageItem imagePayload)
+            sent <- readIORef recorded
+            case sent of
+                [_, second] ->
+                    Text.isInfixOf imagePayload (bodyText second) `shouldBe` False
+                _ -> expectationFailure "expected the rejected request and one retry"
+            warnings <- filter isImageStripWarning <$> readIORef events
+            warnings `shouldBe` [WarningRaised (imageStripNotice 1)]
+
         it "does not retry HTTP 413 when the request has no inline image" do
             recorded <- newIORef []
             let handler _request = pure tooLarge
@@ -929,6 +968,11 @@ xaiCredential token = Credential
 --------------------------------------------------------------------------------
 -- Request/response helpers
 --------------------------------------------------------------------------------
+
+isImageStripWarning :: LoopEvent -> Bool
+isImageStripWarning = \case
+    WarningRaised _ -> True
+    _ -> False
 
 bodyText :: RecordedRequest -> Text
 bodyText request = Text.decodeUtf8 (LBS.toStrict request.body)
