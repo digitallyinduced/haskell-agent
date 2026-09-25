@@ -19,7 +19,6 @@ extra-source-files: benchmark/MemoryUsage.md
                   , benchmark/CommandCompletion.md
                   , benchmark/CommandCompletionResults.csv
 data-files:         data/CHANGELOG.md
-                  , helpers/apple-session-title/main.swift
                   , skills/add-model/SKILL.md
                   , skills/learn-about-user/SKILL.md
                   , skills/post-task-learning-review/SKILL.md

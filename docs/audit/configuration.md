@@ -174,7 +174,7 @@ The following are actual loader inputs, not suggested variables from other tools
 | ENV-CFG-030 | `HASKELL_AGENT_OBSERVATION_DIRECTORY` | `packages/agent-runtime/src/Agent/Runtime/Session/Observation.hs:145` | Environment#runtime-paths | Covered | Socket-directory relocation/default and ancillary failure supplied. |
 | ENV-CFG-031 | `HASKELL_AGENT_INBOX_DIRECTORY` | `packages/agent-runtime/src/Agent/Runtime/Session/Inbox.hs:95` | Environment#runtime-paths | Covered | Socket-directory relocation/default and shared process configuration supplied. |
 | ENV-CFG-032 | `HASKELL_AGENT_EXECUTABLE` | `packages/agent-runtime/src/Agent/Runtime/AgentSessions/Process.hs:619` | Environment#runtime-paths | Covered | Managed process executable override supplied. |
-| ENV-CFG-033 | `HASKELL_AGENT_APPLE_SESSION_TITLE` | `packages/agent-cli/src/Agent/CLI/AppleTitle.hs:97` | Models#session-title-model | Covered | Helper override and fallback documented. |
+| ENV-CFG-033 | `HASKELL_AGENT_APPLE_SESSION_TITLE` | `packages/agent-cli/src/Agent/CLI/AppleTitle.hs:77` | Models#session-title-model | Covered | Helper override and fallback documented. |
 | ENV-CFG-034 | `XAI_STT_LANGUAGE` | `packages/agent-xai/src/Agent/XAI/Transcription.hs:216` | Voice | Covered | Default English and Portuguese environment example supplied. |
 | ENV-CFG-035 | `MODEL_API_KEY` | `packages/agent-runtime/config/models.default.json:26` | Providers#meta-model-api | Covered | Direct Meta versus OpenRouter routes distinguished. |
 | ENV-CFG-036 | `OPENAI_API_KEY` for direct auxiliary authentication | OA:190 | Providers#openai; Voice | Covered | Coding account distinction and dictation setup supplied. |

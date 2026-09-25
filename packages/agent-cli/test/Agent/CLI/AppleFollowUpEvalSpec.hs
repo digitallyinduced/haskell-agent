@@ -44,15 +44,13 @@ runEvaluation = do
             cwd <- Directory.getCurrentDirectory
             xcode <- Directory.doesDirectoryExist
                 "/Applications/Xcode.app/Contents/Developer"
-            source <- Directory.doesFileExist
-                (cwd </> "packages/agent-cli/helpers/apple-session-title/main.swift")
             stop $
                 Text.unlines
                     [ "Apple Intelligence follow-up helper is not available"
                     , "os=" <> Text.pack System.Info.os
                     , "cwd=" <> Text.pack cwd
                     , "xcode=" <> Text.pack (show xcode)
-                    , "repo source visible=" <> Text.pack (show source)
+                    , "expected HASKELL_AGENT_APPLE_SESSION_TITLE or apple-session-title on PATH"
                     ]
     result <-
         classifyFollowUps

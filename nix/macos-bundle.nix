@@ -6,6 +6,7 @@
     agentToolsSource,
     agentCoreSource,
     skylightingSyntaxes,
+    appleSessionTitle,
     bun,
     sourceDateEpoch ? 1,
 }:
@@ -99,6 +100,8 @@ let
 
             # Keep the real Mach-O rather than the Nix shell wrapper.
             install -m 755 ${agentCli}/bin/agent-cli "$out/bin/agent-cli"
+            install -m 755 ${appleSessionTitle}/bin/apple-session-title \
+                "$out/bin/apple-session-title"
 
             # Preserve the capabilities of the normal Nix package without
             # requiring any of these tools to be installed on the host.
