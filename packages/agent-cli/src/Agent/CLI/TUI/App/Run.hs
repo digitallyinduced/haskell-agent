@@ -522,4 +522,5 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appClipboardTip = emptyClipboardFocusTipState
         , appClipboardImageProbe = inactiveClipboardImageProbe
         , appClipboardTipRemainingMillis = Nothing
+        , appFollowUpRouting = False
         }

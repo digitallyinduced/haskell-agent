@@ -503,6 +503,8 @@ handleAppEvent = \case
         vty <- getVtyHandle
         liftIO (applyMouseCaptureToOutput (V.outputIface vty) captured)
         modify' \state -> state { appMouseCapture = captured }
+    AppSetFollowUpRouting enabled ->
+        modify' \state -> state { appFollowUpRouting = enabled }
     AppSyntaxHighlighterChanged ->
         handleSyntaxHighlighterChangedEvent
     AppSetPullRequestURLs generation urls -> do

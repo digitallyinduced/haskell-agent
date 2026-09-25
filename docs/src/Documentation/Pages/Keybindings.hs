@@ -19,7 +19,7 @@ page = Page
         <table>
             <thead><tr><th>Key</th><th>Action</th></tr></thead>
             <tbody>
-                <tr><td><kbd>Enter</kbd></td><td>Send when idle; steer the current turn when running</td></tr>
+                <tr><td><kbd>Enter</kbd></td><td>Send when idle. While running, steer the turn, or queue a separate follow-up when Apple Intelligence is available</td></tr>
                 <tr><td><kbd>Shift+Enter</kbd></td><td>Insert a newline when supported by the terminal</td></tr>
                 <tr><td><kbd>Escape</kbd> / <kbd>Ctrl+C</kbd></td><td>Cancel a running turn from the composer</td></tr>
                 <tr><td><kbd>Tab</kbd></td><td>Move into scrollback navigation when the normal composer footer offers it</td></tr>

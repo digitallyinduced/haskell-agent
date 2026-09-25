@@ -162,12 +162,8 @@ firstExistingFile = \case
 
 runSwiftc :: FilePath -> FilePath -> IO Bool
 runSwiftc source dest = do
-    environment <- getEnvironment
+    environment <- swiftcEnvironment
     let destTmp = dest <> ".tmp"
-        cleaned =
-            filter
-                (\(name, _) -> name `notElem` ["SDKROOT", "DEVELOPER_DIR"])
-                environment
         process =
             (proc
                 "/usr/bin/xcrun"
@@ -182,7 +178,7 @@ runSwiftc source dest = do
                 , destTmp
                 , source
                 ])
-                { env = Just (("DEVELOPER_DIR", xcodeDeveloperDir) : cleaned)
+                { env = Just environment
                 , std_in = NoStream
                 , std_out = CreatePipe
                 , std_err = CreatePipe
@@ -199,6 +195,21 @@ runSwiftc source dest = do
         _ -> do
             _ <- tryAny (removeFile destTmp)
             pure False
+
+-- | Nix leaks SDKROOT, LD_DYLD_PATH, and NIX_LDFLAGS. Xcode's Swift macro
+-- plugin then loads the wrong runtime and rejects @Generable.
+swiftcEnvironment :: IO [(String, String)]
+swiftcEnvironment = do
+    environment <- getEnvironment
+    let preserved =
+            [ (name, value)
+            | name <- ["HOME", "TMPDIR", "USER", "LOGNAME", "LANG"]
+            , Just value <- [lookup name environment]
+            ]
+    pure $
+        ("DEVELOPER_DIR", xcodeDeveloperDir)
+            : ("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            : preserved
 
 swiftTarget :: String
 swiftTarget =

@@ -184,7 +184,9 @@ page = Page
         <code>apple-session-title</code>. The helper is found on <code>PATH</code>, supplied through
         <code>HASKELL_AGENT_APPLE_SESSION_TITLE</code>, or built with Xcode on first use. If unavailable
         or unsuccessful, naming falls back to the provider's inexpensive model. Other systems use
-        provider selection directly. This fallback is for naming, not a switch of the coding model.</p>
+        provider selection directly. This fallback is for naming, not a switch of the coding model.
+        The same helper also decides whether a plain follow-up steers the running fullscreen turn
+        or waits until that turn finishes.</p>
         <h2 id="catalog-errors">Catalog errors and recovery</h2>
         <table>
             <thead><tr><th>Error or symptom</th><th>Action</th></tr></thead>

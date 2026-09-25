@@ -35,6 +35,7 @@ import Agent.Tools.OutputArtifact
 import Agent.Tools.Background
     ( setBackgroundTaskHooks, readBackgroundTasks, BackgroundTaskStatus(..) )
 import Data.List (sortOn)
+import Agent.CLI.AppleFollowUp (maintainAppleFollowUpRouter)
 import Agent.CLI.AppleTitle
     ( generateAppleFoundationTitle
     , probeAppleFoundationTitle
@@ -118,7 +119,11 @@ import Agent.Runtime.Tools.Dialects
 import Agent.CLI.Dictation (dictationTargetForSession)
 import Agent.CLI.TUI.App
 import Agent.CLI.TUI.Composer (appendFullscreenInput)
-import Agent.CLI.TUI.Types (FullscreenInput(..), FullscreenRuntime(..))
+import Agent.CLI.TUI.Types
+    ( AppEvent(AppSetFollowUpRouting)
+    , FullscreenInput(..)
+    , FullscreenRuntime(..)
+    )
 import Agent.CLI.Input (ReplLine(ReplText))
 import Agent.TUI.Model
 import Agent.TUI.Motion
@@ -411,20 +416,40 @@ withSessionTitleRuntime
     -> IO a
 withSessionTitleRuntime host SessionRequest{..} SessionBackend{..} action = do
     appleExecutable <- probeAppleFoundationTitle
-    withSessionTitleManager
-        btwBackend
-        (readSessionRequestParams paramsRef)
-        (do
-            settings <- loadUserSettings workspace.home
-            pure $
-                resolveTitleModel
-                    catalog
-                    provider
-                    settings.settingsTitleModel
-                    (isJust appleExecutable))
-        (generateAppleFoundationTitle <$> appleExecutable)
-        host.hostTitleEvent
-        action
+    withAppleFollowUpRouting host.hostFullscreen appleExecutable $
+        withSessionTitleManager
+            btwBackend
+            (readSessionRequestParams paramsRef)
+            (do
+                settings <- loadUserSettings workspace.home
+                pure $
+                    resolveTitleModel
+                        catalog
+                        provider
+                        settings.settingsTitleModel
+                        (isJust appleExecutable))
+            (generateAppleFoundationTitle <$> appleExecutable)
+            host.hostTitleEvent
+            action
+
+withAppleFollowUpRouting
+    :: Maybe FullscreenRuntime
+    -> Maybe FilePath
+    -> IO a
+    -> IO a
+withAppleFollowUpRouting fullscreen executable action =
+    case (fullscreen, executable) of
+        (Just runtime, Just path) ->
+            withAsync
+                (maintainAppleFollowUpRouter
+                    path
+                    (\route -> writeIORef runtime.runtimeRouteFollowUp route)
+                    (\enabled ->
+                        enqueueAppEvent
+                            runtime
+                            (AppSetFollowUpRouting enabled)))
+                (const action)
+        _ -> action
 
 -- | Mutable controls shared by rendering, tools, persistence, and the agent
 -- viewport. Allocation and viewport registration form one startup phase.

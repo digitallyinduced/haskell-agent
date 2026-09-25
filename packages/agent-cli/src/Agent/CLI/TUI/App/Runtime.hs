@@ -7,6 +7,7 @@ import Agent.CLI.TUI.App.Mailbox
     , enqueueAppEvent
     )
 
+import Agent.CLI.AppleFollowUp (defaultFollowUpRoute)
 import Agent.CLI.Clipboard ( formatImageSize )
 import Agent.CLI.Dictation ( DictationControl(..)
     , DictationResult(..)
@@ -337,6 +338,7 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
         themeRef <- newIORef theme
         windowTitle <- newIORef Nothing
         mouseCapture <- newIORef True
+        routeFollowUp <- newIORef defaultFollowUpRoute
         sessionActions <- newIORef FullscreenSessionActions
             { sessionDictationTarget = Nothing
             , sessionCancel = cancelAction
@@ -357,6 +359,7 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
             , runtimeSteer = \pasted text ->
                 readIORef sessionActions >>= \actions ->
                     actions.sessionSteer pasted text
+            , runtimeRouteFollowUp = routeFollowUp
             , runtimeBtw = \question ->
                 readIORef sessionActions >>= \actions ->
                     actions.sessionBtw question

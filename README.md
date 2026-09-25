@@ -24,10 +24,13 @@ nix run --accept-flake-config "github:digitallyinduced/haskell-agent"
 
 ## Steering and queued prompts
 
-While a fullscreen terminal turn is running, plain text prompts steer the current turn.
-Use `/steer <prompt>` to do this explicitly, or `/queue <prompt>` to wait
-until the current turn finishes. Bare `/queue` lists waiting prompts.
-When idle, either prompt command starts a new turn.
+While a fullscreen terminal turn is running, a plain text prompt normally steers
+the current turn. On macOS, when Apple Intelligence is available, the on-device
+model chooses: a correction or detail of the running task steers it, and a
+separate later task is queued until the turn finishes. If that model is
+unavailable or fails, the prompt steers. Use `/steer <prompt>` or
+`/queue <prompt>` to choose explicitly. Bare `/queue` lists waiting prompts.
+When idle, either command starts a new turn.
 
 ## Terminal mouse capture
 

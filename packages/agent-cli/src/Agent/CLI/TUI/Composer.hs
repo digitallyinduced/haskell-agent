@@ -47,6 +47,8 @@ module Agent.CLI.TUI.Composer
     , queuedFullscreenInputDisplays
     , readFullscreenInputs
     , slashMenuWindowStart
+    , currentTurnTaskText
+    , explicitSteerCommand
     , steeringPrompt
     , takeFullscreenInput
     , takeFullscreenInputOr
@@ -56,6 +58,7 @@ module Agent.CLI.TUI.Composer
     , wrapDraftWindow
     ) where
 
+import Agent.CLI.AppleFollowUp (FollowUpRoute(..))
 import Agent.CLI.Clipboard
     ( appendBoundedImageAttachments
     , loadImagesFromPastedText
@@ -98,6 +101,7 @@ import Control.Concurrent.STM (atomically, writeTQueue)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
+import Data.Foldable (toList)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (elemIndex)
 import Data.Maybe (fromMaybe)
@@ -428,6 +432,153 @@ steeringPrompt ui pasted text
             -- it is consumed only after the active turn returns.
             ReplQueuedPrompt _ -> Nothing
             _ -> Nothing
+
+-- | '/steer' is an explicit choice and is not sent to follow-up routing.
+explicitSteerCommand :: Text -> Bool
+explicitSteerCommand text =
+    case Text.words text of
+        command : _ -> Text.toLower command == "/steer"
+        [] -> False
+
+-- | What the on-device router should see about the running turn. The user's
+-- request and steering come first. Recent assistant text and tool titles fill
+-- the remaining room in the 4,096-token model; tool bodies stay out.
+currentTurnTaskText :: UiState -> Text
+currentTurnTaskText ui =
+    let userPart = Text.take userTaskLimit (Text.intercalate "\n" (turnUserLines ui))
+        recent = Text.take recentWorkLimit (recentTurnWork ui)
+    in Text.take routeContextLimit $
+        if Text.null recent
+            then userPart
+            else userPart <> "\n\nRecent work:\n" <> recent
+
+userTaskLimit :: Int
+userTaskLimit = 1500
+
+recentWorkLimit :: Int
+recentWorkLimit = 2000
+
+-- | Stay inside the on-device context window together with the routing
+-- instructions and a follow-up of up to 2,000 characters.
+routeContextLimit :: Int
+routeContextLimit = 4000
+
+turnUserLines :: UiState -> [Text]
+turnUserLines ui =
+    let indexed = zip [0 :: Int ..] (toList ui.uiBlocks)
+        userText block =
+            let stripped = Text.strip block.blockBody
+            in if block.blockKind == BlockUser && not (Text.null stripped)
+                then Just stripped
+                else Nothing
+        prior =
+            [ text
+            | (index, block) <- indexed
+            , index < ui.uiTurnStartBlock
+            , Just text <- [userText block]
+            ]
+        during =
+            [ text
+            | (index, block) <- indexed
+            , index >= ui.uiTurnStartBlock
+            , Just text <- [userText block]
+            ]
+    in take 1 (reverse prior) ++ take 7 during
+
+recentTurnWork :: UiState -> Text
+recentTurnWork ui =
+    let turnBlocks =
+            [ block
+            | (index, block) <- zip [0 :: Int ..] (toList ui.uiBlocks)
+            , index >= ui.uiTurnStartBlock
+            ]
+        assistantLine = assistantExcerpt turnBlocks
+        toolLines = map ("- " <>) (recentToolLines turnBlocks)
+        activity = Text.strip ui.uiActivity
+        lastTool = case toolLines of
+            [] -> ""
+            lines_ -> last lines_
+        activityLine
+            | Text.null activity || genericTurnActivity activity = Nothing
+            | activity `Text.isInfixOf` lastTool = Nothing
+            | otherwise = Just ("Now: " <> activity)
+        lines_ =
+            maybe [] (\line -> [line]) activityLine
+                ++ maybe [] (\line -> [line]) assistantLine
+                ++ toolLines
+    in Text.intercalate "\n" lines_
+
+genericTurnActivity :: Text -> Bool
+genericTurnActivity activity =
+    activity
+        `elem` [ "Thinking…"
+               , "Writing…"
+               , "Writing plan…"
+               , "Restarting…"
+               , "Retrying response…"
+               ]
+
+assistantExcerpt :: [UiBlock] -> Maybe Text
+assistantExcerpt blocks =
+    case
+        [ excerpt
+        | block <- blocks
+        , block.blockKind == BlockAssistant
+        , let excerpt = flattenExcerpt assistantExcerptLimit block.blockBody
+        , not (Text.null excerpt)
+        ]
+    of
+        [] -> Nothing
+        excerpts -> Just ("Assistant: " <> last excerpts)
+
+recentToolLines :: [UiBlock] -> [Text]
+recentToolLines blocks =
+    reverse $
+        take recentToolLimit $
+            reverse
+                [ line
+                | block <- blocks
+                , isRecentWorkBlock block.blockKind
+                , let line = toolContextLine block
+                , not (Text.null line)
+                ]
+
+recentToolLimit :: Int
+recentToolLimit = 6
+
+assistantExcerptLimit :: Int
+assistantExcerptLimit = 800
+
+toolDetailLimit :: Int
+toolDetailLimit = 80
+
+isRecentWorkBlock :: BlockKind -> Bool
+isRecentWorkBlock = \case
+    BlockTool -> True
+    BlockEdit -> True
+    BlockShell -> True
+    BlockInspect -> True
+    BlockTodo -> True
+    _ -> False
+
+toolContextLine :: UiBlock -> Text
+toolContextLine block =
+    let title = Text.unwords (Text.words block.blockTitle)
+        detail = Text.unwords (Text.words block.blockDetail)
+        short = Text.take toolDetailLimit detail
+    in if Text.null title
+        then ""
+        else
+            if Text.null short || short == title || Text.length detail > toolDetailLimit
+                then title
+                else title <> " — " <> short
+
+flattenExcerpt :: Int -> Text -> Text
+flattenExcerpt limit text =
+    let flat = Text.unwords (Text.words text)
+    in if Text.length flat <= limit
+        then flat
+        else "…" <> Text.takeEnd (limit - 1) flat
 
 -- | Handle one composer key. The host supplies Ctrl-C policy and conversation
 -- page scrolling because those actions also affect non-composer UI state.
@@ -793,26 +944,34 @@ submitText applyUiEvent state text pasted = do
                     pure True
                 Nothing ->
                     case steeringPrompt state.appUi pasted text of
-                        Just (steeringPasted, prompt) -> do
-                            result <- liftIO
-                                (state.appRuntime.runtimeSteer
-                                    steeringPasted
-                                    prompt)
-                            case result of
-                                Left message -> do
+                        Just (steeringPasted, prompt)
+                            | explicitSteerCommand text ->
+                                submitSteering
                                     applyUiEvent
-                                        (UiSetNotice
-                                            (Just (warningNotice message)))
-                                        id
-                                    pure False
-                                Right () -> do
-                                    applyUiEvent UiDraftSubmitted \current ->
-                                        current
-                                            { appSlashIndex = 0
-                                            , appSlashDismissed = False
-                                            , appUndo = []
-                                            }
-                                    pure True
+                                    state
+                                    steeringPasted
+                                    prompt
+                            | otherwise -> do
+                                route <- liftIO $ do
+                                    decide <-
+                                        readIORef
+                                            state.appRuntime.runtimeRouteFollowUp
+                                    decide
+                                        (currentTurnTaskText state.appUi)
+                                        prompt
+                                case route of
+                                    FollowUpQueue ->
+                                        submitQueuedFollowUp
+                                            applyUiEvent
+                                            state
+                                            replLine
+                                            text
+                                    FollowUpSteer ->
+                                        submitSteering
+                                            applyUiEvent
+                                            state
+                                            steeringPasted
+                                            prompt
                         Nothing ->
                             enqueueInput applyUiEvent state replLine (Just text) True
     when accepted do
@@ -885,6 +1044,44 @@ sendNow applyUiEvent = do
                         liftIO state.appRuntime.runtimeCancel
                         vScrollToEnd
                             (viewportScroll ConversationViewport)
+
+submitSteering
+    :: ApplyLocalUiEvent
+    -> AppState
+    -> Bool
+    -> Text
+    -> EventM Name AppState Bool
+submitSteering applyUiEvent state pasted prompt = do
+    result <- liftIO (state.appRuntime.runtimeSteer pasted prompt)
+    case result of
+        Left message -> do
+            applyUiEvent
+                (UiSetNotice (Just (warningNotice message)))
+                id
+            pure False
+        Right () -> do
+            applyUiEvent UiDraftSubmitted \current ->
+                current
+                    { appSlashIndex = 0
+                    , appSlashDismissed = False
+                    , appUndo = []
+                    }
+            pure True
+
+submitQueuedFollowUp
+    :: ApplyLocalUiEvent
+    -> AppState
+    -> ReplLine
+    -> Text
+    -> EventM Name AppState Bool
+submitQueuedFollowUp applyUiEvent state replLine text = do
+    accepted <- enqueueInput applyUiEvent state replLine (Just text) True
+    when accepted $
+        applyUiEvent
+            (UiSetNotice
+                (Just (progressNotice "Queued until this turn finishes.")))
+            id
+    pure accepted
 
 enqueueInput
     :: ApplyLocalUiEvent
