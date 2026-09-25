@@ -17,7 +17,9 @@ import Agent.Server.RepositoryCheckout
     , PreparedRepositoryLayout(..)
     , RepositoryCheckout(..)
     , RepositoryCheckoutOperation(..)
+    , checkoutExceptionDiagnostic
     , completeRepositoryCheckout
+    , redactGitDiagnostic
     )
 import Agent.Server.Types
     ( AccessBoundary
@@ -35,12 +37,13 @@ import Control.Concurrent.MVar
     , takeMVar
     , tryPutMVar
     )
-import Control.Exception.Safe (tryAny)
+import Control.Exception.Safe (isAsyncException, throwIO, tryAny)
 import Control.Monad (void)
 import Data.Aeson (Value, object, (.=))
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
+import Data.Text qualified as Text
 
 data SessionEventSink = SessionEventSink
     { emitSessionEvent :: AccessBoundary -> Text -> Text -> Value -> IO ()
@@ -173,7 +176,10 @@ runCheckout emit done layout descriptor complete = do
                     ]
     result <- tryAny (complete layout descriptor onStep)
     finished <- case result of
-        Left _ -> failCheckout emit layout "could not prepare repository checkout"
+        Left exception
+            | isAsyncException exception -> throwIO exception
+            | otherwise ->
+                failCheckout emit layout (checkoutExceptionDiagnostic exception)
         Right (Left message) -> failCheckout emit layout message
         Right (Right checkout) -> do
             emit "session.setup.completed" $
@@ -190,9 +196,17 @@ failCheckout
     -> Text
     -> IO (Either Text RepositoryCheckout)
 failCheckout emit layout message = do
-    emit "session.setup.failed" $ object ["message" .= message]
+    let rendered = renderedCheckoutFailure message
+    emit "session.setup.failed" $ object ["message" .= rendered]
     _ <- tryAny layout.layoutCleanup
-    pure (Left message)
+    pure (Left rendered)
+
+renderedCheckoutFailure :: Text -> Text
+renderedCheckoutFailure message =
+    let safe = redactGitDiagnostic message
+    in if Text.null safe
+        then "could not prepare repository checkout"
+        else safe
 
 checkoutOperationStatusText :: CheckoutOperationStatus -> Text
 checkoutOperationStatusText = \case
