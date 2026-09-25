@@ -2,6 +2,7 @@ module Agent.Telegram.Internal.Support
     ( cleanupManagedTurnMedia, cleanupTelegramBridge, latestTurnMatches
     , latestPersistedTurnIndex, sessionForPrompt
     , renderLatestTurn, lookupBinding, modifyState, reply
+    , discardSilentTelegramTurn
     , withTelegramProgress, withTelegramProgressUsing
     , loadTelegramState, saveTelegramState
     , redactToken
@@ -20,7 +21,7 @@ import Agent.Runtime.Session
     , loadRecentSessionTurns
     , sessionTitleFromPrompt
     )
-import Agent.Telegram.Classify (telegramReactionEmoji)
+import Agent.Telegram.Classify (isTelegramNoReplyText, telegramReactionEmoji)
 import Agent.Telegram.Types
 import qualified Agent.Telegram.Client as TelegramClient
 import qualified Agent.Json.Decode as Hermes
@@ -152,6 +153,11 @@ modifyState runtime update =
 
 reply :: TelegramRuntime -> TelegramPendingReply -> IO ()
 reply runtime pending
+    | isTelegramNoReplyText pending.pendingText =
+        discardSilentTelegramTurn
+            runtime
+            pending.pendingChat
+            pending.pendingEditMessageId
     | Nothing <- pending.pendingEditMessageId
     , Just emoji <- telegramReactionEmoji pending.pendingText
     , Just messageId <- pending.pendingReplyToMessageId = do
@@ -228,6 +234,30 @@ replyCheckpointKey pending =
         , Text.pack (show pending.pendingUpdateId)
         , "reply"
         ]
+
+discardSilentTelegramTurn
+    :: TelegramRuntime
+    -> TelegramChatKey
+    -> Maybe Integer
+    -> IO ()
+discardSilentTelegramTurn runtime key progressMessageId = do
+    void $ tryAny $
+        TelegramClient.clearStreamingDraft runtime.runtimeClient key
+    forM_ progressMessageId \messageId -> do
+        void $ tryAny $
+            TelegramClient.deleteMessage runtime.runtimeClient key messageId
+        modifyState runtime \state ->
+            state
+                { outboundMessageIds =
+                    Map.update
+                        (\ids ->
+                            let remaining = Set.delete messageId ids
+                            in if Set.null remaining
+                                then Nothing
+                                else Just remaining)
+                        key
+                        state.outboundMessageIds
+                }
 
 withTelegramProgress
     :: TelegramClient

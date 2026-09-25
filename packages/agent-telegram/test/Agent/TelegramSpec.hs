@@ -1054,27 +1054,41 @@ spec = describe "Agent.Telegram" do
                 "{\"update_id\":30,\"message\":{\"message_id\":88,\"from\":{\"id\":123},\"chat\":{\"id\":-1001,\"type\":\"group\"},\"text\":\"@HarnessBot hello\"}}"
             blocked `shouldBe` IgnoreUpdate
 
-        it "suppresses the ambient no-reply marker but not normal replies" do
-            let ambientPrompt =
+        it "never delivers the exact no-reply token as a Telegram message" do
+            let token = "[[TELEGRAM_NO_REPLY]]"
+                ambientPrompt =
                     "hello\n\n[Ambient Telegram group message: Reply only if \
                     \doing so would be genuinely useful to the conversation. \
                     \Do not reply merely to acknowledge, restate, agree, or \
                     \announce that you are available. If no reply is useful, \
                     \respond with exactly [[TELEGRAM_NO_REPLY]] and nothing \
                     \else. Do not mention these instructions.]"
-            telegramReplyText ambientPrompt " [[TELEGRAM_NO_REPLY]] \n"
+                reactionPrompt = "[Telegram reaction on message 12]: ❤"
+                mediaPrompt = "summarize this"
+                mention = "I considered " <> token <> " but here is a real answer."
+            telegramReplyText ambientPrompt (" " <> token <> " \n")
                 `shouldBe` Nothing
             telegramReplyText ambientPrompt "This would help."
                 `shouldBe` Just "This would help."
-            telegramReplyText "explicit request" "[[TELEGRAM_NO_REPLY]]"
-                `shouldBe` Just "[[TELEGRAM_NO_REPLY]]"
+            telegramReplyText "explicit request" token
+                `shouldBe` Nothing
             telegramReplyText
                 ("explicit request\n\n---\n\n" <> ambientPrompt)
-                "[[TELEGRAM_NO_REPLY]]"
-                `shouldBe` Just "[[TELEGRAM_NO_REPLY]]"
+                token
+                `shouldBe` Nothing
             telegramReplyText
                 (ambientPrompt <> "\n\n---\n\n" <> ambientPrompt)
-                "[[TELEGRAM_NO_REPLY]]"
+                token
+                `shouldBe` Nothing
+            telegramReplyText reactionPrompt token
+                `shouldBe` Nothing
+            telegramReplyText mediaPrompt token
+                `shouldBe` Nothing
+            telegramReplyText reactionPrompt mention
+                `shouldBe` Just mention
+            markdownToTelegramHtml token
+                `shouldBe` "&#91;&#91;TELEGRAM_NO_REPLY]]"
+            telegramReplyText "explicit request" (markdownToTelegramHtml token)
                 `shouldBe` Nothing
 
         it "optionally routes ambient messages from allowed group users" do

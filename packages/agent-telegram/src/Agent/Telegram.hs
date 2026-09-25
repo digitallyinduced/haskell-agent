@@ -33,6 +33,7 @@ module Agent.Telegram
     , reactionMessageText
     , telegramReactionEmoji
     , telegramReplyText
+    , isTelegramNoReplyText
     , telegramAgentPrompt
     , telegramCommandArguments
     , telegramReplyUserIdFromPrompt

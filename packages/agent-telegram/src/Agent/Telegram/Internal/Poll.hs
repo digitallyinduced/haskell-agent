@@ -51,7 +51,8 @@ import Agent.Telegram.Internal.Runtime.Types
         )
     )
 import Agent.Telegram.Internal.Support
-    ( lookupBinding
+    ( discardSilentTelegramTurn
+    , lookupBinding
     , modifyState
     , redactToken
     , reply
@@ -380,20 +381,14 @@ processChatQueue runtime key =
                                 pending.pendingTurnChat
                                 (runQueuedTurn runtime pending)
                         Just _ -> runQueuedTurn runtime pending
-                    modifyState runtime \state ->
-                        let completed = completePendingAction action state
-                        in case telegramReplyText pending.pendingTurnText response.telegramTurnText of
-                            Nothing -> completed
-                            Just replyText ->
-                                enqueuePendingAction
-                                    (DeliverReply
-                                        (TelegramPendingReply
-                                            pending.pendingTurnUpdateId
-                                            pending.pendingTurnChat
-                                            (Just pending.pendingTurnMessageId)
-                                            response.telegramTurnProgressMessageId
-                                            replyText))
-                                    completed
+                    enqueueOrDiscardReply
+                        runtime
+                        action
+                        pending.pendingTurnChat
+                        pending.pendingTurnUpdateId
+                        pending.pendingTurnMessageId
+                        pending.pendingTurnText
+                        response
                 RunPendingMediaTurn pending -> do
                     response <- case telegramCommand pending.pendingMediaText of
                         Nothing ->
@@ -402,20 +397,14 @@ processChatQueue runtime key =
                                 pending.pendingMediaChat
                                 (runQueuedMediaTurn runtime pending)
                         Just _ -> runQueuedMediaTurn runtime pending
-                    modifyState runtime \state ->
-                        let completed = completePendingAction action state
-                        in case telegramReplyText pending.pendingMediaText response.telegramTurnText of
-                            Nothing -> completed
-                            Just replyText ->
-                                enqueuePendingAction
-                                    (DeliverReply
-                                        (TelegramPendingReply
-                                            pending.pendingMediaUpdateId
-                                            pending.pendingMediaChat
-                                            (Just pending.pendingMediaMessageId)
-                                            response.telegramTurnProgressMessageId
-                                            replyText))
-                                    completed
+                    enqueueOrDiscardReply
+                        runtime
+                        action
+                        pending.pendingMediaChat
+                        pending.pendingMediaUpdateId
+                        pending.pendingMediaMessageId
+                        pending.pendingMediaText
+                        response
                 LeaveUnauthorizedChat pending -> do
                     leaveUnauthorizedGroup runtime pending
                     modifyState runtime (completePendingAction action)
@@ -439,6 +428,35 @@ processChatQueue runtime key =
                     maybe (pure ()) threadDelay delay
                     processChatQueue runtime key
                 Right () -> processChatQueue runtime key
+
+enqueueOrDiscardReply
+    :: TelegramRuntime
+    -> PendingChatAction
+    -> TelegramChatKey
+    -> Integer
+    -> Integer
+    -> Text
+    -> TelegramTurnResponse
+    -> IO ()
+enqueueOrDiscardReply runtime action chat updateId messageId prompt response =
+    case telegramReplyText prompt response.telegramTurnText of
+        Nothing -> do
+            modifyState runtime (completePendingAction action)
+            discardSilentTelegramTurn
+                runtime
+                chat
+                response.telegramTurnProgressMessageId
+        Just replyText ->
+            modifyState runtime \state ->
+                enqueuePendingAction
+                    (DeliverReply
+                        (TelegramPendingReply
+                            updateId
+                            chat
+                            (Just messageId)
+                            response.telegramTurnProgressMessageId
+                            replyText))
+                    (completePendingAction action state)
 
 runQueuedTurn :: TelegramRuntime -> TelegramPendingTurn -> IO TelegramTurnResponse
 runQueuedTurn runtime pending =
