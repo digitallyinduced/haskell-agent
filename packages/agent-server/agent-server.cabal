@@ -158,6 +158,7 @@ test-suite agent-server-test
                     , hspec >= 2.11 && < 2.12
                     , http-client
                     , http-types
+                    , process
                     , safe-exceptions
                     , stm
                     , temporary

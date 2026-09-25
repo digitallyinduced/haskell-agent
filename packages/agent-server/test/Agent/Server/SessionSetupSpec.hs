@@ -19,6 +19,7 @@ import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Monad (forM_)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Text (Text)
+import Data.Text qualified as Text
 import System.Directory (doesDirectoryExist, doesFileExist)
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
@@ -117,6 +118,51 @@ spec = do
                     complete
                 awaitSessionSetup registry "session-1"
                     `shouldReturn` Left "git clone failed"
+                closeSessionSetupRegistry registry
+
+        it "redacts a returned checkout diagnostic" do
+            withSystemTempDirectory "agent-server-setup-redact" \root -> do
+                layout <-
+                    prepareRepositoryLayout root "01testcorrelation" validDescriptor
+                        >>= either (fail . show) pure
+                registry <- newSessionSetupRegistry
+                let complete _ _ _ =
+                        pure (Left "clone: password=ghs_SECRETVALUE")
+                startRepositorySetupWith
+                    registry
+                    (\_ _ -> pure ())
+                    "session-1"
+                    layout
+                    validDescriptor
+                    complete
+                awaitSessionSetup registry "session-1" >>= \case
+                    Left message -> do
+                        message `shouldSatisfy` Text.isInfixOf "clone:"
+                        message `shouldSatisfy` Text.isInfixOf "password=<redacted>"
+                        message `shouldNotSatisfy` Text.isInfixOf "ghs_SECRETVALUE"
+                    Right () -> expectationFailure "expected checkout failure"
+                closeSessionSetupRegistry registry
+
+        it "redacts a diagnostic when checkout throws" do
+            withSystemTempDirectory "agent-server-setup-throw" \root -> do
+                layout <-
+                    prepareRepositoryLayout root "01testcorrelation" validDescriptor
+                        >>= either (fail . show) pure
+                registry <- newSessionSetupRegistry
+                let complete _ _ _ = fail "password=ghs_SECRETVALUE"
+                startRepositorySetupWith
+                    registry
+                    (\_ _ -> pure ())
+                    "session-1"
+                    layout
+                    validDescriptor
+                    complete
+                awaitSessionSetup registry "session-1" >>= \case
+                    Left message -> do
+                        message `shouldSatisfy` Text.isInfixOf "password=<redacted>"
+                        message `shouldNotSatisfy` Text.isInfixOf "ghs_SECRETVALUE"
+                        message `shouldNotSatisfy` Text.isInfixOf "could not prepare repository checkout"
+                    Right () -> expectationFailure "expected checkout failure"
                 closeSessionSetupRegistry registry
 
 validDescriptor :: RepositoryDescriptor

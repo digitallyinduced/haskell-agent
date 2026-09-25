@@ -22,8 +22,8 @@ mkDerivation {
   testHaskellDepends = [
     aeson agent-core agent-runtime agent-tools async base
     base64-bytestring bytestring containers crypton directory filepath
-    hspec http-client http-types safe-exceptions stm temporary text
-    time unix wai wai-extra warp
+    hspec http-client http-types process safe-exceptions stm temporary
+    text time unix wai wai-extra warp
   ];
   description = "Local HTTP API for managing haskell-agent sessions";
   license = lib.meta.getLicenseFromSpdxId "MIT";

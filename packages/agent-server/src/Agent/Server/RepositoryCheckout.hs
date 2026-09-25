@@ -11,14 +11,24 @@ module Agent.Server.RepositoryCheckout
     , validateDescriptor
     , credentialHelperScript
     , ghWrapperScript
+    , redactGitDiagnostic
+    , gitDiagnosticFromStderr
+    , checkoutExceptionDiagnostic
     ) where
 
+import Control.Concurrent.Async (Async, async, cancel, waitCatch)
+import Control.Exception (SomeException, displayException)
 import Control.Exception.Safe (tryAny)
-import Control.Monad (forM_)
+import Control.Monad (void)
+import Data.ByteString (ByteString)
+import Data.ByteString qualified as ByteString
 import Data.Char (isAlphaNum, isAscii, isControl, isSpace)
 import Data.List (isPrefixOf)
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Text.Encoding qualified as TextEncoding
+import Data.Text.Encoding.Error qualified as TextError
+import Data.Word (Word8)
 import System.Directory
     ( createDirectoryIfMissing
     , getPermissions
@@ -29,13 +39,16 @@ import System.Directory
 import System.Environment (getEnvironment)
 import System.Exit (ExitCode(..))
 import System.FilePath (normalise, splitDirectories, takeDirectory, (</>))
+import System.IO (BufferMode(..), Handle, hClose, hSetBinaryMode, hSetBuffering)
 import System.Posix.Files (setFileMode)
 import System.Process
     ( CreateProcess(..)
-    , StdStream(NoStream)
+    , StdStream(CreatePipe, NoStream)
     , createProcess
     , interruptProcessGroupOf
     , proc
+    , ProcessHandle
+    , terminateProcess
     , waitForProcess
     )
 import System.Timeout qualified as Timeout
@@ -166,23 +179,26 @@ completeRepositoryCheckout
     -> RepositoryDescriptor
     -> (RepositoryCheckoutOperation -> CheckoutOperationStatus -> IO ())
     -> IO (Either Text RepositoryCheckout)
-completeRepositoryCheckout layout descriptor onStep = do
-    let operations = repositoryCheckoutOperations layout descriptor
-    outcome <- tryAny $
-        forM_ operations \operation -> do
-            onStep operation CheckoutOperationRunning
-            runGit layout.layoutWorkspaceRoot operation.checkoutOperationArguments
-            onStep operation CheckoutOperationCompleted
-    case outcome of
-        Left _ -> pure (Left "could not prepare repository checkout")
-        Right () ->
-            pure $
-                Right
-                    RepositoryCheckout
-                        { checkoutPath = layout.layoutCheckoutPath
-                        , checkoutBranch = layout.layoutBranch
-                        , cleanupCheckout = layout.layoutCleanup
-                        }
+completeRepositoryCheckout layout descriptor onStep =
+    attempt repositoryCheckoutAttempts
+  where
+    -- A failed attempt removes only the checkout directory. Credential files
+    -- stay in place so the next attempt can ask the broker again.
+    attempt remaining =
+        runCheckoutOperations layout descriptor onStep >>= \case
+            Right () ->
+                pure $
+                    Right
+                        RepositoryCheckout
+                            { checkoutPath = layout.layoutCheckoutPath
+                            , checkoutBranch = layout.layoutBranch
+                            , cleanupCheckout = layout.layoutCleanup
+                            }
+            Left message
+                | remaining <= 1 -> pure (Left message)
+                | otherwise -> do
+                    _ <- tryAny (removePathForcibly layout.layoutCheckoutPath)
+                    attempt (remaining - 1)
 
 -- | Create the layout and run every Git operation before returning. Callers
 -- that must not block on the network should use 'prepareRepositoryLayout'
@@ -275,7 +291,51 @@ makeExecutable path = do
     setPermissions path (setOwnerExecutable True permissions)
     setFileMode path 0o700
 
-runGit :: FilePath -> [String] -> IO ()
+-- | How many times to run the clone, config, and branch steps.
+repositoryCheckoutAttempts :: Int
+repositoryCheckoutAttempts = 3
+
+-- | Bytes of Git stderr kept from the end of the stream.
+maximumGitStderrBytes :: Int
+maximumGitStderrBytes = 4096
+
+gitCommandTimeoutMicros :: Int
+gitCommandTimeoutMicros = 120 * 1_000_000
+
+data StderrCapture = StderrCapture
+    { stderrBytes :: !ByteString
+    , stderrTruncated :: !Bool
+    , stderrCutInsideToken :: !Bool
+    }
+
+emptyStderrCapture :: StderrCapture
+emptyStderrCapture =
+    StderrCapture
+        { stderrBytes = ByteString.empty
+        , stderrTruncated = False
+        , stderrCutInsideToken = False
+        }
+
+runCheckoutOperations
+    :: PreparedRepositoryLayout
+    -> RepositoryDescriptor
+    -> (RepositoryCheckoutOperation -> CheckoutOperationStatus -> IO ())
+    -> IO (Either Text ())
+runCheckoutOperations layout descriptor onStep =
+    go (repositoryCheckoutOperations layout descriptor)
+  where
+    go [] = pure (Right ())
+    go (operation : rest) = do
+        onStep operation CheckoutOperationRunning
+        runGit layout.layoutWorkspaceRoot operation.checkoutOperationArguments >>= \case
+            Left message -> do
+                onStep operation CheckoutOperationFailed
+                pure (Left (operation.checkoutOperationId <> ": " <> message))
+            Right () -> do
+                onStep operation CheckoutOperationCompleted
+                go rest
+
+runGit :: FilePath -> [String] -> IO (Either Text ())
 runGit cwd arguments = do
     inherited <- getEnvironment
     let safeEnvironment =
@@ -290,17 +350,220 @@ runGit cwd arguments = do
                 , env = Just (("GIT_TERMINAL_PROMPT", "0") : safeEnvironment)
                 , std_in = NoStream
                 , std_out = NoStream
-                , std_err = NoStream
+                , std_err = CreatePipe
                 , create_group = True
                 }
-    (_, _, _, processHandle) <- createProcess command
-    Timeout.timeout (120 * 1_000_000) (waitForProcess processHandle) >>= \case
+    tryAny (createProcess command) >>= \case
+        Left exception ->
+            pure (Left (gitExceptionDiagnostic exception))
+        Right (_, _, Just stderrHandle, processHandle) ->
+            finishGitProcess stderrHandle processHandle
+        Right (_, _, Nothing, processHandle) -> do
+            stopGitProcess processHandle
+            pure (Left "git command failed")
+
+finishGitProcess :: Handle -> ProcessHandle -> IO (Either Text ())
+finishGitProcess stderrHandle processHandle = do
+    hSetBinaryMode stderrHandle True
+    hSetBuffering stderrHandle NoBuffering
+    drained <- async (readBoundedStderr stderrHandle)
+    let collect = collectStderr drained
+    Timeout.timeout gitCommandTimeoutMicros (waitForProcess processHandle) >>= \case
         Nothing -> do
-            interruptProcessGroupOf processHandle
-            _ <- waitForProcess processHandle
-            fail "git command timed out"
-        Just ExitSuccess -> pure ()
-        Just (ExitFailure _) -> fail "git command failed"
+            stopGitProcess processHandle
+            captured <- collect
+            pure (Left (gitTimedOutMessage captured))
+        Just ExitSuccess -> do
+            _ <- collect
+            pure (Right ())
+        Just (ExitFailure code) -> do
+            captured <- collect
+            pure (Left (gitFailedMessage code captured))
+
+readBoundedStderr :: Handle -> IO StderrCapture
+readBoundedStderr handle = do
+    result <- tryAny (loop emptyStderrCapture)
+    void (tryAny (hClose handle))
+    pure $ case result of
+        Left _ -> emptyStderrCapture
+        Right captured -> captured
+  where
+    loop captured = do
+        chunk <- ByteString.hGetSome handle 4096
+        if ByteString.null chunk
+            then pure captured
+            else loop (appendStderr captured chunk)
+
+appendStderr :: StderrCapture -> ByteString -> StderrCapture
+appendStderr captured chunk =
+    let combined = captured.stderrBytes <> chunk
+    in if ByteString.length combined <= maximumGitStderrBytes
+        then captured{stderrBytes = combined}
+        else
+            let extra = ByteString.length combined - maximumGitStderrBytes
+                discarded = ByteString.take extra combined
+                kept = ByteString.drop extra combined
+            in StderrCapture
+                { stderrBytes = kept
+                , stderrTruncated = True
+                , stderrCutInsideToken = boundarySplitsToken discarded kept
+                }
+
+boundarySplitsToken :: ByteString -> ByteString -> Bool
+boundarySplitsToken discarded kept =
+    not (ByteString.null discarded)
+        && not (ByteString.null kept)
+        && isTokenByte (ByteString.last discarded)
+        && isTokenByte (ByteString.head kept)
+
+collectStderr :: Async StderrCapture -> IO StderrCapture
+collectStderr drained =
+    Timeout.timeout (2 * 1_000_000) (waitCatch drained) >>= \case
+        Just (Right captured) -> pure captured
+        _ -> do
+            cancel drained
+            void (tryAny (waitCatch drained))
+            pure emptyStderrCapture
+
+stopGitProcess :: ProcessHandle -> IO ()
+stopGitProcess processHandle = do
+    void (tryAny (interruptProcessGroupOf processHandle))
+    Timeout.timeout (5 * 1_000_000) (waitForProcess processHandle) >>= \case
+        Just _ -> pure ()
+        Nothing -> do
+            void (tryAny (terminateProcess processHandle))
+            void (Timeout.timeout (5 * 1_000_000) (waitForProcess processHandle))
+
+gitFailedMessage :: Int -> StderrCapture -> Text
+gitFailedMessage code captured =
+    withGitDetail
+        ("git command failed (exit " <> Text.pack (show code) <> ")")
+        captured
+
+gitTimedOutMessage :: StderrCapture -> Text
+gitTimedOutMessage = withGitDetail "git command timed out"
+
+withGitDetail :: Text -> StderrCapture -> Text
+withGitDetail summary captured =
+    let detail = gitStderrDiagnostic captured
+    in if Text.null detail then summary else summary <> ": " <> detail
+
+gitExceptionDiagnostic :: SomeException -> Text
+gitExceptionDiagnostic exception =
+    let rendered = redactGitDiagnostic (Text.pack (displayException exception))
+    in if Text.null rendered then "git command failed" else rendered
+
+-- | Text shown when checkout itself throws. Secrets from the exception
+-- text are removed; an empty result falls back to the generic failure.
+checkoutExceptionDiagnostic :: SomeException -> Text
+checkoutExceptionDiagnostic exception =
+    let rendered = redactGitDiagnostic (Text.pack (displayException exception))
+    in if Text.null rendered
+        then "could not prepare repository checkout"
+        else rendered
+
+-- | Redact credential material from a Git or helper diagnostic.
+redactGitDiagnostic :: Text -> Text
+redactGitDiagnostic value =
+    Text.strip $
+        Text.unlines $
+            map
+                (redactLongTokenRuns . redactTokenPrefixes . redactPasswordValues . redactAuthorization)
+                (Text.lines (Text.map sanitizeGitControl value))
+
+-- | Apply the same stderr cap used for a live Git process.
+gitDiagnosticFromStderr :: ByteString -> Text
+gitDiagnosticFromStderr bytes =
+    gitStderrDiagnostic (appendStderr emptyStderrCapture bytes)
+
+gitStderrDiagnostic :: StderrCapture -> Text
+gitStderrDiagnostic captured =
+    let decoded =
+            TextEncoding.decodeUtf8With
+                TextError.lenientDecode
+                captured.stderrBytes
+        dropped =
+            if captured.stderrCutInsideToken
+                then Text.dropWhile isTokenChar decoded
+                else decoded
+        redacted = redactGitDiagnostic dropped
+    in if captured.stderrTruncated && not (Text.null redacted)
+        then "…" <> redacted
+        else redacted
+
+sanitizeGitControl :: Char -> Char
+sanitizeGitControl character
+    | character == '\n' || character == '\t' = character
+    | character == '\r' = '\n'
+    | isControl character = ' '
+    | otherwise = character
+
+redactAuthorization :: Text -> Text
+redactAuthorization line =
+    let lowered = Text.toLower line
+    in case Text.breakOn "authorization" lowered of
+        (before, rest)
+            | Text.null rest -> line
+            | otherwise ->
+                Text.take (Text.length before) line <> "Authorization: <redacted>"
+
+redactPasswordValues :: Text -> Text
+redactPasswordValues = go
+  where
+    marker = "password="
+    go remaining =
+        case Text.breakOn marker remaining of
+            (before, rest)
+                | Text.null rest -> remaining
+                | otherwise ->
+                    let afterName = Text.drop (Text.length marker) rest
+                        (_secret, after) = Text.span (not . isSpace) afterName
+                    in before <> "password=<redacted>" <> go after
+
+redactTokenPrefixes :: Text -> Text
+redactTokenPrefixes =
+    redactTokenPrefix "cdb_live_"
+        . redactTokenPrefix "ghs_"
+        . redactTokenPrefix "ghp_"
+
+redactTokenPrefix :: Text -> Text -> Text
+redactTokenPrefix prefix = go
+  where
+    go remaining =
+        case Text.breakOn prefix remaining of
+            (before, rest)
+                | Text.null rest -> remaining
+                | otherwise ->
+                    let afterPrefix = Text.drop (Text.length prefix) rest
+                        (_body, after) = Text.span isTokenChar afterPrefix
+                    in before <> "<redacted>" <> go after
+
+-- Drop a long opaque run. Checkout diagnostics do not need one, and a
+-- token body is at least this long.
+redactLongTokenRuns :: Text -> Text
+redactLongTokenRuns = go
+  where
+    go remaining =
+        let (plain, rest) = Text.span (not . isTokenChar) remaining
+            (run, after) = Text.span isTokenChar rest
+        in if Text.null rest
+            then remaining
+            else
+                plain
+                    <> (if Text.length run >= 32 then "<redacted>" else run)
+                    <> go after
+
+isTokenChar :: Char -> Bool
+isTokenChar character =
+    isAscii character && (isAlphaNum character || character == '_' || character == '-')
+
+isTokenByte :: Word8 -> Bool
+isTokenByte byte =
+    (byte >= 48 && byte <= 57)
+        || (byte >= 65 && byte <= 90)
+        || (byte >= 97 && byte <= 122)
+        || byte == 95
+        || byte == 45
 
 credentialHelperScript :: String
 credentialHelperScript =
@@ -310,13 +573,20 @@ credentialHelperScript =
         , "[ \"${1:-}\" = get ] || exit 0"
         , "dir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)"
         , "protocol= host= path="
-        , "while IFS='=' read -r key value; do"
+        , "# Git sends capability[]= and other keys whose values may contain '='."
+        , "# Leave errexit off so EOF from read cannot skip the broker exchange."
+        , "set +e"
+        , "while IFS= read -r line; do"
+        , "  [ -n \"$line\" ] || continue"
+        , "  key=${line%%=*}"
+        , "  value=${line#*=}"
         , "  case \"$key\" in"
         , "    protocol) protocol=$value ;;"
         , "    host) host=$value ;;"
         , "    path) path=$value ;;"
         , "  esac"
         , "done"
+        , "set -e"
         , "[ \"$protocol\" = https ] || exit 0"
         , "[ \"$host\" = github.com ] || exit 0"
         , "[ \"${path%.git}\" = \"$(cat \"$dir/repository\")\" ] || exit 0"
@@ -324,7 +594,10 @@ credentialHelperScript =
         , "response=$(curl --fail --silent --show-error --max-time 15 \\"
         , "  -H 'Content-Type: application/json' -H 'Accept: application/json' \\"
         , "  --data \"$payload\" \"$(cat \"$dir/endpoint\")\")"
-        , "token=$(printf '%s' \"$response\" | jq -er '.password | select(type == \"string\" and length > 0)')"
+        , "token=$(printf '%s' \"$response\" | jq -er '.password | select(type == \"string\" and length > 0)' 2>/dev/null) || {"
+        , "  printf '%s\\n' 'credential broker response did not include a password' >&2"
+        , "  exit 1"
+        , "}"
         , "printf 'username=x-access-token\\npassword=%s\\n' \"$token\""
         ]
 
