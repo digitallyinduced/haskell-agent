@@ -260,8 +260,11 @@ runHelper
     -> IO (ExitCode, String, String)
 runHelper helper bin input = do
     environment <- getEnvironment
-    let patched =
-            ("PATH", bin <> ":/bin:/usr/bin")
+    -- Keep the surrounding PATH. A Nix build sandbox has cat and grep
+    -- outside /bin, and the helper compares the repository with cat.
+    let original = fromMaybe "" (lookup "PATH" environment)
+        patched =
+            ("PATH", bin <> ":" <> original)
                 : filter (\(name, _) -> name /= "PATH") environment
     readCreateProcessWithExitCode
         (proc helper ["get"]){env = Just patched}
