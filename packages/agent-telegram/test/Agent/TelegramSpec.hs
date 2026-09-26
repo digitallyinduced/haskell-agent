@@ -32,7 +32,11 @@ import Control.Concurrent
     , takeMVar
     , threadDelay
     )
-import Control.Exception.Safe (finally)
+import Agent.Runtime.GatewayClient
+    ( newGatewayModelAccessWith
+    , newGatewayModelAccessWithDictation
+    )
+import Control.Exception.Safe (finally, tryAny)
 import Control.Monad (forM_)
 import qualified Agent.Json.Decode as Hermes
 import Data.Aeson (Value, encode, object, (.=))
@@ -42,6 +46,7 @@ import Data.IORef
     , modifyIORef'
     , newIORef
     , readIORef
+    , writeIORef
     )
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -133,6 +138,80 @@ spec = describe "Agent.Telegram" do
                 fail "interrupted operation"
             response.telegramTurnText `shouldBe` "Stopped."
             Map.null <$> readMVar active `shouldReturn` True
+
+    describe "Telegram voice transcription" do
+        it "keeps organization-gateway voice transcription inside the gateway boundary" do
+            case telegramVoiceTranscriptionTarget Nothing of
+                DirectXAIVoiceTranscription -> pure ()
+                GatewayVoiceTranscription _ ->
+                    expectationFailure "expected direct xAI transcription"
+            gateway <- newGatewayModelAccessWith (pure (Right []))
+            case telegramVoiceTranscriptionTarget (Just gateway) of
+                GatewayVoiceTranscription _ -> pure ()
+                DirectXAIVoiceTranscription ->
+                    expectationFailure "expected gateway transcription"
+
+        it "transcribes through the gateway when a gateway is connected" do
+            events <- newIORef ([] :: [Text.Text])
+            xaiCalled <- newIORef False
+            gateway <-
+                newGatewayModelAccessWithDictation
+                    (pure (Right []))
+                    \produceAudio onTranscript -> do
+                        produceAudio \chunk ->
+                            atomicModifyIORef' events \current ->
+                                (current <> ["audio:" <> Text.pack (show chunk)], ())
+                        onTranscript "gateway transcript"
+                        pure (Right "gateway transcript")
+            transcript <-
+                transcribeTelegramVoiceAudioWith
+                    (GatewayVoiceTranscription gateway)
+                    (\_ -> do
+                        writeIORef xaiCalled True
+                        pure "xai transcript")
+                    (\_path send -> send "pcm")
+                    "voice.ogg"
+            transcript `shouldBe` "gateway transcript"
+            readIORef xaiCalled `shouldReturn` False
+            readIORef events `shouldReturn`
+                ["audio:\"pcm\""]
+
+        it "does not fall back to local xAI when gateway transcription fails" do
+            xaiCalled <- newIORef False
+            gateway <-
+                newGatewayModelAccessWithDictation
+                    (pure (Right []))
+                    \_produceAudio _onTranscript ->
+                        pure (Left "gateway dictation unavailable")
+            result <-
+                tryAny $
+                    transcribeTelegramVoiceAudioWith
+                        (GatewayVoiceTranscription gateway)
+                        (\_ -> do
+                            writeIORef xaiCalled True
+                            pure "xai transcript")
+                        (\_path send -> send "pcm")
+                        "voice.ogg"
+            case result of
+                Left _ -> pure ()
+                Right transcript ->
+                    expectationFailure
+                        ("expected gateway transcription to fail, got: "
+                            <> Text.unpack transcript)
+            readIORef xaiCalled `shouldReturn` False
+
+        it "uses the existing xAI path when no gateway is connected" do
+            pcmCalled <- newIORef False
+            transcript <-
+                transcribeTelegramVoiceAudioWith
+                    DirectXAIVoiceTranscription
+                    (\_ -> pure "xai transcript")
+                    (\_path _send -> do
+                        writeIORef pcmCalled True
+                        fail "gateway PCM conversion must not run without a gateway")
+                    "voice.ogg"
+            transcript `shouldBe` "xai transcript"
+            readIORef pcmCalled `shouldReturn` False
 
     describe "telegramAgentPrompt" do
         it "injects Telegram streaming and brevity guidance" do

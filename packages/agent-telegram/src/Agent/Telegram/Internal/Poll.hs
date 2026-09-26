@@ -528,9 +528,7 @@ runQueuedTurn runtime pending =
                                         (Text.pack (displayException err))
                                 ]
                             pure $ TelegramTurnResponse
-                                "I could not transcribe that voice message. \
-                                \Check that Codex is installed and logged in, and \
-                                \that the subscription has usage available."
+                                "I could not transcribe that voice message."
                                 Nothing
                         Right prompt -> do
                             let deliveredPrompt
