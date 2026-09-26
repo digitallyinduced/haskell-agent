@@ -43,6 +43,10 @@ module Agent.Telegram
     , resolveTelegramUser
     , TelegramUserResolution(..)
     , transcribeWithXAI
+    , transcribeTelegramVoiceAudio
+    , transcribeTelegramVoiceAudioWith
+    , TelegramVoiceTranscriptionTarget(..)
+    , telegramVoiceTranscriptionTarget
     , downloadTelegramMediaAttachmentsWith
     , telegramMediaTurnRequest
     , telegramMediaUsesLocalPath
@@ -70,4 +74,10 @@ import Agent.Telegram.Internal.Turn
 import Agent.Telegram.Markdown (markdownToTelegramHtml)
 import Agent.Telegram.Types
 import Agent.Telegram.Classify
-import Agent.Telegram.Voice (transcribeWithXAI)
+import Agent.Telegram.Voice
+    ( TelegramVoiceTranscriptionTarget(..)
+    , telegramVoiceTranscriptionTarget
+    , transcribeTelegramVoiceAudio
+    , transcribeTelegramVoiceAudioWith
+    , transcribeWithXAI
+    )

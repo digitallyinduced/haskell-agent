@@ -283,7 +283,7 @@ transcribeTelegramVoice runtime pending voice = do
                 (unsafeToFilePath path)
             let clean = Text.strip transcript
             when (Text.null clean) $
-                fail "xAI returned an empty voice transcription"
+                fail "Voice transcription returned empty text"
             pure $
                 let rendered = "[Voice message transcript]: " <> clean
                 in if pending.pendingTurnText == "[Voice message]"
