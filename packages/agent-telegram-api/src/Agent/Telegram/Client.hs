@@ -129,7 +129,15 @@ telegramRequestOnceWith send client method body timeoutSeconds = do
     result <- requestAttempt (performTelegramRequest send client method body timeoutSeconds)
     pure $ case result of
         Left err -> Left err { telegramErrorMessage = renderRequestError client err }
-        Right bytes -> Right bytes
+        Right bytes ->
+            case Hermes.decodeEither (telegramResponseDecoder rawJsonDecoder) (LBS.toStrict bytes) of
+                Right envelope | envelope.responseOk, Just _ <- envelope.responseResult -> Right bytes
+                _ -> Left TelegramRequestError
+                    { telegramErrorMessage = "Telegram response is malformed or incomplete; delivery outcome is uncertain"
+                    , telegramErrorCode = Nothing
+                    , telegramRetryAfter = Nothing
+                    , telegramErrorRetryable = False
+                    }
 
 performTelegramRequest
     :: (Http.Request -> IO (Http.Response LBS.ByteString))

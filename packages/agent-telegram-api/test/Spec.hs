@@ -13,6 +13,8 @@ import Data.Aeson (object)
 import Data.IORef
 import qualified Data.Text as Text
 import qualified Network.HTTP.Client as HTTP
+import qualified Network.HTTP.Client.Internal as HTTPInternal
+import Network.HTTP.Types (status200, http11)
 import Test.Hspec
 
 main :: IO ()
@@ -40,6 +42,23 @@ main = hspec do
                     failure.telegramErrorMessage `shouldSatisfy`
                         (not . Text.isInfixOf "private-test-token")
                 Right _ -> expectationFailure "Expected an uncertain failure"
+        it "classifies malformed and incomplete success envelopes as uncertain without retrying" do
+            manager <- HTTP.newManager HTTP.defaultManagerSettings
+            let client = TelegramClient "123:private-test-token" manager
+            mapM_ (\body -> do
+                attempts <- newIORef (0 :: Int)
+                let send request = do
+                        modifyIORef' attempts (+ 1)
+                        pure (HTTPInternal.Response status200 http11 [] body
+                            (HTTP.createCookieJar []) (HTTPInternal.ResponseClose (pure ())) request [])
+                result <- telegramRequestOnceWith send client "sendMessage" (object []) 1
+                readIORef attempts `shouldReturn` 1
+                case result of
+                    Left failure -> do
+                        failure.telegramErrorCode `shouldBe` Nothing
+                        failure.telegramErrorRetryable `shouldBe` False
+                    Right _ -> expectationFailure "Expected an uncertain response")
+                ["not json", "{}", "{\"ok\":true}", "{\"ok\":true,\"result\":null}"]
     describe "Reusable presentation" do
         it "retains inbound reaction and removal context" do
             let reaction = TelegramMessageReaction (TelegramChat 1 "private") 42 Nothing []
