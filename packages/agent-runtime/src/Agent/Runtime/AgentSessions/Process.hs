@@ -14,6 +14,7 @@ module Agent.Runtime.AgentSessions.Process
     , waitForManagedSessionReadyWith
     , withManagedTurnCancellation
     , withManagedTurnCancellationFile
+    , classifyManagedTurnFailure
     ) where
 
 import Agent.Runtime.Error (formatException)
@@ -55,21 +56,32 @@ import Control.Exception.Safe
     )
 import Control.Monad (void)
 import Data.Aeson (encode)
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
+import qualified Data.Text.Encoding as TextEncoding
+import Data.Text.Encoding.Error (lenientDecode)
 import System.Directory
     ( findExecutable
+    , getFileSize
     , removeFile
     )
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode(..))
 import System.FilePath (takeFileName)
 import qualified System.FilePath as FilePath
-import System.IO (IOMode(AppendMode), hClose, openTempFile, withFile)
+import System.IO
+    ( IOMode(AppendMode, ReadMode)
+    , SeekMode(AbsoluteSeek)
+    , hClose
+    , hSeek
+    , openTempFile
+    , withFile
+    )
 import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
 import System.Posix.Files (setFileMode)
 import System.Process
@@ -213,7 +225,7 @@ launchSessionTurnInput
                         Right (Left err) -> do
                             forgetSession manager sessionId token
                             pure (Left err)
-                        Right (Right process) -> do
+                        Right (Right (process, logPath, logOffset)) -> do
                             published <-
                                 modifyMVar manager.managedProcesses \state ->
                                     if not (sessionManagerIsOpen state)
@@ -250,15 +262,13 @@ launchSessionTurnInput
                                                             Just exitCode ->
                                                                 pure (Right exitCode)
                                         forgetSession manager sessionId token
-                                        pure case exitResult of
-                                            Left err -> Left err
-                                            Right ExitSuccess ->
-                                                Right
-                                                    ("completed session " <> sessionId)
-                                            Right (ExitFailure code) ->
-                                                Left
-                                                    ("session failed with exit code "
-                                                        <> Text.pack (show code))
+                                        case exitResult of
+                                            Left err -> pure (Left err)
+                                            Right ExitSuccess -> pure $ Right
+                                                ("completed session " <> sessionId)
+                                            Right (ExitFailure code) -> Left <$>
+                                                managedTurnFailureMessage
+                                                    logPath logOffset code
   where
     sessionId = handle.sessionMeta.metaId
 
@@ -318,6 +328,8 @@ launchSessionTurnInput
                 ]
                     <> agentArgs
         started <- try @_ @SomeException do
+            logOffsetResult <- try @_ @SomeException (getFileSize logPath)
+            let logOffset = either (const 0) id logOffsetResult
             withFile logPath AppendMode \logHandle ->
                 setFileMode logPath 0o600 >>
                 createProcess (proc "/bin/sh" args)
@@ -327,14 +339,15 @@ launchSessionTurnInput
                     , std_err = UseHandle logHandle
                     , create_group = True
                     , env = Just childEnv
-                    }
+                    } >>= \(_, _, _, process) ->
+                        pure (process, logOffset)
         case started of
             Left err -> do
                 removePrivateFile inputPath
                 removePrivateFile readyPath
                 pure $ Left
                     ("failed to start agent session: " <> formatException err)
-            Right (_, _, _, process) -> do
+            Right (process, logOffset) -> do
                 ready <- Timeout.timeout 30_000_000
                     (waitForManagedSessionReady process readyPath) >>= \case
                         Nothing -> do
@@ -348,7 +361,37 @@ launchSessionTurnInput
                     Left err -> do
                         _ <- waitForProcess process
                         pure (Left err)
-                    Right () -> pure (Right process)
+                    Right () -> pure (Right (process, logPath, logOffset))
+
+managedTurnFailureMessage :: FilePath -> Integer -> Int -> IO Text
+managedTurnFailureMessage logPath offset code = do
+    output <- try @_ @SomeException $ withFile logPath ReadMode \logHandle -> do
+        hSeek logHandle AbsoluteSeek offset
+        BS.hGetContents logHandle
+    let fallback = "session failed with exit code " <> Text.pack (show code)
+    pure $ case output of
+        Left _ -> fallback
+        Right bytes ->
+            let current = TextEncoding.decodeUtf8With lenientDecode bytes
+            in maybe fallback id (classifyManagedTurnFailure current)
+
+-- | Return only fixed, user-safe summaries. Child output can contain credentials
+-- and provider response bodies, so it must never be forwarded verbatim.
+classifyManagedTurnFailure :: Text -> Maybe Text
+classifyManagedTurnFailure output
+    | any (`Text.isInfixOf` normalized)
+        [ "rate or usage limit"
+        , "rate_limit_error"
+        , "usage limit reached"
+        , "usage limit has been reached"
+        ] = Just
+            "The model provider hit a rate or usage limit and no fallback account is available."
+    | "all accounts for this provider are temporarily unavailable"
+        `Text.isInfixOf` normalized = Just
+            "The model provider is temporarily unavailable and no fallback account is available."
+    | otherwise = Nothing
+  where
+    normalized = Text.toLower output
 
 -- | Launch a structured gateway turn through the private request-file
 -- interface, without exposing gateway credentials to the child.

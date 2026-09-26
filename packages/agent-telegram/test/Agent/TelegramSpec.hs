@@ -4,6 +4,7 @@ import Agent.Telegram
 import Agent.Cancel (isCancelled)
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Runtime.ManagedTurn (ManagedTurnMedia(..), ManagedTurnRequest(..))
+import Agent.Runtime.AgentSessions.Process (classifyManagedTurnFailure)
 import qualified Agent.Telegram.Bridge as Bridge
 import Agent.Telegram.Types
     ( TelegramApprovalMode(..)
@@ -160,6 +161,21 @@ spec = describe "Agent.Telegram" do
             prompt `shouldNotSatisfy` Text.isInfixOf "Ich schaue"
             prompt `shouldSatisfy`
                 Text.isPrefixOf "Inspect the failing tests"
+
+    describe "Telegram model command" do
+        it "recognizes the command and preserves its model alias argument" do
+            telegramCommand "/model grok-4.6" `shouldBe` Just "model"
+            telegramCommand "/MODEL@HarnessBot grok-4.6" `shouldBe` Just "model"
+            telegramCommandArguments "/model grok-4.6" `shouldBe` "grok-4.6"
+
+    describe "managed provider failures" do
+        it "classifies rate limits without exposing arbitrary child output" do
+            classifyManagedTurnFailure
+                "secret-token: abc; type rate_limit_error; usage limit reached"
+                `shouldBe` Just
+                    "The model provider hit a rate or usage limit and no fallback account is available."
+            classifyManagedTurnFailure "secret-token: abc; unexpected crash"
+                `shouldBe` Nothing
 
     describe "telegramActivityDraftHtml" do
         it "shows escaped reasoning summaries and streamed answer text" do
@@ -1505,6 +1521,7 @@ spec = describe "Agent.Telegram" do
                             , "sessionId" .= ("session-1" :: String)
                             ]
                         ]
+                    , "modelSelections" .= ([] :: [Value])
                     , "pendingTurns" .= [turn]
                     , "pendingReplies" .= [reply]
                     , "pendingMediaTurns" .= ([] :: [TelegramPendingMediaTurn])
@@ -1614,13 +1631,18 @@ spec = describe "Agent.Telegram" do
                         , pendingMediaGroupId = Nothing
                         })
 
-        it "persists callback, retry, and chunk-delivery state" do
+        it "persists per-chat model, callback, retry, and chunk-delivery state" do
             let key = TelegramChatKey 123 Nothing
+                topic = TelegramChatKey 123 (Just 7)
                 callback = TelegramPendingCallback
                     20 "callback-1" 456 (Just key) (Just 80) "ha:request:0"
                 retry = TelegramRetryMetadata 2 Nothing (Just "temporary")
                 state = emptyTelegramState
-                    { pendingCallbacks = Map.singleton 20 callback
+                    { modelSelections = Map.fromList
+                        [ (key, "grok-4.6")
+                        , (topic, "claude-sonnet-4-5")
+                        ]
+                    , pendingCallbacks = Map.singleton 20 callback
                     , retryMetadata = Map.singleton "turn" retry
                     , deliveryCheckpoints = Map.singleton "reply" 2
                     }

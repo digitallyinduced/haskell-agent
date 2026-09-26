@@ -32,6 +32,7 @@ import Agent.Telegram.Classify
     , telegramCommandArguments
     , telegramReplyText
     )
+import Agent.Telegram.Internal.Model (modelCommand)
 import Agent.Telegram.Internal.Allowlist
     ( AllowlistChange(..)
     , applyAllowlistChange
@@ -465,7 +466,8 @@ runQueuedTurn runtime pending =
             "Send a message to start or continue an agent session. \
             \Send stop or /stop to interrupt the current turn. \
             \Use /new for a fresh session, /session for its ID, and /allow \
-            \in a group to accept another member by name or by replying to them."
+            \in a group to accept another member by name or by replying to them. \
+            \Use /model to view or switch models."
         Just "new" -> withoutProgress do
             modifyState runtime \state ->
                 state
@@ -481,6 +483,9 @@ runQueuedTurn runtime pending =
                 Just sessionId -> "Session: " <> sessionId
         Just "status" -> withoutProgress $
             telegramConversationStatus runtime pending.pendingTurnChat
+        Just "model" -> withoutProgress $
+            modelCommand runtime pending.pendingTurnChat
+                (telegramCommandArguments pending.pendingTurnText)
         Just "retry" -> withoutProgress $
             retryLastDeadLetter
                 runtime

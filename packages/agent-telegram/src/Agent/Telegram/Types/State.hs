@@ -2,6 +2,7 @@
 module Agent.Telegram.Types.State
     ( TelegramChatKey(..)
     , TelegramBinding(..)
+    , TelegramModelSelection(..)
     , TelegramState(..)
     , TelegramPendingTurn(..)
     , TelegramPendingReply(..)
@@ -112,10 +113,28 @@ telegramBindingDecoder = Hermes.object $
         <$> Hermes.atKey "chat" telegramChatKeyDecoder
         <*> Hermes.atKey "sessionId" Hermes.text
 
+data TelegramModelSelection = TelegramModelSelection
+    { modelSelectionChat :: !TelegramChatKey
+    , modelSelectionId :: !Text
+    } deriving (Eq, Show)
+
+instance ToJSON TelegramModelSelection where
+    toJSON selection = object
+        [ "chat" .= selection.modelSelectionChat
+        , "model" .= selection.modelSelectionId
+        ]
+
+telegramModelSelectionDecoder :: Hermes.Decoder TelegramModelSelection
+telegramModelSelectionDecoder = Hermes.object $
+    TelegramModelSelection
+        <$> Hermes.atKey "chat" telegramChatKeyDecoder
+        <*> Hermes.atKey "model" Hermes.text
+
 data TelegramState = TelegramState
     { telegramStateVersion :: !Int
     , nextUpdateId :: !(Maybe Integer)
     , bindings :: !(Map TelegramChatKey Text)
+    , modelSelections :: !(Map TelegramChatKey Text)
     , pendingQueues :: !(Map TelegramChatKey (Map Integer PendingChatAction))
     , pendingCallbacks :: !(Map Integer TelegramPendingCallback)
     , callbackBindings :: !(Map Text TelegramCallbackBinding)
@@ -137,6 +156,10 @@ instance ToJSON TelegramState where
         , "bindings" .=
             [ TelegramBinding key sessionId
             | (key, sessionId) <- Map.toList state.bindings
+            ]
+        , "modelSelections" .=
+            [ TelegramModelSelection key modelId
+            | (key, modelId) <- Map.toList state.modelSelections
             ]
         , "pendingTurns" .=
             sortOn (.pendingTurnUpdateId)
@@ -196,6 +219,8 @@ telegramStateDecoder = Hermes.object do
         nextUpdateId <- Hermes.optionalKey "nextUpdateId" integerDecoder
         storedBindings <- defaultField "bindings" []
             (Hermes.list telegramBindingDecoder)
+        storedModelSelections <- defaultField "modelSelections" []
+            (Hermes.list telegramModelSelectionDecoder)
         pendingTurns <- defaultField "pendingTurns" []
             (Hermes.list telegramPendingTurnDecoder)
         pendingReplies <- defaultField "pendingReplies" []
@@ -253,6 +278,10 @@ telegramStateDecoder = Hermes.object do
             { telegramStateVersion = 2
             , nextUpdateId
             , bindings
+            , modelSelections = Map.fromList
+                [ (selection.modelSelectionChat, selection.modelSelectionId)
+                | selection <- storedModelSelections
+                ]
             , pendingQueues =
                 foldl'
                     (flip insertPendingAction)
@@ -657,6 +686,7 @@ emptyTelegramState = TelegramState
     { telegramStateVersion = 2
     , nextUpdateId = Nothing
     , bindings = Map.empty
+    , modelSelections = Map.empty
     , pendingQueues = Map.empty
     , pendingCallbacks = Map.empty
     , callbackBindings = Map.empty
