@@ -35,6 +35,7 @@ module Agent.Telegram
     , telegramReplyText
     , isTelegramNoReplyText
     , telegramAgentPrompt
+    , telegramCommand
     , telegramCommandArguments
     , telegramReplyUserIdFromPrompt
     , telegramUserLabel

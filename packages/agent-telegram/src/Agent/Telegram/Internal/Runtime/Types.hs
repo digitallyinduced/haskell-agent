@@ -5,6 +5,7 @@ import Agent.Runtime.AgentSessions.Process (SessionProcessManager)
 import Agent.Cancel (CancelFlag)
 import Agent.Runtime.Options (ApprovalPolicy)
 import Agent.Runtime.Models (ModelTarget)
+import Agent.Runtime.ModelConfig (ModelCatalog)
 import Agent.Telegram.Types
 import Agent.Store.Postgres.Connection (StorePool)
 import Control.Concurrent.Chan (Chan)
@@ -28,6 +29,8 @@ data TelegramRuntime = TelegramRuntime
     , runtimeScheduled :: !(MVar (Set TelegramChatKey))
     , runtimeActiveTurns :: !(MVar (Map TelegramChatKey CancelFlag))
     , runtimeProcessManager :: !SessionProcessManager
+    , runtimeHome :: !OsPath
+    , runtimeModelCatalog :: !ModelCatalog
     , runtimeTarget :: !ModelTarget
     , runtimeCwd :: !OsPath
     , runtimeEffort :: !Text

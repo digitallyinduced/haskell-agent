@@ -64,6 +64,10 @@ import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
 import System.Posix.Files (setFileMode)
 import Agent.Telegram.Internal.Runtime.Types
 import Agent.Telegram.Internal.Allowlist
+import Agent.Telegram.Internal.Model
+    ( retargetTelegramSession
+    , selectedTargetForChat
+    )
 import Agent.Telegram.Internal.Support
 
 -- Allow substantial development tasks while still bounding each turn.
@@ -146,7 +150,8 @@ runQueuedMediaTurn
 runQueuedMediaTurn runtime pending =
   withTelegramTurnCancellation runtime pending.pendingMediaChat \cancellation -> do
     progressMessageId <- newIORef Nothing
-    handle <- sessionForPrompt runtime pending.pendingMediaChat pending.pendingMediaText
+    handle <- sessionForSelectedPrompt
+        runtime pending.pendingMediaChat pending.pendingMediaText
     let agentPrompt = telegramAgentPrompt pending.pendingMediaText
     bracket
         (downloadTelegramMediaAttachments runtime handle pending)
@@ -493,7 +498,8 @@ recordPendingFailure runtime action err =
                     (TelegramRetryMetadata 0 Nothing Nothing)
                     (Map.lookup key state.retryMetadata)
             attempts = previous.retryAttempts + 1
-        if attempts >= 5 && not (isLeaveAction action)
+        if (attempts >= 5 || isTerminalTurnFailure err)
+                && not (isLeaveAction action)
             then do
                 let withoutAction =
                         (deletePendingAction action state)
@@ -512,7 +518,7 @@ recordPendingFailure runtime action err =
                                             }
                                        ]
                             }
-                    next = case failureReply action of
+                    next = case failureReply action err of
                         Nothing -> withoutAction
                         Just pending ->
                             enqueuePendingAction
@@ -537,8 +543,8 @@ recordPendingFailure runtime action err =
                 saveTelegramState runtime.runtimeStatePath next
                 pure (next, Just (seconds * 1_000_000))
 
-failureReply :: PendingChatAction -> Maybe TelegramPendingReply
-failureReply = \case
+failureReply :: PendingChatAction -> Text -> Maybe TelegramPendingReply
+failureReply action err = case action of
     DeliverReply _ -> Nothing
     LeaveUnauthorizedChat _ -> Nothing
     RunPendingTurn pending ->
@@ -548,7 +554,7 @@ failureReply = \case
             , pendingReplyToMessageId = Just pending.pendingTurnMessageId
             , pendingEditMessageId = Nothing
             , pendingText =
-                "This turn failed after 5 attempts. Send /retry to try it again."
+                failureMessage "I couldn't process this turn." err
             }
     RunPendingMediaTurn pending ->
         Just TelegramPendingReply
@@ -557,8 +563,20 @@ failureReply = \case
             , pendingReplyToMessageId = Just pending.pendingMediaMessageId
             , pendingEditMessageId = Nothing
             , pendingText =
-                "This media turn failed after 5 attempts. Send /retry to try it again."
+                failureMessage "I couldn't process this media turn." err
             }
+
+failureMessage :: Text -> Text -> Text
+failureMessage prefix err
+    | isTerminalTurnFailure err =
+        prefix <> "\n\nReason: " <> err
+            <> "\n\nUse /model to switch models, then send /retry."
+    | otherwise =
+        prefix <> " after 5 attempts. Send /retry to try it again."
+
+isTerminalTurnFailure :: Text -> Bool
+isTerminalTurnFailure err =
+    "no fallback account is available" `Text.isInfixOf` Text.toLower err
 
 pendingRetryKey :: PendingChatAction -> Text
 pendingRetryKey action =
@@ -604,7 +622,7 @@ runAgentTurn
     -> Text
     -> IO TelegramTurnResponse
 runAgentTurn cancellation runtime key userId replyToMessageId prompt =
-  prepareTelegramTurn cancellation (sessionForPrompt runtime key prompt) \handle -> do
+  prepareTelegramTurn cancellation (sessionForSelectedPrompt runtime key prompt) \handle -> do
     let agentPrompt = telegramAgentPrompt prompt
     runManagedAgentTurn
         cancellation
@@ -616,6 +634,18 @@ runAgentTurn cancellation runtime key userId replyToMessageId prompt =
         (not (isAmbientGroupPrompt prompt))
         (managedTurnRequestFromText agentPrompt)
         agentPrompt
+
+sessionForSelectedPrompt
+    :: TelegramRuntime -> TelegramChatKey -> Text -> IO SessionHandle
+sessionForSelectedPrompt runtime key prompt = do
+    selectedTargetForChat runtime key >>= \case
+        Left err -> fail (Text.unpack err)
+        Right selected -> do
+            handle <- sessionForPrompt runtime key prompt
+            case selected of
+                Nothing -> pure handle
+                Just (target, gatewayIdentity) ->
+                    retargetTelegramSession handle target gatewayIdentity
 
 telegramAgentPrompt :: Text -> Text
 telegramAgentPrompt prompt =
