@@ -1,7 +1,8 @@
 module Agent.Telegram.Internal.Turn where
 
 
-import Agent.Runtime.AgentSessions.Process (launchManagedTurnCancellable)
+import Agent.Runtime.AgentSessions.Process
+    ( classifyManagedTurnFailure, launchManagedTurnCancellable )
 import Agent.Cancel (CancelFlag, isCancelled, newCancelFlag, requestCancel)
 import Agent.Runtime.ManagedTurn
     ( ManagedTurnMedia(..)
@@ -554,7 +555,7 @@ failureReply action err = case action of
             , pendingReplyToMessageId = Just pending.pendingTurnMessageId
             , pendingEditMessageId = Nothing
             , pendingText =
-                failureMessage "I couldn't process this turn." err
+                telegramFailureMessage "I couldn't process this turn." err
             }
     RunPendingMediaTurn pending ->
         Just TelegramPendingReply
@@ -563,20 +564,22 @@ failureReply action err = case action of
             , pendingReplyToMessageId = Just pending.pendingMediaMessageId
             , pendingEditMessageId = Nothing
             , pendingText =
-                failureMessage "I couldn't process this media turn." err
+                telegramFailureMessage "I couldn't process this media turn." err
             }
 
-failureMessage :: Text -> Text -> Text
-failureMessage prefix err
-    | isTerminalTurnFailure err =
-        prefix <> "\n\nReason: " <> err
-            <> "\n\nUse /model to switch models, then send /retry."
-    | otherwise =
-        prefix <> " after 5 attempts. Send /retry to try it again."
+telegramFailureMessage :: Text -> Text -> Text
+telegramFailureMessage prefix err =
+    case classifyManagedTurnFailure err of
+        Just safeReason ->
+            prefix <> "\n\nReason: " <> safeReason
+                <> "\n\nUse /model to switch models, then send /retry."
+        Nothing ->
+            prefix <> " after 5 attempts. Send /retry to try it again."
 
 isTerminalTurnFailure :: Text -> Bool
-isTerminalTurnFailure err =
-    "no fallback account is available" `Text.isInfixOf` Text.toLower err
+isTerminalTurnFailure err = case classifyManagedTurnFailure err of
+    Just _ -> True
+    Nothing -> False
 
 pendingRetryKey :: PendingChatAction -> Text
 pendingRetryKey action =
