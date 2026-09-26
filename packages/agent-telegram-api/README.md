@@ -24,6 +24,11 @@ delivery; malformed or incomplete responses are uncertain, not safe to retry.
 For an application-owned outbox, render with `markdownToTelegramHtml` and send
 through the single-attempt operation; only use a plain-text fallback after a
 definitive Telegram parse rejection, not after a transport failure.
+The successful branch contains the raw response envelope, not a validated
+delivery receipt. Decode it and require the method's expected result (including
+the message identifier for sends). Malformed or incomplete success responses
+remain uncertain and must not trigger another send. Likewise, a rejection
+without a usable error code must not be treated as a definite rejection.
 
 `withTelegramVoiceTranscript` accepts acquisition, release and transcription
 callbacks. It checks duration and declared size before acquisition, brackets the
