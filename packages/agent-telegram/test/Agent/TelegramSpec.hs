@@ -177,6 +177,15 @@ spec = describe "Agent.Telegram" do
             classifyManagedTurnFailure "secret-token: abc; unexpected crash"
                 `shouldBe` Nothing
 
+        it "renders provider failures without exception wrappers or call stacks" do
+            telegramFailureMessage
+                "I couldn't process this turn."
+                "user error (The model provider hit a rate or usage limit and no fallback account is available.\nHasCallStack backtrace:\n  error, called at Secret.hs:12:3)"
+                `shouldBe`
+                    "I couldn't process this turn.\n\n\
+                    \Reason: The model provider hit a rate or usage limit and no fallback account is available.\n\n\
+                    \Use /model to switch models, then send /retry."
+
     describe "telegramActivityDraftHtml" do
         it "shows escaped reasoning summaries and streamed answer text" do
             Bridge.telegramActivityDraftHtml
@@ -860,6 +869,19 @@ spec = describe "Agent.Telegram" do
                     , pendingMediaEdited = True
                     , pendingMediaGroupId = Nothing
                     }
+
+        it "routes edited model commands through command processing" do
+            action <- classify
+                "{\"update_id\":34,\"edited_message\":{\
+                \\"message_id\":91,\"from\":{\"id\":456},\
+                \\"chat\":{\"id\":123,\"type\":\"private\"},\
+                \\"text\":\"/model gpt-6-sol\"}}"
+            action `shouldBe`
+                QueueTurn
+                    91
+                    (TelegramChatKey 123 Nothing)
+                    "/model gpt-6-sol"
+                    Nothing
 
         it "queues group media replies as attributed managed media turns" do
             action <- classify

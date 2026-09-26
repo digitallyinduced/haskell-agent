@@ -682,6 +682,8 @@ classifyMessageLike edited bot sender respondToAllGroupMessages message =
 
     queueText rawText
         | Text.null clean = IgnoreUpdate
+        | edited, telegramCommand clean /= Nothing =
+            QueueTurn message.messageId key clean Nothing
         | edited =
             QueueMediaTurn TelegramPendingMediaTurn
                 { pendingMediaUpdateId = message.messageId
