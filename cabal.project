@@ -13,6 +13,7 @@ packages:
     packages/agent-repository
     packages/agent-native-bridge
     packages/agent-telegram
+    packages/agent-telegram-api
     packages/agent-core
     packages/agent-mcp
     packages/agent-codex-dialect

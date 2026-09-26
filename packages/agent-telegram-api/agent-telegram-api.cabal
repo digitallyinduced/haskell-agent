@@ -1,0 +1,41 @@
+cabal-version: 3.0
+name: agent-telegram-api
+version: 0.1.0.0
+synopsis: Reusable Telegram transport and presentation components
+license: MIT
+author: digitally induced GmbH
+maintainer: marc@digitallyinduced.com
+build-type: Simple
+
+common options
+    default-language: GHC2021
+    default-extensions: BlockArguments, OverloadedStrings, OverloadedRecordDot,
+                        DuplicateRecordFields, NoFieldSelectors, LambdaCase,
+                        RecordWildCards, NamedFieldPuns, TypeApplications,
+                        ScopedTypeVariables
+    ghc-options: -Wall -Wcompat -Werror=incomplete-patterns -Werror=missing-fields
+
+library
+    import: options
+    hs-source-dirs: src
+    exposed-modules: Agent.Telegram.Client
+                     Agent.Telegram.Markdown
+                     Agent.Telegram.Types.Wire
+                     Agent.Telegram.Types.State
+                     Agent.Telegram.Internal.Text
+                     Agent.Telegram.Progress
+                     Agent.Telegram.Reaction
+                     Agent.Telegram.VoicePreparation
+    build-depends: agent-json >= 0.1 && < 0.2,
+                   aeson >= 2.0, async, base >= 4.17 && < 5, bytestring,
+                   containers, directory, filepath, http-client, http-client-tls,
+                   http-types, retry >= 0.9.3.1 && < 0.10, safe-exceptions,
+                   text >= 2.0 && < 2.2, time, unix
+
+test-suite agent-telegram-api-test
+    import: options
+    type: exitcode-stdio-1.0
+    hs-source-dirs: test
+    main-is: Spec.hs
+    build-depends: agent-telegram-api, agent-json, aeson, async, base, bytestring,
+                   hspec, http-client, http-types, safe-exceptions, text

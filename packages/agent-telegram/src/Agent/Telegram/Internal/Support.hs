@@ -27,8 +27,7 @@ import qualified Agent.Telegram.Client as TelegramClient
 import qualified Agent.Json.Decode as Hermes
 import Agent.FileRetry (writeLazyFileAtomically)
 import Agent.OsPath (unsafeToFilePath)
-import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (withAsync)
+import Agent.Telegram.Progress (withTelegramProgressUsing)
 import Control.Concurrent.MVar
     ( modifyMVar
     , readMVar
@@ -269,21 +268,6 @@ withTelegramProgress client key action =
         (TelegramClient.sendTypingAction client key)
         (TelegramClient.sendThinkingDraft client key "Thinking…")
         action
-
-withTelegramProgressUsing :: IO () -> IO () -> IO a -> IO a
-withTelegramProgressUsing sendTyping sendDraft action = do
-    -- Seed the native draft once. The managed-turn bridge takes ownership of
-    -- refreshing it with live reasoning, response, and tool activity.
-    void (tryAny sendDraft)
-    withAsync progressLoop (const action)
-  where
-    progressLoop = loop
-    loop = do
-        -- Chat actions expire after roughly five seconds. Keep typing as a
-        -- fallback for clients that do not support native rich drafts.
-        void (tryAny sendTyping)
-        threadDelay 4_000_000
-        loop
 
 loadTelegramState :: OsPath -> IO TelegramState
 loadTelegramState path = do

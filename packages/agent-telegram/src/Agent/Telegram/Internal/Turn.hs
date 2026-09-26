@@ -25,6 +25,7 @@ import Agent.Telegram.Classify
 import Agent.Telegram.Bridge (withTelegramBridge)
 import qualified Agent.Telegram.Client as TelegramClient
 import Agent.Telegram.Voice (transcribeWithXAI)
+import Agent.Telegram.VoicePreparation (withTelegramVoiceTranscript)
 import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.OsPath (unsafeToFilePath)
 import Control.Concurrent (threadDelay)
@@ -275,7 +276,7 @@ transcribeTelegramVoice runtime pending voice = do
                     ("voice-"
                         <> show pending.pendingTurnUpdateId
                         <> Text.unpack extension)
-    bracket
+    clean <- withTelegramVoiceTranscript voice
         (TelegramClient.downloadTelegramFile
             runtime.runtimeClient
             (20 * 1024 * 1024)
@@ -284,17 +285,14 @@ transcribeTelegramVoice runtime pending voice = do
         (\path -> void (tryAny (removeFile path)))
         \path -> do
             transcriptionCwd <- Directory.getTemporaryDirectory
-            transcript <- transcribeWithXAI
+            transcribeWithXAI
                 transcriptionCwd
                 (unsafeToFilePath path)
-            let clean = Text.strip transcript
-            when (Text.null clean) $
-                fail "xAI returned an empty voice transcription"
-            pure $
-                let rendered = "[Voice message transcript]: " <> clean
-                in if pending.pendingTurnText == "[Voice message]"
-                    then rendered
-                    else pending.pendingTurnText <> "\n" <> rendered
+    pure $
+        let rendered = "[Voice message transcript]: " <> clean
+        in if pending.pendingTurnText == "[Voice message]"
+            then rendered
+            else pending.pendingTurnText <> "\n" <> rendered
 
 downloadTelegramMediaAttachments
     :: TelegramRuntime

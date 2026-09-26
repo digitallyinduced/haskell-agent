@@ -1,8 +1,9 @@
-{ mkDerivation, aeson, agent-core, agent-json, agent-runtime
-, agent-store, async, base, bytestring, containers, directory
-, filelock, filepath, hspec, http-client, http-client-tls
-, http-types, lib, optparse-applicative, process, retry
-, safe-exceptions, split, temporary, text, time, unix, vector
+{ mkDerivation, aeson, agent-accounts, agent-core, agent-json
+, agent-runtime, agent-store, agent-telegram-api, async, base
+, bytestring, containers, directory, filelock, filepath, hspec
+, http-client, http-client-tls, http-types, lib
+, optparse-applicative, process, retry, safe-exceptions, split
+, temporary, text, time, unix, vector
 }:
 mkDerivation {
   pname = "agent-telegram";
@@ -11,10 +12,11 @@ mkDerivation {
   isLibrary = true;
   isExecutable = true;
   libraryHaskellDepends = [
-    aeson agent-core agent-json agent-runtime agent-store async base
-    bytestring containers directory filelock filepath http-client
-    http-client-tls http-types optparse-applicative process retry
-    safe-exceptions split text time unix vector
+    aeson agent-accounts agent-core agent-json agent-runtime
+    agent-store agent-telegram-api async base bytestring containers
+    directory filelock filepath http-client http-client-tls http-types
+    optparse-applicative process retry safe-exceptions split text time
+    unix vector
   ];
   executableHaskellDepends = [ base ];
   testHaskellDepends = [
@@ -23,6 +25,6 @@ mkDerivation {
   ];
   benchmarkHaskellDepends = [ base filepath temporary text time ];
   description = "Telegram gateway for the universal agent harness";
-  license = lib.meta.getLicenseFromSpdxId "MIT";
+  license = lib.licenses.mit;
   mainProgram = "agent-telegram";
 }
