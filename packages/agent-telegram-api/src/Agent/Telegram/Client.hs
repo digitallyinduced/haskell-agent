@@ -30,7 +30,7 @@ module Agent.Telegram.Client
     , redactToken
     ) where
 
-import Agent.Telegram.Markdown (markdownToTelegramHtml)
+import Agent.Telegram.Presentation
 import Agent.Telegram.Types.Wire
 import Agent.Telegram.Types.State (TelegramChatKey(..))
 import Agent.Json (rawJsonDecoder)
@@ -462,13 +462,7 @@ sendRichMessage client key replyToMessageId text =
         _ -> sendHtmlMessage client key replyToMessageId text
   where
     richBody = object $
-        [ "chat_id" .= key.chatId
-        , "rich_message" .= object
-            [ "html" .= markdownToTelegramHtml text
-            ]
-        ]
-            <> threadParameters key
-            <> replyParameters replyToMessageId
+        messageAddressFields key replyToMessageId <> textPresentationFields RichText text
 
 sendHtmlMessage
     :: TelegramClient
@@ -484,12 +478,7 @@ sendHtmlMessage client key replyToMessageId text =
         _ -> sendPlainMessage client key replyToMessageId text
   where
     htmlBody = object $
-        [ "chat_id" .= key.chatId
-        , "text" .= markdownToTelegramHtml text
-        , "parse_mode" .= ("HTML" :: Text)
-        ]
-            <> threadParameters key
-            <> replyParameters replyToMessageId
+        messageAddressFields key replyToMessageId <> textPresentationFields HtmlText text
 
 sendPlainMessage
     :: TelegramClient
@@ -503,11 +492,7 @@ sendPlainMessage client key replyToMessageId text =
         Right response -> pure (decodeSentMessageId response)
   where
     body = object $
-        [ "chat_id" .= key.chatId
-        , "text" .= text
-        ]
-            <> threadParameters key
-            <> replyParameters replyToMessageId
+        messageAddressFields key replyToMessageId <> textPresentationFields PlainText text
 
 sendMessageWithKeyboard
     :: TelegramClient
@@ -522,22 +507,8 @@ sendMessageWithKeyboard client key replyToMessageId text rows =
         Right response -> pure (decodeSentMessageId response)
   where
     body = object $
-        [ "chat_id" .= key.chatId
-        , "text" .= text
-        , "reply_markup" .= object
-            [ "inline_keyboard" .=
-                [ [ object
-                        [ "text" .= label
-                        , "callback_data" .= callbackData
-                        ]
-                  | (label, callbackData) <- row
-                  ]
-                | row <- rows
-                ]
-            ]
-        ]
-            <> threadParameters key
-            <> replyParameters replyToMessageId
+        messageAddressFields key replyToMessageId <> textPresentationFields PlainText text
+            <> ["reply_markup" .= inlineKeyboardMarkup rows]
 
 editMessageText
     :: TelegramClient
@@ -546,14 +517,11 @@ editMessageText
     -> Text
     -> IO (Either Text ())
 editMessageText client key messageId text =
-    requestUnit client "editMessageText" $ object
+    requestUnit client "editMessageText" $ object $
         [ "chat_id" .= key.chatId
         , "message_id" .= messageId
-        , "text" .= text
-        , "reply_markup" .= object
-            [ "inline_keyboard" .= ([] :: [[Value]])
-            ]
-        ]
+        , "reply_markup" .= inlineKeyboardMarkup []
+        ] <> textPresentationFields PlainText text
 
 editRichMessageText
     :: TelegramClient
@@ -566,12 +534,10 @@ editRichMessageText client key messageId text =
         Left _ -> editMessageText client key messageId text
         Right () -> pure (Right ())
   where
-    richBody = object
+    richBody = object $
         [ "chat_id" .= key.chatId
         , "message_id" .= messageId
-        , "text" .= markdownToTelegramHtml text
-        , "parse_mode" .= ("HTML" :: Text)
-        ]
+        ] <> textPresentationFields HtmlText text
 
 answerCallbackQuery
     :: TelegramClient
@@ -700,15 +666,6 @@ threadParameters key =
     maybe []
         (\threadId -> ["message_thread_id" .= threadId])
         key.messageThreadId
-
-replyParameters :: Maybe Integer -> [(Key.Key, Value)]
-replyParameters =
-    maybe [] \messageId ->
-        [ "reply_parameters" .= object
-            [ "message_id" .= messageId
-            , "allow_sending_without_reply" .= True
-            ]
-        ]
 
 escapeHtml :: Text -> Text
 escapeHtml =

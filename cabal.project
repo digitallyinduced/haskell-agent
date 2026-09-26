@@ -5,6 +5,7 @@ packages:
     packages/agent-mail
     packages/agent-integration-api
     packages/agent-runtime
+    packages/agent-audio
     packages/agent-accounts
     packages/agent-computer-use
     packages/agent-tools

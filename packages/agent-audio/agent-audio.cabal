@@ -1,0 +1,44 @@
+cabal-version: 3.0
+name: agent-audio
+version: 0.1.0.0
+synopsis: Bounded audio conversion and transcription transport
+license: MIT
+license-file: LICENSE
+extra-source-files: README.md
+build-type: Simple
+
+library
+    default-language: GHC2021
+    ghc-options: -Wall
+    hs-source-dirs: src
+    exposed-modules:
+        Agent.Audio.Conversion
+        Agent.Audio.Transcription
+    build-depends:
+        base >=4.17 && <5
+      , aeson
+      , bytestring
+      , http-client
+      , http-types
+      , process
+      , safe-exceptions
+      , text
+      , unix
+
+test-suite agent-audio-tests
+    type: exitcode-stdio-1.0
+    default-language: GHC2021
+    ghc-options: -Wall -threaded
+    hs-source-dirs: test
+    main-is: Main.hs
+    build-depends:
+        base >=4.17 && <5
+      , agent-audio
+      , async
+      , bytestring
+      , hspec
+      , http-client
+      , http-types
+      , text
+      , wai
+      , warp

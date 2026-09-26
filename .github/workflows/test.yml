@@ -34,6 +34,7 @@ jobs:
             targets: .#checks.x86_64-linux.agent-runtime-daemon
           - name: Extracted package tests
             targets: >-
+              .#checks.x86_64-linux.agent-audio
               .#checks.x86_64-linux.agent-external-session
               .#checks.x86_64-linux.agent-repository
               .#checks.x86_64-linux.agent-native-bridge

@@ -1,4 +1,4 @@
-{ mkDerivation, aeson, agent-accounts, agent-claude
+{ mkDerivation, aeson, agent-accounts, agent-audio, agent-claude
 , agent-codex-dialect, agent-computer-use, agent-connectivity
 , agent-core, agent-gemini, agent-grok-build-dialect
 , agent-integration-api, agent-json, agent-mcp, agent-openai
@@ -17,7 +17,7 @@ mkDerivation {
   src = ./.;
   enableSeparateDataOutput = true;
   libraryHaskellDepends = [
-    aeson agent-accounts agent-claude agent-codex-dialect
+    aeson agent-accounts agent-audio agent-claude agent-codex-dialect
     agent-computer-use agent-connectivity agent-core agent-gemini
     agent-grok-build-dialect agent-integration-api agent-json agent-mcp
     agent-openai agent-openrouter agent-process agent-responses

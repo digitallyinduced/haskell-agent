@@ -24,6 +24,7 @@ library
                      Agent.Telegram.Types.State
                      Agent.Telegram.Internal.Text
                      Agent.Telegram.Progress
+                     Agent.Telegram.Presentation
                      Agent.Telegram.Reaction
                      Agent.Telegram.VoicePreparation
     build-depends: agent-json >= 0.1 && < 0.2,

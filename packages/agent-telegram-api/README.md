@@ -5,6 +5,14 @@ Markdown rendering, text segmentation, reaction descriptions, and scoped typing
 notifications used by `agent-telegram`, without depending on the agent runtime,
 provider credentials, local sessions, or database implementation.
 
+`Agent.Telegram.Presentation` prepares request fields without performing network
+operations. Both the high-level client and embedding applications use the same
+plain/HTML/rich text conversion, chat/topic/reply addressing, and inline-keyboard
+markup. `boundedTextPresentationFields` selects plain text before transmission
+when formatting would exceed a supplied rendered Unicode-scalar budget. It does
+not truncate or segment: callers must bound raw content themselves and preserve
+any chunk boundaries already recorded in durable delivery state.
+
 Applications retain ownership of account authorization, durable update offsets,
 message identifiers, conversation mapping, and delivery intent. Import
 `Agent.Telegram.Types.Wire` for `telegramUpdateDecoder`; decoding an update does

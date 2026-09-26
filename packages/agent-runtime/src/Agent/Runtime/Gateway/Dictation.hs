@@ -6,7 +6,8 @@ import Agent.Accounts.Gateway.Credentials
     , validateGatewayCredential
     , withGatewayCredentialTurnLease
     )
-import Agent.Runtime.Gateway.Http (gatewayMaxResponseBytes, readBoundedBody)
+import Agent.Runtime.Gateway.Http (gatewayMaxResponseBytes)
+import Agent.Audio.Transcription qualified as Audio
 import Agent.ClientIdentity (gatewayUserAgent)
 import Agent.OpenAI.Transcription
     ( ChatGPTDictationStreamFailure(..)
@@ -27,7 +28,6 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
 import Network.HTTP.Client qualified as HTTP
-import Network.HTTP.Client.MultipartFormData qualified as Multipart
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types
     ( Status
@@ -199,8 +199,7 @@ postGatewayTranscription credential wav =
                 initial <- HTTP.parseRequest (Text.unpack endpoint)
                 let baseRequest =
                         initial
-                            { HTTP.method = "POST"
-                            , HTTP.requestHeaders =
+                            { HTTP.requestHeaders =
                                 [ ( hAuthorization
                                   , "Bearer "
                                         <> TextEncoding.encodeUtf8
@@ -209,40 +208,21 @@ postGatewayTranscription credential wav =
                                 , (hAccept, "application/json")
                                 , ("User-Agent", userAgent)
                                 ]
-                            , HTTP.checkResponse = \_ _ -> pure ()
-                            -- Never forward the gateway bearer to a redirect.
-                            , HTTP.redirectCount = 0
-                            , HTTP.responseTimeout =
-                                HTTP.responseTimeoutMicro
-                                    (2 * 60 * 1_000_000)
                             }
-                    audioPart =
-                        (Multipart.partFileRequestBody
-                            "file"
-                            "audio.wav"
-                            (HTTP.RequestBodyLBS wav))
-                            { Multipart.partContentType = Just "audio/wav" }
-                request <- Multipart.formDataBodyWithBoundary
-                    boundary
-                    [ Multipart.partBS "model" "dictation"
-                    , audioPart
-                    ]
-                    baseRequest
-                HTTP.withResponse request manager \response -> do
-                    responseBody <-
-                        readBoundedBody
-                            gatewayMaxResponseBytes
-                            (HTTP.responseBody response)
-                    pure
-                        ( HTTP.responseStatus response
-                        , responseBody
-                        )
+                case Audio.transcriptionRequest
+                    (gatewayMaxPcmBytes + 4096)
+                    baseRequest boundary "dictation" (LBS.toStrict wav) of
+                    Left problem -> pure (Left problem)
+                    Right request ->
+                        Audio.performTranscriptionRequest manager gatewayMaxResponseBytes request
             pure case outcome of
                 Left _ ->
                     Left "Could not reach the organization gateway for dictation."
-                Right (_status, Nothing) ->
+                Right (Left Audio.TranscriptionResponseTooLarge) ->
                     Left "Gateway dictation returned an oversized response."
-                Right (status, Just responseBody)
+                Right (Left _) ->
+                    Left "Could not reach the organization gateway for dictation."
+                Right (Right (status, responseBody))
                     | statusIsSuccessful status ->
                         decodeGatewayTranscript responseBody
                     | statusCode status == 404 ->
