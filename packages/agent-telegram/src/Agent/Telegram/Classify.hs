@@ -29,6 +29,7 @@ module Agent.Telegram.Classify
 
 import Agent.Telegram.Types
 import Agent.Telegram.Classify.Media
+import Agent.Telegram.Reaction (reactionMessageText)
 import Agent.Telegram.Classify.User
 import Agent.Telegram.Markdown (markdownToTelegramHtml)
 import Control.Applicative ((<|>))
@@ -925,25 +926,6 @@ mentionLabel bot (snippet, mentionedUser)
   where
     mentionName =
         Text.strip (Text.dropWhile (== '@') (Text.strip snippet))
-
-reactionMessageText :: TelegramMessageReaction -> Text
-reactionMessageText reaction
-    | null reaction.messageReactionNew =
-        "[Telegram reaction removed from message "
-            <> Text.pack (show reaction.messageReactionMessageId)
-            <> "]"
-    | otherwise =
-        "[Telegram reaction on message "
-            <> Text.pack (show reaction.messageReactionMessageId)
-            <> "]: "
-            <> Text.intercalate " "
-                (map renderReaction reaction.messageReactionNew)
-  where
-    renderReaction value = case
-        (value.reactionEmoji, value.reactionCustomEmojiId) of
-            (Just emoji, _) -> emoji
-            (_, Just customId) -> "custom-emoji:" <> customId
-            _ -> value.reactionType
 
 updateAlreadyStored :: Integer -> TelegramState -> Bool
 updateAlreadyStored updateId state =

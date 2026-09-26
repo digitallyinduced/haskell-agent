@@ -936,6 +936,8 @@
                                   final.agent-integration-api
                                   final.agent-syntax
                                 ]);
+                        agent-telegram-api = localPackage
+                            (final.callPackage ./packages/agent-telegram-api/package.nix { });
                         agent-telegram = localPackage (pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-telegram/package.nix { }) {
                                 src =
@@ -1630,6 +1632,7 @@
                         packages.agent-repository
                         packages.agent-native-bridge
                         packages.agent-telegram
+                        packages.agent-telegram-api
                         packages.agent-server
                         packages.agent-core
                         packages.agent-tools
@@ -1730,6 +1733,7 @@
                             touch "$out"
                         '';
                     agent-telegram = agentTelegramCheckPackage;
+                    agent-telegram-api = haskellPackages.agent-telegram-api;
                     agent-server = agentServerCheckPackage;
                     agent-server-client =
                         haskellPackages.agent-server-client;

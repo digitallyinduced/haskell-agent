@@ -3,11 +3,14 @@ module Agent.Telegram.Client
     ( TelegramRequestError(..)
     , telegramRequest
     , telegramRequestWith
+    , telegramRequestOnce
+    , telegramRequestOnceWith
     , decodeTelegramResponse
     , getUpdates
     , getTelegramBot
     , getTelegramFilePath
     , downloadTelegramFile
+    , validTelegramFilePath
     , sendTypingAction
     , sendThinkingDraft
     , sendStreamingDraft
@@ -28,7 +31,8 @@ module Agent.Telegram.Client
     ) where
 
 import Agent.Telegram.Markdown (markdownToTelegramHtml)
-import Agent.Telegram.Types
+import Agent.Telegram.Types.Wire
+import Agent.Telegram.Types.State (TelegramChatKey(..))
 import Agent.Json (rawJsonDecoder)
 import qualified Agent.Json.Decode as Hermes
 import Control.Concurrent (threadDelay)
@@ -47,7 +51,9 @@ import Data.Aeson
     )
 import qualified Data.Aeson.Key as Key
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.ByteString as BS
 import Data.Maybe (fromMaybe)
+import Data.Char (isAscii, isAlphaNum)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -56,8 +62,7 @@ import qualified Network.HTTP.Client.MultipartFormData as Multipart
 import Network.HTTP.Types.Status (statusCode)
 import System.Directory (doesFileExist)
 import System.FilePath (takeFileName)
-import System.OsPath (OsPath)
-import Agent.OsPath (unsafeToFilePath)
+import System.OsPath (OsPath, decodeFS)
 import System.Posix.Files (setFileMode)
 
 data TelegramRequestError = TelegramRequestError
@@ -82,7 +87,7 @@ telegramRequest
     -> Int
     -> IO (Either Text LBS.ByteString)
 telegramRequest client =
-    telegramRequestWith (Http.httpLbs `flip` client.clientManager) client
+    telegramRequestWith (\request -> httpLimited client 2097152 request) client
 
 telegramRequestWith
     :: (Http.Request -> IO (Http.Response LBS.ByteString))
@@ -92,7 +97,45 @@ telegramRequestWith
     -> Int
     -> IO (Either Text LBS.ByteString)
 telegramRequestWith send client method body timeoutSeconds =
-    runRetrying client do
+    runRetrying client (performTelegramRequest send client method body timeoutSeconds)
+
+-- | A single attempt for a caller-owned durable outbox. A missing error code
+-- means delivery is uncertain; callers must not retry a non-idempotent send.
+telegramRequestOnce
+    :: TelegramClient -> String -> Value -> Int
+    -> IO (Either TelegramRequestError LBS.ByteString)
+telegramRequestOnce client =
+    telegramRequestOnceWith (\request -> httpLimited client 2097152 request) client
+
+httpLimited :: TelegramClient -> Integer -> Http.Request -> IO (Http.Response LBS.ByteString)
+httpLimited client maximumBytes request =
+    Http.withResponse request client.clientManager \response -> do
+        body <- readChunks maximumBytes [] response.responseBody
+        pure response { Http.responseBody = body }
+  where
+    readChunks remaining chunks reader = do
+        chunk <- Http.brRead reader
+        if BS.null chunk
+            then pure (LBS.fromChunks (reverse chunks))
+            else if toInteger (BS.length chunk) > remaining
+                then fail "Telegram response exceeds the configured limit"
+                else readChunks (remaining - toInteger (BS.length chunk)) (chunk : chunks) reader
+
+telegramRequestOnceWith
+    :: (Http.Request -> IO (Http.Response LBS.ByteString))
+    -> TelegramClient -> String -> Value -> Int
+    -> IO (Either TelegramRequestError LBS.ByteString)
+telegramRequestOnceWith send client method body timeoutSeconds = do
+    result <- requestAttempt (performTelegramRequest send client method body timeoutSeconds)
+    pure $ case result of
+        Left err -> Left err { telegramErrorMessage = renderRequestError client err }
+        Right bytes -> Right bytes
+
+performTelegramRequest
+    :: (Http.Request -> IO (Http.Response LBS.ByteString))
+    -> TelegramClient -> String -> Value -> Int
+    -> IO (Http.Response LBS.ByteString)
+performTelegramRequest send client method body timeoutSeconds = do
         base <- Http.parseRequest $
             "https://api.telegram.org/bot"
                 <> Text.unpack client.clientToken
@@ -103,6 +146,8 @@ telegramRequestWith send client method body timeoutSeconds =
                 , Http.requestHeaders =
                     [("Content-Type", "application/json")]
                 , Http.requestBody = Http.RequestBodyLBS (encode body)
+                , Http.redirectCount = 0
+                , Http.checkResponse = \_ _ -> pure ()
                 , Http.responseTimeout =
                     Http.responseTimeoutMicro
                         (timeoutSeconds * 1_000_000)
@@ -117,12 +162,25 @@ runRetrying client request = do
     result <- retrying
         (fullJitterBackoff 250_000 <> limitRetries 4)
         shouldRetry
-        (const attempt)
+        (const (requestAttempt request))
     pure $ case result of
         Left err -> Left (renderRequestError client err)
         Right body -> Right body
   where
-    attempt =
+    shouldRetry _ = \case
+        Right _ -> pure False
+        Left err
+            | not err.telegramErrorRetryable -> pure False
+            | otherwise -> do
+                maybe (pure ()) (\seconds ->
+                    threadDelay (max 1 (min 60 seconds) * 1_000_000))
+                    err.telegramRetryAfter
+                pure True
+
+requestAttempt
+    :: IO (Http.Response LBS.ByteString)
+    -> IO (Either TelegramRequestError LBS.ByteString)
+requestAttempt request =
         tryAny request >>= \case
             Left err ->
                 pure $ Left TelegramRequestError
@@ -153,16 +211,6 @@ runRetrying client request = do
                                         code == 429 || code >= 500
                                     }
                                 (responseFailure body)
-
-    shouldRetry _ = \case
-        Right _ -> pure False
-        Left err
-            | not err.telegramErrorRetryable -> pure False
-            | otherwise -> do
-                maybe (pure ()) (\seconds ->
-                    threadDelay (max 1 seconds * 1_000_000))
-                    err.telegramRetryAfter
-                pure True
 
 responseFailure :: LBS.ByteString -> Maybe TelegramRequestError
 responseFailure bytes =
@@ -283,24 +331,37 @@ downloadTelegramFile
     -> OsPath
     -> IO OsPath
 downloadTelegramFile client maxBytes remotePath destination = do
+    when (maxBytes <= 0 || not (validTelegramFilePath (Text.pack remotePath))) $
+        fail "Invalid Telegram download path or size limit"
     response <- runRetrying client do
         request <- Http.parseRequest $
             "https://api.telegram.org/file/bot"
                 <> Text.unpack client.clientToken
                 <> "/"
                 <> remotePath
-        Http.httpLbs
+        httpLimited client maxBytes
             request
                 { Http.responseTimeout =
                     Http.responseTimeoutMicro 60_000_000
+                , Http.redirectCount = 0
+                , Http.checkResponse = \_ _ -> pure ()
                 }
-            client.clientManager
     body <- either (fail . Text.unpack) pure response
     when (LBS.length body > fromIntegral maxBytes) $
         fail "Telegram file download exceeds the configured limit"
-    LBS.writeFile (unsafeToFilePath destination) body
-    setFileMode (unsafeToFilePath destination) 0o600
+    destinationPath <- decodeFS destination
+    LBS.writeFile destinationPath body
+    setFileMode destinationPath 0o600
     pure destination
+
+validTelegramFilePath :: Text -> Bool
+validTelegramFilePath path =
+    not (Text.null path) && all validSegment (Text.splitOn "/" path)
+  where
+    validSegment segment =
+        not (Text.null segment) && segment /= "." && segment /= ".."
+            && Text.all (\character -> isAscii character
+                && (isAlphaNum character || character `elem` ("._-" :: [Char]))) segment
 
 sendTypingAction :: TelegramClient -> TelegramChatKey -> IO ()
 sendTypingAction client key =
@@ -586,10 +647,12 @@ sendMultipartFile client key method fieldName path caption requestedName = do
                     (map textPart fields <> [filePart])
                     base
                         { Http.method = "POST"
+                        , Http.redirectCount = 0
+                        , Http.checkResponse = \_ _ -> pure ()
                         , Http.responseTimeout =
                             Http.responseTimeoutMicro 60_000_000
                         }
-                Http.httpLbs request client.clientManager
+                httpLimited client 2097152 request
             case result of
                 Left err -> pure (Left err)
                 Right response -> pure (decodeSentMessageId response)
