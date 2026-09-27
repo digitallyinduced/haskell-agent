@@ -5,6 +5,7 @@ import qualified Agent.Json.Decode as Json
 import Agent.Cancel (newCancelFlag, requestCancel)
 import Agent.Error (ApiError(..))
 import Agent.Loop
+import Agent.Loop.Input (normalizeTurnInputs)
 import Agent.Loop.InputItems (turnInputsToItems)
 import Agent.Loop.Fixtures
 import qualified Agent.Loop.EventDeliverySpec as EventDelivery
@@ -929,6 +930,27 @@ spec = describe "runLoop" do
             state ->
                 expectationFailure $
                     "unexpected submitted backend state: " <> show state
+
+    it "normalizes structured tool result images without dropping the JSON payload" do
+        let payload = Aeson.object ["count" Aeson..= (42 :: Int)]
+            sourceUrl = "data:image/bmp;base64,"
+                <> TextEncoding.decodeUtf8 (Base64.encode oversizedFixtureBytes)
+            result = ToolCallResultWithStructured
+                "structured-image" "viewed image" FunctionCallKind AsyncToolCall
+                [ToolResultImage sourceUrl (Just "auto")] (Just ToolSucceeded) payload
+        case normalizeTurnInputs [CompletedTool result] of
+            [CompletedTool normalized] -> do
+                toolCallResultStructured normalized `shouldBe` Just payload
+                normalized.output `shouldBe` "viewed image"
+                normalized.callId `shouldBe` "structured-image"
+                toolCallResultMode normalized `shouldBe` AsyncToolCall
+                toolCallResultOutcome normalized `shouldBe` Just ToolSucceeded
+                case normalized.toolResultImages of
+                    [image] -> do
+                        image.imageUrl `shouldNotBe` sourceUrl
+                        image.imageDetail `shouldBe` Just "auto"
+                    images -> expectationFailure ("unexpected images: " <> show images)
+            inputs -> expectationFailure ("unexpected inputs: " <> show inputs)
 
     it "normalizes oversized tool images before follow-up submission" do
         submissions <- newIORef []

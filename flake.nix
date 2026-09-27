@@ -1454,11 +1454,6 @@
                       echo "repl: missing $script" >&2
                       exit 1
                     fi
-                    # Cap the long-running GHCi/agent process without forcing
-                    # every command in nix develop to inherit the same limit.
-                    if [ -z "''${GHCRTS:-}" ]; then
-                      export GHCRTS="-M8G"
-                    fi
                     cabal="${haskellPackages.cabal-install}/bin/cabal"
                     expect_bin="${pkgs.expect}/bin/expect"
                     stty_bin="${pkgs.coreutils}/bin/stty"
@@ -1470,7 +1465,14 @@
                       set cabal $env(AGENT_REPL_CABAL)
                       set script $env(AGENT_REPL_SCRIPT)
                       set external_stty $env(AGENT_REPL_STTY)
-                      spawn -noecho $cabal repl lib:agent-cli --repl-options=-ghci-script=$script
+                      # Limit GHCi itself, not its MCP subprocesses: an inherited
+                      # GHCRTS can prevent executables without -rtsopts starting.
+                      # Preserve explicitly supplied runtime settings.
+                      set rts_options {}
+                      if {![info exists env(GHCRTS)] || $env(GHCRTS) eq ""} {
+                        set rts_options {--repl-options=+RTS --repl-options=-M8G --repl-options=-RTS}
+                      }
+                      spawn -noecho $cabal repl lib:agent-cli --repl-options=-ghci-script=$script {*}$rts_options
                       # Expect gives Cabal/GHCi its own PTY. Keep that PTY in
                       # sync so Vty receives resize events with current bounds.
                       proc sync_spawn_size {} {
@@ -1551,6 +1553,10 @@
                 };
                 packages.agent-cli-static = agentCliStaticExecutable;
                 packages.agent-cli = agentCliExecutable;
+                # Opt-in compiler environment; the JavaScript CLI closure stays unchanged.
+                packages.code-mode-ghci = haskellPackages.ghcWithPackages (haskell: with haskell; [
+                    aeson async bytestring containers safe-exceptions scientific stm text unix
+                ]);
                 packages.${if pkgs.stdenv.hostPlatform.isDarwin
                     then "apple-session-title" else null} = appleSessionTitle;
                 packages.agent-telegram = agentTelegramExecutable;

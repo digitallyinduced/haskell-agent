@@ -1,8 +1,8 @@
 { mkDerivation, aeson, agent-core, agent-json, agent-process
 , agent-responses-types, async, base, base64-bytestring, bytestring
-, containers, directory, extra, filepath, hspec, JuicyPixels, lib, process
-, QuickCheck, safe-exceptions, scientific, stm, template-haskell
-, text, time, transformers, unix, vector
+, containers, directory, extra, filepath, hspec, JuicyPixels, lib
+, process, QuickCheck, safe-exceptions, scientific, stm
+, template-haskell, text, time, transformers, unix, vector
 }:
 mkDerivation {
   pname = "agent-tools";
@@ -22,7 +22,7 @@ mkDerivation {
   ];
   benchmarkHaskellDepends = [
     aeson agent-core async base bytestring directory filepath process
-    safe-exceptions text time unix
+    safe-exceptions text time unix vector
   ];
   description = "Concrete local tools for the agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";

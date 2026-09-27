@@ -2,6 +2,7 @@
 
 module Agent.Tools.CodeMode.Host.Worker
     ( bundledCodeModeWorkerPath
+    , bundledHaskellCodeModeSupportPath
     , codeModeWorkerPath
     ) where
 
@@ -36,6 +37,27 @@ bundledCodeModeWorkerPath = do
 codeModeWorkerPath :: IO FilePath
 codeModeWorkerPath = bundledCodeModeWorkerPath
 
+-- | GHCi does not install Cabal data files. Keep the support module available
+-- independently of both the installation prefix and the runtime working directory.
+bundledHaskellCodeModeSupportPath :: IO FilePath
+bundledHaskellCodeModeSupportPath = do
+    installedPath <- getDataFileName "data/code-mode/CodeModeSupport.hs"
+    installedExists <- doesFileExist installedPath
+    if installedExists
+        then pure installedPath
+        else materializeEmbeddedSource
+            "haskell-agent-code-mode-support-" ".hs" embeddedHaskellCodeModeSupportSource
+
+embeddedHaskellCodeModeSupportSource :: Text
+embeddedHaskellCodeModeSupportSource =
+    Text.pack
+        $(do
+            path <- makeRelativeToProject "data/code-mode/CodeModeSupport.hs"
+            qAddDependentFile path
+            contents <- runIO (readFile path)
+            TH.lift contents
+        )
+
 embeddedCodeModeWorkerSource :: Text
 embeddedCodeModeWorkerSource =
     Text.pack
@@ -47,14 +69,18 @@ embeddedCodeModeWorkerSource =
         )
 
 materializeEmbeddedWorker :: IO FilePath
-materializeEmbeddedWorker = do
+materializeEmbeddedWorker =
+    materializeEmbeddedSource "haskell-agent-code-mode-worker-" ".mjs" embeddedCodeModeWorkerSource
+
+materializeEmbeddedSource :: FilePath -> FilePath -> Text -> IO FilePath
+materializeEmbeddedSource prefix extension source = do
     tmpDir <- getTemporaryDirectory >>= canonicalizePath
-    let bytes = Text.encodeUtf8 embeddedCodeModeWorkerSource
+    let bytes = Text.encodeUtf8 source
         target =
             tmpDir
-                </> ("haskell-agent-code-mode-worker-"
-                    <> embeddedWorkerFingerprint bytes
-                    <> ".mjs")
+                </> (prefix
+                    <> embeddedSourceFingerprint bytes
+                    <> extension)
     exists <- doesFileExist target
     if exists
         then pure target
@@ -65,8 +91,8 @@ materializeEmbeddedWorker = do
             renameFile staging target
             pure target
 
-embeddedWorkerFingerprint :: BS.ByteString -> String
-embeddedWorkerFingerprint bytes =
+embeddedSourceFingerprint :: BS.ByteString -> String
+embeddedSourceFingerprint bytes =
     show (BS.length bytes) <> "-" <> show (BS.foldl' step seed bytes)
   where
     seed = 14695981039346656037 :: Word64

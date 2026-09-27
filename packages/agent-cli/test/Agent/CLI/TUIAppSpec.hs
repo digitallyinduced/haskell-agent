@@ -1393,7 +1393,7 @@ spec = do
             syntaxLanguagesForBlocks (toList conversation.uiBlocks)
                 `shouldBe` Set.singleton "haskell"
 
-        it "requests the JavaScript grammar for exec source" do
+        it "does not assume a language grammar for exec source" do
             let conversation =
                     reduceUi
                         (UiLoop
@@ -1404,7 +1404,7 @@ spec = do
                                     "const answer = 42;")))
                         initialUiState
             syntaxLanguagesForBlocks (toList conversation.uiBlocks)
-                `shouldBe` Set.singleton "javascript"
+                `shouldBe` Set.empty
 
         it "requests grammars for every file in an edit preview" do
             let patch =
@@ -3699,7 +3699,7 @@ spec = do
             ghciText `shouldNotSatisfy`
                 Text.isInfixOf "ghci-output-marker"
             execText `shouldSatisfy`
-                Text.isInfixOf "JavaScript execution"
+                Text.isInfixOf "Code execution"
             execText `shouldNotSatisfy`
                 Text.isInfixOf "exec-invocation-marker"
             execText `shouldNotSatisfy`

@@ -22,7 +22,7 @@ import Agent.MCP.Client.Internal.Runtime
 import Agent.MCP.Types
     ( McpTool(discoveredReadOnly, discoveredHeaderParams,
               discoveredName, discoveredTitle, discoveredDescription,
-              discoveredInputSchema, discoveredRequiresFreshApproval),
+              discoveredInputSchema, discoveredOutputSchema, discoveredRequiresFreshApproval),
       McpHeaderParam(..),
       McpCompletion,
       McpPromptResult(promptResultMessages, promptResultDescription),
@@ -61,9 +61,13 @@ import Agent.MCP.Types
       mcpTaskListDecoder,
       mcpToolDecoder,
       projectRawOr )
-import Agent.ToolDispatch ( typedStreamingTool )
+import Agent.ToolDispatch
+    ( typedStreamingRichTool, ToolHandlerResult(..), ToolOutcome(..),
+      withToolHandlerStructuredResult )
 import Agent.Tools.Types
     ( AppTool(..),
+      ToolOutputMetadata(..),
+      ToolOutputFormat(..),
       ApprovalRule(..),
       ToolAsyncCapability(..),
       ToolExecutionPolicy(..),
@@ -542,7 +546,7 @@ appToolForArtifactDirectory artifactDirectory client tool = AppTool
     , appToolSchema =
         RawJsonFunctionSchema (toJSON tool.discoveredInputSchema)
     , appToolHandler =
-        typedStreamingTool qualifiedName rawObjectDecoder \publish arguments -> do
+        typedStreamingRichTool qualifiedName rawObjectDecoder \publish arguments -> do
             current <- readTVarIO client.clientLifecycle
             case current of
                 ClientReady tools _
@@ -554,7 +558,7 @@ appToolForArtifactDirectory artifactDirectory client tool = AppTool
                         -- Snapshots accumulate: each progress line is
                         -- appended to the text already shown for this call.
                         shown <- newIORef Text.empty
-                        callDiscoveredToolWith
+                        fmap richMcpToolResult $ callDiscoveredToolPayloadWith
                             artifactDirectory
                             client
                             tool
@@ -584,6 +588,10 @@ appToolForArtifactDirectory artifactDirectory client tool = AppTool
             else TurnSequential
     , appToolResourceClaims = Nothing
     , appToolAsyncCapability = BlockingOnly
+    , appToolOutputMetadata = Just ToolOutputMetadata
+        { outputSchema = toJSON <$> tool.discoveredOutputSchema
+        , outputFormat = McpToolOutput
+        }
     }
   where
     qualifiedName = qualifiedMcpToolName
@@ -655,14 +663,26 @@ callDiscoveredToolWith
     -> RawJson
     -> Maybe (McpProgress -> IO ())
     -> IO (Either Text Text)
-callDiscoveredToolWith _ client tool _ _
+callDiscoveredToolWith directory client tool arguments progress =
+    fst <$> callDiscoveredToolPayloadWith directory client tool arguments progress
+
+-- Keep the original envelope separate from presentation and local artifact paths.
+-- Both public text calls and rich handlers execute this path exactly once.
+callDiscoveredToolPayloadWith
+    :: Maybe FilePath
+    -> McpClient
+    -> McpTool
+    -> RawJson
+    -> Maybe (McpProgress -> IO ())
+    -> IO (Either Text Text, Maybe Value)
+callDiscoveredToolPayloadWith _ client tool _ _
     | tool.discoveredName `elem` client.clientConfig.mcpServerExcludedTools =
-        pure (Left "This tool is owned by another integration endpoint.")
-callDiscoveredToolWith artifactDirectory client tool arguments _
+        pure (Left "This tool is owned by another integration endpoint.", Nothing)
+callDiscoveredToolPayloadWith artifactDirectory client tool arguments _
     | McpClientInMemory server _ <- client.clientTransport = do
         state <- readTVarIO client.clientLifecycle
         case state of
-            ClientClosed -> pure (Left "MCP server closed")
+            ClientClosed -> pure (Left "MCP server closed", Nothing)
             _ -> do
                 outcome <- tryAny $
                     server.toolServerCallTool
@@ -672,9 +692,11 @@ callDiscoveredToolWith artifactDirectory client tool arguments _
                             Nothing
                             artifactDirectory)
                 pure $ case outcome of
-                    Left _ -> Left "Internal MCP tool error"
-                    Right result -> either (Left . renderMcpError) renderInMemoryToolResult result
-callDiscoveredToolWith artifactDirectory client tool arguments onProgress = do
+                    Left _ -> (Left "Internal MCP tool error", Nothing)
+                    Right (Left err) -> (Left (renderMcpError err), Nothing)
+                    Right (Right result) ->
+                        (renderInMemoryToolResult result, Just (inMemoryToolEnvelope result))
+callDiscoveredToolPayloadWith artifactDirectory client tool arguments onProgress = do
     let parameters =
             "name" .= tool.discoveredName
                 <> AesonEncoding.pair "arguments" (rawJsonEncoding arguments)
@@ -686,15 +708,48 @@ callDiscoveredToolWith artifactDirectory client tool arguments onProgress = do
             , requestAllowReissue = toolAllowsAutomaticReissue tool
             }
         >>= \case
-        Left err -> pure (Left (renderMcpError err))
-        Right result -> case normalizeMcpToolResult result of
-            Left err -> pure (Left err)
-            Right rendered -> case artifactDirectory of
-                Nothing -> pure (Right rendered)
-                Just directory ->
-                    materializeArtifacts directory
-                        (readMcpResourceWithArtifactLimit True client) result
-                        >>= pure . fmap (\paths -> Text.intercalate "\n" (rendered : paths))
+        Left err -> pure (Left (renderMcpError err), Nothing)
+        Right result -> do
+            renderedResult <- case normalizeMcpToolResult result of
+                Left err -> pure (Left err)
+                Right rendered -> case artifactDirectory of
+                    Nothing -> pure (Right rendered)
+                    Just directory ->
+                        materializeArtifacts directory
+                            (readMcpResourceWithArtifactLimit True client) result
+                            >>= pure . fmap (\paths -> Text.intercalate "\n" (rendered : paths))
+            pure (renderedResult, Just (toJSON result))
+
+richMcpToolResult
+    :: (Either Text Text, Maybe Value) -> Either Text ToolHandlerResult
+richMcpToolResult (rendered, Nothing) =
+    fmap (\text -> ToolHandlerResult text []) rendered
+richMcpToolResult (rendered, Just envelope) =
+    Right $ withToolHandlerStructuredResult envelope $
+        case rendered of
+            Left err -> ToolHandlerResultWithOutcome ("Error: " <> err) [] ToolFailed
+            Right text -> ToolHandlerResult text []
+
+callDiscoveredToolRichWith
+    :: Maybe FilePath
+    -> McpClient
+    -> McpTool
+    -> RawJson
+    -> Maybe (McpProgress -> IO ())
+    -> IO (Either Text ToolHandlerResult)
+callDiscoveredToolRichWith directory client tool arguments progress =
+    richMcpToolResult <$>
+        callDiscoveredToolPayloadWith directory client tool arguments progress
+
+inMemoryToolEnvelope :: McpCallToolResult -> Value
+inMemoryToolEnvelope result =
+    object $
+        [ "isError" .= result.callToolIsError
+        , "content" .=
+            [object ["type" .= ("text" :: Text), "text" .= text]
+            | text <- result.callToolText]
+        ] <> maybe [] (\value -> ["structuredContent" .= toJSON value])
+            result.callToolStructuredContent
 
 toolAllowsAutomaticReissue :: McpTool -> Bool
 toolAllowsAutomaticReissue =

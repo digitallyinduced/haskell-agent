@@ -661,7 +661,7 @@ blockStateGlyph state target block
 
 shellBlockTitle :: UiBlock -> Text
 shellBlockTitle block
-    | block.blockTitle == "$ exec" = "JavaScript execution"
+    | block.blockTitle == "$ exec" = "Code execution"
     | block.blockExpanded = block.blockTitle
     | block.blockTitle /= "$ ghci" = block.blockTitle
     | Text.null invocation = block.blockTitle

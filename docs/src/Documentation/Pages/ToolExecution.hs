@@ -54,6 +54,10 @@ page = Page
         emit its result with <code>text</code>. Do not mistake successful execution of the wrapper
         for success of every nested operation. The available <code>tools</code> methods are supplied
         by the current catalog.</p>
+        <p>Planning and user-input tools remain normal, directly callable tools in both
+        JavaScript and Haskell code mode: <code>update_plan</code>, <code>enter_plan_mode</code>,
+        <code>write_plan</code>, <code>exit_plan_mode</code>, <code>ask_user_question</code>, and
+        <code>ask_secret</code>. They are not included in the generated code-mode bindings.</p>
         <pre><code class="language-js">{"text(await tools.read_file({target_file: \"README.md\"}));" :: Text}</code></pre>
         <p>Each call runs in a fresh V8 isolate, not Node: there is no direct filesystem,
         network or console access. Ordinary JavaScript variables do not persist between calls.
@@ -75,6 +79,40 @@ page = Page
         <p>Use explicit concurrency only for independent operations. Dependent edits and checks must
         remain ordered. A syntax error is different from a tool denial; correct the JavaScript for
         the former and inspect the actual authorization decision for the latter.</p>
+        <h2 id="haskell-code-mode">Experimental Haskell orchestration</h2>
+        <p>Install the optional pinned GHCi environment from a source checkout first;
+        it is not included in the default CLI installation:</p>
+        <pre><code>{"nix build .#code-mode-ghci\nexport HASKELL_AGENT_GHCI=\"$PWD/result/bin/ghci\"" :: Text}</code></pre>
+        <p>Launch with <code>--code-mode --code-mode-backend haskell</code> to use GHCi instead.
+        The tool names remain <code>exec</code> and <code>wait</code>. Supply one complete
+        <code>IO ()</code> expression, usually a <code>do</code> block, not GHCi commands.
+        The current tool description supplies generated <code>Tools</code> bindings and their
+        argument types. The whole expression is typechecked before it runs.</p>
+        <pre><code class="language-haskell">{"do\n  text \"Hello from Haskell\"" :: Text}</code></pre>
+        <p>Tools with declared output schemas return <code>ToolResult a</code>:
+        inspect <code>.decodedResult</code> for a typed value or decoding error, and
+        <code>.rawResult</code> for the original JSON payload. A decoding failure never
+        repeats the tool call. Unsupported schema shapes remain <code>Value</code>;
+        generated decoders are not complete JSON Schema validators.</p>
+        <p>Without a declared schema, results remain <code>Value</code>. Observed return
+        shapes are bounded, session-local hints, not guaranteed contracts or persisted
+        types. They retain property names and types, not scalar response values;
+        property names can themselves contain sensitive data.</p>
+        <p>For OpenAI sessions, add <code>--code-mode-repair</code> to opt into compiler repair
+        by <code>gpt-6-luna</code>. The isolated request receives the submitted code, compiler
+        diagnostics, and binding context, not the conversation history or tool access.
+        At most two revisions are attempted before returning the failure to the main model.
+        Revisions are checked before execution; runtime failures are never automatically retried.
+        Repair is instructed to preserve intent, but successful typechecking does not prove
+        semantic equivalence. Nested calls retain their usual approval checks.
+        Repair candidates, diagnostics, timing, and reported token usage are recorded on the
+        diagnostic stderr stream (the private native diagnostics log in interactive sessions),
+        not added as side-conversation messages to the main transcript.</p>
+        <p>This experimental backend runs ordinary, unsandboxed IO with the agent process's
+        ambient permissions. Nested tools still use normal authorization. Only one cell can
+        run at a time; use <code>wait</code> to observe or terminate it before starting another.
+        Cancellation cannot undo effects already performed. Ordinary local bindings do not
+        persist between calls. Repeat the backend flag when resuming in a new CLI process.</p>
         <h2 id="retained-output-parameters">Retained output parameters</h2>
         <table><thead><tr><th>Tool</th><th>Inputs and limits</th></tr></thead><tbody>
             <tr><td><code>read_tool_output</code></td><td><code>handle</code>; character <code>cursor</code> (default 0) and <code>max_chars</code> (default/max 4096), or legacy one-based <code>offset</code> and <code>limit</code> (default 200, max 1000)</td></tr>

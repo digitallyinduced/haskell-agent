@@ -600,6 +600,7 @@ fake name = AppTool
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
     , appToolAsyncCapability = BlockingOnly
+    , appToolOutputMetadata = Nothing
     }
 
 withTempDir :: (FilePath -> IO a) -> IO a

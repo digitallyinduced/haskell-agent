@@ -17,6 +17,8 @@ module Agent.ToolDispatch
     , ToolDispatchOutcome(..)
     , ToolResultImage(..)
     , ToolHandlerResult(..)
+    , withToolHandlerStructuredResult
+    , toolCallResultStructured
     , ToolOutcome(..)
     , toolCallResultOutcome
     , withToolCallOutcome
@@ -231,7 +233,23 @@ data ToolHandlerResult = ToolHandlerResult
         , resultImages :: ![ToolResultImage]
         , resultOutcome :: !ToolOutcome
         }
+    | ToolHandlerResultWithStructured
+        { resultText :: !Text
+        , resultImages :: ![ToolResultImage]
+        , resultStructured :: !Aeson.Value
+        , resultStructuredOutcome :: !(Maybe ToolOutcome)
+        }
     deriving (Eq, Show)
+
+-- | Preserve an ephemeral programmatic payload independently of human-facing
+-- text formatting and truncation. Attaching data never changes execution facts.
+withToolHandlerStructuredResult :: Aeson.Value -> ToolHandlerResult -> ToolHandlerResult
+withToolHandlerStructuredResult value result =
+    ToolHandlerResultWithStructured result.resultText result.resultImages value $
+        case result of
+            ToolHandlerResult{} -> Nothing
+            ToolHandlerResultWithOutcome{resultOutcome} -> Just resultOutcome
+            ToolHandlerResultWithStructured{resultStructuredOutcome} -> resultStructuredOutcome
 
 -- | A dispatched result together with its protocol-neutral success bit.
 --
@@ -256,7 +274,23 @@ data ToolCallResult = ToolCallResult
     , toolResultImages :: ![ToolResultImage]
     , toolResultOutcome :: !(Maybe ToolOutcome)
     }
+    | ToolCallResultWithStructured
+    { callId :: !Text
+    , output :: !Text
+    , callKind :: !ToolCallKind
+    , toolResultMode :: !ToolCallMode
+    , toolResultImages :: ![ToolResultImage]
+    , toolResultOutcome :: !(Maybe ToolOutcome)
+    , toolResultStructured :: !Aeson.Value
+    }
     deriving (Eq)
+
+-- | Native, ephemeral structured data. Historical/imported text-only results
+-- deliberately have no inferred payload. Generic serialization remains text-only.
+toolCallResultStructured :: ToolCallResult -> Maybe Aeson.Value
+toolCallResultStructured ToolCallResult{} = Nothing
+toolCallResultStructured ToolCallResultWithStructured{toolResultStructured} =
+    Just toolResultStructured
 
 instance Show ToolCallResult where
     show result =
@@ -540,12 +574,19 @@ dispatchToolHandlerWithAuthorization authorization config maybeHandler call = do
     let outcome = case result of
             Right (Right ToolHandlerResult{}) -> ToolSucceeded
             Right (Right ToolHandlerResultWithOutcome{resultOutcome}) -> resultOutcome
+            Right (Right ToolHandlerResultWithStructured{resultStructuredOutcome}) ->
+                maybe ToolSucceeded id resultStructuredOutcome
             Right (Left _) -> ToolFailed
             Left _ -> ToolFailed
         dispatchedResult =
-            ToolCallResult
-                call.callId finalizedOutput call.callKind
-                (toolCallMode call) resultImages (Just outcome)
+            case result of
+                Right (Right ToolHandlerResultWithStructured{resultStructured}) ->
+                    ToolCallResultWithStructured
+                        call.callId finalizedOutput call.callKind
+                        (toolCallMode call) resultImages (Just outcome) resultStructured
+                _ -> ToolCallResult
+                    call.callId finalizedOutput call.callKind
+                    (toolCallMode call) resultImages (Just outcome)
     pure ToolDispatchOutcome
         { toolDispatchResult = dispatchedResult
         , toolDispatchSucceeded = toolOutcomeSucceeded outcome

@@ -78,7 +78,7 @@ summarizeToolCall = summarizeToolCallRelative ""
 -- shown relative to that workspace.
 summarizeToolCallRelative :: Text -> ToolCall -> Text
 summarizeToolCallRelative _ call
-    | canonicalToolName call.name == "exec" = "JavaScript execution"
+    | canonicalToolName call.name == "exec" = "Code execution"
 summarizeToolCallRelative workspace call =
     let verb = case canonicalToolName call.name of
             "mcp_call" -> mcpCallDisplayName call.arguments
@@ -137,7 +137,7 @@ toolCallTitle = toolCallTitleRelative ""
 toolCallTitleRelative :: Text -> ToolCall -> Text
 toolCallTitleRelative workspace call
     | canonicalToolName call.name == "run_ghci" = "$ ghci"
-    | canonicalToolName call.name == "exec" = "JavaScript execution"
+    | canonicalToolName call.name == "exec" = "Code execution"
     | canonicalToolName call.name `elem` ["run_terminal_cmd", "shell_command"]
     , let description =
             Text.strip (jsonTextFieldPartialDefault "description" call.arguments)

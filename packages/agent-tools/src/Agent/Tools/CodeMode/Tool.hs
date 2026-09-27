@@ -1,4 +1,4 @@
--- | Model-facing @exec@/@wait@ tools backed by the isolated Node worker.
+-- | Model-facing @exec@/@wait@ tools backed by selectable execution runtimes.
 --
 -- Wire names, descriptions, grammar, and output formatting mirror the Codex
 -- CLI code-mode implementation so a catalog model running @code_mode_only@
@@ -15,9 +15,13 @@ module Agent.Tools.CodeMode.Tool
     , codeModeExecGrammar
     , defaultExecYieldTimeMs
     , newCodeModeToolSet
+    , newCodeModeToolSetWithBackend
+    , newCodeModeToolSetWithRepair
     , normalizeCodeModeIdentifier
     , parseExecSource
+    , parseExecSourceFor
     , renderJsonSchemaType
+    , projectNestedResult
     ) where
 
 import Agent.ToolArgs
@@ -25,6 +29,13 @@ import Agent.ToolArgs
     , optBoolStrict
     , optInt
     , reqText
+    )
+import qualified Agent.Tools.CodeMode.Haskell.Host as Haskell
+import Agent.Tools.CodeMode.Backend (CodeModeBackend(..))
+import Agent.Tools.CodeMode.Haskell.Bindings
+    ( HaskellBindings(..)
+    , generateHaskellBindingsWithOutputs
+    , normalizeHaskellIdentifier
     )
 import Agent.Json.Decode (Decoder)
 import qualified Agent.Json.Decode as Json
@@ -37,10 +48,12 @@ import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolOutcome(..)
     , ToolHandlerResult(..)
     , ToolResultImage(..)
     , streamingRichTextTool
     , toolCallResultImages
+    , toolCallResultStructured
     , typedStreamingRichTool
     )
 import Agent.Tools.CodeMode.Host
@@ -61,8 +74,13 @@ import Agent.Tools.CodeMode.Host
     , withCodeModeHost
     )
 import Agent.Tools.CodeMode.Protocol (CodeModeToolMetadata(..))
+import Agent.Tools.CodeMode.ReturnShape
+    (inferReturnShape, mergeReturnShapes, renderReturnShapeHint)
+import Agent.Tools.CodeMode.Host.Worker (bundledHaskellCodeModeSupportPath)
 import Agent.Tools.Types
     ( AppTool(..)
+    , ToolOutputMetadata(..)
+    , ToolOutputFormat(..)
     , ApprovalRule(..)
     , BackgroundTaskStatus(..)
     , ToolExecutionPolicy(..)
@@ -72,6 +90,7 @@ import Agent.Tools.Types
     , withAsyncToolCalls
     )
 import Control.Applicative ((<|>))
+import Control.Exception.Safe (bracketOnError)
 import Control.Monad (foldM)
 import Data.Aeson (Value(..), encode)
 import qualified Data.Aeson as Aeson
@@ -79,7 +98,7 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
-import Data.IORef (IORef, atomicModifyIORef', newIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.List (sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -130,6 +149,7 @@ data CodeModeToolSet = CodeModeToolSet
 
 data NestedTool = NestedTool
     { nestedAppTool :: !AppTool
+    , nestedOutputSchema :: !(Maybe Value)
     , nestedRuntimeName :: !Text
     , nestedCallKind :: !ToolCallKind
     , nestedDescription :: !Text
@@ -150,7 +170,32 @@ newCodeModeToolSet
     -> CodeModeNestedInvoke
     -> [CodeModeNestedSpec]
     -> IO (Either Text CodeModeToolSet)
-newCodeModeToolSet mode detailVisibility workerPath invoke specs =
+newCodeModeToolSet = newCodeModeToolSetWithBackend JavaScriptBackend
+
+newCodeModeToolSetWithBackend
+    :: CodeModeBackend
+    -> ToolMode
+    -> ImageDetailVisibility
+    -> FilePath
+    -> CodeModeNestedInvoke
+    -> [CodeModeNestedSpec]
+    -> IO (Either Text CodeModeToolSet)
+newCodeModeToolSetWithBackend = newCodeModeToolSetWithRepair Nothing
+
+-- | Optional compiler repair is confined to Haskell cells. JavaScript and
+-- startup probes never invoke the repair model.
+newCodeModeToolSetWithRepair
+    :: Maybe Haskell.HaskellRepairHandler
+    -> CodeModeBackend
+    -> ToolMode
+    -> ImageDetailVisibility
+    -> FilePath
+    -> CodeModeNestedInvoke
+    -> [CodeModeNestedSpec]
+    -> IO (Either Text CodeModeToolSet)
+newCodeModeToolSetWithRepair repair HaskellBackend _mode detailVisibility _workerPath invoke specs =
+    newHaskellCodeModeToolSet repair detailVisibility invoke specs
+newCodeModeToolSetWithRepair _repair JavaScriptBackend mode detailVisibility workerPath invoke specs =
     case buildNestedTools specs of
         Left err -> pure (Left err)
         Right nested -> do
@@ -212,6 +257,142 @@ newCodeModeToolSet mode detailVisibility workerPath invoke specs =
                                     closeCodeModeHost host
                                 }
 
+newHaskellCodeModeToolSet
+    :: Maybe Haskell.HaskellRepairHandler
+    -> ImageDetailVisibility
+    -> CodeModeNestedInvoke
+    -> [CodeModeNestedSpec]
+    -> IO (Either Text CodeModeToolSet)
+newHaskellCodeModeToolSet repair detailVisibility invoke specs =
+    case prepare specs of
+        Left err -> pure (Left err)
+        Right (nested, bindings) -> do
+            supportPath <- bundledHaskellCodeModeSupportPath
+            bracketOnError (Haskell.newHaskellHost supportPath)
+                (either (const (pure ())) Haskell.closeHaskellHost) \case
+                Left err -> pure (Left err)
+                Right host -> construct host nested bindings
+  where
+    prepare currentSpecs = do
+        nested <- buildRefreshedNestedTools currentSpecs
+        bindings <- generateHaskellBindingsWithOutputs
+            [ (name, definition.nestedParameters, definition.nestedOutputSchema)
+            | (name, definition) <- Map.toAscList nested
+            ]
+        pure (nested, bindings)
+
+    construct host nested bindings = do
+        nextInvocation <- newIORef (0 :: Int)
+        hints <- newIORef []
+        let observeInvoke tool call = do
+                result <- invoke tool call
+                case result of
+                    Right completed
+                        | Nothing <- tool.appToolOutputMetadata >>= (.outputSchema)
+                        , observableResult tool.appToolOutputMetadata completed
+                        , Just value <- structuredNestedResult tool.appToolOutputMetadata completed ->
+                            atomicModifyIORef' hints \old ->
+                                let key = hintKey tool
+                                    shape = inferReturnShape value
+                                    merged = maybe shape (mergeReturnShapes shape) (lookup key old)
+                                in (take 128 ((key, merged) : filter ((/= key) . fst) old), ())
+                    _ -> pure ()
+                pure result
+            withHints observed = Map.map \definition ->
+                case lookup (hintKey definition.nestedAppTool) observed of
+                    Nothing -> definition
+                    Just shape -> definition
+                        { nestedDescription = definition.nestedDescription
+                            <> "\n" <> renderReturnShapeHint shape }
+            surface current currentBindings =
+                [ execToolWith HaskellBackend
+                    (\source yieldMs -> projectResult <$> Haskell.execHaskellCellWithRepair
+                        (fmap (\repairSource request -> repairSource
+                            request{Haskell.repairBindings = currentBindings.bindingsDeclarations}) repair)
+                        host source
+                        currentBindings.bindingsModuleSource
+                        (runNestedTool observeInvoke nextInvocation current) yieldMs)
+                    (haskellExecDescription currentBindings current)
+                , waitToolWith
+                    (\identifier yieldMs -> projectResult <$> Haskell.waitHaskellCell host identifier yieldMs)
+                    (\identifier -> projectResult <$> Haskell.terminateHaskellCell host identifier)
+                ]
+            projectResult = fmap (projectImageDetail detailVisibility)
+        probe <- Haskell.execHaskellCell host "pure ()"
+            bindings.bindingsModuleSource
+            (\_ _ -> pure (Left "tool calls are unavailable during the readiness probe"))
+            30000
+        case probe of
+            Right CodeModeFinished{} -> pure $ Right CodeModeToolSet
+                { codeModeTools = surface nested bindings
+                , codeModeNestedToolNames = Map.keys nested
+                -- Refresh is pure: the captured module is compiled when its
+                -- first cell executes, not while another cell may be using
+                -- GHCi for discovery. A load failure is explicit and cannot
+                -- run against another generation's callback table.
+                , codeModeRefreshToolSet = \currentSpecs -> do
+                    observed <- readIORef hints
+                    pure $ fmap (\(current, currentBindings) ->
+                        surface (withHints observed current) currentBindings) (prepare currentSpecs)
+                , codeModeReadBackgroundTasks = do
+                    cells <- Haskell.readRunningHaskellCells host
+                    pure
+                        [ BackgroundTaskStatus
+                            { taskKey = "code-mode:" <> identifier
+                            , taskLabel = "Haskell cell " <> identifier
+                            , taskStartedAt = startedAt
+                            , taskAutoResume = False
+                            }
+                        | (identifier, startedAt) <- cells
+                        ]
+                , closeCodeModeToolSet = Haskell.closeHaskellHost host
+                }
+            unexpected -> do
+                Haskell.closeHaskellHost host
+                pure $ Left $ "Haskell code-mode readiness probe failed: "
+                    <> Text.pack (show unexpected)
+
+-- Original registry identity and both schemas, not a normalized binding name.
+-- The cache is session-local and bounded; it stores shapes, never response values.
+hintKey :: AppTool -> Text
+hintKey tool = tool.appToolName <> "\n"
+    <> Text.pack (show tool.appToolSchema) <> "\n"
+    <> Text.pack (show tool.appToolOutputMetadata)
+
+observableResult :: Maybe ToolOutputMetadata -> ToolCallResult -> Bool
+observableResult (Just information) result
+    | information.outputFormat == McpToolOutput
+    , Just (Object fields) <- toolCallResultStructured result =
+        KeyMap.lookup "isError" fields /= Just (Bool True)
+            && case KeyMap.lookup "content" fields of
+                Just (Array blocks) -> all isMcpTextBlock blocks
+                Nothing -> True
+                _ -> False
+observableResult (Just information) _
+    | information.outputFormat == McpToolOutput = False
+observableResult _ _ = True
+
+-- | Haskell has unrestricted IO, but provider-specific media metadata must
+-- still obey the selected model's wire format.
+projectImageDetail :: ImageDetailVisibility -> CodeModeResult -> CodeModeResult
+projectImageDetail ImageDetailVisible result = result
+projectImageDetail ImageDetailHidden result = case result of
+    CodeModeFinished identifier value -> CodeModeFinished identifier (project value)
+    CodeModeFailed identifier value message -> CodeModeFailed identifier (project value) message
+    CodeModeRunning identifier value -> CodeModeRunning identifier (project value)
+    CodeModeTerminated identifier value -> CodeModeTerminated identifier (project value)
+  where
+    project (Object fields) =
+        Object $ KeyMap.mapWithKey
+            (\key value -> if key == "content" then projectContents value else value) fields
+    project value = value
+    projectContents (Array items) = Array (fmap projectItem items)
+    projectContents value = value
+    projectItem (Object fields)
+        | Just (String "image") <- KeyMap.lookup "type" fields =
+            Object (KeyMap.delete "detail" fields)
+    projectItem value = value
+
 probeCodeModeConfig :: CodeModeConfig -> IO (Either Text ())
 probeCodeModeConfig config = do
     result <- withCodeModeHost config \host ->
@@ -268,6 +449,7 @@ buildNestedTools =
             Right $ Map.insert codeName
                 NestedTool
                     { nestedAppTool = tool
+                    , nestedOutputSchema = tool.appToolOutputMetadata >>= (.outputSchema)
                     , nestedRuntimeName = tool.appToolName
                     , nestedCallKind = case tool.appToolSchema of
                         FreeformApplyPatchSchema -> CustomCallKind
@@ -355,18 +537,59 @@ runNestedTool invoke nextInvocation nested codeName arguments =
             , callKind = tool.nestedCallKind
             , argumentsEncrypted = False
             }
-        pure (nestedResultValue <$> result)
+        pure (projectNestedResult tool.nestedAppTool.appToolOutputMetadata <$> result)
 
-nestedResultValue :: ToolCallResult -> Value
-nestedResultValue result =
+-- | Only explicitly marked structured tools are decoded. A local read_file
+-- result containing JSON remains text. Failed and multimodal results retain
+-- their original representation instead of being mistaken for typed data.
+projectNestedResult :: Maybe ToolOutputMetadata -> ToolCallResult -> Value
+projectNestedResult metadata result =
     case toolCallResultImages result of
-        [] -> String result.output
+        [] | Just value <- structuredNestedResult metadata result -> value
+           | otherwise -> String result.output
         image : _ ->
             Object . KeyMap.fromList $
                 [ ("image_url", String image.imageUrl) ]
                     <> [ ("output_hint", String result.output)
                        | not (Text.null (Text.strip result.output))
                        ]
+
+structuredNestedResult :: Maybe ToolOutputMetadata -> ToolCallResult -> Maybe Value
+structuredNestedResult metadata result
+    | result.toolResultOutcome /= Just ToolSucceeded = Nothing
+    | not (null (toolCallResultImages result)) = Nothing
+    | Just information <- metadata = case information.outputFormat of
+        JsonToolOutput -> toolCallResultStructured result <|> decoded
+        McpToolOutput -> case toolCallResultStructured result of
+            Just envelope -> Just (unwrapMcpResult envelope)
+            -- Legacy text is already rendered: never treat payload properties
+            -- named content/structuredContent as another protocol envelope.
+            Nothing -> decoded
+    | otherwise = Nothing
+  where
+    decoded = Aeson.decodeStrict' (TextEncoding.encodeUtf8 result.output)
+
+unwrapMcpResult :: Value -> Value
+unwrapMcpResult value@(Object fields)
+    | KeyMap.lookup "isError" fields == Just (Bool True) = value
+    | Just (Array content) <- KeyMap.lookup "content" fields
+    , not (all isMcpTextBlock content) = value
+    | Just structured <- KeyMap.lookup "structuredContent" fields
+    , Just (Array _) <- KeyMap.lookup "content" fields = structured
+    | Just (Array content) <- KeyMap.lookup "content" fields
+    , [Object block] <- Vector.toList content
+    , Just (String text) <- KeyMap.lookup "text" block =
+        fromMaybe (String text) (Aeson.decodeStrict' (TextEncoding.encodeUtf8 text))
+    | otherwise = value
+unwrapMcpResult value = value
+
+isMcpTextBlock :: Value -> Bool
+isMcpTextBlock (Object block) =
+    KeyMap.lookup "type" block == Just (String "text")
+        && case KeyMap.lookup "text" block of
+            Just (String _) -> True
+            _ -> False
+isMcpTextBlock _ = False
 
 nestedToolArguments :: ToolCallKind -> Value -> Either Text Text
 nestedToolArguments CustomCallKind = \case
@@ -399,28 +622,40 @@ defaultWaitYieldTimeMs = 10000
 
 execTool :: CodeModeHost -> [CodeModeToolMetadata] -> Text -> AppTool
 execTool host nestedTools description =
+    execToolWith JavaScriptBackend
+        (\source yieldMs -> execCodeCellWithTools host source nestedTools yieldMs)
+        description
+
+type ExecuteCell = Text -> Int -> IO (Either CodeModeError CodeModeResult)
+
+execToolWith :: CodeModeBackend -> ExecuteCell -> Text -> AppTool
+execToolWith backend execute description =
     withAsyncToolCalls $
     freeformGrammarAppToolWithExecution
         "exec"
         description
         "lark"
-        codeModeExecGrammar
-        AlwaysReadOnly
-        -- The JavaScript source is opaque to the outer scheduler and may
+        (case backend of
+            JavaScriptBackend -> codeModeExecGrammar
+            HaskellBackend -> Text.replace "\\/\\/" "--" codeModeExecGrammar)
+        (case backend of
+            JavaScriptBackend -> AlwaysReadOnly
+            HaskellBackend -> AlwaysPrompt)
+        -- Source is opaque to the outer scheduler and may
         -- invoke any projected tool, including mutating tools. Treat the
         -- wrapper as an exclusive call; concurrency requested inside the
-        -- cell remains explicit in the JavaScript (for example Promise.all).
+        -- cell remains explicit in the submitted program.
         TurnSequential
         (streamingRichTextTool "exec" \_emit source ->
-            runExec host nestedTools (ExecArgs source))
+            runExec backend execute (ExecArgs source))
 
 runExec
-    :: CodeModeHost
-    -> [CodeModeToolMetadata]
+    :: CodeModeBackend
+    -> ExecuteCell
     -> ExecArgs
     -> IO (Either Text ToolHandlerResult)
-runExec host nestedTools args =
-    case parseExecSource args.source of
+runExec backend execute args =
+    case parseExecSourceFor backend args.source of
         Left err -> pure (Left err)
         Right (source, pragma)
             | maybe False (< 0) pragma.yieldTimeMs ->
@@ -439,10 +674,8 @@ runExec host nestedTools args =
                     "exec pragma field `max_output_tokens` must be a non-negative safe integer")
             | otherwise -> do
                 started <- getCurrentTime
-                result <- execCodeCellWithTools
-                    host
+                result <- execute
                     source
-                    nestedTools
                     (resolveYieldTimeoutMs
                         (fromMaybe defaultExecYieldTimeMs pragma.yieldTimeMs))
                 finished <- getCurrentTime
@@ -462,20 +695,25 @@ resolveYieldTimeoutMs requested
     | otherwise = max 1 requested
 
 parseExecSource :: Text -> Either Text (Text, ExecPragma)
-parseExecSource raw
+parseExecSource = parseExecSourceFor JavaScriptBackend
+
+parseExecSourceFor :: CodeModeBackend -> Text -> Either Text (Text, ExecPragma)
+parseExecSourceFor backend raw
     | Text.null (Text.strip raw) =
         Left
-            "exec expects raw JavaScript source text (non-empty). Provide JS only, optionally with first-line `// @exec: {\"yield_time_ms\": 10000, \"max_output_tokens\": 1000}`."
+            ("exec expects raw " <> language <> " source text (non-empty). Provide "
+                <> shortLanguage <> " only, optionally with first-line `" <> comment
+                <> " @exec: {\"yield_time_ms\": 10000, \"max_output_tokens\": 1000}`.")
     | otherwise =
         let (first, restWithNewline) = Text.breakOn "\n" raw
             trimmed = Text.stripStart first
-        in case Text.stripPrefix "// @exec:" trimmed of
+        in case Text.stripPrefix (comment <> " @exec:") trimmed of
             Nothing -> Right (raw, ExecPragma Nothing Nothing)
             Just directive
                 | Text.null restWithNewline
                     || Text.null (Text.strip (Text.drop 1 restWithNewline)) ->
                     Left
-                        "exec pragma must be followed by JavaScript source on subsequent lines"
+                        ("exec pragma must be followed by " <> language <> " source on subsequent lines")
                 | Text.null (Text.strip directive) ->
                     Left
                         "exec pragma must be a JSON object with supported fields \
@@ -494,6 +732,13 @@ parseExecSource raw
                                     \`max_output_tokens` must be non-negative safe integers"
                             | otherwise ->
                                 Right (Text.drop 1 restWithNewline, pragma)
+  where
+    (language, comment) = case backend of
+        JavaScriptBackend -> ("JavaScript", "//")
+        HaskellBackend -> ("Haskell", "--")
+    shortLanguage = case backend of
+        JavaScriptBackend -> "JS"
+        HaskellBackend -> "Haskell"
 
 data WaitArgs = WaitArgs
     { cellId :: Text
@@ -513,6 +758,13 @@ waitArgsDecoder = objectArgsExact
 
 waitTool :: CodeModeHost -> AppTool
 waitTool host =
+    waitToolWith (waitCodeCell host) (terminateCodeCell host)
+
+waitToolWith
+    :: (Text -> Int -> IO (Either CodeModeError CodeModeResult))
+    -> (Text -> IO (Either CodeModeError CodeModeResult))
+    -> AppTool
+waitToolWith wait terminate =
     withAsyncToolCalls $
     jsonAppToolWithExecution
         "wait"
@@ -528,10 +780,14 @@ waitTool host =
         ]
         AlwaysReadOnly
         ParallelSafe
-        (typedStreamingRichTool "wait" waitArgsDecoder (\_emit -> runWait host))
+        (typedStreamingRichTool "wait" waitArgsDecoder (\_emit -> runWait wait terminate))
 
-runWait :: CodeModeHost -> WaitArgs -> IO (Either Text ToolHandlerResult)
-runWait host args
+runWait
+    :: (Text -> Int -> IO (Either CodeModeError CodeModeResult))
+    -> (Text -> IO (Either CodeModeError CodeModeResult))
+    -> WaitArgs
+    -> IO (Either Text ToolHandlerResult)
+runWait wait terminate args
     | maybe False (< 0) args.yieldTimeMs =
         pure (Left "yield_time_ms must be non-negative")
     | maybe False (< 0) args.maxTokens =
@@ -540,8 +796,8 @@ runWait host args
         started <- getCurrentTime
         result <-
             if args.terminate
-                then terminateCodeCell host args.cellId
-                else waitCodeCell host args.cellId
+                then terminate args.cellId
+                else wait args.cellId
                     (resolveYieldTimeoutMs
                         (fromMaybe defaultWaitYieldTimeMs args.yieldTimeMs))
         finished <- getCurrentTime
@@ -686,7 +942,7 @@ renderCodeModeError :: CodeModeError -> Text
 renderCodeModeError = \case
     CodeModeStartupError err -> "code-mode worker failed to start: " <> err
     CodeModeProtocolError err -> "code-mode protocol failure: " <> err
-    CodeModeExecutionError err -> "JavaScript execution failed: " <> err
+    CodeModeExecutionError err -> "code-mode execution failed: " <> err
     CodeModeResourceError err -> "code-mode resource limit: " <> err
     CodeModeUnknownCell cellId -> "exec cell " <> cellId <> " not found"
     CodeModeBusyObserver cellId ->
@@ -731,6 +987,37 @@ execDescription includeDeclarations detailVisibility tools =
             <> (if includeDeclarations && not (null tools)
                     then [renderNestedToolSections tools]
                     else [])
+
+haskellExecDescription :: HaskellBindings -> Map Text NestedTool -> Text
+haskellExecDescription bindings tools =
+    Text.intercalate "\n\n"
+        [ Text.unlines
+            [ "Run Haskell code to orchestrate/compose tool calls."
+            , "- Provide one raw Haskell expression of type IO (), normally a do block. No markdown fences, imports, module declarations, or GHCi commands."
+            , "- The complete expression is typechecked before execution. Compile errors execute no tool calls; runtime failures do not roll back earlier effects."
+            , "- This experimental runtime is NOT sandboxed. Ordinary IO has the worker process's permissions. Generated Tools bindings use the normal approval-aware dispatcher; direct IO does not."
+            , "- Call generated functions and constructors qualified as Tools.<name>. Results are Aeson Value: usually String containing tool output, or an object containing image_url."
+            , "- Only one cell may run at a time. If exec yields a cell ID, use wait or terminate it before starting another cell."
+            , "- Prefer concurrency whenever operations are independent: batch independent tool calls within one cell instead of executing them sequentially or in separate exec calls. Use the preloaded mapConcurrently f inputs or forConcurrently inputs f for collections, and concurrently actionA actionB for two independent actions. Use mapConcurrently_, forConcurrently_, or concurrently_ when results are not needed."
+            , "- Keep dependent operations and conflicting writes sequential, obey tool-specific concurrency restrictions, and use bounded batches for large collections or rate-limited services. Await all work before returning; do not leave detached threads running."
+            , "- Local bindings last only for this expression. Use explicit store/load for JSON-compatible state. Worker termination may discard ambient process state; effects are never replayed."
+            , "- Optional first line: -- @exec: {\"yield_time_ms\": 10000, \"max_output_tokens\": 1000}"
+            , "- yield_time_ms defaults to 30000; it returns early without cancelling the cell. max_output_tokens defaults to 10000."
+            , "- Use text for final output; avoid emitting large intermediate tool results."
+            , "- Preloaded helpers: text :: Text -> IO (); json :: Value -> IO (); store :: Text -> Value -> IO (); load :: Text -> IO Value."
+            , "- decodeJson :: FromJSON a => Value -> Either Text a decodes structured tool output or JSON inside a String result."
+            , "- image :: Value -> IO () accepts a data-URL String or an object containing image_url; it does not load file paths. generatedImage :: Value -> IO () is an alias. audio :: Value -> IO () accepts an explicit content envelope with type=audio. Do not print encoded media as text."
+            ]
+        , "Preloaded environment (do not repeat imports in the cell):\n"
+            <> Haskell.haskellCellEnvironment
+        , Haskell.haskellCellGuidance
+        , "Available tool descriptions:\n" <> Text.intercalate "\n\n"
+            [ "### Tools." <> normalizeHaskellIdentifier name <> "\n" <> definition.nestedDescription
+            | (name, definition) <- Map.toAscList tools
+            ]
+        , "Haskell declarations (Tools is already imported qualified):\n```haskell\n"
+            <> bindings.bindingsDeclarations <> "\n```"
+        ]
 
 execDescriptionTemplate :: ImageDetailVisibility -> Text
 execDescriptionTemplate detailVisibility =

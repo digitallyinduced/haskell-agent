@@ -13,13 +13,15 @@ import Agent.MCP.Client
 import Agent.MCP.Types
 import Agent.Tools.Types
     ( AppTool(..)
+    , ToolOutputMetadata(..)
+    , ToolOutputFormat(..)
     , ApprovalRequirement(..)
     , ApprovalRule(..)
     , ToolAsyncCapability(..)
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
     )
-import Agent.ToolDispatch (ToolCall(..), typedTool, typedToolWithCall)
+import Agent.ToolDispatch (ToolCall(..), typedTool, typedRichToolWithCall)
 import Agent.Concurrent (forConcurrentlyBounded_)
 import Control.Concurrent.Async
     ( asyncWithUnmask
@@ -979,6 +981,7 @@ codexMcpSearchTool fleet (McpToolDiscovery selected) = AppTool
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
     , appToolAsyncCapability = BlockingOnly
+    , appToolOutputMetadata = Nothing
     }
 
 -- | A direct call retains the same approval-time catalog binding and safe
@@ -992,17 +995,21 @@ deferredCatalogTool artifactDirectory fleet name advertised = AppTool
         describeToolFor advertised.catalogClient.clientConfig advertised.catalogTool
     , appToolSchema = RawJsonFunctionSchema
         (Aeson.toJSON advertised.catalogTool.discoveredInputSchema)
-    , appToolHandler = typedToolWithCall name rawObjectDecoder \call arguments -> do
+    , appToolHandler = typedRichToolWithCall name rawObjectDecoder \call arguments -> do
         current <- Map.lookup name <$> readTVarIO fleet.mcpFleetCatalog
         case current of
             Just entry | sameCatalogTool advertised entry ->
-                callApprovedCatalogTool artifactDirectory fleet call name arguments
+                callApprovedCatalogToolUsing callDiscoveredToolRichWith artifactDirectory fleet call name arguments
             _ -> pure (Left "MCP tool changed since discovery; run tool_search again")
     , appToolApproval = ClassifyApproval
         (catalogCallApproval fleet ((\arguments -> (name, arguments)) <$> rawObjectDecoder))
     , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
     , appToolAsyncCapability = BlockingOnly
+    , appToolOutputMetadata = Just ToolOutputMetadata
+        { outputSchema = Aeson.toJSON <$> advertised.catalogTool.discoveredOutputSchema
+        , outputFormat = McpToolOutput
+        }
     }
 
 codexSearchArgumentsDecoder :: Json.Decoder (Text, Int)
@@ -1142,6 +1149,7 @@ mcpSearchTool fleet = AppTool
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
     , appToolAsyncCapability = BlockingOnly
+    , appToolOutputMetadata = Nothing
     }
 
 grokSearchTool :: McpFleet -> AppTool
@@ -1256,6 +1264,7 @@ grokSearchTool fleet = AppTool
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
     , appToolAsyncCapability = BlockingOnly
+    , appToolOutputMetadata = Nothing
     }
 
 callCatalogEntryWithReconnect
@@ -1266,10 +1275,19 @@ callCatalogEntryWithReconnect
     -> RawJson
     -> IO (Either Text Text)
 callCatalogEntryWithReconnect artifactDirectory fleet qualifiedName entry arguments =
+    callCatalogEntryWithReconnectUsing callDiscoveredToolWith
+        artifactDirectory fleet qualifiedName entry arguments
+
+callCatalogEntryWithReconnectUsing
+    :: (Maybe FilePath -> McpClient -> McpTool -> RawJson
+        -> Maybe (McpProgress -> IO ()) -> IO (Either Text a))
+    -> Maybe FilePath -> McpFleet -> Text -> McpCatalogEntry -> RawJson
+    -> IO (Either Text a)
+callCatalogEntryWithReconnectUsing invoke artifactDirectory fleet qualifiedName entry arguments =
     catalogEntryIsLive entry >>= \case
         False -> pure (Left changedCatalogEntryMessage)
         True ->
-            callDiscoveredToolWith
+            invoke
                 artifactDirectory
                 entry.catalogClient
                 entry.catalogTool
@@ -1313,7 +1331,7 @@ callCatalogEntryWithReconnect artifactDirectory fleet qualifiedName entry argume
                                                             (Left
                                                                 changedCatalogEntryMessage)
                                                     else
-                                                        callDiscoveredToolWith
+                                                        invoke
                                                             artifactDirectory
                                                             replacement.catalogClient
                                                             replacement.catalogTool
@@ -1338,6 +1356,15 @@ callApprovedCatalogTool
     -> RawJson
     -> IO (Either Text Text)
 callApprovedCatalogTool artifactDirectory fleet call name toolArguments = do
+    callApprovedCatalogToolUsing callDiscoveredToolWith
+        artifactDirectory fleet call name toolArguments
+
+callApprovedCatalogToolUsing
+    :: (Maybe FilePath -> McpClient -> McpTool -> RawJson
+        -> Maybe (McpProgress -> IO ()) -> IO (Either Text a))
+    -> Maybe FilePath -> McpFleet -> ToolCall -> Text -> RawJson
+    -> IO (Either Text a)
+callApprovedCatalogToolUsing invoke artifactDirectory fleet call name toolArguments = do
     approved <- atomically do
         approvals <- readTVar fleet.mcpFleetApprovedCalls
         writeTVar fleet.mcpFleetApprovedCalls
@@ -1365,7 +1392,7 @@ callApprovedCatalogTool artifactDirectory fleet call name toolArguments = do
                         if not (sameCatalogTool approvedEntry replacement)
                             then pure (Left changedCatalogEntryMessage)
                             else
-                                callCatalogEntryWithReconnect
+                                callCatalogEntryWithReconnectUsing invoke
                                     artifactDirectory
                                     fleet
                                     name
@@ -1559,9 +1586,9 @@ mcpCallTool artifactDirectory fleet = AppTool
         , "required" .= (["name"] :: [Text])
         , "additionalProperties" .= False
         ]
-    , appToolHandler = typedToolWithCall "mcp_call" callArgumentsDecoder
+    , appToolHandler = typedRichToolWithCall "mcp_call" callArgumentsDecoder
         \call (name, toolArguments) ->
-            callApprovedCatalogTool
+            callApprovedCatalogToolUsing callDiscoveredToolRichWith
                 artifactDirectory fleet call name toolArguments
     , appToolApproval =
         ClassifyApproval
@@ -1569,6 +1596,7 @@ mcpCallTool artifactDirectory fleet = AppTool
     , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
     , appToolAsyncCapability = BlockingOnly
+    , appToolOutputMetadata = Just (ToolOutputMetadata Nothing McpToolOutput)
     }
 
 grokUseTool :: Maybe FilePath -> McpFleet -> AppTool
@@ -1591,9 +1619,9 @@ grokUseTool artifactDirectory fleet = AppTool
         , "required" .= (["tool_name", "tool_input"] :: [Text])
         , "additionalProperties" .= False
         ]
-    , appToolHandler = typedToolWithCall "use_tool" grokCallArgumentsDecoder
+    , appToolHandler = typedRichToolWithCall "use_tool" grokCallArgumentsDecoder
         \call (name, toolArguments) ->
-            callApprovedCatalogTool
+            callApprovedCatalogToolUsing callDiscoveredToolRichWith
                 artifactDirectory fleet call name toolArguments
     , appToolApproval =
         ClassifyApproval
@@ -1601,6 +1629,7 @@ grokUseTool artifactDirectory fleet = AppTool
     , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
     , appToolAsyncCapability = BlockingOnly
+    , appToolOutputMetadata = Just (ToolOutputMetadata Nothing McpToolOutput)
     }
 
 mcpListResourcesTool :: McpFleet -> AppTool
@@ -1638,6 +1667,7 @@ mcpListResourcesTool fleet = AppTool
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
     , appToolAsyncCapability = BlockingOnly
+    , appToolOutputMetadata = Nothing
     }
 
 mcpReadResourceTool :: McpFleet -> AppTool
@@ -1666,6 +1696,7 @@ mcpReadResourceTool fleet = AppTool
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
     , appToolAsyncCapability = BlockingOnly
+    , appToolOutputMetadata = Nothing
     }
   where
     readArgumentsDecoder = Json.object do

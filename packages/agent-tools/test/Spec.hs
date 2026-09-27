@@ -2,7 +2,11 @@ module Main (main) where
 
 import qualified Agent.ToolDispatchSpec as ToolDispatchSpec
 import qualified Agent.Tools.CodeMode.HostSpec as CodeModeHostSpec
+import qualified Agent.Tools.CodeMode.Haskell.BindingsSpec as HaskellBindingsSpec
+import qualified Agent.Tools.CodeMode.Haskell.HostSpec as HaskellHostSpec
+import qualified Agent.Tools.CodeMode.ToolSpec as CodeModeToolSpec
 import qualified Agent.Tools.CodeMode.ProtocolSpec as CodeModeProtocolSpec
+import qualified Agent.Tools.CodeMode.ReturnShapeSpec as ReturnShapeSpec
 import qualified Agent.Tools.DangerousSpec as DangerousSpec
 import qualified Agent.Tools.FileSystem.GrepSpec as GrepSpec
 import qualified Agent.Tools.FileSystem.ListDirSpec as ListDirSpec
@@ -42,5 +46,9 @@ main = hspec do
     ViewImageSpec.spec
     RenderChartSpec.spec
     CodeModeHostSpec.spec
+    HaskellBindingsSpec.spec
+    HaskellHostSpec.spec
+    CodeModeToolSpec.spec
     CodeModeProtocolSpec.spec
+    ReturnShapeSpec.spec
     DangerousSpec.spec

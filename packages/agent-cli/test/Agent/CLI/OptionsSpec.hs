@@ -638,6 +638,44 @@ spec = do
             parseArgs ["--ghci", "--no-ghci"]
                 `shouldBe` Right (RunAgent defaultCliOptions { optGhci = False })
 
+        it "selects the code-mode backend independently of enablement" do
+            defaultCliOptions.optCodeModeBackend `shouldBe` JavaScriptBackend
+            parseArgs ["--code-mode-backend", "haskell"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optCodeModeBackend = HaskellBackend })
+            parseArgs ["--code-mode", "--code-mode-backend=haskell"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optCodeMode = CodeModeEnabled
+                    , optCodeModeBackend = HaskellBackend
+                    })
+            parseArgs ["--code-mode-backend=haskell", "--code-mode-backend=javascript"]
+                `shouldBe` Right (RunAgent defaultCliOptions)
+            parseArgs ["--no-code-mode", "--code-mode-backend=haskell"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optCodeMode = CodeModeDisabled
+                    , optCodeModeBackend = HaskellBackend
+                    })
+
+        it "rejects unsupported code-mode backends" do
+            parseArgs ["--code-mode-backend", "python"]
+                `shouldSatisfy` \case
+                    Left _ -> True
+                    Right _ -> False
+
+        it "enables Haskell compiler repair only by explicit opt-in" do
+            defaultCliOptions.optCodeModeRepair `shouldBe` False
+            parseArgs ["--code-mode-repair"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optCodeModeRepair = True })
+            parseArgs ["--code-mode-repair", "--no-code-mode-repair"]
+                `shouldBe` Right (RunAgent defaultCliOptions)
+
+        it "preserves the code-mode backend across fresh-session option resets" do
+            let options = freshSessionOptions
+                    defaultCliOptions { optCodeModeBackend = HaskellBackend }
+                    (fromFilePath "/project")
+            options.optCodeModeBackend `shouldBe` HaskellBackend
+
     describe "resolveApprovalPolicy" do
         it "auto-approves one-shot scripts without a TTY" do
             resolveApprovalPolicy defaultCliOptions { optPrompt = Just "hi" } False False
