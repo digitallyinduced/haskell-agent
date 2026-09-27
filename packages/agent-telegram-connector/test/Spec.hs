@@ -108,11 +108,24 @@ coreTests = hspec do
                 `shouldSatisfyIO` isLeft
             readIORef calls `shouldReturn` 0
     describe "Private conversation admission" do
-        it "rejects message identifiers outside the durable signed range" do
+        it "bounds message identifiers for messages, edits, reactions and callbacks" do
             case classify (messagePayload 17 17 False "private") of
-                Just (_, _, ConversationMessage message) -> mapM_ (\identifier ->
-                    classifyPrivateConversationUpdate (TelegramUpdate 1 (Just message { messageId = identifier }) Nothing Nothing Nothing Nothing)
-                        `shouldBe` Nothing) [0, -1, 9223372036854775808]
+                Just (_, _, ConversationMessage message) -> do
+                    let actor = TelegramUser 17 False Nothing Nothing Nothing
+                        updates identifier =
+                            let changed = message { messageId = identifier }
+                                empty = TelegramUpdate 1 Nothing Nothing Nothing Nothing Nothing
+                            in [ empty { updateMessage = Just changed }
+                               , empty { updateEditedMessage = Just changed }
+                               , empty { updateMessageReaction = Just (TelegramMessageReaction message.messageChat identifier (Just actor) [] []) }
+                               , empty { updateCallbackQuery = Just (TelegramCallbackQuery "callback" actor (Just changed) (Just "opaque")) }
+                               ]
+                    mapM_ (\identifier -> mapM_ (\update ->
+                        classifyPrivateConversationUpdate update `shouldBe` Nothing)
+                        (updates identifier)) [0, -1, 9223372036854775808]
+                    mapM_ (\identifier -> mapM_ (\update ->
+                        classifyPrivateConversationUpdate update `shouldSatisfy` present)
+                        (updates identifier)) [1, 9223372036854775807]
                 _ -> expectationFailure "Expected fixture message"
         it "shares message content recognition with the standalone connector" do
             case classify (messagePayload 17 17 False "private") of
