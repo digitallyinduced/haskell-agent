@@ -382,6 +382,16 @@ sendQueryContent turn content = do
 
 userContentValue :: UserContentBlock -> Aeson.Value
 userContentValue = \case
+    UserDocumentBlock{documentTitle, documentBytes} ->
+        Aeson.object $
+            [ "type" Aeson..= ("document" :: Text)
+            , "source" Aeson..= Aeson.object
+                [ "type" Aeson..= ("base64" :: Text)
+                , "media_type" Aeson..= ("application/pdf" :: Text)
+                , "data" Aeson..=
+                    TextEncoding.decodeUtf8 (Base64.encode documentBytes)
+                ]
+            ] <> maybe [] (\title -> ["title" Aeson..= title]) documentTitle
     UserTextBlock{text} ->
         Aeson.object
             [ "type" Aeson..= ("text" :: Text)

@@ -681,6 +681,44 @@ spec = do
                     submitted `shouldNotContain` "data:image/"
                     submitted `shouldNotContain` "[image image/png]"
 
+        it "imports native PDF tool results and isolates invalid file payloads" $
+            withFakeClaude \fake -> do
+                let document source = InputFilePart Nothing source Nothing Nothing (Just "invoice.pdf") Nothing
+                    parts =
+                        [ InputTextPart "before" Nothing
+                        , document (Just "data:application/pdf;base64,JVBERi0x")
+                        , InputTextPart "after" Nothing
+                        , document (Just "data:application/pdf;base64,SECRET_INVALID!")
+                        , document Nothing
+                        ]
+                transcript <- newIORef [FunctionCallOutputItem FunctionCallOutput
+                    { itemId = Nothing, callId = "document-read", name = Just "read_file"
+                    , namespace = Nothing, provider = Nothing
+                    , output = rawJsonFromEncoding (Aeson.toEncoding parts)
+                    , status = Nothing, async = Nothing, localOutcome = Nothing
+                    }]
+                initialHistory <- readIORef transcript
+                state <- newIORef (initialBackendSnapshot initialHistory)
+                result <- timeout 5_000_000 $
+                    withClaudeCodeBackend
+                        (defaultClaudeCodeOptions fake.executable fake.workingDirectory)
+                        Nothing (pure defaultResponseCreateParams) transcript \backend ->
+                            submitBackendWithState state backend Nothing [UserMessage "continue"] (const (pure ()))
+                result `shouldSatisfy` \case
+                    Just (Right _) -> True
+                    _ -> False
+                submitted <- readFile fake.promptLog
+                Text.count "\"type\":\"document\"" (Text.pack submitted) `shouldBe` 1
+                submitted `shouldContain` "\"media_type\":\"application/pdf\""
+                submitted `shouldContain` "\"data\":\"JVBERi0x\""
+                submitted `shouldContain` "\"title\":\"invoice.pdf\""
+                submitted `shouldContain` "before"
+                submitted `shouldContain` "after"
+                submitted `shouldContain` "Historical document unavailable"
+                submitted `shouldNotContain` "SECRET_INVALID"
+                submitted `shouldNotContain` "data:application/pdf"
+                submitted `shouldNotContain` "invoice.pdf omitted"
+
         it "retains ordinary JSON tool-result arrays and text-tagged objects during fresh import" $
             withFakeClaude \fake -> do
                 let output = rawJsonFromEncoding (Aeson.toEncoding ([1, 2] :: [Int]))

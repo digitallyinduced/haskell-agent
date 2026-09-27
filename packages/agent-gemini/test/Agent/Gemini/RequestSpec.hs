@@ -14,6 +14,44 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Gemini request projection" do
+    it "projects native PDF tool results as inline data without JSON fallback" do
+        let parts =
+                [ InputTextPart "before" Nothing
+                , InputFilePart Nothing (Just "data:application/pdf;base64,JVBERi0x")
+                    Nothing Nothing (Just "invoice.pdf") Nothing
+                , InputTextPart "after" Nothing
+                ]
+            output = FunctionCallOutputItem FunctionCallOutput
+                { localOutcome = Nothing, itemId = Nothing
+                , callId = "document-read", name = Just "read_file"
+                , namespace = Nothing, provider = Nothing
+                , output = rawJsonFromEncoding (Aeson.toEncoding parts)
+                , status = Just ItemCompleted, async = Nothing
+                }
+            params :: ResponseCreateParams
+            params = defaultResponseCreateParams
+                { input = Just (ResponseInputItems [output]) }
+        fmap (.requestBody) (buildRequest "gemini-test" params)
+            `shouldBe` Right (object
+                [ "contents" .= [object
+                    [ "role" .= ("user" :: Text)
+                    , "parts" .=
+                        [ object ["functionResponse" .= object
+                            [ "id" .= ("document-read" :: Text)
+                            , "name" .= ("read_file" :: Text)
+                            , "response" .= object
+                                ["result" .= ("Tool result content follows." :: Text)]
+                            ]]
+                        , object ["text" .= ("before" :: Text)]
+                        , object ["inlineData" .= object
+                            [ "mimeType" .= ("application/pdf" :: Text)
+                            , "data" .= ("JVBERi0x" :: Text)
+                            ]]
+                        , object ["text" .= ("after" :: Text)]
+                        ]
+                    ]]
+                ])
+
     it "projects Claude tool-result images as ordered native parts, not JSON text" do
         let parts =
                 [ InputTextPart "before" Nothing
@@ -52,10 +90,10 @@ spec = describe "Gemini request projection" do
                     ]]
                 ])
 
-    it "omits malformed image-only tool results instead of exposing raw image JSON" do
+    mapM_ (\(tag, field) -> it ("omits malformed " <> show tag <> " tool results instead of exposing raw JSON") do
         let malformed = [object
-                [ "type" .= ("input_image" :: Text)
-                , "image_url" .= object
+                [ "type" .= (tag :: Text)
+                , field .= object
                     ["url" .= ("data:image/png;base64,cG5nLWJ5dGVz" :: Text)]
                 ]]
             output = FunctionCallOutputItem FunctionCallOutput
@@ -82,7 +120,7 @@ spec = describe "Gemini request projection" do
                         , object ["text" .= ("[Unsupported tool result content omitted]" :: Text)]
                         ]
                     ]]
-                ])
+                ])) [("input_image", "image_url"), ("input_file", "file_data")]
 
     it "projects instructions, user text, and model normalization" do
         let params = defaultResponseCreateParams

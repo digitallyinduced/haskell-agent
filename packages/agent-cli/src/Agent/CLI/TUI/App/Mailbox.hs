@@ -139,6 +139,8 @@ import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult(..)
     , ToolResultImage(..)
+    , ToolResultFile(..)
+    , toolCallResultFiles
     , toolCallResultImages
     )
 import Brick
@@ -825,6 +827,12 @@ toolCallResultLogicalBytes result =
                             (image.imageUrl : maybeToList image.imageDetail)))
                 0
                 (toolCallResultImages result))
+        `saturatingAdd` foldl'
+            (\size file ->
+                size `saturatingAdd` logicalTextsBytes [file.fileName, file.fileMimeType]
+                    `saturatingAdd` BS.length file.fileData)
+            0
+            (toolCallResultFiles result)
 
 turnOutputLogicalBytes :: TurnOutput -> Int
 turnOutputLogicalBytes output =
