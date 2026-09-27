@@ -3,13 +3,15 @@ module Main where
 import Agent.Telegram.Client
 import Agent.Telegram.Markdown
 import Agent.Telegram.Progress
+import Agent.Telegram.Presentation
+import Agent.Telegram.Types.State (TelegramChatKey (..))
 import Agent.Telegram.Reaction
 import Agent.Telegram.Internal.Text (splitTelegramText)
 import Agent.Telegram.VoicePreparation
 import Agent.Telegram.Types.Wire
 import Control.Concurrent.MVar
 import Control.Exception.Safe (finally)
-import Data.Aeson (object)
+import Data.Aeson (object, (.=))
 import Data.IORef
 import qualified Data.Text as Text
 import qualified Network.HTTP.Client as HTTP
@@ -19,6 +21,44 @@ import Test.Hspec
 
 main :: IO ()
 main = hspec do
+    describe "Pure response preparation" do
+        it "preserves topic and reply addressing independently of presentation" do
+            object (messageAddressFields (TelegramChatKey 42 (Just 7)) (Just 8))
+                `shouldBe` object
+                    [ "chat_id" .= (42 :: Integer)
+                    , "message_thread_id" .= (7 :: Integer)
+                    , "reply_parameters" .= object
+                        [ "message_id" .= (8 :: Integer)
+                        , "allow_sending_without_reply" .= True
+                        ]
+                    ]
+            object (messageAddressFields (TelegramChatKey 42 Nothing) Nothing)
+                `shouldBe` object ["chat_id" .= (42 :: Integer)]
+        it "preserves plain, HTML, and rich message wire fields" do
+            object (textPresentationFields PlainText "**Hello** <input>")
+                `shouldBe` object ["text" .= ("**Hello** <input>" :: Text.Text)]
+            object (textPresentationFields HtmlText "**Hello** <input>")
+                `shouldBe` object
+                    [ "text" .= ("<b>Hello</b> &lt;input&gt;" :: Text.Text)
+                    , "parse_mode" .= ("HTML" :: Text.Text)
+                    ]
+            object (textPresentationFields RichText "**Hello**")
+                `shouldBe` object ["rich_message" .= object ["html" .= ("<b>Hello</b>" :: Text.Text)]]
+        it "preserves keyboard rows and explicit keyboard removal" do
+            inlineKeyboardMarkup [[("Approve", "approve:1")], [("Reject", "reject:1")]]
+                `shouldBe` object ["inline_keyboard" .=
+                    [[object ["text" .= ("Approve" :: Text.Text), "callback_data" .= ("approve:1" :: Text.Text)]]
+                    ,[object ["text" .= ("Reject" :: Text.Text), "callback_data" .= ("reject:1" :: Text.Text)]]]]
+            inlineKeyboardMarkup [] `shouldBe` object ["inline_keyboard" .= ([] :: [[Int]])]
+        it "selects plain text before sending formatting-expanded content" do
+            let content = "| " <> Text.replicate 100 "x" <> " | B |\n| --- | --- |\n"
+                    <> Text.replicate 50 "| a | b |\n"
+            telegramRenderedLength content `shouldSatisfy` (> 2000)
+            boundedTextPresentationFields 2000 content `shouldBe` textPresentationFields PlainText content
+        it "uses scalar budgets without discarding supplementary characters" do
+            let content = Text.replicate 2000 "😀"
+            boundedTextPresentationFields 2000 content `shouldBe` textPresentationFields HtmlText content
+            boundedTextPresentationFields 1999 content `shouldBe` textPresentationFields PlainText content
     describe "Single-attempt Telegram transport" do
         it "rejects download traversal and encoded separators" do
             map validTelegramFilePath ["../file", "/file", "a/%2fsecret", "https://other/file"]

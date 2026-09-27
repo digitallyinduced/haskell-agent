@@ -136,6 +136,7 @@ library
                     , Agent.Runtime.Tools.Resources
                     , Agent.Runtime.Tools.Startup
     build-depends:    agent-accounts >= 0.1 && < 0.2
+                    , agent-audio >= 0.1 && < 0.2
                     , agent-codex-dialect >= 0.1 && < 0.2
                     , agent-grok-build-dialect >= 0.1 && < 0.2
                     , agent-claude >= 0.1 && < 0.2

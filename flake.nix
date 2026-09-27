@@ -936,6 +936,8 @@
                                   final.agent-integration-api
                                   final.agent-syntax
                                 ]);
+                        agent-audio = localPackage
+                            (final.callPackage ./packages/agent-audio/package.nix { });
                         agent-telegram-api = localPackage
                             (final.callPackage ./packages/agent-telegram-api/package.nix { });
                         agent-telegram = localPackage (pkgs.haskell.lib.addTestToolDepends
@@ -1633,6 +1635,7 @@
                         packages.agent-native-bridge
                         packages.agent-telegram
                         packages.agent-telegram-api
+                        packages.agent-audio
                         packages.agent-server
                         packages.agent-core
                         packages.agent-tools
@@ -1734,6 +1737,7 @@
                         '';
                     agent-telegram = agentTelegramCheckPackage;
                     agent-telegram-api = haskellPackages.agent-telegram-api;
+                    agent-audio = haskellPackages.agent-audio;
                     agent-server = agentServerCheckPackage;
                     agent-server-client =
                         haskellPackages.agent-server-client;

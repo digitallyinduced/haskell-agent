@@ -17,5 +17,5 @@ mkDerivation {
     safe-exceptions text
   ];
   description = "Reusable Telegram transport and presentation components";
-  license = lib.licenses.mit;
+  license = lib.meta.getLicenseFromSpdxId "MIT";
 }
