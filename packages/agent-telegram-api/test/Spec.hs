@@ -21,6 +21,13 @@ import Test.Hspec
 
 main :: IO ()
 main = hspec do
+    describe "Shared conversation style" do
+        it "retains the standalone conversational guidance" do
+            telegramConversationStyle `shouldBe`
+                "Keep messages concise and conversational; avoid terminal-style verbosity unless the user asks for detail. Follow the language and style of the conversation."
+        it "does not assume application delivery capabilities or coding tools" do
+            mapM_ (\instruction -> telegramConversationStyle `shouldSatisfy` (not . Text.isInfixOf instruction))
+                ["live Telegram draft", "commentary", "create_agent_session", "reaction emoji"]
     describe "Pure response preparation" do
         it "preserves topic and reply addressing independently of presentation" do
             object (messageAddressFields (TelegramChatKey 42 (Just 7)) (Just 8))

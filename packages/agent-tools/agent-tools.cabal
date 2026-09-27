@@ -51,6 +51,7 @@ library
                     , Agent.Tools.CodeMode.ReturnShape
                     , Agent.Tools.CodeMode.Tool
                     , Agent.Tools.Dangerous
+                    , Agent.Tools.Environment
                     , Agent.Tools.FileSystem
                     , Agent.Tools.FileSystem.GitIgnore
                     , Agent.Tools.FileSystem.Grep
@@ -218,6 +219,7 @@ test-suite agent-tools-test
                     , Agent.Tools.CodeMode.ProtocolSpec
                     , Agent.Tools.CodeMode.ReturnShapeSpec
                     , Agent.Tools.DangerousSpec
+                    , Agent.Tools.EnvironmentSpec
                     , Agent.Tools.FileSystem.GrepSpec
                     , Agent.Tools.FileSystem.ListDirSpec
                     , Agent.Tools.FileSystem.ReadFileSpec

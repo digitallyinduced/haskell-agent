@@ -343,6 +343,7 @@ data CodeModeSessionRuntime = CodeModeSessionRuntime
 -- may need to compose shell calls with other tools in one code-mode cell.
 -- Planning and user-input controls remain direct-only: their interaction with
 -- the conversation does not benefit from execution inside a generated program.
+-- The environment tool also stays direct so its raw Nix input needs no wrapper.
 data CodeModeToolProjection = CodeModeToolProjection
     { directCodeModeTools :: ![AppTool]
     , nestedCodeModeTools :: ![AppTool]
@@ -366,7 +367,7 @@ projectCodeModeTools mode tools = case mode of
             , "ask_user_question", "ask_secret"
             ]
     isDirectShellTool tool =
-        tool.appToolName `elem` ["shell_command", "write_stdin"]
+        tool.appToolName `elem` ["shell_command", "write_stdin", "set_environment"]
     isHostedComputerTool tool =
         case tool.appToolSchema of
             HostedComputerSchema -> True

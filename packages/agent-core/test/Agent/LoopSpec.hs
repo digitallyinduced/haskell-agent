@@ -937,7 +937,7 @@ spec = describe "runLoop" do
                 <> TextEncoding.decodeUtf8 (Base64.encode oversizedFixtureBytes)
             result = ToolCallResultWithStructured
                 "structured-image" "viewed image" FunctionCallKind AsyncToolCall
-                [ToolResultImage sourceUrl (Just "auto")] (Just ToolSucceeded) payload
+                [ToolResultImage sourceUrl (Just "auto")] (Just ToolSucceeded) payload []
         case normalizeTurnInputs [CompletedTool result] of
             [CompletedTool normalized] -> do
                 toolCallResultStructured normalized `shouldBe` Just payload

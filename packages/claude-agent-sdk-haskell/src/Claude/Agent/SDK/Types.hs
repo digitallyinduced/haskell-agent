@@ -235,6 +235,10 @@ data UserContentBlock
         { mediaType :: !Text
         , imageBytes :: !ByteString
         }
+    | UserDocumentBlock
+        { documentTitle :: !(Maybe Text)
+        , documentBytes :: !ByteString
+        }
     deriving (Eq)
 
 instance Show UserContentBlock where
@@ -244,6 +248,11 @@ instance Show UserContentBlock where
         "UserImageBlock { mediaType = " <> show mediaType
             <> ", imageBytes = <redacted>"
             <> ", imageByteLength = " <> show (ByteString.length imageBytes)
+            <> " }"
+    show UserDocumentBlock{documentTitle, documentBytes} =
+        "UserDocumentBlock { documentTitle = " <> show documentTitle
+            <> ", documentBytes = <redacted>"
+            <> ", documentByteLength = " <> show (ByteString.length documentBytes)
             <> " }"
 
 data ContentBlock

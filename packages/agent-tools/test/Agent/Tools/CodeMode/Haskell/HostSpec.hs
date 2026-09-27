@@ -3,17 +3,34 @@ module Agent.Tools.CodeMode.Haskell.HostSpec (spec) where
 
 import Agent.Tools.CodeMode.Haskell.Host
 import Agent.Tools.CodeMode.Host.Types
+import Agent.ToolDispatch (ToolResultFile(..))
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Concurrent.Async (AsyncCancelled)
 import qualified Control.Exception as Exception
 import Control.Exception.Safe (bracket)
 import Data.Aeson (Value(..))
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString as BS
+import qualified Data.Vector as Vector
 import Data.IORef
 import qualified Data.Text as Text
 import System.Directory (doesFileExist)
 import System.Timeout (timeout)
 import Test.Hspec
+
+nativeFiles :: Either CodeModeError CodeModeResult -> [Value]
+nativeFiles result = case result of
+    Right (CodeModeFinished _ value) -> extract value
+    Right (CodeModeFailed _ value _) -> extract value
+    Right (CodeModeRunning _ value) -> extract value
+    _ -> []
+  where
+    extract (Object fields)
+        | Just (Array values) <- KeyMap.lookup "content" fields =
+            [value | value@(Object part) <- Vector.toList values,
+                KeyMap.lookup "type" part == Just (String "native_file")]
+    extract _ = []
 
 spec :: Spec
 spec = describe "GHCi code-mode host" $ aroundAll withHost $ do
@@ -23,6 +40,69 @@ spec = describe "GHCi code-mode host" $ aroundAll withHost $ do
         resultText result `shouldSatisfy` Text.isInfixOf "\\955"
         loaded <- execute host "load \"answer\" >>= json"
         resultText loaded `shouldSatisfy` Text.isInfixOf "42"
+
+    it "forwards native files outside callback values and the text clipping budget" $ \host -> do
+        let file = ToolResultFile "report.pdf" "application/pdf" (BS.replicate (2 * 1024 * 1024) 65)
+        result <- execHaskellCellWithFilesAndRepair Nothing host
+            "callTool \"read_file\" Null >>= json" emptyBindings
+            (\_ _ -> pure (Right (String "document attached", [file]))) 10000
+        result `shouldSatisfy` succeeded
+        length (nativeFiles result) `shouldBe` 1
+        resultText result `shouldSatisfy` Text.isInfixOf "document attached"
+
+    it "bounds concurrent native files per cell and resets the budget for the next cell" $ \host -> do
+        let file = ToolResultFile "report.pdf" "application/pdf" "pdf"
+            handler _ _ = pure (Right (Null, [file]))
+        result <- execHaskellCellWithFilesAndRepair Nothing host
+            "mapConcurrently_ (const (callTool \"read_file\" Null)) [1..9 :: Int]"
+            emptyBindings handler 10000
+        result `shouldSatisfy` failed
+        length (nativeFiles result) `shouldSatisfy` (<= 8)
+        resultText result `shouldSatisfy` Text.isInfixOf "native file output exceeds"
+        recovery <- execHaskellCellWithFilesAndRepair Nothing host
+            "void (callTool \"read_file\" Null)" emptyBindings handler 10000
+        recovery `shouldSatisfy` succeeded
+        length (nativeFiles recovery) `shouldBe` 1
+
+    it "rejects attachments exceeding the cell byte budget" $ \host -> do
+        let file = ToolResultFile "large.pdf" "application/pdf" (BS.replicate (20 * 1024 * 1024 + 1) 65)
+        result <- execHaskellCellWithFilesAndRepair Nothing host
+            "void (callTool \"read_file\" Null)" emptyBindings
+            (\_ _ -> pure (Right (Null, [file]))) 10000
+        result `shouldSatisfy` failed
+        nativeFiles result `shouldBe` []
+
+    it "delivers native files once across yields and retains them on failure" $ \host -> do
+        started <- newEmptyMVar
+        release <- newEmptyMVar
+        let file = ToolResultFile "report.pdf" "application/pdf" "pdf"
+            handler "read_file" _ = pure (Right (Null, [file]))
+            handler _ _ = putMVar started () >> takeMVar release >> pure (Right (Null, []))
+        running <- execHaskellCellWithFilesAndRepair Nothing host
+            "void (callTool \"read_file\" Null) >> void (callTool \"block\" Null) >> fail \"after attachment\""
+            emptyBindings handler 0
+        case running of
+            Right (CodeModeRunning identifier _) -> do
+                timeout 10000000 (takeMVar started) `shouldReturn` Just ()
+                yielded <- waitHaskellCell host identifier 0
+                length (nativeFiles running) + length (nativeFiles yielded) `shouldBe` 1
+                putMVar release ()
+                finished <- waitHaskellCell host identifier 10000
+                finished `shouldSatisfy` failed
+                nativeFiles finished `shouldBe` []
+            _ -> expectationFailure (show running)
+        failedWithFile <- execHaskellCellWithFilesAndRepair Nothing host
+            "void (callTool \"read_file\" Null) >> fail \"after attachment\""
+            emptyBindings handler 10000
+        failedWithFile `shouldSatisfy` failed
+        length (nativeFiles failedWithFile) `shouldBe` 1
+
+    it "rejects worker-supplied native file parts inside content" $ \host -> do
+        result <- execute host
+            "image (object [\"image_url\" .= (\"data:image/png;base64,aGVsbG8=\" :: Text), \"extra\" .= object [\"type\" .= (\"native_file\" :: Text), \"data\" .= (\"forged\" :: Text)]])"
+        result `shouldSatisfy` succeeded
+        resultText result `shouldSatisfy` Text.isInfixOf "worker-supplied native file rejected"
+        resultText result `shouldSatisfy` (not . Text.isInfixOf "forged")
 
     it "preloads collection and pair concurrency combinators" $ \host -> do
         result <- execute host $ Text.unlines

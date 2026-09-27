@@ -110,6 +110,10 @@ permissionToolCallPromptRelative workspace call =
             detailedPrompt
                 "Run this shell command?"
                 (jsonTextFieldDefault "command" call.arguments)
+        "set_environment" ->
+            detailedPrompt
+                "Replace this session's shell environment?"
+                call.arguments
         "skill_create" ->
             "Create learned skill " <> skillIdentity call.arguments <> "?"
         "skill_update" ->
@@ -162,6 +166,7 @@ toolCallInput :: ToolCall -> Text
 toolCallInput call = case canonicalToolName call.name of
     "run_ghci" -> jsonTextFieldPartialDefault "expression" call.arguments
     "exec" -> call.arguments
+    "set_environment" -> call.arguments
     "run_terminal_cmd" -> jsonTextFieldPartialDefault "command" call.arguments
     "shell_command" -> jsonTextFieldPartialDefault "command" call.arguments
     _ -> ""

@@ -6,6 +6,7 @@ module Agent.Telegram.Presentation
     , boundedTextPresentationFields
     , messageAddressFields
     , inlineKeyboardMarkup
+    , telegramConversationStyle
     ) where
 
 import Agent.Telegram.Markdown (markdownToTelegramHtml, telegramRenderedLength)
@@ -13,6 +14,14 @@ import Agent.Telegram.Types.State (TelegramChatKey (..))
 import Data.Aeson (Value, object, (.=))
 import Data.Aeson.Key (Key)
 import Data.Text (Text)
+
+-- | Shared conversational style, without assumptions about streaming,
+-- commentary delivery, reaction support, or available agent tools.
+telegramConversationStyle :: Text
+telegramConversationStyle =
+    "Keep messages concise and conversational; avoid terminal-style "
+    <> "verbosity unless the user asks for detail. Follow the language and "
+    <> "style of the conversation."
 
 data TelegramTextPresentation = PlainText | HtmlText | RichText
     deriving (Eq, Show)

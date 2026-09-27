@@ -20,6 +20,7 @@ import Agent.Runtime.Session
 import Agent.Runtime.Session.History (foldSessionItems)
 import Agent.Runtime.Session.Preparation (PersistenceRequest(..), prepareSessionPersistence)
 import Agent.Tools.TaskPlan (TaskPlanEnv, newTaskPlanEnv)
+import Agent.Tools.Environment (restoreShellEnvironment)
 import Agent.Tools.Types
     ( ToolEnv(toolOutputMemoryStore), setToolSessionTmp, clearMemoryOutputArtifacts )
 import Control.Exception.Safe (Exception, bracketOnError, throwIO)
@@ -84,6 +85,7 @@ prepareSessionResources SessionResourcesRequest{..} hooks =
                         pure ())
                 pure tempDir
         setToolSessionTmp resourceToolEnv (Just resourceSessionTmp)
+        restoreShellEnvironment resourceToolEnv
         _ <- allocateResource scope
             (pure ())
             (\() -> clearMemoryOutputArtifacts resourceToolEnv.toolOutputMemoryStore)

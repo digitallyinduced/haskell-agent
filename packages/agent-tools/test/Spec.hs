@@ -8,6 +8,7 @@ import qualified Agent.Tools.CodeMode.ToolSpec as CodeModeToolSpec
 import qualified Agent.Tools.CodeMode.ProtocolSpec as CodeModeProtocolSpec
 import qualified Agent.Tools.CodeMode.ReturnShapeSpec as ReturnShapeSpec
 import qualified Agent.Tools.DangerousSpec as DangerousSpec
+import qualified Agent.Tools.EnvironmentSpec as EnvironmentSpec
 import qualified Agent.Tools.FileSystem.GrepSpec as GrepSpec
 import qualified Agent.Tools.FileSystem.ListDirSpec as ListDirSpec
 import qualified Agent.Tools.FileSystem.ReadFileSpec as ReadFileSpec
@@ -52,3 +53,4 @@ main = hspec do
     CodeModeProtocolSpec.spec
     ReturnShapeSpec.spec
     DangerousSpec.spec
+    EnvironmentSpec.spec

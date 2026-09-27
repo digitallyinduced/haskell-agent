@@ -70,6 +70,22 @@ spec = describe "dispatchToolCall" do
             toolCallResultStructured plain `shouldBe` Nothing
             toolCallResultStructured failed `shouldBe` Nothing
             toolCallResultOutcome failed `shouldBe` Just ToolFailed
+        it "preserves native files when attaching and replacing structured payloads" do
+            let file = ToolResultFile "report.pdf" "application/pdf" "%PDF-1.4"
+                rich = ToolHandlerResultWithFiles "report" [] [file]
+            plain <- dispatchToolCall testConfig [handler rich] call
+            toolCallResultStructured plain `shouldBe` Nothing
+            toolCallResultFiles plain `shouldBe` [file]
+            result <- dispatchToolCall testConfig
+                [handler (withToolHandlerStructuredResult payload
+                    (withToolHandlerStructuredResult Aeson.Null rich))] call
+            toolCallResultStructured result `shouldBe` Just payload
+            toolCallResultFiles result `shouldBe` [file]
+            toolCallResultFiles (withToolCallOutcome (Just ToolFailed) result)
+                `shouldBe` [file]
+            toolCallResultFiles (withToolCallResultMode AsyncToolCall result)
+                `shouldBe` [file]
+            toolCallResultOutcome result `shouldBe` Just ToolSucceeded
         it "does not turn explicit failure into success when attaching a payload" do
             result <- dispatchToolCallDetailed testConfig
                 [handler (withToolHandlerStructuredResult payload

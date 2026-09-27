@@ -8,14 +8,16 @@ module Agent.Tools.FileSystem.ReadFile
     ) where
 
 import Agent.Json.Decode (Decoder)
-import Agent.OsPath (fromText, unsafeToFilePath)
+import Agent.OsPath (fromText, toText, unsafeToFilePath)
 import Agent.ToolArgs (objectArgs, optInt, optText, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch
     ( ToolCall(..)
+    , ToolHandlerResult(..)
+    , ToolResultFile(..)
     , decodeToolArguments
     , toolArgumentsValue
-    , typedTool
+    , typedRichToolWithCall
     )
 import Agent.Tools.IO (displayPathInWorkspace, resolveForRead)
 import Agent.Tools.Scheduling
@@ -30,7 +32,8 @@ import Agent.Tools.Types
     , jsonTool
     , withSharedToolResourceClaims
     )
-import Data.Maybe (fromMaybe)
+import Agent.Tools.ViewImage (imageResultFromBytes, supportedImageMime)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.ByteString as BS
@@ -39,7 +42,7 @@ import Data.Text.Encoding.Error (lenientDecode)
 import Data.Word (Word8)
 import Control.Exception.Safe (SomeException, try)
 import System.IO (Handle, IOMode(ReadMode), withBinaryFile)
-import System.OsPath (OsPath)
+import System.OsPath (OsPath, takeFileName)
 import System.Directory.OsPath (doesFileExist)
 
 data ReadFileArgs = ReadFileArgs
@@ -70,7 +73,7 @@ readFileTool env = withSharedToolResourceClaims env (readFileClaims env) $
     ]
     True
     ParallelSafe
-    (typedTool "read_file" readFileArgsDecoder (runReadFile env))
+    (typedRichToolWithCall "read_file" readFileArgsDecoder (\_ -> runReadFile env))
 
 readFileClaims
     :: ToolEnv
@@ -90,9 +93,11 @@ readFileClaims env call =
 
 readFileDescription :: Text
 readFileDescription =
-    "Read a file.\n\
+    "Read a text file, or load a PDF or image into your model context.\n\
     \\n\
     \- The target_file parameter can be relative to the workspace or an absolute path in an allowed filesystem root\n\
+    \- PDFs and supported images are detected by content, including extensionless files, and attached directly to your context (maximum 20 MiB). PDF reading requires a provider/model supporting native file inputs. No local conversion is needed.\n\
+    \- offset and limit apply only to text. PDFs and images are loaded whole; omit line ranges for them.\n\
     \- By default, it reads up to 1000 lines starting from the beginning of the file\n\
     \- offset is 1-based. Negative offsets count from the end of the file (-1 is the last line).\n\
     \- Line numbers (1-based) appear as anchors in the format LINE_NUMBER\8594LINE_CONTENT on the first returned line and on every 10th line of the file; the lines in between show content only. Count from the nearest anchor when referring to a specific line"
@@ -103,22 +108,67 @@ maxReadLines = 1000
 maxReadTokens :: Int
 maxReadTokens = 25000
 
-runReadFile :: ToolEnv -> ReadFileArgs -> IO (Either Text Text)
+maxAttachmentBytes :: Int
+maxAttachmentBytes = 20 * 1024 * 1024
+
+runReadFile :: ToolEnv -> ReadFileArgs -> IO (Either Text ToolHandlerResult)
 runReadFile env args = resolveForRead env (fromText args.targetFile) >>= \case
     Left err -> pure (Left err)
-    Right path
-        | ".pdf" `Text.isSuffixOf` Text.toLower args.targetFile ->
-            pure $ Left
-                "PDF rendering is not available. Use an explicit terminal conversion tool if available, or convert the file to text first."
-        | otherwise -> doesFileExist path >>= \case
-            False -> do
-                display <- displayPathInWorkspace env path
-                pure $ Left $ "File not found: " <> display
-            True -> do
-                _ <- pure (args.pages, args.format)
-                try @_ @SomeException (streamReadFile path args) >>= \case
-                    Left err -> pure $ Left $ "Failed to read file: " <> Text.pack (show err)
-                    Right result -> pure result
+    Right path -> doesFileExist path >>= \case
+        False -> do
+            display <- displayPathInWorkspace env path
+            pure $ Left $ "File not found: " <> display
+        True -> do
+            display <- displayPathInWorkspace env path
+            try @_ @SomeException (readContent display path) >>= \case
+                Left err -> pure $ Left $ "Failed to read file: " <> Text.pack (show err)
+                Right result -> pure result
+  where
+    readContent display path = do
+        -- Detect and read attachments using the same open handle. In particular,
+        -- UUID-named uploads must not fall through to the text reader.
+        attachment <- withBinaryFile (unsafeToFilePath path) ReadMode \handle -> do
+            prefix <- BS.hGet handle 1024
+            let pdf = "%PDF-" `BS.isPrefixOf` prefix
+                image = isJust (supportedImageMime prefix)
+            if pdf || image
+                then if any isJust [args.offset, args.limit]
+                    || any isJust [args.pages, args.format]
+                    then pure (Just (Left "PDFs and images are loaded whole; omit offset, limit, pages and format."))
+                    else do
+                        remainder <- BS.hGet handle (maxAttachmentBytes + 1 - BS.length prefix)
+                        let bytes = prefix <> remainder
+                        pure . Just $
+                            if BS.length bytes > maxAttachmentBytes
+                                then Left "File is too large to attach (maximum 20 MiB)."
+                                else if pdf
+                                    then Right ToolHandlerResultWithFiles
+                                        { resultText = "Loaded PDF file into model context: " <> display
+                                        , resultImages = []
+                                        , resultFiles =
+                                            [ ToolResultFile
+                                                { fileName = pdfName path
+                                                , fileMimeType = "application/pdf"
+                                                , fileData = bytes
+                                                }
+                                            ]
+                                        }
+                                    else imageResultFromBytes display bytes
+                else pure Nothing
+        case attachment of
+            Just result -> pure result
+            Nothing
+                | ".pdf" `Text.isSuffixOf` Text.toLower args.targetFile ->
+                    pure (Left "The file does not contain a PDF header.")
+                | otherwise ->
+                    fmap (\text -> ToolHandlerResult text []) <$> streamReadFile path args
+
+    -- Native file inputs need a useful PDF filename even when storage uses UUIDs.
+    pdfName path =
+        let name = toText (takeFileName path)
+        in if ".pdf" `Text.isSuffixOf` Text.toLower name
+            then Text.take 251 (Text.dropEnd 4 name) <> Text.takeEnd 4 name
+            else Text.take 251 name <> ".pdf"
 
 -- | Bounded, incremental implementation used by the tool.  The first pass
 -- counts lines (needed for negative offsets and stable out-of-range errors);

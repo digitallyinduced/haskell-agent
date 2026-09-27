@@ -102,7 +102,7 @@ spec = describe "ClaudeSDKClient subprocess transport" do
                     (expectedQueryRecord
                         [ProbeText "hello from Haskell"])
 
-    it "serializes image content in streaming user messages" do
+    it "serializes image and PDF content in streaming user messages" do
         withFakeClaude transportProbeScript \directory executable -> do
             let argsPath = directory </> "args"
                 environmentPath = directory </> "environment"
@@ -124,7 +124,8 @@ spec = describe "ClaudeSDKClient subprocess transport" do
                         { mediaType = "image/png"
                         , imageBytes = "png-bytes"
                         }
-                    , UserTextBlock "describe this image"
+                    , UserDocumentBlock (Just "invoice.pdf") "%PDF-1"
+                    , UserTextBlock "describe these attachments"
                     ]
                     (const (pure ()))
             _ <- expectRight queryResult
@@ -135,8 +136,13 @@ spec = describe "ClaudeSDKClient subprocess transport" do
                     Right
                         (expectedQueryRecord
                             [ ProbeImage "image/png" "cG5nLWJ5dGVz"
-                            , ProbeText "describe this image"
+                            , ProbeDocument (Just "invoice.pdf") "application/pdf" "JVBERi0x"
+                            , ProbeText "describe these attachments"
                             ])
+
+    it "redacts native PDF bytes from diagnostic output" do
+        show (UserDocumentBlock Nothing "private-document-content")
+            `shouldNotContain` "private-document-content"
 
     it "routes subprocess permission prompts through handler stdio" do
         withFakeClaude permissionPromptScript \directory executable -> do
@@ -1368,6 +1374,7 @@ expectedArguments =
 data ProbeContent
     = ProbeText !Text
     | ProbeImage !Text !Text
+    | ProbeDocument !(Maybe Text) !Text !Text
     deriving (Eq, Show)
 
 data QueryRecord = QueryRecord
@@ -1412,6 +1419,12 @@ probeContentDecoder = Json.object do
         "image" -> Json.object $
             Json.atKey "source" $ Json.object $
                 ProbeImage
+                    <$> Json.atKey "media_type" Json.text
+                    <*> Json.atKey "data" Json.text
+        "document" -> Json.object do
+            title <- Json.optionalKey "title" Json.text
+            Json.atKey "source" $ Json.object $
+                ProbeDocument title
                     <$> Json.atKey "media_type" Json.text
                     <*> Json.atKey "data" Json.text
         _ -> fail "unexpected query content type"

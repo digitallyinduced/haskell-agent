@@ -47,3 +47,16 @@ cell may be active; observe or terminate it with `wait` before another `exec`.
 Local bindings do not persist between cells. Termination or worker failure does
 not roll back IO, and the runtime never replays a failed cell automatically.
 Repeat the backend selection when resuming in a new CLI process.
+
+## Reading local documents
+
+`read_file` retains numbered, bounded line windows for text. PDF documents and
+supported images are recognized by their content, including files stored without
+an extension. They are returned as native model content rather than binary text
+or instructions to run a converter. The same allowed-root policy applies to all
+formats; attachments are limited to 20 MiB and loaded whole, so line-range and
+page-selection arguments are rejected for them.
+
+PDF processing requires a provider/model accepting native file inputs. The tool
+does not claim to have extracted text or verified facts: it supplies the original
+bytes for model inspection. Local PDF rendering and OCR are not prerequisites.

@@ -23,6 +23,7 @@ import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch
     ( ToolCallResult(..), ToolOutcome(..), customToolCall, dispatchToolCall, typedTool
     , toolCallResultImages
+    , toolCallResultFiles, ToolResultFile(..)
     )
 import Agent.Tools.CodeMode.Host (codeModeWorkerPath, ImageDetailVisibility(..))
 import Agent.Tools.CodeMode.Haskell.Host
@@ -52,7 +53,7 @@ spec = do
             pure result { output = output, toolResultOutcome = Just ToolSucceeded }
         native envelope result = ToolCallResultWithStructured
             result.callId result.output result.callKind result.toolResultMode
-            result.toolResultImages result.toolResultOutcome envelope
+            result.toolResultImages result.toolResultOutcome envelope []
     it "preserves JSON-looking local file content as text" do
         result <- resultFor (encoded payload)
         projectNestedResult Nothing result `shouldBe` String (encoded payload)
@@ -272,6 +273,19 @@ integrationSpec = describe "registered code-mode toolsets" do
                     JavaScriptBackend -> "generatedImage({image_url: 'data:image/png;base64,aGVsbG8='});"
                     HaskellBackend -> "generatedImage (object [\"image_url\" .= (\"data:image/png;base64,aGVsbG8=\" :: Text)])"
                 length (toolCallResultImages result) `shouldBe` 1
+
+        it "preserves native files from nested callbacks without returning their bytes to the cell" do
+            let file = ToolResultFile "report.pdf" "application/pdf" "native-pdf"
+                invoke _ call = do
+                    result <- dispatchToolCall defaultLoopDispatch [doubleTool.appToolHandler] call
+                    pure $ Right $ ToolCallResultWithFiles
+                        result.callId "document attached" result.callKind result.toolResultMode
+                        [] (Just ToolSucceeded) [file]
+            withToolSet backend invoke [nested doubleTool] \tools -> do
+                result <- runExec tools (doubleSource backend)
+                toolCallResultFiles result `shouldBe` [file]
+                result.output `shouldSatisfy` Text.isInfixOf "document attached"
+                result.output `shouldSatisfy` (not . Text.isInfixOf "native-pdf")
 
     it "typechecks an entire Haskell cell before any nested effect" do
         calls <- newIORef (0 :: Int)

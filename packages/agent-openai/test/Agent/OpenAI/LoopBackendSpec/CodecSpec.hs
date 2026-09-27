@@ -8,7 +8,10 @@ import Agent.Responses.LoopBackend
     , streamOutputObserved
     )
 import Agent.Responses.Types
+import Agent.Responses.Types.Items (responseItemDecoder)
 import Agent.ToolDispatch
+import qualified Agent.Json.Decode as Json
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -158,6 +161,40 @@ spec = do
                     Aeson.toJSON output.output `shouldBe` Aeson.String "echoed"
                     itemType output `shouldBe` "function_call_output"
                 other -> expectationFailure ("expected function output, got " <> show other)
+
+        it "preserves native PDF tool results through wire replay and request input" do
+            let file = ToolResultFile "receipt.pdf" "application/pdf" "%PDF-1.4\n"
+                result = ToolCallResultWithFiles "pdf-call" "PDF attached"
+                    FunctionCallKind BlockingToolCall [] (Just ToolSucceeded) [file]
+                items = turnInputsToItems [CompletedTool result]
+            case items of
+                [item@(FunctionCallOutputItem output)] -> do
+                    output.callId `shouldBe` "pdf-call"
+                    Aeson.toJSON output.output `shouldBe` Aeson.toJSON
+                        [ Aeson.object
+                            [ "type" Aeson..= ("input_file" :: Text)
+                            , "detail" Aeson..= ("auto" :: Text)
+                            , "filename" Aeson..= ("receipt.pdf" :: Text)
+                            , "file_data" Aeson..= ("data:application/pdf;base64,JVBERi0xLjQK" :: Text)
+                            ]
+                        , Aeson.object
+                            [ "type" Aeson..= ("input_text" :: Text)
+                            , "text" Aeson..= ("PDF attached" :: Text)
+                            ]
+                        ]
+                    let replay = Json.decodeEither responseItemDecoder (LBS.toStrict (Aeson.encode item))
+                    fmap Aeson.toJSON replay `shouldBe` Right (Aeson.toJSON item)
+                    inputItems (withRequestInput baseParams items) `shouldBe` items
+                _ -> expectationFailure "expected native PDF function output"
+
+        it "does not show native file bytes in tool result diagnostics" do
+            let file = ToolResultFile "receipt.pdf" "application/pdf" "sensitive-pdf-bytes"
+                result = ToolCallResultWithFiles "pdf-call" "PDF attached"
+                    FunctionCallKind BlockingToolCall [] (Just ToolSucceeded) [file]
+            show file `shouldNotContain` "sensitive-pdf-bytes"
+            show result `shouldNotContain` "sensitive-pdf-bytes"
+            toolCallResultFiles (withToolCallResultMode AsyncToolCall result) `shouldBe` [file]
+            toolCallResultFiles (functionResult "text-only" "done") `shouldBe` []
 
         it "encodes custom results as custom_tool_call_output strings" do
             let items = turnInputsToItems

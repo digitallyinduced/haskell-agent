@@ -9,6 +9,7 @@ module Agent.Tools.CodeMode.Haskell.Host
     , prepareHaskellBindings
     , execHaskellCell
     , execHaskellCellWithRepair
+    , execHaskellCellWithFilesAndRepair
     , HaskellRepairRequest(..)
     , HaskellRepairHandler
     , waitHaskellCell
@@ -20,8 +21,9 @@ module Agent.Tools.CodeMode.Haskell.Host
     ) where
 
 import Agent.Process (terminateProcessGroup)
+import Agent.ToolDispatch (ToolResultFile(..))
 import Agent.Tools.CodeMode.Host.Types
-    ( CodeModeError(..), CodeModeResult(..), CodeModeToolHandler )
+    ( CodeModeError(..), CodeModeResult(..), CodeModeToolHandler, CodeModeFileToolHandler )
 import Control.Concurrent.Async
     ( Async, asyncWithUnmask, cancel, concurrently_, link, poll, wait, waitCatch, withAsync )
 import Control.Concurrent.MVar
@@ -32,6 +34,7 @@ import Control.Monad (unless, void, when)
 import Data.Aeson (Value(..), encode, eitherDecodeStrict', object, (.=))
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
 import qualified Data.Map.Strict as Map
@@ -149,6 +152,15 @@ execHaskellCellWithRepair
     -> HaskellHost -> Text -> Text -> CodeModeToolHandler -> Int
     -> IO (Either CodeModeError CodeModeResult)
 execHaskellCellWithRepair repair host source bindings handler yieldMilliseconds
+    = execHaskellCellWithFilesAndRepair repair host source bindings
+        (\name arguments -> fmap (\value -> (value, [])) <$> handler name arguments)
+        yieldMilliseconds
+
+execHaskellCellWithFilesAndRepair
+    :: Maybe HaskellRepairHandler
+    -> HaskellHost -> Text -> Text -> CodeModeFileToolHandler -> Int
+    -> IO (Either CodeModeError CodeModeResult)
+execHaskellCellWithFilesAndRepair repair host source bindings handler yieldMilliseconds
     | BS.length (Text.encodeUtf8 source) > 1024 * 1024 =
         pure (Left (CodeModeResourceError "Haskell cell exceeds the 1 MiB source limit"))
     | otherwise = do
@@ -359,7 +371,7 @@ killWorker worker =
 
 evaluateCell
     :: Maybe HaskellRepairHandler
-    -> HaskellHost -> Worker -> Text -> Text -> Text -> CodeModeToolHandler
+    -> HaskellHost -> Worker -> Text -> Text -> Text -> CodeModeFileToolHandler
     -> TVar [Value] -> TVar Int -> IO (Either Text ())
 evaluateCell repair host worker identifier source bindings handler output bytes = do
     TextIO.writeFile (host.hostDirectory </> "Tools.hs") bindings
@@ -546,14 +558,15 @@ collectStream handle marker emit = loop BS.empty
             | otherwise -> loop bytes
 
 serveRequests
-    :: HaskellHost -> Worker -> Text -> CodeModeToolHandler
+    :: HaskellHost -> Worker -> Text -> CodeModeFileToolHandler
     -> TVar [Value] -> TVar Int -> IORef (Maybe (Either Text ())) -> IO ()
 serveRequests host worker identifier handler output bytes completion = do
     retained <- newIORef BS.empty
     writer <- newMVar True
-    loop retained writer
+    fileBudget <- newIORef (0 :: Int, 0 :: Int)
+    loop fileBudget retained writer
   where
-    loop retained writer = do
+    loop fileBudget retained writer = do
         line <- readControlLine worker.workerRequests retained
         value <- either fail pure (eitherDecodeStrict' line)
         (scope, requestId, method, arguments) <- case value of
@@ -569,15 +582,34 @@ serveRequests host worker identifier handler output bytes completion = do
                 | Just (String name) <- KeyMap.lookup "name" fields
                 , Just arguments' <- KeyMap.lookup "arguments" fields ->
                     -- Every callback is scoped to this cell's request loop.
-                    withAsync (handler name arguments' >>= respond writer scope requestId method) $ \task ->
-                        link task >> loop retained writer
+                    withAsync (invoke fileBudget name arguments' >>= respond writer scope requestId method) $ \task ->
+                        link task >> loop fileBudget retained writer
             _ -> do
                 (continue, result) <- dispatch method arguments
                 respond writer scope requestId method result
-                when continue (loop retained writer)
+                when continue (loop fileBudget retained writer)
+    invoke fileBudget name arguments = do
+        result <- handler name arguments
+        case result of
+            Left message -> pure (Left message)
+            Right (value, files) -> do
+                accepted <- atomicModifyIORef' fileBudget \(count, size) ->
+                    let nextCount = count + length files
+                        nextSize = size + sum (map (BS.length . (.fileData)) files)
+                    in if nextCount <= 8 && nextSize <= 20 * 1024 * 1024
+                        then ((nextCount, nextSize), True)
+                        else ((count, size), False)
+                if accepted
+                    then do
+                        -- Attachments stay host-side and have their own byte
+                        -- budget, independent of clipped textual cell output.
+                        atomically $ modifyTVar' output
+                            (\values -> reverse (map nativeFilePart files) <> values)
+                        pure (Right value)
+                    else pure (Left "native file output exceeds the cell limit (8 files, 20 MiB)")
     dispatch method arguments = case (method, arguments) of
             ("content", content) ->
-                appendOutput output bytes content >> pure (True, Right Null)
+                appendOutput output bytes (sanitizeWorkerContent content) >> pure (True, Right Null)
             ("store", Object fields)
                 | Just (String key) <- KeyMap.lookup "key" fields
                 , Just stored <- KeyMap.lookup "value" fields -> do
@@ -610,6 +642,22 @@ serveRequests host worker identifier handler output bytes completion = do
                 BS.hPut worker.workerReplies "\n"
                 hFlush worker.workerReplies
             pure (callbacksOpen && method /= "completed")
+
+nativeFilePart :: ToolResultFile -> Value
+nativeFilePart file = object
+    [ "type" .= ("native_file" :: Text)
+    , "filename" .= file.fileName
+    , "mime_type" .= file.fileMimeType
+    , "data" .= Text.decodeUtf8 (Base64.encode file.fileData)
+    ]
+
+sanitizeWorkerContent :: Value -> Value
+sanitizeWorkerContent (Object fields)
+    | KeyMap.lookup "type" fields == Just (String "native_file") =
+        object ["type" .= ("text" :: Text), "text" .= ("[worker-supplied native file rejected]" :: Text)]
+    | otherwise = Object (fmap sanitizeWorkerContent fields)
+sanitizeWorkerContent (Array values) = Array (fmap sanitizeWorkerContent values)
+sanitizeWorkerContent value = value
 
 -- Preserve coalesced frames while bounding each message before decoding.
 readControlLine :: Handle -> IORef BS.ByteString -> IO BS.ByteString

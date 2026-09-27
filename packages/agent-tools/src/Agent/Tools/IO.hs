@@ -62,7 +62,7 @@ import Agent.Tools.OutputArtifact
     , renderOutputArtifactNotice
     )
 import System.OsPath (OsPath)
-import Agent.Tools.Types (ToolEnv(..))
+import Agent.Tools.Types (ToolEnv(..), ShellEnvironment(..))
 import Agent.Tools.ShellPermission
     ( ShellExecutionAuthorization
     , defaultShellExecutionAuthorization
@@ -510,15 +510,32 @@ configuredProcessAuthorized authorization env spec = do
         ioError (userError "Shell execution authorization was already consumed or has expired.")
     sessionTmp <- readIORef env.toolSessionTmp
     processEnv <- configuredProcessEnvFor sessionTmp spec.env
+    activeEnvironment <- readIORef env.toolShellEnvironment
+    let environmentCommand = shellEnvironmentCommand sessionTmp activeEnvironment spec.cmdspec
     command <- if shellExecutionIsEscalated authorization
-        then pure spec.cmdspec
-        else configuredCommandSpec sessionTmp spec.cmdspec
+        then pure environmentCommand
+        else configuredCommandSpec sessionTmp environmentCommand
     pure spec
         { cmdspec = command
         , env = case processEnv of
             Nothing -> spec.env
             Just values -> Just values
         }
+
+-- | Wrap only shell tool commands, not internal harness subprocesses. Each
+-- launch captures one revision; retained processes never change environment.
+-- Keep the sandbox outside Nix so shell hooks remain subject to its policy.
+shellEnvironmentCommand :: Maybe OsPath -> Maybe ShellEnvironment -> CmdSpec -> CmdSpec
+shellEnvironmentCommand (Just directory) (Just active) (ShellCommand script)
+    | directory == active.environmentDirectory =
+        RawCommand active.environmentNixExecutable
+            [ "--extra-experimental-features", "nix-command flakes"
+            , "develop", unsafeToFilePath active.environmentProfile
+            , "--command", "/bin/sh", "-c"
+            , "export TMPDIR=\"$1\" HASKELL_AGENT_TMPDIR=\"$1\"; unset HASKELL_AGENT_HOST_TMPDIR; exec /bin/sh -c \"$2\""
+            , "agent-shell-environment", unsafeToFilePath directory, script
+            ]
+shellEnvironmentCommand _ _ command = command
 
 configuredCommandSpec :: Maybe OsPath -> CmdSpec -> IO CmdSpec
 #if defined(darwin_HOST_OS)

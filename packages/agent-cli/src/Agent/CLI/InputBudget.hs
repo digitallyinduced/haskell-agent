@@ -21,7 +21,9 @@ import Agent.Loop
 import Agent.ToolDispatch
     ( ToolCallResult(..)
     , ToolResultImage(..)
+    , ToolResultFile(..)
     , toolCallResultImages
+    , toolCallResultFiles
     )
 import qualified Data.ByteString as ByteString
 import Data.Char (ord)
@@ -74,6 +76,12 @@ logicalTurnInputBytes = \case
             `saturatingAdd` foldBytes
                 logicalToolResultImageBytes
                 (toolCallResultImages result)
+            `saturatingAdd` foldBytes
+                (\file ->
+                    logicalTextBytes file.fileName
+                        `saturatingAdd` logicalTextBytes file.fileMimeType
+                        `saturatingAdd` ByteString.length file.fileData)
+                (toolCallResultFiles result)
 
 logicalReplLineBytes :: ReplLine -> Int
 logicalReplLineBytes = \case

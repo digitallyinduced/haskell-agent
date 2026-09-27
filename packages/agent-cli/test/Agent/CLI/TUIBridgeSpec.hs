@@ -49,7 +49,7 @@ import Agent.TUI.Presentation
 import Agent.Loop (ImageAttachment(..), LoopEvent(..), emptyTurnOutput)
 import Agent.Provider (Provider(XAIProvider))
 import Agent.Subagents (SubagentId(..))
-import Agent.ToolDispatch (ToolCall(..), ToolCallResult(..), ToolCallKind(..), ToolCallMode(..), functionToolCall)
+import Agent.ToolDispatch (ToolCall(..), ToolCallResult(..), ToolCallKind(..), ToolCallMode(..), ToolResultFile(..), functionToolCall)
 import Agent.TUI.Motion (MotionMode(..))
 import Control.Concurrent.Async (wait, withAsync)
 import Control.Concurrent.STM (atomically, readTVar, readTVarIO, retry, putTMVar)
@@ -517,6 +517,23 @@ spec = describe "fullscreen TUI bridge" do
         let AppEventMailbox stateRef = runtime.runtimeMailbox
         state <- readTVarIO stateRef
         state.mailboxPendingCount `shouldBe` 1
+
+    it "accounts and backpressures native file results by content and metadata" do
+        runtime <- newBridgeTestRuntime
+        let content = BS.replicate (10 * 1024 * 1024) 0
+            file = ToolResultFile "über.pdf" "application/pdf" content
+            result files = ToolCallResultWithFiles
+                "id" "ok" FunctionCallKind BlockingToolCall [] Nothing files
+            event files = AppUi (UiLoop (ToolFinished (result files)))
+        appEventLogicalBytes (event [file, file]) - appEventLogicalBytes (event [])
+            `shouldBe` 2 * (BS.length content + 128 + 4 * (8 + 15))
+        enqueueAppEvent runtime (event [file])
+        withAsync (enqueueAppEvent runtime (event [file])) \publishing -> do
+            timeout 100000 (wait publishing) `shouldReturn` Nothing
+            let AppEventMailbox stateRef = runtime.runtimeMailbox
+            state <- readTVarIO stateRef
+            state.mailboxPendingCount `shouldBe` 1
+            state.mailboxPendingBytes `shouldBe` appEventLogicalBytes (event [file])
 
     it "accounts and backpressures encoded image events by payload bytes" do
         runtime <- newBridgeTestRuntime

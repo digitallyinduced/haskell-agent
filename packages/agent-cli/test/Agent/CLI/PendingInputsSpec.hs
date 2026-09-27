@@ -54,6 +54,7 @@ import Agent.ToolDispatch
     , ToolCallResult(..)
     , ToolCallMode(..)
     , ToolResultImage(..)
+    , ToolResultFile(..)
     )
 import Control.Concurrent
     ( forkIO
@@ -164,6 +165,26 @@ spec = do
         Model.retainedBytes committed `shouldBe` 3
 
   describe "logicalTurnInputBytes" do
+    it "counts native file content and UTF-8 metadata against the retained queue budget" do
+        let metadata = logicalTextBytes "über.pdf" + logicalTextBytes "application/pdf"
+            contentLength = pendingInputByteLimit - metadata - 4
+            file = ToolResultFile "über.pdf" "application/pdf"
+                (ByteString.replicate contentLength 0)
+            result = ToolCallResultWithFiles
+                "id" "ok" FunctionCallKind BlockingToolCall [] Nothing [file]
+            input = CompletedTool result
+            (queued, accepted) = Model.enqueueInput input Model.emptyPendingState
+            (inflight, batch) = Model.drain queued
+            retried = fst (Model.requeue batch inflight)
+            committed = fst (Model.commit batch inflight)
+        logicalTurnInputBytes input `shouldBe` pendingInputByteLimit
+        accepted `shouldBe` Right ()
+        map Model.retainedBytes [queued, inflight, retried]
+            `shouldBe` replicate 3 pendingInputByteLimit
+        snd (Model.enqueueInput input inflight) `shouldSatisfy` isLeft
+        Model.retainedBytes committed `shouldBe` 0
+        snd (Model.enqueueInput input committed) `shouldBe` Right ()
+
     it "counts ordered attachments and rich tool-result images" do
         let attached =
                 userMessageWithAttachments "é"

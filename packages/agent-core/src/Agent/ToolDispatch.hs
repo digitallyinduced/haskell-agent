@@ -16,6 +16,7 @@ module Agent.ToolDispatch
     , ToolCallResult(..)
     , ToolDispatchOutcome(..)
     , ToolResultImage(..)
+    , ToolResultFile(..)
     , ToolHandlerResult(..)
     , withToolHandlerStructuredResult
     , toolCallResultStructured
@@ -23,6 +24,7 @@ module Agent.ToolDispatch
     , toolCallResultOutcome
     , withToolCallOutcome
     , toolCallResultImages
+    , toolCallResultFiles
     , toolCallResultMode
     , withToolCallResultMode
     , ToolDispatchConfig(..)
@@ -67,6 +69,7 @@ import Control.Exception.Safe (SomeException, bracket, tryAny)
 import Data.IORef (IORef, newIORef, atomicModifyIORef', writeIORef)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -208,6 +211,19 @@ instance Show ToolCall where
             | call.argumentsEncrypted = "<redacted>"
             | otherwise = show call.arguments
 
+-- | Native file content is kept separate from printable/truncated tool text.
+data ToolResultFile = ToolResultFile
+    { fileName :: !Text
+    , fileMimeType :: !Text
+    , fileData :: !BS.ByteString
+    } deriving (Eq)
+
+instance Show ToolResultFile where
+    show file =
+        "ToolResultFile { fileName = " <> show file.fileName
+            <> ", fileMimeType = " <> show file.fileMimeType
+            <> ", fileData = <redacted> }"
+
 -- | An image returned alongside a tool's short textual output. Keeping image
 -- data out of 'output' prevents large data URLs from being truncated, logged,
 -- or fed back to the model as ordinary text.
@@ -238,6 +254,12 @@ data ToolHandlerResult = ToolHandlerResult
         , resultImages :: ![ToolResultImage]
         , resultStructured :: !Aeson.Value
         , resultStructuredOutcome :: !(Maybe ToolOutcome)
+        , resultFiles :: ![ToolResultFile]
+        }
+    | ToolHandlerResultWithFiles
+        { resultText :: !Text
+        , resultImages :: ![ToolResultImage]
+        , resultFiles :: ![ToolResultFile]
         }
     deriving (Eq, Show)
 
@@ -245,11 +267,17 @@ data ToolHandlerResult = ToolHandlerResult
 -- text formatting and truncation. Attaching data never changes execution facts.
 withToolHandlerStructuredResult :: Aeson.Value -> ToolHandlerResult -> ToolHandlerResult
 withToolHandlerStructuredResult value result =
-    ToolHandlerResultWithStructured result.resultText result.resultImages value $
-        case result of
+    ToolHandlerResultWithStructured result.resultText result.resultImages value outcome files
+  where
+    outcome = case result of
             ToolHandlerResult{} -> Nothing
+            ToolHandlerResultWithFiles{} -> Nothing
             ToolHandlerResultWithOutcome{resultOutcome} -> Just resultOutcome
             ToolHandlerResultWithStructured{resultStructuredOutcome} -> resultStructuredOutcome
+    files = case result of
+        ToolHandlerResultWithFiles{resultFiles} -> resultFiles
+        ToolHandlerResultWithStructured{resultFiles} -> resultFiles
+        _ -> []
 
 -- | A dispatched result together with its protocol-neutral success bit.
 --
@@ -282,13 +310,24 @@ data ToolCallResult = ToolCallResult
     , toolResultImages :: ![ToolResultImage]
     , toolResultOutcome :: !(Maybe ToolOutcome)
     , toolResultStructured :: !Aeson.Value
+    , toolResultFiles :: ![ToolResultFile]
     }
+    | ToolCallResultWithFiles
+        { callId :: !Text
+        , output :: !Text
+        , callKind :: !ToolCallKind
+        , toolResultMode :: !ToolCallMode
+        , toolResultImages :: ![ToolResultImage]
+        , toolResultOutcome :: !(Maybe ToolOutcome)
+        , toolResultFiles :: ![ToolResultFile]
+        }
     deriving (Eq)
 
 -- | Native, ephemeral structured data. Historical/imported text-only results
 -- deliberately have no inferred payload. Generic serialization remains text-only.
 toolCallResultStructured :: ToolCallResult -> Maybe Aeson.Value
 toolCallResultStructured ToolCallResult{} = Nothing
+toolCallResultStructured ToolCallResultWithFiles{} = Nothing
 toolCallResultStructured ToolCallResultWithStructured{toolResultStructured} =
     Just toolResultStructured
 
@@ -300,14 +339,23 @@ instance Show ToolCallResult where
             <> ", callMode = " <> show (toolCallResultMode result)
             <> ", outcome = " <> show (toolCallResultOutcome result)
             <> imageSummary
+            <> fileSummary
             <> " }"
       where
         imageSummary = case toolCallResultImages result of
             [] -> ""
             images -> ", images = <" <> show (length images) <> ">"
+        fileSummary = case toolCallResultFiles result of
+            [] -> ""
+            files -> ", files = <" <> show (length files) <> ">"
 
 toolCallResultImages :: ToolCallResult -> [ToolResultImage]
 toolCallResultImages = (.toolResultImages)
+
+toolCallResultFiles :: ToolCallResult -> [ToolResultFile]
+toolCallResultFiles ToolCallResult{} = []
+toolCallResultFiles ToolCallResultWithStructured{toolResultFiles} = toolResultFiles
+toolCallResultFiles ToolCallResultWithFiles{toolResultFiles} = toolResultFiles
 
 toolCallResultOutcome :: ToolCallResult -> Maybe ToolOutcome
 toolCallResultOutcome = (.toolResultOutcome)
@@ -551,20 +599,24 @@ dispatchToolHandlerWithAuthorization authorization config maybeHandler call = do
                     handler
             Nothing -> pure (Left (config.toolDispatchUnknownTool callName))
     result <- tryAny runTool
-    (resultOutput, resultImages) <- case result of
+    (resultOutput, resultImages, resultFiles) <- case result of
         Right (Right toolResult) ->
             pure
                 ( config.toolDispatchFormatResult (Right toolResult.resultText)
                 , toolResult.resultImages
+                , case toolResult of
+                    ToolHandlerResultWithFiles{resultFiles} -> resultFiles
+                    ToolHandlerResultWithStructured{resultFiles} -> resultFiles
+                    _ -> []
                 )
         Right (Left err) ->
-            pure (config.toolDispatchFormatResult (Left err), [])
+            pure (config.toolDispatchFormatResult (Left err), [], [])
         Left exception -> do
             -- Diagnostics must not replace the original tool failure with a
             -- second exception. 'tryAny' still lets asynchronous cancellation
             -- propagate.
             _ <- tryAny (config.toolDispatchOnException callName exception)
-            pure (config.toolDispatchFormatException callName exception, [])
+            pure (config.toolDispatchFormatException callName exception, [], [])
     finalizedOutput <-
         tryAny (config.toolDispatchFinalizeOutput call resultOutput) >>= \case
             Right output -> pure output
@@ -573,6 +625,7 @@ dispatchToolHandlerWithAuthorization authorization config maybeHandler call = do
                 pure resultOutput
     let outcome = case result of
             Right (Right ToolHandlerResult{}) -> ToolSucceeded
+            Right (Right ToolHandlerResultWithFiles{}) -> ToolSucceeded
             Right (Right ToolHandlerResultWithOutcome{resultOutcome}) -> resultOutcome
             Right (Right ToolHandlerResultWithStructured{resultStructuredOutcome}) ->
                 maybe ToolSucceeded id resultStructuredOutcome
@@ -583,10 +636,14 @@ dispatchToolHandlerWithAuthorization authorization config maybeHandler call = do
                 Right (Right ToolHandlerResultWithStructured{resultStructured}) ->
                     ToolCallResultWithStructured
                         call.callId finalizedOutput call.callKind
-                        (toolCallMode call) resultImages (Just outcome) resultStructured
-                _ -> ToolCallResult
-                    call.callId finalizedOutput call.callKind
-                    (toolCallMode call) resultImages (Just outcome)
+                        (toolCallMode call) resultImages (Just outcome) resultStructured resultFiles
+                _ -> case resultFiles of
+                    [] -> ToolCallResult
+                        call.callId finalizedOutput call.callKind
+                        (toolCallMode call) resultImages (Just outcome)
+                    files -> ToolCallResultWithFiles
+                        call.callId finalizedOutput call.callKind
+                        (toolCallMode call) resultImages (Just outcome) files
     pure ToolDispatchOutcome
         { toolDispatchResult = dispatchedResult
         , toolDispatchSucceeded = toolOutcomeSucceeded outcome

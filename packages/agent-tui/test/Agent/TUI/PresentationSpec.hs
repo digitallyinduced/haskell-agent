@@ -374,6 +374,22 @@ spec = describe "tool presentation" do
             `shouldBe`
                 "Script failed\nWall time 0.1 seconds\nOutput:\nScript error:\nboom"
 
+    it "retains complete plain Nix source for environment approval and expansion" do
+        let source =
+                "{ pkgs }: pkgs.mkShell {\n"
+                    <> "  # " <> Text.replicate 2001 "x" <> "\n"
+                    <> "  packages = [ pkgs.python312 ];\n}"
+            call = customToolCall "environment" "set_environment" source
+        toolCallInput call `shouldBe` source
+        permissionToolCallPrompt call `shouldBe`
+            "Replace this session's shell environment?\n\n" <> source
+        permissionToolCallPrompt
+            (customToolCall "environment" "set_environment"
+                "{ pkgs }: pkgs.mkShell { # \ESC]0;owned\BEL\n}")
+            `shouldBe`
+                "Replace this session's shell environment?\n\n\
+                \{ pkgs }: pkgs.mkShell { # ␛]0;owned␇\n}"
+
     it "shows complete multiline code and shell commands for permission" do
         permissionToolCallPrompt
             (functionToolCall
