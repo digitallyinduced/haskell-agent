@@ -17,6 +17,7 @@ import Agent.Runtime.Session
     , loadSessionHandle
     )
 import Agent.Telegram.Types
+import Agent.Telegram.Presentation (telegramConversationStyle)
 import Agent.Telegram.Classify
     ( checkpointPendingVoiceTranscript
     , isAmbientGroupPrompt
@@ -593,10 +594,9 @@ sessionForSelectedPrompt runtime key prompt = do
 telegramAgentPrompt :: Text -> Text
 telegramAgentPrompt prompt =
     prompt
-        <> "\n\n[Telegram delivery context: You are conversing in Telegram. \
-        \Keep messages concise and conversational; avoid terminal-style \
-        \verbosity unless the user asks for detail. Follow the language and \
-        \style of the conversation. If you need to use tools or do substantial \
+        <> "\n\n[Telegram delivery context: You are conversing in Telegram. "
+        <> telegramConversationStyle
+        <> " If you need to use tools or do substantial \
         \work before you can answer, first emit one short commentary progress \
         \sentence before the first tool call, in that same language and style. \
         \For example: I'll take a quick look. Do not wait for findings before \
