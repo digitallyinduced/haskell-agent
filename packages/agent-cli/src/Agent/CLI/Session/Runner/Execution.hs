@@ -141,6 +141,7 @@ import Agent.Store.Postgres.Skill (LearnedSkill)
 import Agent.Subagents
 import Agent.Subagents.TaskPath
 import Agent.ToolDispatch
+import Agent.Tools.Environment (restoreShellEnvironment)
 import Agent.Tools.MultiAgents
 import Agent.Tools.PlanMode
 import Agent.Tools.Types
@@ -1337,6 +1338,7 @@ buildSessionShellRuntime host controls SessionRequest{..} =
         -- file remains attached to the previous session.
         resetToolSessionTemp tempDir
         setToolSessionTmp toolEnv (Just tempDir)
+        restoreShellEnvironment toolEnv
         refreshCurrentSessionParams
 
 data SessionSubagentRuntime = SessionSubagentRuntime

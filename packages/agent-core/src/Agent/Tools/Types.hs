@@ -15,6 +15,7 @@ module Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , ToolRegistry
     , ToolEnv(..)
+    , ShellEnvironment(..)
     , OutputArtifactMemoryStore
     , MemoryOutputArtifact(..)
     , insertMemoryOutputArtifact
@@ -252,6 +253,14 @@ noBackgroundTaskHooks = BackgroundTaskHooks
     , backgroundTaskDismissed = \_ -> pure ()
     }
 
+-- | A realized Nix development environment owned by one session directory.
+-- The harness process itself never enters this environment.
+data ShellEnvironment = ShellEnvironment
+    { environmentDirectory :: !OsPath
+    , environmentNixExecutable :: !FilePath
+    , environmentProfile :: !OsPath
+    } deriving (Eq, Show)
+
 data ToolEnv = ToolEnv
     { toolCwd :: !OsPath
     , toolResourceArbiter :: !ToolResourceArbiter
@@ -272,6 +281,7 @@ data ToolEnv = ToolEnv
       -- Kept separate so catalog refreshes can replace them without
       -- disturbing other explicitly allowed roots.
     , toolSessionTmp :: !(IORef (Maybe OsPath))
+    , toolShellEnvironment :: !(IORef (Maybe ShellEnvironment))
     , toolOutputInlineCap :: !Int
     , toolOutputPreviewCap :: !Int
     , toolOutputArtifactCap :: !Int
@@ -299,6 +309,7 @@ defaultToolEnv cwd = do
     humanInputWaitHooks <- newIORef (pure (), pure ())
     skillRoots <- newIORef []
     sessionTmp <- newIORef Nothing
+    shellEnvironment <- newIORef Nothing
     outputMemory <- newOutputArtifactMemoryStore
     backgroundTaskHooks <- newIORef noBackgroundTaskHooks
     backgroundTasks <- newTVarIO Map.empty
@@ -311,6 +322,7 @@ defaultToolEnv cwd = do
         , toolHumanInputWaitHooks = humanInputWaitHooks
         , toolSkillRoots = skillRoots
         , toolSessionTmp = sessionTmp
+        , toolShellEnvironment = shellEnvironment
         , toolOutputInlineCap = 50 * 1024
         , toolOutputPreviewCap = 8 * 1024
         , toolOutputArtifactCap = 64 * 1024 * 1024
@@ -375,7 +387,9 @@ setToolSessionTmp env directory = do
     previous <- readIORef env.toolSessionTmp
     if previous == directory
         then pure ()
-        else clearMemoryOutputArtifacts env.toolOutputMemoryStore
+        else do
+            clearMemoryOutputArtifacts env.toolOutputMemoryStore
+            writeIORef env.toolShellEnvironment Nothing
     writeIORef env.toolSessionTmp directory
 
 -- | Construct a JSON tool whose approval is selected from a simple read-only

@@ -182,6 +182,7 @@ data CodeModeSessionRuntime = CodeModeSessionRuntime
 -- API, so forcing a single command through a JavaScript cell adds no
 -- orchestration value. They remain in the nested set as well, since code mode
 -- may need to compose shell calls with other tools in one JavaScript cell.
+-- The environment tool also stays direct so its raw Nix input needs no wrapper.
 data CodeModeToolProjection = CodeModeToolProjection
     { directCodeModeTools :: ![AppTool]
     , nestedCodeModeTools :: ![AppTool]
@@ -199,7 +200,7 @@ projectCodeModeTools mode tools = case mode of
     direct tool = isDirectShellTool tool || isHostedComputerTool tool
     nestable = not . isHostedComputerTool
     isDirectShellTool tool =
-        tool.appToolName `elem` ["shell_command", "write_stdin"]
+        tool.appToolName `elem` ["shell_command", "write_stdin", "set_environment"]
     isHostedComputerTool tool =
         case tool.appToolSchema of
             HostedComputerSchema -> True

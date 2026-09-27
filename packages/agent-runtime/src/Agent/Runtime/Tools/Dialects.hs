@@ -20,6 +20,7 @@ import Agent.Codex.Dialect.Runtime
     , newCodexCodingToolsWithTaskPlan
     )
 import Agent.Tools.TaskPlan (TaskPlanEnv)
+import Agent.Tools.Environment (newEnvironmentTool, restoreShellEnvironment)
 import Agent.Dialect
     ( Dialect
     , InstructionHomeStyle(..)
@@ -120,6 +121,8 @@ codingToolsForWithTypes
     -> IO CodingTools
 codingToolsForWithTypes
         dialect env planHooks taskPlan secretHooks imageHooks multi typesRef = do
+    restoreShellEnvironment env
+    environmentTool <- newEnvironmentTool env
     secretStore <- traverse (newSecretStore env) secretHooks
     let closeSecrets = mapM_ closeSecretStore secretStore
         analysisSpawner =
@@ -157,7 +160,7 @@ codingToolsForWithTypes
                     toolGroups
                         <> [ ExecutionToolGroup
                                 (if includeArtifacts
-                                    then artifactTools env analysisSpawner
+                                    then environmentTool : artifactTools env analysisSpawner
                                     else [])
                            , HostToolGroup (secretTools <> imageTools)
                            ]
@@ -234,7 +237,7 @@ isBashTool = isBashToolName . (.appToolName)
 isBashToolName :: Text -> Bool
 isBashToolName name =
     name `elem`
-        ["shell_command", "write_stdin", "run_terminal_cmd"]
+        ["shell_command", "write_stdin", "run_terminal_cmd", "set_environment"]
 
 isGhciTool :: AppTool -> Bool
 isGhciTool = isGhciToolName . (.appToolName)

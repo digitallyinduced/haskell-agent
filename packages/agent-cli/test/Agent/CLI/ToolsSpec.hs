@@ -20,6 +20,7 @@ import Agent.OpenAI.Models
     )
 import qualified Agent.OpenAI.Models.Types as OpenAIModels
 import Agent.Tools.RenderChart (renderChartResult)
+import Agent.Tools.Environment (newEnvironmentTool)
 import Agent.Tools.ShowImage (ImageDisplayHooks(..), ImageDisplayRequest(..))
 import Agent.Dialect
     ( claudeCodeDialect
@@ -243,6 +244,18 @@ spec = describe "schemasFromAppTools" do
             `shouldBe` ["shell_command", "write_stdin"]
         map (.appToolName) projection.nestedCodeModeTools
             `shouldBe` ["read_file", "shell_command", "write_stdin", "apply_patch"]
+    it "keeps raw Nix environment input direct in code-only mode" do
+        env <- defaultToolEnv (unsafeEncodeUtf ".")
+        environmentTool <- newEnvironmentTool env
+        let projection = projectCodeModeTools CodeOnlyToolMode [environmentTool]
+        map (.appToolName) projection.directCodeModeTools
+            `shouldBe` ["set_environment"]
+        map (.appToolSchema) projection.directCodeModeTools
+            `shouldBe` [environmentTool.appToolSchema]
+        case environmentTool.appToolSchema of
+            FreeformGrammarSchema "lark" _ -> pure ()
+            other -> expectationFailure ("expected freeform Nix input, got " <> show other)
+
     it "keeps hosted computer use direct and out of code mode" do
         let tools =
                 [ testTool "read_file"

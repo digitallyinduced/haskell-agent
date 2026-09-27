@@ -154,6 +154,7 @@ spec = describe "Agent.Runtime.Tools.Dialects" do
                                 , "read_file"
                                 , "view_image"
                                 , shellName
+                                , "set_environment"
                                 , "read_tool_output"
                                 , "search_tool_output"
                                 , "export_tool_output"
@@ -175,6 +176,7 @@ spec = describe "Agent.Runtime.Tools.Dialects" do
                 , "shell_command"
                 , "write_stdin"
                 , "run_terminal_cmd"
+                , "set_environment"
                 ]
             names = map (.appToolName)
         names (filterBashTools False tools)
@@ -185,6 +187,7 @@ spec = describe "Agent.Runtime.Tools.Dialects" do
                 , "shell_command"
                 , "write_stdin"
                 , "run_terminal_cmd"
+                , "set_environment"
                 ]
 
 withTempToolEnv :: (ToolEnv -> IO a) -> IO a
