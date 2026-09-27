@@ -246,7 +246,7 @@ import Agent.ToolDispatch (canonicalToolName, ToolDispatchConfig(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ToolSchema(..)
-    , ToolEnv(toolAllowedRoots, toolRootAccessRequest, toolSkillRoots, toolSessionTmp, toolResourceArbiter, toolOutputMemoryStore, toolOutputMemoryCap)
+    , ToolEnv(toolAllowedRoots, toolRootAccessRequest, toolSkillRoots, toolSessionTmp, toolShellEnvironment, toolShellEnvironmentLock, toolResourceArbiter, toolOutputMemoryStore, toolOutputMemoryCap)
     )
 import Control.Applicative ( (<|>) )
 import Control.Concurrent.Async ( waitSTM, withAsync )
