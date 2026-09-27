@@ -5,7 +5,6 @@ import qualified Agent.Json.Decode as Json
 import Agent.Cancel (newCancelFlag, requestCancel)
 import Agent.Error (ApiError(..))
 import Agent.Loop
-import Agent.Loop.Input (normalizeTurnInputs)
 import Agent.Loop.InputItems (turnInputsToItems)
 import Agent.Loop.Fixtures
 import qualified Agent.Loop.EventDeliverySpec as EventDelivery
@@ -932,13 +931,21 @@ spec = describe "runLoop" do
                     "unexpected submitted backend state: " <> show state
 
     it "normalizes structured tool result images without dropping the JSON payload" do
+        submittedInputs <- newIORef []
         let payload = Aeson.object ["count" Aeson..= (42 :: Int)]
             sourceUrl = "data:image/bmp;base64,"
                 <> TextEncoding.decodeUtf8 (Base64.encode oversizedFixtureBytes)
             result = ToolCallResultWithStructured
                 "structured-image" "viewed image" FunctionCallKind AsyncToolCall
                 [ToolResultImage sourceUrl (Just "auto")] (Just ToolSucceeded) payload []
-        case normalizeTurnInputs [CompletedTool result] of
+            backend = Backend \_state _previous inputs _onEvent -> do
+                writeIORef submittedInputs inputs
+                pure (Left (ConnectionError "down"))
+        config <- testConfig backend
+        execution <- runLoopInputsDetailed config Nothing [CompletedTool result]
+        execution.executionResult
+            `shouldBe` Left (LoopTransport (ConnectionError "down"))
+        readIORef submittedInputs >>= \case
             [CompletedTool normalized] -> do
                 toolCallResultStructured normalized `shouldBe` Just payload
                 normalized.output `shouldBe` "viewed image"
