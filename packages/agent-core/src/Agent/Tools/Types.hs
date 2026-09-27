@@ -88,6 +88,7 @@ import Agent.Tools.Scheduling
     )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (race_)
+import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Concurrent.STM (STM, TVar, atomically, newTVarIO, retry)
 import Control.Exception.Safe (bracket_, tryAny)
 import Control.Monad (foldM)
@@ -282,6 +283,9 @@ data ToolEnv = ToolEnv
       -- disturbing other explicitly allowed roots.
     , toolSessionTmp :: !(IORef (Maybe OsPath))
     , toolShellEnvironment :: !(IORef (Maybe ShellEnvironment))
+    , toolShellEnvironmentLock :: !(MVar ())
+      -- | Shared with the session directory and active revision by child
+      -- agents. Serializes activation, restoration, and session resets.
     , toolOutputInlineCap :: !Int
     , toolOutputPreviewCap :: !Int
     , toolOutputArtifactCap :: !Int
@@ -310,6 +314,7 @@ defaultToolEnv cwd = do
     skillRoots <- newIORef []
     sessionTmp <- newIORef Nothing
     shellEnvironment <- newIORef Nothing
+    shellEnvironmentLock <- newMVar ()
     outputMemory <- newOutputArtifactMemoryStore
     backgroundTaskHooks <- newIORef noBackgroundTaskHooks
     backgroundTasks <- newTVarIO Map.empty
@@ -323,6 +328,7 @@ defaultToolEnv cwd = do
         , toolSkillRoots = skillRoots
         , toolSessionTmp = sessionTmp
         , toolShellEnvironment = shellEnvironment
+        , toolShellEnvironmentLock = shellEnvironmentLock
         , toolOutputInlineCap = 50 * 1024
         , toolOutputPreviewCap = 8 * 1024
         , toolOutputArtifactCap = 64 * 1024 * 1024
@@ -383,7 +389,7 @@ setToolSkillRoots env = writeIORef env.toolSkillRoots
 -- target of the system-temp aliases directly, so changing it cannot get out of
 -- sync with a separately maintained roots list.
 setToolSessionTmp :: ToolEnv -> Maybe OsPath -> IO ()
-setToolSessionTmp env directory = do
+setToolSessionTmp env directory = withMVar env.toolShellEnvironmentLock \() -> do
     previous <- readIORef env.toolSessionTmp
     if previous == directory
         then pure ()

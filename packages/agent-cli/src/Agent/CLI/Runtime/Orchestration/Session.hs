@@ -189,6 +189,7 @@ import Agent.CLI.Subagents.Runtime
                       subagentSessions, subagentStoreRoot, subagentTypes,
                       subagentLegacyTarget, subagentConnection, subagentMapModel,
                       subagentCreateWorktree, subagentSessionTmp,
+                      subagentShellEnvironment, subagentShellEnvironmentLock,
                       subagentOutputMemoryStore, subagentOutputMemoryCap,
                       subagentSpawnModelGuidance, subagentAllowedChildModels,
                       subagentResolveChildModel, subagentChildModelAllowed) )
@@ -783,6 +784,8 @@ buildSessionSubagentRuntime AgentSessionRequest
         , subagentMapModel = transportModel
         , subagentCreateWorktree = Just createSubagentWorktree
         , subagentSessionTmp = toolEnv.toolSessionTmp
+        , subagentShellEnvironment = toolEnv.toolShellEnvironment
+        , subagentShellEnvironmentLock = toolEnv.toolShellEnvironmentLock
         , subagentOutputMemoryStore = toolEnv.toolOutputMemoryStore
         , subagentOutputMemoryCap = toolEnv.toolOutputMemoryCap
         , subagentSpawnModelGuidance =

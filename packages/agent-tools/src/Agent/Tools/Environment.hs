@@ -13,7 +13,7 @@ import Agent.Tools.Types
     ( AppTool, ApprovalRule(..), ShellEnvironment(..), ToolEnv(..)
     , ToolExecutionPolicy(..), freeformGrammarAppToolWithExecution
     )
-import Control.Concurrent.MVar (newMVar, withMVar)
+import Control.Concurrent.MVar (withMVar)
 import Control.Exception.Safe (mask_, tryAny)
 import Data.Aeson (eitherDecodeStrict', encode)
 import qualified Data.ByteString as ByteString
@@ -44,7 +44,6 @@ newEnvironmentToolWithNix env executable =
 
 newEnvironmentToolUsing :: ToolEnv -> IO (Maybe FilePath) -> IO AppTool
 newEnvironmentToolUsing env resolveExecutable = do
-    lock <- newMVar ()
     pure $ freeformGrammarAppToolWithExecution
         "set_environment"
         ( "Replace this session's shell environment. Pass plain Nix source, not JSON "
@@ -60,7 +59,7 @@ newEnvironmentToolUsing env resolveExecutable = do
         AlwaysPrompt
         TurnSequential
         (streamingTextTool "set_environment" \emit expression ->
-            withMVar lock \() ->
+            withMVar env.toolShellEnvironmentLock \() ->
                 if Text.null (Text.strip expression)
                     then pure (Left "Provide a nonempty Nix expression.")
                     else do
@@ -141,7 +140,7 @@ replaceEnvironment env executable emit expression = do
 -- | Reconnect to the last successfully activated profile on session resume.
 -- Missing or malformed state does not prevent the session from opening.
 restoreShellEnvironment :: ToolEnv -> IO ()
-restoreShellEnvironment env = do
+restoreShellEnvironment env = withMVar env.toolShellEnvironmentLock \() -> do
     directory <- readIORef env.toolSessionTmp
     restored <- tryAny $ case directory of
         Nothing -> pure Nothing

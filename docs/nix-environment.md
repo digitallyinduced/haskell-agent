@@ -28,6 +28,10 @@ expression is replaced, rather than merged with the previous expression.
 Existing processes keep their original environment, and the harness process's
 environment is never changed. Other sessions are unaffected.
 
+The parent and its in-process child agents share the session's active profile.
+Environment changes are serialized across their tool instances; a successful
+change affects subsequent shell commands from every agent in that session.
+
 Successful activation is recorded atomically in `nix-environment/active.json`.
 Resuming the same session restores its profile while the session temporary
 directory and Nix profile remain available. Revision directories retain the

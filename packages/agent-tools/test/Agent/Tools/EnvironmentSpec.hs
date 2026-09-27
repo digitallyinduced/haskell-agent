@@ -31,7 +31,8 @@ import Agent.Tools.Types
     , setToolSessionTmp
     )
 import Control.Exception.Safe (bracket)
-import Control.Concurrent.MVar (readMVar)
+import Control.Concurrent.Async (withAsync, wait)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, readMVar, takeMVar)
 import Data.IORef (readIORef)
 import Data.Maybe (isJust)
 import Data.Text (Text)
@@ -89,6 +90,65 @@ spec = describe "Agent.Tools.Environment" do
             current <- requireActive env
             current.environmentProfile `shouldNotBe` previous.environmentProfile
             shellValue env `shouldReturn` "revision-two"
+
+    it "serializes separate parent and child tools and publishes one shared revision" do
+        withEnvironment \directory executable parent parentTool -> do
+            freshChild <- defaultToolEnv parent.toolCwd
+            let child = freshChild
+                    { toolSessionTmp = parent.toolSessionTmp
+                    , toolShellEnvironment = parent.toolShellEnvironment
+                    , toolShellEnvironmentLock = parent.toolShellEnvironmentLock
+                    }
+            childTool <- newEnvironmentToolWithNix child executable
+            parentEntered <- newEmptyMVar
+            releaseParent <- newEmptyMVar
+            childStarted <- newEmptyMVar
+            childEntered <- newEmptyMVar
+            let parentOutput output =
+                    if output == "Building candidate Nix environment…"
+                        then putMVar parentEntered () >> takeMVar releaseParent
+                        else pure ()
+                childOutput output =
+                    if output == "Building candidate Nix environment…"
+                        then putMVar childEntered ()
+                        else pure ()
+            completed <- timeout 10000000 $
+                withAsync (runToolWithOutput parentOutput parentTool firstExpression) \parentCall -> do
+                    takeMVar parentEntered
+                    withAsync (putMVar childStarted () >> runToolWithOutput childOutput childTool secondExpression) \childCall -> do
+                        takeMVar childStarted
+                        timeout 100000 (readMVar childEntered) `shouldReturn` Nothing
+                        putMVar releaseParent ()
+                        wait parentCall >>= (`shouldNotSatisfy` Text.isPrefixOf "ERR ")
+                        wait childCall >>= (`shouldNotSatisfy` Text.isPrefixOf "ERR ")
+            completed `shouldBe` Just ()
+            shellValue parent `shouldReturn` "revision-two"
+            shellValue child `shouldReturn` "revision-two"
+            parentActive <- requireActive parent
+            childActive <- requireActive child
+            childActive.environmentProfile `shouldBe` parentActive.environmentProfile
+            resumed <- defaultToolEnv parent.toolCwd
+            setToolSessionTmp resumed (Just (unsafeEncodeUtf directory))
+            restoreShellEnvironment resumed
+            restored <- requireActive resumed
+            restored.environmentProfile `shouldBe` parentActive.environmentProfile
+            shellValue resumed `shouldReturn` "revision-two"
+
+    it "shares parent activation with an existing child and preserves it after child failure" do
+        withEnvironment \_ executable parent parentTool -> do
+            freshChild <- defaultToolEnv parent.toolCwd
+            let child = freshChild
+                    { toolSessionTmp = parent.toolSessionTmp
+                    , toolShellEnvironment = parent.toolShellEnvironment
+                    , toolShellEnvironmentLock = parent.toolShellEnvironmentLock
+                    }
+            childTool <- newEnvironmentToolWithNix child executable
+            runTool parentTool firstExpression
+            shellValue child `shouldReturn` "revision-one"
+            output <- runTool childTool "{ pkgs }: throw \"ENVIRONMENT_TEST_FAILURE\""
+            output `shouldSatisfy` Text.isPrefixOf "ERR "
+            shellValue parent `shouldReturn` "revision-one"
+            shellValue child `shouldReturn` "revision-one"
 
     it "leaves the active revision intact after a failed realization" do
         withEnvironment \_ _ env tool -> do
@@ -242,8 +302,12 @@ simulatedNix = Text.unlines
     ]
 
 runTool :: AppTool -> Text -> IO Text
-runTool tool source = do
-    result <- dispatchToolCall testDispatchConfig
+runTool = runToolWithOutput (const (pure ()))
+
+runToolWithOutput :: (Text -> IO ()) -> AppTool -> Text -> IO Text
+runToolWithOutput onOutput tool source = do
+    result <- dispatchToolCall
+        testDispatchConfig { toolDispatchOnOutput = \_ output -> onOutput output }
         [tool.appToolHandler]
         (customToolCall "environment-1" "set_environment" source)
     pure result.output
