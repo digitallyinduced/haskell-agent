@@ -202,6 +202,15 @@
       "label": "5.1 · frontier · subscription",
       "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
       "default_reasoning_effort": "high"
+    },
+    {
+      "id": "claude-opus-5-5",
+      "connection": "claude-code",
+      "dialect": "claude-code",
+      "context_window": 1000000,
+      "label": "5.5 · frontier · subscription · 1M context",
+      "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+      "default_reasoning_effort": "medium"
     }
   ]
 }
