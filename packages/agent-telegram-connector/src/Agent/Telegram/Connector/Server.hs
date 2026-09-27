@@ -107,6 +107,7 @@ sessionFailure :: AgentServerClientError -> SessionFailure
 sessionFailure = \case
     AgentServerTransportError _ -> SessionUnavailable
     AgentServerCredentialError _ -> SessionUnavailable
+    AgentServerHttpError 409 (Just "session_busy") _ -> SessionUnavailable
     AgentServerHttpError status _ _
         | status == 408 || status == 429 || status >= 500 -> SessionUnavailable
         | otherwise -> SessionRejected "Agent server rejected the operation"
@@ -153,7 +154,7 @@ reconcileServerTurnWith
     -> IO (Either AgentServerClientError ServerTurnSnapshot)
 reconcileServerTurnWith transport maximumLength session request knownTurn =
     case knownTurn of
-        Just identifier -> fetchResult identifier
+        Just identifier -> inspectTurn identifier
         Nothing -> transport.transportListTurns session >>= \case
             Left problem -> pure (Left problem)
             Right listing ->
@@ -168,19 +169,25 @@ reconcileServerTurnWith transport maximumLength session request knownTurn =
     adopt turn = case validate Nothing turn of
         Left problem -> pure (Left problem)
         Right () -> pure (Right (ServerTurnSnapshot turn.agentServerTurnId ServerTurnActive))
+    -- The result endpoint rejects nonterminal turns with turn_not_terminal.
+    -- Inspect state first so running work and human requests remain live.
+    inspectTurn identifier = transport.transportGetTurn identifier >>= \case
+        Left problem -> pure (Left problem)
+        Right turn -> case validate (Just identifier) turn of
+            Left problem -> pure (Left problem)
+            Right () -> classify identifier turn
     fetchResult identifier = transport.transportGetResult identifier >>= \case
         Left problem -> pure (Left problem)
         Right result -> case validate (Just identifier) result.agentServerResultTurn of
             Left problem -> pure (Left problem)
-            Right () -> classify identifier result
-    classify identifier result = case result.agentServerResultTurn.agentServerTurnStatus of
+            Right () -> pure $ ServerTurnSnapshot identifier . ServerTurnCompleted
+                <$> completedServerResponse maximumLength result
+    classify identifier turn = case turn.agentServerTurnStatus of
         AgentServerTurnQueued -> snapshot identifier ServerTurnActive
         AgentServerTurnRunning -> snapshot identifier ServerTurnActive
         AgentServerTurnFailed -> snapshot identifier ServerTurnFailed
         AgentServerTurnCancelled -> snapshot identifier ServerTurnCancelled
-        AgentServerTurnCompleted ->
-            pure $ ServerTurnSnapshot identifier . ServerTurnCompleted
-                <$> completedServerResponse maximumLength result
+        AgentServerTurnCompleted -> fetchResult identifier
         AgentServerTurnWaitingForInput ->
             transport.transportListRequests identifier >>= \case
                 Left problem -> pure (Left problem)
