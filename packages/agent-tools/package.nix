@@ -19,6 +19,7 @@ mkDerivation {
     aeson agent-core agent-json agent-responses-types async base
     base64-bytestring bytestring containers directory filepath hspec
     JuicyPixels process QuickCheck safe-exceptions stm text time unix
+    vector
   ];
   benchmarkHaskellDepends = [
     aeson agent-core async base bytestring directory filepath process

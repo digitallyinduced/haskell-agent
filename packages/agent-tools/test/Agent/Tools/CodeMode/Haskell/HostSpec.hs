@@ -2,7 +2,7 @@
 module Agent.Tools.CodeMode.Haskell.HostSpec (spec) where
 
 import Agent.Tools.CodeMode.Haskell.Host
-import Agent.Tools.CodeMode.Host.Types
+import Agent.Tools.CodeMode.Host (CodeModeError(..), CodeModeResult(..))
 import Agent.ToolDispatch (ToolResultFile(..))
 import Control.Concurrent.MVar
 import Control.Concurrent.STM

@@ -208,6 +208,7 @@ benchmark artifact-retrieval-bench
 
 test-suite agent-tools-test
     import:           common-opts
+    ghc-options:      -threaded
     type:             exitcode-stdio-1.0
     hs-source-dirs:   test
     main-is:          Spec.hs
@@ -257,3 +258,4 @@ test-suite agent-tools-test
                     , text
                     , time
                     , unix
+                    , vector

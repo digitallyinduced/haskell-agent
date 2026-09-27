@@ -51,6 +51,7 @@ spec = do
                 [doubleTool.appToolHandler]
                 (customToolCall "projection" "double" "{\"value\":21}")
             pure result { output = output, toolResultOutcome = Just ToolSucceeded }
+        native :: Value -> ToolCallResult -> ToolCallResult
         native envelope result = ToolCallResultWithStructured
             result.callId result.output result.callKind result.toolResultMode
             result.toolResultImages result.toolResultOutcome envelope []
@@ -157,7 +158,8 @@ spec = do
     it "repairs before dispatch and preserves nested approval denial" do
         repairs <- newIORef (0 :: Int)
         calls <- newIORef (0 :: Int)
-        let repair request = do
+        let repair :: HaskellRepairRequest -> IO (Maybe Text)
+            repair request = do
                 request.repairEnvironment `shouldSatisfy` Text.isInfixOf haskellCellEnvironment
                 request.repairEnvironment `shouldSatisfy` Text.isInfixOf haskellCellGuidance
                 request.repairBindings `shouldSatisfy` Text.isInfixOf "double ::"
@@ -223,7 +225,8 @@ integrationSpec = describe "registered code-mode toolsets" do
       describe (show backend) do
         it "invokes generated tools through the supplied dispatcher" do
             calls <- newIORef (0 :: Int)
-            let invoke tool call = do
+            let invoke :: CodeModeNestedInvoke
+                invoke tool call = do
                     modifyIORef' calls (+ 1)
                     Right <$> dispatchToolCall defaultLoopDispatch [tool.appToolHandler] call
             withToolSet backend invoke [nested doubleTool] \tools -> do
@@ -243,7 +246,8 @@ integrationSpec = describe "registered code-mode toolsets" do
 
         it "refreshes wrappers while preserving captured descriptions and dispatch tables" do
             descriptions <- newIORef []
-            let invoke tool call = do
+            let invoke :: CodeModeNestedInvoke
+                invoke tool call = do
                     modifyIORef' descriptions (<> [tool.appToolDescription])
                     Right <$> dispatchToolCall defaultLoopDispatch [tool.appToolHandler] call
             withToolSet backend invoke [] \original -> do
@@ -307,6 +311,7 @@ integrationSpec = describe "registered code-mode toolsets" do
                 ]
             tool = doubleTool
                 { appToolOutputMetadata = Just (ToolOutputMetadata (Just schema) McpToolOutput) }
+            invoke :: CodeModeNestedInvoke
             invoke actual call = do
                 modifyIORef' calls (+ 1)
                 Right <$> dispatchToolCall defaultLoopDispatch [actual.appToolHandler] call
@@ -323,7 +328,8 @@ integrationSpec = describe "registered code-mode toolsets" do
     it "keeps an active Haskell cell on its captured tools across refresh" do
         descriptions <- newIORef []
         refresh <- newIORef (pure ())
-        let invoke tool call = do
+        let invoke :: CodeModeNestedInvoke
+            invoke tool call = do
                 modifyIORef' descriptions (<> [tool.appToolDescription])
                 joinAction <- atomicModifyIORef' refresh (\action -> (pure (), action))
                 joinAction
