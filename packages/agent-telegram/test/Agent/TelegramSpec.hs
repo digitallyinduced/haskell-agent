@@ -68,6 +68,10 @@ decodeWith decoder =
 spec :: Spec
 spec = describe "Agent.Telegram" do
     describe "Local connector session backend" do
+        it "reserves negative retry IDs without fixed-width overflow" do
+            retryExecutionUpdateId 0 `shouldBe` (-1)
+            retryExecutionUpdateId 9223372036854775807 `shouldBe` (-9223372036854775808)
+            retryExecutionUpdateId 9223372036854775808 `shouldBe` (-9223372036854775809)
         it "persists a retry identity without replacing the next real pending update" do
             let key = TelegramChatKey 123 Nothing
                 retryId = retryExecutionUpdateId 123
@@ -100,7 +104,10 @@ spec = describe "Agent.Telegram" do
                     `shouldReturn` ExecutionCompleted (Text.pack (show retryId)) "retried prompt"
                 execute 124 "next real prompt"
                     `shouldReturn` ExecutionCompleted "124" "next real prompt"
-                readIORef launches `shouldReturn` 2
+                let secondRetryId = retryExecutionUpdateId 125
+                execute secondRetryId "retried prompt"
+                    `shouldReturn` ExecutionCompleted (Text.pack (show secondRetryId)) "retried prompt"
+                readIORef launches `shouldReturn` 3
         it "recovers completed output without launching the same request again" $
             withSystemTempDirectory "telegram-execution" \directory -> do
                 launches <- newIORef (0 :: Int)
