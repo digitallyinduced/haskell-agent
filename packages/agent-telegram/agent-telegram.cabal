@@ -54,12 +54,14 @@ library
                     , Agent.Telegram.Types
                     , Agent.Telegram.Types.Config
                     , Agent.Telegram.Voice
+                    , Agent.Telegram.Session.Local
     reexported-modules: Agent.Telegram.Client
                       , Agent.Telegram.Markdown
                       , Agent.Telegram.Types.State
                       , Agent.Telegram.Types.Wire
     build-depends:    agent-accounts >= 0.1 && < 0.2
                     , agent-telegram-api >= 0.1 && < 0.2
+                    , agent-telegram-connector >= 0.1 && < 0.2
                     , agent-runtime >= 0.1 && < 0.2
                     , agent-core >= 0.1 && < 0.2
                     , agent-json >= 0.1 && < 0.2
@@ -104,6 +106,7 @@ test-suite agent-telegram-test
                     , agent-json
                     , agent-runtime
                     , agent-telegram
+                    , agent-telegram-connector
                     , aeson
                     , base >= 4.17 && < 5
                     , bytestring

@@ -1,9 +1,10 @@
 { mkDerivation, aeson, agent-accounts, agent-core, agent-json
-, agent-runtime, agent-store, agent-telegram-api, async, base
-, bytestring, containers, directory, filelock, filepath, hspec
-, http-client, http-client-tls, http-types, lib
-, optparse-applicative, process, retry, safe-exceptions, split
-, temporary, text, time, unix, vector
+, agent-runtime, agent-store, agent-telegram-api
+, agent-telegram-connector, async, base, bytestring, containers
+, directory, filelock, filepath, hspec, http-client
+, http-client-tls, http-types, lib, optparse-applicative, process
+, retry, safe-exceptions, split, temporary, text, time, unix
+, vector
 }:
 mkDerivation {
   pname = "agent-telegram";
@@ -13,15 +14,16 @@ mkDerivation {
   isExecutable = true;
   libraryHaskellDepends = [
     aeson agent-accounts agent-core agent-json agent-runtime
-    agent-store agent-telegram-api async base bytestring containers
-    directory filelock filepath http-client http-client-tls http-types
-    optparse-applicative process retry safe-exceptions split text time
-    unix vector
+    agent-store agent-telegram-api agent-telegram-connector async base
+    bytestring containers directory filelock filepath http-client
+    http-client-tls http-types optparse-applicative process retry
+    safe-exceptions split text time unix vector
   ];
   executableHaskellDepends = [ base ];
   testHaskellDepends = [
-    aeson agent-core agent-json agent-runtime base bytestring
-    containers directory filepath hspec safe-exceptions temporary text
+    aeson agent-core agent-json agent-runtime agent-telegram-connector
+    base bytestring containers directory filepath hspec safe-exceptions
+    temporary text
   ];
   benchmarkHaskellDepends = [ base filepath temporary text time ];
   description = "Telegram gateway for the universal agent harness";

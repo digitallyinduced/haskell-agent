@@ -1,0 +1,48 @@
+cabal-version: 3.0
+name: agent-telegram-connector
+version: 0.1.0.0
+synopsis: Durable Telegram conversation and agent session connector
+license: MIT
+author: digitally induced GmbH
+maintainer: marc@digitallyinduced.com
+build-type: Simple
+
+common options
+    default-language: GHC2021
+    default-extensions: BlockArguments, OverloadedStrings, OverloadedRecordDot,
+                        DuplicateRecordFields, NoFieldSelectors, LambdaCase,
+                        RecordWildCards, NamedFieldPuns, ScopedTypeVariables
+    ghc-options: -Wall -Wcompat -Werror=incomplete-patterns -Werror=missing-fields
+
+library
+    import: options
+    hs-source-dirs: src
+    exposed-modules: Agent.Telegram.Connector
+                     Agent.Telegram.Connector.Session
+                     Agent.Telegram.Connector.Controls
+                     Agent.Telegram.Connector.Media
+                     Agent.Telegram.Connector.Input
+                     Agent.Telegram.Connector.Server
+                     Agent.Telegram.Connector.PostgreSQL
+    build-depends: agent-telegram-api >= 0.1 && < 0.2, agent-json, agent-server-client,
+                   aeson >= 2.0, async, base >= 4.17 && < 5, bytestring,
+                   postgresql-simple, safe-exceptions, text >= 2.0 && < 2.2, time
+
+test-suite agent-telegram-connector-test
+    import: options
+    type: exitcode-stdio-1.0
+    hs-source-dirs: test
+    main-is: Spec.hs
+    other-modules: ServerSpec InputSpec
+    build-depends: agent-telegram-connector, agent-telegram-api, agent-json,
+                   agent-server-client, aeson, base, bytestring, hspec, text, time
+
+test-suite agent-telegram-connector-postgres-test
+    import: options
+    type: exitcode-stdio-1.0
+    hs-source-dirs: test
+    main-is: PostgreSQLSpec.hs
+    ghc-options: -main-is PostgreSQLSpec
+    build-depends: agent-telegram-connector, agent-telegram-api, aeson, base,
+                   bytestring, hspec, text, time,
+                   directory, filepath, postgresql-simple, process, temporary, safe-exceptions
