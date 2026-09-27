@@ -50,6 +50,25 @@ spec = describe "Agent.Runtime.ModelConfig" do
             `shouldBe` Just 1_048_576
         catalogContextWindowFor catalog "claude-code" "claude-fable-5-1"
             `shouldBe` Just 200_000
+        catalogContextWindowFor catalog "claude-code" "claude-opus-5-5"
+            `shouldBe` Just 1_000_000
+        fmap
+            (\model ->
+                ( model.catalogModelConnectionId
+                , model.catalogModelWireId
+                , model.catalogModelDialect
+                , model.catalogModelDefaultReasoningEffort
+                , model.catalogModelDefault
+                ))
+            (catalogModelById catalog "claude-opus-5-5")
+            `shouldBe`
+                Just
+                    ( "claude-code"
+                    , "claude-opus-5-5"
+                    , ClaudeCodeDialect
+                    , Just "medium"
+                    , False
+                    )
         fmap (.catalogModelId)
             (catalogModelsForConnection "openai" catalog)
             `shouldBe`
