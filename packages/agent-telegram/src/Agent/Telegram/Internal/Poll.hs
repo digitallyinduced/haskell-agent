@@ -81,6 +81,7 @@ import Agent.Telegram.Internal.Turn
 import qualified Agent.Telegram.Client as TelegramClient
 import Agent.Telegram.Log (logTelegramEvent)
 import Agent.Telegram.Markdown ()
+import Agent.Telegram.Connector (ConversationQueue(..), runConversationQueue)
 import Agent.Telegram.Types
     ( PendingChatAction(..)
     , TelegramChat(..)
@@ -366,11 +367,10 @@ isBenignLeaveError err =
 
 processChatQueue :: TelegramRuntime -> TelegramChatKey -> IO ()
 processChatQueue runtime key =
-    nextChatAction runtime key >>= \case
-        Nothing -> pure ()
-        Just action -> do
-            waitForActionRetry runtime action
-            result <- tryAny case action of
+    runConversationQueue ConversationQueue
+        { nextConversationAction = nextChatAction runtime key
+        , waitConversationAction = waitForActionRetry runtime
+        , performConversationAction = \action -> case action of
                 DeliverReply pending -> do
                     reply runtime pending
                     modifyState runtime (completePendingAction action)
@@ -409,8 +409,7 @@ processChatQueue runtime key =
                 LeaveUnauthorizedChat pending -> do
                     leaveUnauthorizedGroup runtime pending
                     modifyState runtime (completePendingAction action)
-            case result of
-                Left err -> do
+        , failConversationAction = \action err -> do
                     delay <- recordPendingFailure
                         runtime
                         action
@@ -426,9 +425,8 @@ processChatQueue runtime key =
                             redactToken runtime.runtimeClient.clientToken
                                 (Text.pack (displayException err))
                         ]
-                    maybe (pure ()) threadDelay delay
-                    processChatQueue runtime key
-                Right () -> processChatQueue runtime key
+                    pure delay
+        }
 
 enqueueOrDiscardReply
     :: TelegramRuntime
@@ -516,6 +514,7 @@ runQueuedTurn runtime pending =
                     runAgentTurn
                         cancellation
                         runtime
+                        pending.pendingTurnUpdateId
                         pending.pendingTurnChat
                         userId
                         (Just pending.pendingTurnMessageId)
@@ -546,6 +545,7 @@ runQueuedTurn runtime pending =
                             runAgentTurn
                                 cancellation
                                 runtime
+                                pending.pendingTurnUpdateId
                                 pending.pendingTurnChat
                                 userId
                                 (Just pending.pendingTurnMessageId)

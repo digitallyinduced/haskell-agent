@@ -940,6 +940,9 @@
                             (final.callPackage ./packages/agent-audio/package.nix { });
                         agent-telegram-api = localPackage
                             (final.callPackage ./packages/agent-telegram-api/package.nix { });
+                        agent-telegram-connector = localPackage (pkgs.haskell.lib.addTestToolDepends
+                            (final.callPackage ./packages/agent-telegram-connector/package.nix { })
+                            [ pkgs.postgresql_18 ]);
                         agent-telegram = localPackage (pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-telegram/package.nix { }) {
                                 src =
@@ -1635,6 +1638,7 @@
                         packages.agent-native-bridge
                         packages.agent-telegram
                         packages.agent-telegram-api
+                        packages.agent-telegram-connector
                         packages.agent-audio
                         packages.agent-server
                         packages.agent-core
@@ -1737,6 +1741,7 @@
                         '';
                     agent-telegram = agentTelegramCheckPackage;
                     agent-telegram-api = haskellPackages.agent-telegram-api;
+                    agent-telegram-connector = haskellPackages.agent-telegram-connector;
                     agent-audio = haskellPackages.agent-audio;
                     agent-server = agentServerCheckPackage;
                     agent-server-client =

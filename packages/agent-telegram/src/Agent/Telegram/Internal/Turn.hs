@@ -26,6 +26,8 @@ import Agent.Telegram.Bridge (withTelegramBridge)
 import qualified Agent.Telegram.Client as TelegramClient
 import Agent.Telegram.Voice (transcribeWithXAI)
 import Agent.Telegram.VoicePreparation (withTelegramVoiceTranscript)
+import Agent.Telegram.Connector.Session
+import Agent.Telegram.Session.Local (localSessionBackend)
 import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.OsPath (unsafeToFilePath)
 import Control.Concurrent (threadDelay)
@@ -151,83 +153,21 @@ runQueuedMediaTurn
     -> IO TelegramTurnResponse
 runQueuedMediaTurn runtime pending =
   withTelegramTurnCancellation runtime pending.pendingMediaChat \cancellation -> do
-    progressMessageId <- newIORef Nothing
     handle <- sessionForSelectedPrompt
         runtime pending.pendingMediaChat pending.pendingMediaText
     let agentPrompt = telegramAgentPrompt pending.pendingMediaText
     bracket
         (downloadTelegramMediaAttachments runtime handle pending)
         cleanupTelegramMediaAttachments
-        (runWithAttachments cancellation progressMessageId handle agentPrompt)
+        (runWithAttachments cancellation handle agentPrompt)
   where
-   runWithAttachments cancellation progressMessageId handle agentPrompt attachments = do
+   runWithAttachments cancellation handle agentPrompt attachments = do
     let request = telegramMediaTurnRequest agentPrompt attachments
-    let bridgeDir =
-            handle.sessionTempDir
-                </> unsafeEncodeUtf
-                    ("telegram-bridge-"
-                        <> maybe "turn" show (Just pending.pendingMediaMessageId))
-        bridgePath = unsafeToFilePath bridgeDir
-        gatewayRequest =
-            managedTurnRequestWithGateway
-                bridgePath
-                ManagedTurnContext
-                    { managedGateway = "telegram"
-                    , managedChatId = pending.pendingMediaChat.chatId
-                    , managedMessageThreadId =
-                        pending.pendingMediaChat.messageThreadId
-                    , managedReplyToMessageId =
-                        Just pending.pendingMediaMessageId
-                    , managedUserId = pending.pendingMediaUserId
-                    }
-                request
-        bridgeEnv =
-            telegramBridgeEnv
-                runtime
-                gatewayRequest
-                pending.pendingMediaChat
-                pending.pendingMediaUserId
-                (Just pending.pendingMediaMessageId)
-                progressMessageId
-                (not (isAmbientGroupPrompt pending.pendingMediaText))
-                (unsafeToFilePath handle.sessionTempDir)
-    (priorTurnIndex, result) <-
-        withTurnBridgeDirectory runtime bridgeDir do
-          priorTurnIndex <-
-              latestPersistedTurnIndex runtime handle.sessionMeta.metaId
-          result <- withTelegramBridge bridgeEnv $
-            launchManagedTurnCancellable cancellation
-                runtime.runtimeProcessManager
-                runtime.runtimePolicy
-                True
-                False
-                (Just telegramTurnTimeoutMicros)
-                handle
-                gatewayRequest
-          pure (priorTurnIndex, result)
-    response <- case result of
-        Left err -> fail (Text.unpack err)
-        Right _ ->
-            loadSessionHandle
-                runtime.runtimePool
-                runtime.runtimeSessionsRoot
-                handle.sessionMeta.metaId >>= \case
-                    Left err -> fail (Text.unpack err)
-                    Right (_, turns) ->
-                        latestPersistedTurnIndex
-                            runtime
-                            handle.sessionMeta.metaId >>= \case
-                                Just turnIndex
-                                    | maybe True (< turnIndex) priorTurnIndex
-                                    , latestTurnMatches
-                                        request.managedTurnText
-                                        turns ->
-                                        pure (renderLatestTurn turns)
-                                _ ->
-                                    fail
-                                        "agent completed without recording \
-                                        \the Telegram turn"
-    TelegramTurnResponse response <$> readIORef progressMessageId
+    runManagedAgentTurn cancellation runtime handle pending.pendingMediaUpdateId
+        pending.pendingMediaChat pending.pendingMediaUserId
+        (Just pending.pendingMediaMessageId)
+        (not (isAmbientGroupPrompt pending.pendingMediaText))
+        request request.managedTurnText
 
 -- Install cleanup before chmod, persisted-turn lookup, or bridge startup.
 withTurnBridgeDirectory :: TelegramRuntime -> OsPath -> IO a -> IO a
@@ -617,18 +557,20 @@ pendingActionChatLocal = \case
 runAgentTurn
     :: CancelFlag
     -> TelegramRuntime
+    -> Integer
     -> TelegramChatKey
     -> Integer
     -> Maybe Integer
     -> Text
     -> IO TelegramTurnResponse
-runAgentTurn cancellation runtime key userId replyToMessageId prompt =
+runAgentTurn cancellation runtime updateId key userId replyToMessageId prompt =
   prepareTelegramTurn cancellation (sessionForSelectedPrompt runtime key prompt) \handle -> do
     let agentPrompt = telegramAgentPrompt prompt
     runManagedAgentTurn
         cancellation
         runtime
         handle
+        updateId
         key
         userId
         replyToMessageId
@@ -679,6 +621,7 @@ runManagedAgentTurn
     :: CancelFlag
     -> TelegramRuntime
     -> SessionHandle
+    -> Integer
     -> TelegramChatKey
     -> Integer
     -> Maybe Integer
@@ -687,7 +630,7 @@ runManagedAgentTurn
     -> Text
     -> IO TelegramTurnResponse
 runManagedAgentTurn
-        cancellation runtime handle key userId replyToMessageId groupActivityEnabled baseRequest expectedPrompt = do
+        cancellation runtime handle updateId key userId replyToMessageId groupActivityEnabled baseRequest expectedPrompt = do
     progressMessageId <- newIORef Nothing
     let bridgeDir =
             handle.sessionTempDir
@@ -716,39 +659,48 @@ runManagedAgentTurn
                 progressMessageId
                 groupActivityEnabled
                 (unsafeToFilePath handle.sessionTempDir)
-    (priorTurnIndex, result) <- withTurnBridgeDirectory runtime bridgeDir do
-      priorTurnIndex <-
-          latestPersistedTurnIndex runtime handle.sessionMeta.metaId
-      result <- withTelegramBridge bridgeEnv $
-        launchManagedTurnCancellable cancellation
-            runtime.runtimeProcessManager
-            runtime.runtimePolicy
-            True
-            False
-            (Just telegramTurnTimeoutMicros)
-            handle
-            request
-      pure (priorTurnIndex, result)
-    response <- case result of
-            Left err -> fail (Text.unpack err)
-            Right _ ->
+        checkpointDirectory = runtime.runtimeGatewayDirectory </> unsafeEncodeUtf "executions"
+        checkpointPath = unsafeToFilePath
+            (checkpointDirectory </> unsafeEncodeUtf (show updateId <> ".json"))
+        execution = SessionExecution
+            { executionRequestId = Text.pack (show updateId)
+            , executionSessionId = handle.sessionMeta.metaId
+            , executionPrompt = expectedPrompt
+            , executionTurnId = Nothing
+            }
+        launch = withTurnBridgeDirectory runtime bridgeDir do
+            priorTurnIndex <- latestPersistedTurnIndex runtime handle.sessionMeta.metaId
+            result <- withTelegramBridge bridgeEnv $
+                launchManagedTurnCancellable cancellation
+                    runtime.runtimeProcessManager runtime.runtimePolicy True False
+                    (Just telegramTurnTimeoutMicros) handle request
+            case result of
+              Left err -> pure (Left err)
+              Right _ ->
                 loadSessionHandle
-                    runtime.runtimePool
-                    runtime.runtimeSessionsRoot
+                    runtime.runtimePool runtime.runtimeSessionsRoot
                     handle.sessionMeta.metaId >>= \case
-                        Left err -> fail (Text.unpack err)
-                        Right (_, turns) ->
-                            latestPersistedTurnIndex
-                                runtime
-                                handle.sessionMeta.metaId >>= \case
-                                    Just turnIndex
-                                        | maybe True (< turnIndex) priorTurnIndex
-                                        , latestTurnMatches expectedPrompt turns ->
-                                            pure (renderLatestTurn turns)
-                                    _ ->
-                                        fail
-                                            "agent completed without recording \
-                                            \the Telegram turn"
+                      Left err -> pure (Left err)
+                      Right (_, turns) ->
+                        latestPersistedTurnIndex runtime handle.sessionMeta.metaId >>= \case
+                          Just turnIndex
+                            | maybe True (< turnIndex) priorTurnIndex
+                            , latestTurnMatches expectedPrompt turns ->
+                                pure (Right (renderLatestTurn turns))
+                          _ -> pure (Left "agent completed without recording the Telegram turn")
+    createDirectoryIfMissing True checkpointDirectory
+    setFileMode (unsafeToFilePath checkpointDirectory) 0o700
+    transition <- advanceSessionExecution
+        (localSessionBackend checkpointPath (isCancelled cancellation)
+            (requestCancel cancellation) launch)
+        execution
+    response <- case transition of
+            ExecutionCompleted _ content -> pure content
+            ExecutionCancelled -> pure "Stopped."
+            ExecutionFailed problem -> fail (Text.unpack problem)
+            ExecutionRetry -> fail "Local execution checkpoint unavailable"
+            ExecutionRunning _ -> fail "Unexpected asynchronous local execution"
+            ExecutionWaiting _ _ -> fail "Local human requests must use the active bridge"
     TelegramTurnResponse response <$> readIORef progressMessageId
 
 telegramTurnUserId :: TelegramRuntime -> TelegramChatKey -> IO Integer

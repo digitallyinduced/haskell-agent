@@ -6,6 +6,8 @@ import Agent.OsPath (unsafeToFilePath)
 import Agent.Runtime.ManagedTurn (ManagedTurnMedia(..), ManagedTurnRequest(..))
 import Agent.Runtime.AgentSessions.Process (classifyManagedTurnFailure)
 import qualified Agent.Telegram.Bridge as Bridge
+import Agent.Telegram.Session.Local (localSessionBackend)
+import Agent.Telegram.Connector.Session
 import Agent.Telegram.Types
     ( TelegramApprovalMode(..)
     , defaultTelegramWorkerCount
@@ -65,6 +67,50 @@ decodeWith decoder =
 
 spec :: Spec
 spec = describe "Agent.Telegram" do
+    describe "Local connector session backend" do
+        it "recovers completed output without launching the same request again" $
+            withSystemTempDirectory "telegram-execution" \directory -> do
+                launches <- newIORef (0 :: Int)
+                let execution = SessionExecution "123" "session" "prompt" Nothing
+                    backend = localSessionBackend (directory <> "/123.json")
+                        (pure False) (pure ())
+                        (modifyIORef' launches (+ 1) >> pure (Right "response"))
+                advanceSessionExecution backend execution
+                    `shouldReturn` ExecutionCompleted "123" "response"
+                advanceSessionExecution backend execution
+                    `shouldReturn` ExecutionCompleted "123" "response"
+                readIORef launches `shouldReturn` 1
+        it "does not reuse a checkpoint for another session or prompt" $
+            withSystemTempDirectory "telegram-execution" \directory -> do
+                let execution = SessionExecution "123" "session" "prompt" Nothing
+                    backend = localSessionBackend (directory <> "/123.json")
+                        (pure False) (pure ()) (pure (Right "response"))
+                advanceSessionExecution backend execution
+                    `shouldReturn` ExecutionCompleted "123" "response"
+                advanceSessionExecution backend execution { executionSessionId = "another" }
+                    `shouldReturn` ExecutionFailed "Local execution checkpoint identity mismatch"
+                advanceSessionExecution backend execution { executionPrompt = "changed" }
+                    `shouldReturn` ExecutionFailed "Local execution checkpoint identity mismatch"
+        it "never relaunches a process after interruption during its execution" $
+            withSystemTempDirectory "telegram-execution" \directory -> do
+                launches <- newIORef (0 :: Int)
+                let execution = SessionExecution "123" "session" "prompt" Nothing
+                    backend = localSessionBackend (directory <> "/123.json")
+                        (pure False) (pure ())
+                        (modifyIORef' launches (+ 1) >> threadDelay 1000000 >> pure (Right "response"))
+                Timeout.timeout 100000 (advanceSessionExecution backend execution)
+                    `shouldReturn` Nothing
+                recovered <- advanceSessionExecution backend execution
+                recovered `shouldSatisfy` \case
+                    ExecutionFailed problem -> "outcome is uncertain" `Text.isInfixOf` problem
+                    _ -> False
+                readIORef launches `shouldReturn` 1
+        it "honors cancellation before submission" $
+            withSystemTempDirectory "telegram-execution" \directory -> do
+                let execution = SessionExecution "123" "session" "prompt" Nothing
+                    backend = localSessionBackend (directory <> "/123.json")
+                        (pure True) (pure ()) (fail "Cancelled work must not launch")
+                advanceSessionExecution backend execution `shouldReturn` ExecutionCancelled
     describe "Telegram turn cancellation" do
         it "accepts stop during voice preparation and never submits its transcript" do
             active <- newMVar Map.empty

@@ -147,6 +147,7 @@ jobs:
               .#checks.x86_64-linux.package-boundaries
               .#checks.x86_64-linux.agent-telegram
               .#checks.x86_64-linux.agent-telegram-api
+              .#checks.x86_64-linux.agent-telegram-connector
               .#checks.x86_64-linux.agent-audio
               .#checks.x86_64-linux.agent-server
               .#checks.x86_64-linux.agent-runtime-daemon
