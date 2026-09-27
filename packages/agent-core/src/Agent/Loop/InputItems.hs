@@ -28,8 +28,10 @@ import Agent.ToolDispatch
     , ToolCallMode(..)
     , ToolCallResult(..)
     , ToolResultImage(..)
+    , ToolResultFile(..)
     , isComputerToolCallKind
     , toolCallResultImages
+    , toolCallResultFiles
     , toolCallResultMode
     )
 import qualified Data.Aeson as Aeson
@@ -181,25 +183,37 @@ toolResultToItem result = case result.callKind of
 
 toolResultOutput :: ToolCallResult -> RawJson
 toolResultOutput result =
-    richToolResultOutput result.output (toolCallResultImages result)
+    richToolResultOutput result.output (toolCallResultImages result) (toolCallResultFiles result)
 
 computerFunctionToolResultOutput :: ToolCallResult -> RawJson
 computerFunctionToolResultOutput result =
     richToolResultOutput
         (computerFunctionTextOutput result.output)
         (toolCallResultImages result)
+        (toolCallResultFiles result)
 
-richToolResultOutput :: Text -> [ToolResultImage] -> RawJson
-richToolResultOutput output images =
-    case images of
-        [] -> rawJsonFromEncoding (Aeson.toEncoding output)
-        nonEmptyImages ->
+richToolResultOutput :: Text -> [ToolResultImage] -> [ToolResultFile] -> RawJson
+richToolResultOutput output images files =
+    case (images, files) of
+        ([], []) -> rawJsonFromEncoding (Aeson.toEncoding output)
+        _ ->
             rawJsonFromEncoding . Aeson.toEncoding $
-                map imagePart nonEmptyImages
+                map imagePart images
+                    <> map filePart files
                     <> [ InputTextPart output Nothing
                        | not (Text.null (Text.strip output))
                        ]
   where
+    filePart :: ToolResultFile -> ResponseContentPart
+    filePart file =
+        InputFilePart
+            { detail = Just "auto"
+            , fileData = Just ("data:" <> file.fileMimeType <> ";base64," <> Text.decodeUtf8 (Base64.encode file.fileData))
+            , fileId = Nothing
+            , fileUrl = Nothing
+            , filename = Just file.fileName
+            , promptCacheBreakpoint = Nothing
+            }
     imagePart :: ToolResultImage -> ResponseContentPart
     imagePart image =
         InputImagePart

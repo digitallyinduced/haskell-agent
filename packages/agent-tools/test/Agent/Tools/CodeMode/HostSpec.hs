@@ -21,6 +21,8 @@ import Agent.ToolDispatch
     , ToolCallResult(..)
     , ToolCallMode(..)
     , ToolHandler
+    , ToolResultFile(..)
+    , toolCallResultFiles
     , customToolCall
     , dispatchToolCall
     , functionToolCall
@@ -897,6 +899,80 @@ spec = describe "code-mode Bun host" do
         readIORef approvals `shouldReturn` 1
         toolSet.closeCodeModeToolSet
 
+    it "forwards native files without exposing bytes to JavaScript or printed output" $
+        withNativeFileToolSet \toolSet -> do
+            result <- runRegisteredExecResult toolSet
+                "text(await tools.document({}));"
+            toolCallResultFiles result `shouldBe` [nativeTestFile]
+            result.output `shouldSatisfy` Text.isInfixOf "Document attached"
+            result.output `shouldNotSatisfy` Text.isInfixOf "%PDF"
+            result.output `shouldNotSatisfy` Text.isInfixOf "JVBER"
+
+    it "preserves native files when JavaScript fails after reading them" $
+        withNativeFileToolSet \toolSet -> do
+            result <- runRegisteredExecResult toolSet
+                "await tools.document({}); throw new Error('later failure');"
+            toolCallResultFiles result `shouldBe` [nativeTestFile]
+            result.output `shouldSatisfy` Text.isInfixOf "later failure"
+            result.output `shouldNotSatisfy` Text.isInfixOf "JVBER"
+
+    it "delivers native files once across an explicit yield and wait" $
+        withNativeFileToolSet \toolSet -> do
+            result <- runRegisteredExecResult toolSet
+                "await tools.document({}); yield_control(); await new Promise(resolve => setTimeout(resolve, 30)); text('resumed');"
+            toolCallResultFiles result `shouldBe` [nativeTestFile]
+            result.output `shouldSatisfy` Text.isInfixOf "Script running"
+            case toolSet.codeModeTools of
+                _ : waitTool_ : _ -> do
+                    continued <- dispatchToolCall defaultLoopDispatch
+                        [waitTool_.appToolHandler]
+                        (functionToolCall "wait-files" "wait"
+                            "{\"cell_id\":\"1\",\"yield_time_ms\":1000}")
+                    toolCallResultFiles continued `shouldBe` []
+                    continued.output `shouldSatisfy` Text.isInfixOf "resumed"
+                _ -> expectationFailure "missing wait tool"
+
+    it "bounds native files per cell" $
+        withNativeFileToolSet \toolSet -> do
+            result <- runRegisteredExecResult toolSet
+                "for (let i = 0; i < 9; i++) await tools.document({});"
+            length (toolCallResultFiles result) `shouldBe` 8
+            result.output `shouldSatisfy` Text.isInfixOf "cell limit"
+
+    it "keeps native files when printed output is truncated" $
+        withNativeFileToolSet \toolSet -> do
+            result <- runRegisteredExecResult toolSet
+                "// @exec: {\"max_output_tokens\": 0}\nawait tools.document({}); text('long output');"
+            toolCallResultFiles result `shouldBe` [nativeTestFile]
+            result.output `shouldNotSatisfy` Text.isInfixOf "JVBER"
+
+    it "preserves native files accumulated after a yield on termination" do
+        release <- newEmptyMVar
+        observed <- newEmptyMVar
+        let config = (defaultCodeModeConfig "data/code-mode/worker.mjs"
+                (\_ _ -> pure (Left "unused")))
+                { fileToolHandler = Just \_ _ -> do
+                    readMVar release
+                    pure (Right (Null, [nativeTestFile]))
+                , notifyHandler = putMVar observed
+                }
+        withCodeModeHost config \host -> do
+            started <- execCodeCell host
+                "await tools.document({}); notify('attached'); await new Promise(() => {});"
+                ["document"] 1
+            started `shouldBe` Right (CodeModeRunning "1" emptyContent)
+            putMVar release ()
+            timeout 5000000 (takeMVar observed) `shouldReturn` Just "attached"
+            terminated <- terminateCodeCell host "1"
+            case terminated of
+                Right CodeModeTerminated{cellValue = value} ->
+                    value `shouldSatisfy` \case
+                        Object payload -> case KeyMap.lookup "content" payload of
+                            Just (Array parts) -> length parts == 1
+                            _ -> False
+                        _ -> False
+                other -> expectationFailure (show other)
+
     it "retains running cell dispatchers when the host surface changes" do
         worker <- codeModeWorkerPath
         entered <- newEmptyMVar
@@ -1178,6 +1254,28 @@ runRegisteredExecResult toolSet source =
                 [execTool_.appToolHandler]
                 (customToolCall "exec-call" "exec" source)
         [] -> fail "missing exec tool"
+
+nativeTestFile :: ToolResultFile
+nativeTestFile = ToolResultFile "report.pdf" "application/pdf" "%PDF-1.7\nprivate bytes"
+
+withNativeFileToolSet :: (CodeModeToolSet -> IO ()) -> IO ()
+withNativeFileToolSet action = do
+    worker <- codeModeWorkerPath
+    let tool = jsonAppToolWithExecution
+            "document" "Read a document." [] AlwaysReadOnly ParallelSafe
+            (typedTool "document" emptyObjectDecoder \() -> pure (Right "Document attached"))
+        invoke _ _ = pure $ Right ToolCallResultWithFiles
+            { callId = "nested-document"
+            , output = "Document attached"
+            , callKind = FunctionCallKind
+            , toolResultMode = BlockingToolCall
+            , toolResultImages = []
+            , toolResultOutcome = Nothing
+            , toolResultFiles = [nativeTestFile]
+            }
+        create = newCodeModeToolSet CodeOnlyToolMode ImageDetailVisible worker
+            invoke [plainNested tool] >>= either (fail . Text.unpack) pure
+    bracket create (.closeCodeModeToolSet) action
 
 withImagePreparationToolSet :: (CodeModeToolSet -> IO ()) -> IO ()
 withImagePreparationToolSet action = do

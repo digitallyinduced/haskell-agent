@@ -5,6 +5,8 @@
 module Agent.Tools.ViewImage
     ( viewImageTool
     , viewImageToolName
+    , supportedImageMime
+    , imageResultFromBytes
     ) where
 
 import Agent.Json.Decode (Decoder)
@@ -123,26 +125,30 @@ runViewImage env _call args =
                     "Image is too large to view (the limit is "
                         <> Text.pack (show maxViewImageBytes)
                         <> " bytes). Downscale it first."
-            Right bytes ->
-                case supportedImageMime bytes of
-                    Nothing ->
-                        pure . Left $
-                            display <> " is not a supported image. Supported formats: PNG, JPEG, WebP, non-animated GIF."
-                    Just mime
-                        | not (validImage mime bytes) ->
-                            pure . Left $ "Unable to process image: invalid or unsupported image data"
-                        | otherwise ->
-                            pure . Right $ ToolHandlerResult
-                                { resultText = "Viewed image file: " <> display
-                                , resultImages =
-                                    [ ToolResultImage
-                                        { imageUrl =
-                                            "data:" <> mime <> ";base64,"
-                                                <> TextEncoding.decodeUtf8 (Base64.encode bytes)
-                                        , imageDetail = Just "high"
-                                        }
-                                    ]
-                                }
+            Right bytes -> pure (imageResultFromBytes display bytes)
+
+-- | Shared with read_file so both entry points apply the same image validation.
+imageResultFromBytes :: Text -> BS.ByteString -> Either Text ToolHandlerResult
+imageResultFromBytes display bytes =
+    case supportedImageMime bytes of
+        Nothing ->
+            Left $
+                display <> " is not a supported image. Supported formats: PNG, JPEG, WebP, non-animated GIF."
+        Just mime
+            | not (validImage mime bytes) ->
+                Left "Unable to process image: invalid or unsupported image data"
+            | otherwise ->
+                Right ToolHandlerResult
+                    { resultText = "Viewed image file: " <> display
+                    , resultImages =
+                        [ ToolResultImage
+                            { imageUrl =
+                                "data:" <> mime <> ";base64,"
+                                    <> TextEncoding.decodeUtf8 (Base64.encode bytes)
+                            , imageDetail = Just "high"
+                            }
+                        ]
+                    }
 
 -- | Image types supported by the Responses image-input API. We inspect magic
 -- bytes rather than extensions; the full decoder check above rejects corrupt

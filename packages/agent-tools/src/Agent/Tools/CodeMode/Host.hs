@@ -9,6 +9,7 @@ module Agent.Tools.CodeMode.Host
     , CodeModeHost
     , CodeModeResult(..)
     , CodeModeToolHandler
+    , CodeModeFileToolHandler
     , ImageDetailVisibility(..)
     , bundledCodeModeWorkerPath
     , codeModeWorkerPath
@@ -18,6 +19,7 @@ module Agent.Tools.CodeMode.Host
     , execCodeCell
     , execCodeCellWithTools
     , codeModeHostWithToolHandler
+    , codeModeHostWithFileToolHandler
     , newCodeModeHost
     , readRunningCodeCells
     , terminateCodeCell
@@ -35,6 +37,7 @@ import Agent.Tools.CodeMode.Protocol
     , encodeToolSuccess
     )
 import Agent.Json (RawJson)
+import Agent.ToolDispatch (ToolResultFile(..))
 import Agent.Process (terminateProcessGroup)
 import Agent.Tools.CodeMode.Host.Types
     ( Cell(..)
@@ -45,6 +48,7 @@ import Agent.Tools.CodeMode.Host.Types
     , CodeModeHost(..)
     , CodeModeResult(..)
     , CodeModeToolHandler
+    , CodeModeFileToolHandler
     , ImageDetailVisibility(..)
     , IdleWorker(..)
     , WorkerPool(..)
@@ -108,8 +112,9 @@ import Control.Monad (filterM, void)
 import Data.Aeson (ToJSON(toJSON), Value(..), object, (.=))
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Char8 as BS8
-import Data.IORef (atomicModifyIORef', newIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -185,7 +190,13 @@ closeCodeModeHost host = do
 -- Existing cells retain the dispatcher captured when they started.
 codeModeHostWithToolHandler :: CodeModeHost -> CodeModeToolHandler -> CodeModeHost
 codeModeHostWithToolHandler host handler =
-    host { hostConfig = host.hostConfig { toolHandler = handler } }
+    host { hostConfig = host.hostConfig { toolHandler = handler, fileToolHandler = Nothing } }
+
+-- | Native attachments stay in the host, never in the JavaScript result.
+codeModeHostWithFileToolHandler
+    :: CodeModeHost -> CodeModeFileToolHandler -> CodeModeHost
+codeModeHostWithFileToolHandler host handler =
+    host { hostConfig = host.hostConfig { fileToolHandler = Just handler } }
 
 execCodeCell
     :: CodeModeHost
@@ -539,6 +550,7 @@ startCellFromProcess host identifier tools alreadyReady
                                     (\unmask -> unmask $
                                         monitorWorker
                                             host.hostConfig.toolHandler
+                                            host.hostConfig.fileToolHandler
                                             host.hostConfig.notifyHandler
                                             host.hostStoredValues
                                             (Set.fromList
@@ -602,6 +614,7 @@ startCellFromProcess host identifier tools alreadyReady
 
 monitorWorker
     :: CodeModeToolHandler
+    -> Maybe CodeModeFileToolHandler
     -> (Text -> IO ())
     -> MVar (Map Text Value)
     -> Set Text
@@ -616,9 +629,10 @@ monitorWorker
     -> Bool
     -> IO ()
 monitorWorker
-        handler notify storedValues allowedTools
-        input writerLock callbacks output ready result yields content initialReady =
-    try @_ @SomeException (loop initialReady) >>= \case
+        handler fileHandler notify storedValues allowedTools
+        input writerLock callbacks output ready result yields content initialReady = do
+    fileBudget <- newIORef (0 :: Int, 0 :: Int)
+    try @_ @SomeException (loop fileBudget initialReady) >>= \case
         Right () -> pure ()
         Left err -> atomically do
             let failure = Left $ CodeModeProtocolError $
@@ -627,7 +641,7 @@ monitorWorker
             void $ tryPutTMVar ready failure
             void $ tryPutTMVar result failure
   where
-    loop hasStarted = do
+    loop fileBudget hasStarted = do
         received <- try @_ @SomeException $ BS8.hGetLine output
         case received of
             Left err ->
@@ -642,13 +656,13 @@ monitorWorker
                     Right WorkerReady
                         | not hasStarted -> do
                             atomically $ void $ tryPutTMVar ready (Right ())
-                            loop True
+                            loop fileBudget True
                         | otherwise ->
                             failClosed True "duplicate worker ready message"
                     Right (WorkerToolInvocation invocation)
                         | hasStarted -> do
-                            launchInvocation invocation
-                            loop True
+                            launchInvocation fileBudget invocation
+                            loop fileBudget True
                         | otherwise ->
                             failClosed False "tool call received before ready"
                     Right WorkerYielded{..}
@@ -657,21 +671,21 @@ monitorWorker
                                 values <- drainTQueue content
                                 writeTQueue yields $
                                     preferStreamedContent values
-                                        (protocolValue responseValue)
-                            loop True
+                                        (workerOutputValue responseValue)
+                            loop fileBudget True
                         | otherwise ->
                             failClosed False "yield received before ready"
                     Right WorkerNotification{..}
                         | hasStarted -> do
                             notify notificationText
-                            loop True
+                            loop fileBudget True
                         | otherwise ->
                             failClosed False "notification received before ready"
                     Right WorkerContent{..}
                         | hasStarted -> do
                             atomically $
-                                writeTQueue content (protocolValue contentValue)
-                            loop True
+                                writeTQueue content (workerOutputValue contentValue)
+                            loop fileBudget True
                         | otherwise ->
                             failClosed False "content received before ready"
                     Right WorkerExecSucceeded{..}
@@ -692,7 +706,7 @@ monitorWorker
                                         Right (CellSucceeded
                                             (preferStreamedContent
                                                 values
-                                                (protocolValue responseValue)))
+                                                (workerOutputValue responseValue)))
                                 pure updated
                         | otherwise ->
                             failClosed hasStarted
@@ -712,42 +726,58 @@ monitorWorker
                                         Right (CellFailed
                                             (preferStreamedContent
                                                 values
-                                                (protocolValue responseValue))
+                                                (workerOutputValue responseValue))
                                             responseError)
                                 pure updated
                         | otherwise ->
                             failClosed hasStarted
                                 "unexpected execution error id"
 
-    handleInvocation :: ToolInvocation -> IO ()
-    handleInvocation invocation = do
+    handleInvocation :: IORef (Int, Int) -> ToolInvocation -> IO ()
+    handleInvocation fileBudget invocation = do
         if invocation.invocationName `Set.notMember` allowedTools
             then send $ encodeToolFailure invocation.invocationId $
                 "tool is not available in this cell: "
                     <> invocation.invocationName
             else do
                 handled <- try @_ @SomeException $
-                    handler
-                        invocation.invocationName
-                        (protocolValue invocation.invocationArguments)
+                    case fileHandler of
+                        Just richHandler ->
+                            richHandler invocation.invocationName
+                                (protocolValue invocation.invocationArguments)
+                        Nothing ->
+                            fmap (\value -> (value, [])) <$> handler
+                                invocation.invocationName
+                                (protocolValue invocation.invocationArguments)
                 case handled of
                     Left err ->
                         send $ encodeToolFailure invocation.invocationId $
                             Text.pack (displayException err)
                     Right (Left err) ->
                         send $ encodeToolFailure invocation.invocationId err
-                    Right (Right value) ->
-                        send $ encodeToolSuccess invocation.invocationId value
+                    Right (Right (value, files)) -> do
+                        accepted <- atomicModifyIORef' fileBudget \(count, bytes) ->
+                            let nextCount = count + length files
+                                nextBytes = bytes + sum (map (BS.length . (.fileData)) files)
+                            in if nextCount <= 8 && nextBytes <= 20 * 1024 * 1024
+                                then ((nextCount, nextBytes), True)
+                                else ((count, bytes), False)
+                        if accepted
+                            then do
+                                atomically $ mapM_ (writeTQueue content . nativeFilePart) files
+                                send $ encodeToolSuccess invocation.invocationId value
+                            else send $ encodeToolFailure invocation.invocationId
+                                "native file output exceeds the cell limit (8 files, 20 MiB)"
 
     -- The worker can issue independent nested calls before awaiting them
     -- (for example through Promise.all). Keep every callback scoped to the
     -- cell so termination and shutdown cancel and join outstanding effects.
-    launchInvocation :: ToolInvocation -> IO ()
-    launchInvocation invocation = do
+    launchInvocation :: IORef (Int, Int) -> ToolInvocation -> IO ()
+    launchInvocation fileBudget invocation = do
         startGate <- newEmptyMVar
         callback <- asyncWithUnmask \unmask -> do
             readMVar startGate
-            unmask (handleInvocation invocation)
+            unmask (handleInvocation fileBudget invocation)
         (do
             modifyMVar_ callbacks (pure . (callback :))
             putMVar startGate ())
@@ -878,6 +908,29 @@ drainTQueue queue = go []
         tryReadTQueue queue >>= \case
             Nothing -> pure (reverse values)
             Just value -> go (value : values)
+
+-- These parts are host-only: never sent to the worker or stored in JS globals.
+-- A worker must not forge these parts and bypass the per-cell attachment cap.
+workerOutputValue :: RawJson -> Value
+workerOutputValue = sanitize . protocolValue
+  where
+    sanitize (Object fields)
+        | KeyMap.lookup "type" fields == Just (String "native_file") =
+            object
+                [ "type" .= ("text" :: Text)
+                , "text" .= ("[worker-supplied native file rejected]" :: Text)
+                ]
+        | otherwise = Object (fmap sanitize fields)
+    sanitize (Array values) = Array (fmap sanitize values)
+    sanitize value = value
+
+nativeFilePart :: ToolResultFile -> Value
+nativeFilePart file = object
+    [ "type" .= ("native_file" :: Text)
+    , "filename" .= file.fileName
+    , "mime_type" .= file.fileMimeType
+    , "data" .= Text.decodeUtf8 (Base64.encode file.fileData)
+    ]
 
 contentResult :: [Value] -> Value
 contentResult values = object ["content" .= values]

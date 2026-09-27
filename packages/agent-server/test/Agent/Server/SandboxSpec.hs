@@ -23,6 +23,8 @@ import Agent.ToolDispatch
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
     , ToolDispatchOutcome(..)
+    , ToolResultFile(..)
+    , toolCallResultFiles
     , dispatchToolCallDetailed
     , functionToolCall
     , noArgsTool
@@ -143,6 +145,20 @@ spec = describe "tenant sandbox protocol" do
             outcome <- dispatchToolCallDetailed testDispatchConfig (map (.appToolHandler) tools)
                 (functionToolCall "invalid" name "{\"handle\":\"../secret\"}")
             outcome.toolDispatchSucceeded `shouldBe` False
+
+    it "preserves native PDF broker results outside the printable output" do
+        withFakeSandbox "pdf" \tenant sandbox _ -> do
+            outcome <- dispatchSandbox tenant sandbox
+            outcome.toolDispatchSucceeded `shouldBe` True
+            toolCallResultFiles outcome.toolDispatchResult `shouldBe`
+                [ToolResultFile "report.pdf" "application/pdf" "%PDF-1.7\nprivate"]
+            outcome.toolDispatchResult.output `shouldNotSatisfy` Text.isInfixOf "JVBER"
+
+    forM_ ["pdf-invalid-base64", "pdf-wrong-mime", "pdf-too-many", "pdf-invalid-header"] \mode ->
+        it ("rejects malformed native PDF broker results: " <> mode) $
+            withFakeSandbox mode \tenant sandbox _ -> do
+                outcome <- dispatchSandbox tenant sandbox
+                outcome.toolDispatchSucceeded `shouldBe` False
 
     it "reads host disk fallback without forwarding to the guest" $
         withSystemTempDirectory "artifact-host-routing" \directory -> do
@@ -415,6 +431,7 @@ spec = describe "tenant sandbox protocol" do
             createDirectory workspace
             createDirectory stateRoot
             writeFile (workspace </> "example.txt") "sandboxed\n"
+            ByteString8.writeFile (workspace </> "report.pdf") "%PDF-1.7\nprivate"
             tenantId <- either (fail . Text.unpack) pure
                 (parseTenantId validTenantId)
             (workerInput, requestOutput) <- pipeHandles
@@ -438,7 +455,7 @@ spec = describe "tenant sandbox protocol" do
                             (readJsonLine responseInput)
                         generation <-
                             (parseField "generation" ready :: IO Text)
-                        let request =
+                        let request name arguments =
                                 object
                                     [ "type" .= ("tool" :: Text)
                                     , "version" .= (1 :: Int)
@@ -450,21 +467,35 @@ spec = describe "tenant sandbox protocol" do
                                     , "dialect" .= ("codex" :: Text)
                                     , "call" .= object
                                         [ "id" .= ("worker-call" :: Text)
-                                        , "name" .= ("list_dir" :: Text)
-                                        , "arguments" .=
-                                            ("{\"target_directory\":\".\"}"
-                                                :: Text)
+                                        , "name" .= (name :: Text)
+                                        , "arguments" .= (arguments :: Text)
                                         , "kind" .= ("function" :: Text)
                                         , "argumentsEncrypted" .= False
                                         ]
                                     ]
-                        writeJsonLine requestOutput request
+                        writeJsonLine requestOutput
+                            (request "list_dir" "{\"target_directory\":\".\"}")
                         result <- within "sandbox worker result"
                             (readJsonLine responseInput)
                         parseField "ok" result `shouldReturn` True
                         resultText <- parseField "output" result
                         resultText `shouldSatisfy`
                             Text.isInfixOf "example.txt"
+                        writeJsonLine requestOutput
+                            (request "read_file" "{\"target_file\":\"report.pdf\"}")
+                        pdfResult <- within "sandbox native PDF result"
+                            (readJsonLine responseInput)
+                        parseField "ok" pdfResult `shouldReturn` True
+                        files <- parseField "files" pdfResult :: IO [Value]
+                        length files `shouldBe` 1
+                        forM_ files \file -> do
+                            parseField "name" file `shouldReturn` ("report.pdf" :: Text)
+                            parseField "mimeType" file `shouldReturn` ("application/pdf" :: Text)
+                            encoded <- parseField "data" file
+                            Base64.decode (TextEncoding.encodeUtf8 encoded)
+                                `shouldBe` Right "%PDF-1.7\nprivate"
+                        pdfText <- parseField "output" pdfResult
+                        pdfText `shouldNotSatisfy` Text.isInfixOf "JVBER"
                         hClose requestOutput
                         within "sandbox worker shutdown" (wait worker)
                             `shouldReturn` Right ()
@@ -707,6 +738,24 @@ fakeLoop mode stateRoot = do
                                                     (Nothing :: Maybe Text)
                                                 ]
                                             ]
+                                        else ([] :: [Value])
+                                , "files" .=
+                                    if "pdf" `Text.isPrefixOf` mode
+                                        then replicate (if mode == "pdf-too-many" then 9 else 1) $
+                                            object
+                                                [ "name" .= ("report.pdf" :: Text)
+                                                , "mimeType" .=
+                                                    (if mode == "pdf-wrong-mime"
+                                                        then "text/html"
+                                                        else "application/pdf" :: Text)
+                                                , "data" .=
+                                                    (if mode == "pdf-invalid-base64"
+                                                        then "!invalid!"
+                                                        else TextEncoding.decodeUtf8 (Base64.encode
+                                                            (if mode == "pdf-invalid-header"
+                                                                then "not a PDF"
+                                                                else "%PDF-1.7\nprivate")))
+                                                ]
                                         else ([] :: [Value])
                                 ]
         fakeLoop mode stateRoot
