@@ -139,9 +139,9 @@ normalizeTurnInputImages = \case
                         }
         file@FileAttachmentItem{} -> file
 
-    normalizeToolResultImages result@ToolCallResult{toolResultImages} =
+    normalizeToolResultImages result =
         let (errors, images) =
-                partitionEithers (map normalizeToolResultImage toolResultImages)
+                partitionEithers (map normalizeToolResultImage result.toolResultImages)
         in result
             { toolResultImages = images
             , output = Text.intercalate "\n" (result.output : errors)

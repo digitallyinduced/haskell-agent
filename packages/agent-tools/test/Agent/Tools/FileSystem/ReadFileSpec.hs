@@ -2,6 +2,9 @@ module Agent.Tools.FileSystem.ReadFileSpec (spec) where
 
 import Agent.ToolDispatch
     ( ToolCallResult(..)
+    , ToolResultFile(..)
+    , ToolResultImage(..)
+    , toolCallResultFiles
     , ToolDispatchConfig(..)
     , dispatchToolCall
     , functionToolCall
@@ -17,7 +20,7 @@ import qualified Data.ByteString as BS
 import Data.Either (isLeft)
 import qualified Data.Text as Text
 import Control.Exception.Safe (bracket)
-import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
+import System.Directory (getTemporaryDirectory, removeDirectoryRecursive, createFileLink)
 import System.FilePath ((</>))
 import System.OsPath (unsafeEncodeUtf)
 import System.Posix.Temp (mkdtemp)
@@ -121,13 +124,92 @@ spec = describe "formatReadFile" do
                 result <- runReadTool tool "{\"target_file\":\"notes.txt\"}"
                 result.output `shouldBe` "1\8594hello"
                 result.toolResultImages `shouldBe` []
+                toolCallResultFiles result `shouldBe` []
 
-        it "rejects image files as binary rather than attaching them" do
+        it "loads images into context using the same validation as view_image" do
             withTool \workspace tool -> do
                 BS.writeFile (workspace </> "shot.png") pngBytes
                 result <- runReadTool tool "{\"target_file\":\"shot.png\"}"
-                result.output `shouldSatisfy` Text.isInfixOf "Cannot read binary file"
+                result.output `shouldBe` "Viewed image file: shot.png"
+                map (.imageDetail) result.toolResultImages `shouldBe` [Just "high"]
+                map (.imageUrl) result.toolResultImages `shouldSatisfy`
+                    all (Text.isPrefixOf "data:image/png;base64,")
+                toolCallResultFiles result `shouldBe` []
+
+        it "loads extensionless PDF bytes as a native attachment, not text" do
+            withTool \workspace tool -> do
+                BS.writeFile (workspace </> "document-identifier") pdfBytes
+                result <- runReadTool tool "{\"target_file\":\"document-identifier\"}"
+                toolCallResultFiles result `shouldBe`
+                    [ToolResultFile "document-identifier.pdf" "application/pdf" pdfBytes]
+                result.output `shouldBe` "Loaded PDF file into model context: document-identifier"
                 result.toolResultImages `shouldBe` []
+
+        it "bounds the attachment filename when adding a PDF extension" do
+            withTool \workspace tool -> do
+                let name = Text.replicate 255 "a"
+                BS.writeFile (workspace </> Text.unpack name) pdfBytes
+                result <- runReadTool tool ("{\"target_file\":\"" <> name <> "\"}")
+                toolCallResultFiles result `shouldBe`
+                    [ToolResultFile (Text.replicate 251 "a" <> ".pdf") "application/pdf" pdfBytes]
+
+        it "detects an image stored under an extensionless document identifier" do
+            withTool \workspace tool -> do
+                BS.writeFile (workspace </> "image-identifier") pngBytes
+                result <- runReadTool tool "{\"target_file\":\"image-identifier\"}"
+                length result.toolResultImages `shouldBe` 1
+                toolCallResultFiles result `shouldBe` []
+
+        it "retains a PDF basename rather than leaking its absolute path" do
+            withTool \workspace tool -> do
+                let path = workspace </> "Report.PDF"
+                BS.writeFile path pdfBytes
+                result <- runReadTool tool
+                    ("{\"target_file\":\"" <> Text.pack path <> "\"}")
+                map (.fileName) (toolCallResultFiles result) `shouldBe` ["Report.PDF"]
+
+        it "does not mistake a misleading PDF extension for valid content" do
+            withTool \workspace tool -> do
+                BS.writeFile (workspace </> "report.pdf") "not a PDF"
+                result <- runReadTool tool "{\"target_file\":\"report.pdf\"}"
+                result.output `shouldSatisfy` Text.isInfixOf "does not contain a PDF header"
+                toolCallResultFiles result `shouldBe` []
+
+        it "rejects oversized native attachments before returning content" do
+            withTool \workspace tool -> do
+                BS.writeFile (workspace </> "large") ("%PDF-" <> BS.replicate (20 * 1024 * 1024) 32)
+                result <- runReadTool tool "{\"target_file\":\"large\"}"
+                result.output `shouldSatisfy` Text.isInfixOf "maximum 20 MiB"
+                toolCallResultFiles result `shouldBe` []
+
+        it "accepts native attachments at the exact size limit without truncating" do
+            withTool \workspace tool -> do
+                let bytes = "%PDF-" <> BS.replicate (20 * 1024 * 1024 - 5) 32
+                BS.writeFile (workspace </> "limit.pdf") bytes
+                result <- runReadTool tool "{\"target_file\":\"limit.pdf\"}"
+                map (.fileData) (toolCallResultFiles result) `shouldBe` [bytes]
+
+        it "does not silently ignore text ranges for binary attachments" do
+            withTool \workspace tool -> do
+                BS.writeFile (workspace </> "report") pdfBytes
+                result <- runReadTool tool "{\"target_file\":\"report\",\"limit\":2}"
+                result.output `shouldSatisfy` Text.isInfixOf "loaded whole"
+                toolCallResultFiles result `shouldBe` []
+
+        it "rejects corrupt images rather than attaching the signature alone" do
+            withTool \workspace tool -> do
+                BS.writeFile (workspace </> "image") (BS.take 12 pngBytes)
+                result <- runReadTool tool "{\"target_file\":\"image\"}"
+                result.output `shouldSatisfy` Text.isInfixOf "invalid or unsupported image"
+                result.toolResultImages `shouldBe` []
+
+        it "rejects a PDF reached through a symlink outside allowed roots" do
+            withBytes pdfBytes \outside ->
+                withTool \workspace tool -> do
+                    createFileLink outside (workspace </> "external.pdf")
+                    result <- runReadTool tool "{\"target_file\":\"external.pdf\"}"
+                    result.output `shouldSatisfy` Text.isPrefixOf "ERR "
+                    toolCallResultFiles result `shouldBe` []
 
         it "still rejects non-image binary files" do
             withTool \workspace tool -> do
@@ -145,6 +227,11 @@ readArgs offset limit =
         , pages = Nothing
         , format = Nothing
         }
+
+-- The provider owns full PDF decoding; read_file recognizes the native header
+-- and preserves the exact bytes instead of parsing or rendering the document.
+pdfBytes :: BS.ByteString
+pdfBytes = "%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n"
 
 withFile :: String -> (FilePath -> IO a) -> IO a
 withFile content = withBytes (BS.pack (map (fromIntegral . fromEnum) content))

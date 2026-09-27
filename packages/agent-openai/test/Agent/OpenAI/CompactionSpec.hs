@@ -9,6 +9,8 @@ import Agent.OpenAI.ModelMetadata
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import Agent.Provider
+import Agent.Loop.InputItems (toolResultToItem)
+import Agent.ToolDispatch
 import Agent.Responses.Types
 import Agent.Tools.TaskPlan
     ( CurrentTaskPlan(..)
@@ -31,6 +33,20 @@ raw = rawJsonFromEncoding . Aeson.toEncoding
 
 spec :: Spec
 spec = do
+    describe "native file tool result compaction" do
+        it "omits binary payloads while preserving tool correlation, filename and text" do
+            let result = ToolCallResultWithFiles "pdf-call" "Read receipt"
+                    FunctionCallKind BlockingToolCall [] (Just ToolSucceeded)
+                    [ToolResultFile "receipt.pdf" "application/pdf" "secret-pdf-bytes"]
+                items = sanitizeCompactionHistory [toolResultToItem result]
+                serialized = show (Aeson.encode items)
+            serialized `shouldNotContain` "file_data"
+            serialized `shouldNotContain` "c2VjcmV0LXBkZi1ieXRlcw=="
+            serialized `shouldContain` "receipt.pdf"
+            serialized `shouldContain` "Read receipt"
+            case items of
+                [FunctionCallOutputItem output] -> output.callId `shouldBe` "pdf-call"
+                _ -> expectationFailure "expected correlated function output"
     describe "decodeCompactBodyBytes" do
         it "decodes compacted items directly from wire bytes" do
             let bytes = LBS.toStrict . Aeson.encode $ Aeson.object

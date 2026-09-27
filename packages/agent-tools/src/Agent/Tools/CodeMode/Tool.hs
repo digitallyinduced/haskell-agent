@@ -41,6 +41,8 @@ import Agent.ToolDispatch
     , ToolResultImage(..)
     , streamingRichTextTool
     , toolCallResultImages
+    , toolCallResultFiles
+    , ToolResultFile(..)
     , typedStreamingRichTool
     )
 import Agent.Tools.CodeMode.Host
@@ -51,7 +53,7 @@ import Agent.Tools.CodeMode.Host
     , ImageDetailVisibility(..)
     , checkCodeModeAvailability
     , closeCodeModeHost
-    , codeModeHostWithToolHandler
+    , codeModeHostWithFileToolHandler
     , defaultCodeModeConfig
     , execCodeCellWithTools
     , newCodeModeHost
@@ -78,6 +80,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.List (sortOn)
@@ -157,7 +160,8 @@ newCodeModeToolSet mode detailVisibility workerPath invoke specs =
             nextInvocation <- newIORef (0 :: Int)
             let config =
                     (defaultCodeModeConfig workerPath
-                        (runNestedTool invoke nextInvocation nested))
+                        (\name arguments -> fmap fst <$>
+                            runNestedTool invoke nextInvocation nested name arguments))
                         { imageDetailVisibility = detailVisibility }
             checkCodeModeAvailability config >>= \case
                 Left err -> pure (Left err)
@@ -168,7 +172,7 @@ newCodeModeToolSet mode detailVisibility workerPath invoke specs =
                             host <- newCodeModeHost config
                             let surface current =
                                     [ execTool
-                                        (codeModeHostWithToolHandler host
+                                        (codeModeHostWithFileToolHandler host
                                             (runNestedTool invoke nextInvocation current))
                                         (metadataFor current)
                                         (execDescription
@@ -330,7 +334,7 @@ runNestedTool
     -> Map Text NestedTool
     -> Text
     -> Value
-    -> IO (Either Text Value)
+    -> IO (Either Text (Value, [ToolResultFile]))
 runNestedTool invoke nextInvocation nested codeName arguments =
     case Map.lookup codeName nested of
         Nothing -> pure (Left
@@ -338,7 +342,7 @@ runNestedTool invoke nextInvocation nested codeName arguments =
         Just tool -> either (pure . Left) (invokeTool tool)
             (nestedToolArguments tool.nestedCallKind arguments)
   where
-    invokeTool :: NestedTool -> Text -> IO (Either Text Value)
+    invokeTool :: NestedTool -> Text -> IO (Either Text (Value, [ToolResultFile]))
     invokeTool tool callArguments = do
         invocation <- atomicModifyIORef' nextInvocation
             \current ->
@@ -355,7 +359,7 @@ runNestedTool invoke nextInvocation nested codeName arguments =
             , callKind = tool.nestedCallKind
             , argumentsEncrypted = False
             }
-        pure (nestedResultValue <$> result)
+        pure ((\value -> (nestedResultValue value, toolCallResultFiles value)) <$> result)
 
 nestedResultValue :: ToolCallResult -> Value
 nestedResultValue result =
@@ -557,10 +561,30 @@ withResultImages
     -> Text
     -> ToolHandlerResult
 withResultImages result text =
-    ToolHandlerResult
-        { resultText = text
-        , resultImages = codeModeResultImages result
-        }
+    case codeModeResultFiles result of
+        [] -> ToolHandlerResult text (codeModeResultImages result)
+        files -> ToolHandlerResultWithFiles text (codeModeResultImages result) files
+
+codeModeResultFiles :: Either CodeModeError CodeModeResult -> [ToolResultFile]
+codeModeResultFiles = \case
+    Right CodeModeRunning{cellOutput} -> valueFiles cellOutput
+    Right CodeModeTerminated{cellValue} -> valueFiles cellValue
+    Right CodeModeFinished{cellValue} -> valueFiles cellValue
+    Right CodeModeFailed{cellValue} -> valueFiles cellValue
+    Left _ -> []
+  where
+    valueFiles (Object result)
+        | Just (Array content) <- KeyMap.lookup "content" result =
+            mapMaybe contentFile (Vector.toList content)
+    valueFiles _ = []
+    contentFile (Object content)
+        | Just (String "native_file") <- KeyMap.lookup "type" content
+        , Just (String filename) <- KeyMap.lookup "filename" content
+        , Just (String mime) <- KeyMap.lookup "mime_type" content
+        , Just (String encoded) <- KeyMap.lookup "data" content
+        , Right bytes <- Base64.decode (TextEncoding.encodeUtf8 encoded) =
+            Just (ToolResultFile filename mime bytes)
+    contentFile _ = Nothing
 
 codeModeResultImages
     :: Either CodeModeError CodeModeResult
@@ -642,6 +666,8 @@ renderCodeModeResult budget wallTime = \case
             "[image output item; call tools.show_image to display an image to the user]"
         | Just (String "audio") <- KeyMap.lookup "type" content =
             "[audio output item]"
+        | Just (String "native_file") <- KeyMap.lookup "type" content =
+            "[native file attached to model context]"
         | otherwise = renderValue value
     contentItem _requested value = renderValue value
 
@@ -754,6 +780,7 @@ execDescriptionTemplate detailVisibility =
         , "- `text(value: string | number | boolean | undefined | null)`: Appends a text item. Non-string values are stringified with `JSON.stringify(...)` when possible."
         , imageHelperDescription detailVisibility
         , "- Native image tools such as `view_image` return an `{ image_url, output_hint? }` object, not MCP `content` blocks: use `image(await tools.view_image({ path: \"/absolute/path.png\" }))`. Do not construct image data URLs from formatted shell output."
+        , "- Native files returned by tools such as `read_file` are attached to model context automatically. JavaScript receives only the short text result; do not print or construct file data URLs."
         , "- `audio(audioUrlOrItem: string | { audio_url: string } | AudioContent)`: Appends an audio item. `audio_url` should be a base64-encoded `data:` URL. To forward an MCP tool audio block, pass an individual `AudioContent` block from `result.content`, for example `audio(result.content[0])`."
         , "- `generatedImage(result: { image_url: string; output_hint?: string })`: Appends an image-generation result and its optional output hint. HTTP(S) URLs are not supported."
         , "- `store(key: string, value: any)`: stores a serializable value under a string key for later `exec` calls in the same session."

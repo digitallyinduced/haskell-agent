@@ -3,6 +3,7 @@
 module Agent.Tools.CodeMode.Host.Types where
 
 import Control.Concurrent.Async (Async)
+import Agent.ToolDispatch (ToolResultFile)
 import Control.Concurrent.MVar
     ( MVar
     )
@@ -22,6 +23,9 @@ import System.Process (ProcessHandle)
 type CodeModeToolHandler =
     Text -> Value -> IO (Either Text Value)
 
+type CodeModeFileToolHandler =
+    Text -> Value -> IO (Either Text (Value, [ToolResultFile]))
+
 data ImageDetailVisibility
     = ImageDetailVisible
     | ImageDetailHidden
@@ -34,6 +38,7 @@ data CodeModeConfig = CodeModeConfig
     , maxActiveCells :: !Int
     , maxSourceBytes :: !Int
     , toolHandler :: !CodeModeToolHandler
+    , fileToolHandler :: !(Maybe CodeModeFileToolHandler)
     , notifyHandler :: !(Text -> IO ())
     , imageDetailVisibility :: !ImageDetailVisibility
     -- | Maximum idle Bun processes retained between cells. Set to zero to
@@ -49,6 +54,7 @@ defaultCodeModeConfig script handler = CodeModeConfig
     , maxActiveCells = 64
     , maxSourceBytes = 1024 * 1024
     , toolHandler = handler
+    , fileToolHandler = Nothing
     , notifyHandler = \_ -> pure ()
     , imageDetailVisibility = ImageDetailVisible
     , workerPoolSize = 2

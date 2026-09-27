@@ -56,8 +56,10 @@ import Agent.OpenAI.Compaction.Commands
     , rewindSessionUserText
     )
 import Agent.Responses.Types
+import Agent.Responses.Types.Content (responseContentPartDecoder)
 import Agent.Tools.TaskPlan (isTaskPlanContextText)
-import Agent.Json (RawJson, rawJsonFromEncoding)
+import Agent.Json (RawJson, rawJsonFromEncoding, rawJsonBytes)
+import qualified Agent.Json.Decode as Json
 import qualified Data.Aeson as Aeson
 import Data.Maybe (isJust, listToMaybe, mapMaybe)
 import qualified Data.Map.Strict as Map
@@ -648,7 +650,20 @@ sanitizeCompactionHistory = map sanitizeCompactionItem
 sanitizeCompactionItem :: ResponseItem -> ResponseItem
 sanitizeCompactionItem (MessageItem message) =
     MessageItem (sanitizeMessage message)
+sanitizeCompactionItem (FunctionCallOutputItem output) =
+    FunctionCallOutputItem output { output = sanitizeToolOutput output.output }
+sanitizeCompactionItem (CustomToolCallOutputItem output) =
+    CustomToolCallOutputItem output { output = sanitizeToolOutput output.output }
 sanitizeCompactionItem item = item
+
+-- The ordinary replay retains complete native attachments. Summarization has
+-- the same media-omission policy for tool results as for user attachments.
+sanitizeToolOutput :: RawJson -> RawJson
+sanitizeToolOutput output =
+    case Json.decodeEither (Json.list responseContentPartDecoder) (rawJsonBytes output) of
+        Right parts -> rawJsonFromEncoding . Aeson.toEncoding $
+            concatMap (sanitizeContentPart RoleUser) parts
+        Left _ -> output
 
 sanitizeMessage :: ResponseMessage -> ResponseMessage
 sanitizeMessage message =

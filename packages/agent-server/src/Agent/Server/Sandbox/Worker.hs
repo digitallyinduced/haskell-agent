@@ -37,7 +37,9 @@ import Agent.ToolDispatch
     , withToolCallMode
     , ToolDispatchOutcome(..)
     , ToolResultImage(..)
+    , ToolResultFile(..)
     , toolCallResultImages
+    , toolCallResultFiles
     )
 import Agent.Tools.Types
     ( defaultToolEnv
@@ -145,7 +147,7 @@ maximumRequestBytes :: Int
 maximumRequestBytes = 4 * 1024 * 1024
 
 maximumResponseBytes :: Int
-maximumResponseBytes = 16 * 1024 * 1024
+maximumResponseBytes = 32 * 1024 * 1024
 
 maximumStreamBytes :: Int
 maximumStreamBytes = 8 * 1024 * 1024
@@ -523,6 +525,8 @@ writeOutcome output request outcome =
                        , "output" .= result.output
                        , "images" .= map imageValue
                             (toolCallResultImages result)
+                       , "files" .= map fileValue
+                            (toolCallResultFiles result)
                        ]
     in writeProtocolValue output value >>= \case
         Right () -> pure (Right ())
@@ -550,6 +554,13 @@ responseBase messageType request =
     , "tenantId" .= request.requestTenantId
     , "generation" .= request.requestGeneration
     , "requestId" .= request.requestId
+    ]
+
+fileValue :: ToolResultFile -> Value
+fileValue file = object
+    [ "name" .= file.fileName
+    , "mimeType" .= file.fileMimeType
+    , "data" .= Encoding.decodeUtf8 (Base64.encode file.fileData)
     ]
 
 imageValue :: ToolResultImage -> Value

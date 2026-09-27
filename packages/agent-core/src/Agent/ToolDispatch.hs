@@ -16,11 +16,13 @@ module Agent.ToolDispatch
     , ToolCallResult(..)
     , ToolDispatchOutcome(..)
     , ToolResultImage(..)
+    , ToolResultFile(..)
     , ToolHandlerResult(..)
     , ToolOutcome(..)
     , toolCallResultOutcome
     , withToolCallOutcome
     , toolCallResultImages
+    , toolCallResultFiles
     , toolCallResultMode
     , withToolCallResultMode
     , ToolDispatchConfig(..)
@@ -65,6 +67,7 @@ import Control.Exception.Safe (SomeException, bracket, tryAny)
 import Data.IORef (IORef, newIORef, atomicModifyIORef', writeIORef)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -206,6 +209,19 @@ instance Show ToolCall where
             | call.argumentsEncrypted = "<redacted>"
             | otherwise = show call.arguments
 
+-- | Native file content is kept separate from printable/truncated tool text.
+data ToolResultFile = ToolResultFile
+    { fileName :: !Text
+    , fileMimeType :: !Text
+    , fileData :: !BS.ByteString
+    } deriving (Eq)
+
+instance Show ToolResultFile where
+    show file =
+        "ToolResultFile { fileName = " <> show file.fileName
+            <> ", fileMimeType = " <> show file.fileMimeType
+            <> ", fileData = <redacted> }"
+
 -- | An image returned alongside a tool's short textual output. Keeping image
 -- data out of 'output' prevents large data URLs from being truncated, logged,
 -- or fed back to the model as ordinary text.
@@ -230,6 +246,11 @@ data ToolHandlerResult = ToolHandlerResult
         { resultText :: !Text
         , resultImages :: ![ToolResultImage]
         , resultOutcome :: !ToolOutcome
+        }
+    | ToolHandlerResultWithFiles
+        { resultText :: !Text
+        , resultImages :: ![ToolResultImage]
+        , resultFiles :: ![ToolResultFile]
         }
     deriving (Eq, Show)
 
@@ -256,6 +277,15 @@ data ToolCallResult = ToolCallResult
     , toolResultImages :: ![ToolResultImage]
     , toolResultOutcome :: !(Maybe ToolOutcome)
     }
+    | ToolCallResultWithFiles
+        { callId :: !Text
+        , output :: !Text
+        , callKind :: !ToolCallKind
+        , toolResultMode :: !ToolCallMode
+        , toolResultImages :: ![ToolResultImage]
+        , toolResultOutcome :: !(Maybe ToolOutcome)
+        , toolResultFiles :: ![ToolResultFile]
+        }
     deriving (Eq)
 
 instance Show ToolCallResult where
@@ -266,14 +296,22 @@ instance Show ToolCallResult where
             <> ", callMode = " <> show (toolCallResultMode result)
             <> ", outcome = " <> show (toolCallResultOutcome result)
             <> imageSummary
+            <> fileSummary
             <> " }"
       where
         imageSummary = case toolCallResultImages result of
             [] -> ""
             images -> ", images = <" <> show (length images) <> ">"
+        fileSummary = case toolCallResultFiles result of
+            [] -> ""
+            files -> ", files = <" <> show (length files) <> ">"
 
 toolCallResultImages :: ToolCallResult -> [ToolResultImage]
 toolCallResultImages = (.toolResultImages)
+
+toolCallResultFiles :: ToolCallResult -> [ToolResultFile]
+toolCallResultFiles ToolCallResult{} = []
+toolCallResultFiles ToolCallResultWithFiles{toolResultFiles} = toolResultFiles
 
 toolCallResultOutcome :: ToolCallResult -> Maybe ToolOutcome
 toolCallResultOutcome = (.toolResultOutcome)
@@ -517,20 +555,23 @@ dispatchToolHandlerWithAuthorization authorization config maybeHandler call = do
                     handler
             Nothing -> pure (Left (config.toolDispatchUnknownTool callName))
     result <- tryAny runTool
-    (resultOutput, resultImages) <- case result of
+    (resultOutput, resultImages, resultFiles) <- case result of
         Right (Right toolResult) ->
             pure
                 ( config.toolDispatchFormatResult (Right toolResult.resultText)
                 , toolResult.resultImages
+                , case toolResult of
+                    ToolHandlerResultWithFiles{resultFiles} -> resultFiles
+                    _ -> []
                 )
         Right (Left err) ->
-            pure (config.toolDispatchFormatResult (Left err), [])
+            pure (config.toolDispatchFormatResult (Left err), [], [])
         Left exception -> do
             -- Diagnostics must not replace the original tool failure with a
             -- second exception. 'tryAny' still lets asynchronous cancellation
             -- propagate.
             _ <- tryAny (config.toolDispatchOnException callName exception)
-            pure (config.toolDispatchFormatException callName exception, [])
+            pure (config.toolDispatchFormatException callName exception, [], [])
     finalizedOutput <-
         tryAny (config.toolDispatchFinalizeOutput call resultOutput) >>= \case
             Right output -> pure output
@@ -539,13 +580,18 @@ dispatchToolHandlerWithAuthorization authorization config maybeHandler call = do
                 pure resultOutput
     let outcome = case result of
             Right (Right ToolHandlerResult{}) -> ToolSucceeded
+            Right (Right ToolHandlerResultWithFiles{}) -> ToolSucceeded
             Right (Right ToolHandlerResultWithOutcome{resultOutcome}) -> resultOutcome
             Right (Left _) -> ToolFailed
             Left _ -> ToolFailed
         dispatchedResult =
-            ToolCallResult
-                call.callId finalizedOutput call.callKind
-                (toolCallMode call) resultImages (Just outcome)
+            case resultFiles of
+                [] -> ToolCallResult
+                    call.callId finalizedOutput call.callKind
+                    (toolCallMode call) resultImages (Just outcome)
+                files -> ToolCallResultWithFiles
+                    call.callId finalizedOutput call.callKind
+                    (toolCallMode call) resultImages (Just outcome) files
     pure ToolDispatchOutcome
         { toolDispatchResult = dispatchedResult
         , toolDispatchSucceeded = toolOutcomeSucceeded outcome

@@ -24,6 +24,7 @@ import Agent.ToolDispatch
     , ToolCallKind(..)
     , ToolHandlerResult(..)
     , ToolResultImage(..)
+    , ToolResultFile(..)
     , passthroughTool
     , wrapToolHandler
     )
@@ -134,7 +135,7 @@ maximumRequestBytes :: Int
 maximumRequestBytes = 4 * 1024 * 1024
 
 maximumResponseBytes :: Int
-maximumResponseBytes = 16 * 1024 * 1024
+maximumResponseBytes = 32 * 1024 * 1024
 
 maximumStreamBytes :: Int
 maximumStreamBytes = 16 * 1024 * 1024
@@ -175,7 +176,7 @@ data BrokerReady = BrokerReady
 
 data BrokerMessage
     = BrokerOutput !Text !Text !Text !Text
-    | BrokerResult !Text !Text !Text !Bool !Text ![ToolResultImage]
+    | BrokerResult !Text !Text !Text !Bool !Text ![ToolResultImage] ![ToolResultFile]
 
 openTenantSandbox
     :: FilePath
@@ -533,7 +534,7 @@ exchange sandbox running requestId emit request uploadPath = do
                             emit output
                             readResponses
                                 (streamed + encodedTextLength output)
-                    Right (BrokerResult tenant generation responseId ok output images)
+                    Right (BrokerResult tenant generation responseId ok output images files)
                         | tenant /= expectedTenant ->
                             pure (Left "sandbox response tenant mismatch")
                         | generation /= expectedGeneration ->
@@ -545,10 +546,9 @@ exchange sandbox running requestId emit request uploadPath = do
                                 Right $
                                     if ok
                                         then
-                                            Right ToolHandlerResult
-                                                { resultText = output
-                                                , resultImages = images
-                                                }
+                                            Right $ if null files
+                                                then ToolHandlerResult output images
+                                                else ToolHandlerResultWithFiles output images files
                                         else Left output
 
 invalidateSandbox :: TenantSandbox -> RunningSandbox -> IO ()
@@ -762,7 +762,7 @@ parseBrokerMessage value =
                 rejectUnknownFields
                     "BrokerResult"
                     [ "type", "version", "tenantId", "generation"
-                    , "requestId", "ok", "output", "images"
+                    , "requestId", "ok", "output", "images", "files"
                     ]
                     payload
                 requireProtocol payload
@@ -777,6 +777,14 @@ parseBrokerMessage value =
                         when (length values > 8)
                             (fail "too many sandbox result images")
                         traverse parseResultImage values)
+                    <*> (payload .:? "files" >>= \files -> do
+                        let values = maybe [] id files
+                        when (length values > 8)
+                            (fail "too many sandbox result files")
+                        decoded <- traverse parseResultFile values
+                        when (sum (map (ByteString.length . (.fileData)) decoded) > 20 * 1024 * 1024)
+                            (fail "sandbox result files exceed the decoded byte limit")
+                        pure decoded)
             _ -> fail "unsupported broker message type"
 
 instance FromJSON BrokerReady where
@@ -810,6 +818,25 @@ parseResultImage = withObject "ToolResultImage" \payload -> do
             { imageUrl = url
             , imageDetail = detail
             }
+
+parseResultFile :: Value -> Parser ToolResultFile
+parseResultFile = withObject "ToolResultFile" \payload -> do
+    rejectUnknownFields "ToolResultFile" ["name", "mimeType", "data"] payload
+    name <- payload .: "name"
+    mime <- payload .: "mimeType"
+    encoded <- payload .: "data"
+    unless (not (Text.null name) && Text.length name <= 255
+            && not (Text.any (`elem` ['\0', '/', '\\']) name))
+        (fail "sandbox result file must have a bounded filename")
+    unless (mime == "application/pdf"
+            && encodedTextLength encoded <= maximumResponseBytes)
+        (fail "sandbox result file must be a bounded PDF")
+    bytes <- either (const (fail "sandbox result file has invalid base64")) pure
+        (Base64.decode (TextEncoding.encodeUtf8 encoded))
+    unless (ByteString.length bytes <= 20 * 1024 * 1024
+            && "%PDF-" `ByteString.isPrefixOf` bytes)
+        (fail "sandbox result file must be a bounded PDF")
+    pure (ToolResultFile name mime bytes)
 
 validateReady :: ResolvedTenant -> BrokerReady -> Either Text ()
 validateReady tenant ready

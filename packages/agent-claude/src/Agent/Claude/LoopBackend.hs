@@ -821,8 +821,8 @@ contentPartBlocks = \case
     RefusalPart{refusal} -> [UserTextBlock refusal]
     SummaryTextPart{text} -> [UserTextBlock text]
     InputImagePart{imageUrl} -> [historicalImageBlock imageUrl]
-    InputFilePart{filename} ->
-        [UserTextBlock ("[file" <> maybe "" (" " <>) filename <> " omitted]")]
+    InputFilePart{filename, fileData} ->
+        [historicalDocumentBlock filename fileData]
     InputAudioPart{} -> [UserTextBlock "[audio omitted]"]
     -- Do not render reasoning text into another model's prompt.
     ReasoningTextPart{} -> []
@@ -854,6 +854,23 @@ historicalImageBlock source =
                 bytes <- either (const Nothing) Just $
                     Base64.decode (TextEncoding.encodeUtf8 (Text.drop 1 payloadWithComma))
                 if ByteString.null bytes then Nothing else Just (mime, bytes)
+
+historicalDocumentBlock :: Maybe Text -> Maybe Text -> UserContentBlock
+historicalDocumentBlock filename source =
+    case source >>= decodeInlineDocument of
+        Just bytes -> UserDocumentBlock filename bytes
+        Nothing -> UserTextBlock
+            "[Historical document unavailable to this model: expected an inline base64 PDF. Remote/file references are not fetched during import. Recover the attachment or ask the user before relying on its contents.]"
+  where
+    decodeInlineDocument url = do
+        let (metadata, payloadWithComma) = Text.breakOn "," url
+        if Text.toLower metadata /= "data:application/pdf;base64"
+            || Text.null payloadWithComma
+            then Nothing
+            else do
+                bytes <- either (const Nothing) Just $
+                    Base64.decode (TextEncoding.encodeUtf8 (Text.drop 1 payloadWithComma))
+                if ByteString.null bytes then Nothing else Just bytes
 
 -- Preserve the previous text-only prompt layout without repeated strict append.
 coalesceTextBlocks :: [UserContentBlock] -> [UserContentBlock]
