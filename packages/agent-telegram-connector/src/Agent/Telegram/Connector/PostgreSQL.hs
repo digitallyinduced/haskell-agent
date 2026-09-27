@@ -28,6 +28,7 @@ module Agent.Telegram.Connector.PostgreSQL
     , claimDelivery
     , completeDeliveryPart
     , rejectDeliveryPart
+    , retryDeliveryPart
     , registerCallback
     , consumeCallback
     , revokeBinding
@@ -98,6 +99,7 @@ schemaStatements =
     , "CREATE INDEX IF NOT EXISTS telegram_connector_inbox_pending ON telegram_connector_inbox(namespace, update_id) WHERE processed_at IS NULL"
     , "CREATE TABLE IF NOT EXISTS telegram_connector_deliveries (namespace TEXT NOT NULL, id TEXT NOT NULL, binding_revision TEXT NOT NULL, chat_id BIGINT NOT NULL, parts JSONB NOT NULL CHECK(jsonb_typeof(parts) = 'array' AND jsonb_array_length(parts) > 0), next_part INT NOT NULL DEFAULT 0 CHECK(next_part >= 0), status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','sending','sent','failed','uncertain')), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY(namespace,id))"
     , "CREATE INDEX IF NOT EXISTS telegram_connector_deliveries_pending ON telegram_connector_deliveries(namespace,created_at,id) WHERE status = 'pending'"
+    , "ALTER TABLE telegram_connector_deliveries ADD COLUMN IF NOT EXISTS retry_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
     , "CREATE TABLE IF NOT EXISTS telegram_connector_receipts (namespace TEXT NOT NULL, delivery_id TEXT NOT NULL, part_index INT NOT NULL CHECK(part_index >= 0), telegram_message_id BIGINT NOT NULL, PRIMARY KEY(namespace,delivery_id,part_index), FOREIGN KEY(namespace,delivery_id) REFERENCES telegram_connector_deliveries(namespace,id))"
     , "CREATE TABLE IF NOT EXISTS telegram_connector_callbacks (namespace TEXT NOT NULL, token TEXT NOT NULL, owner_id TEXT NOT NULL, chat_id BIGINT NOT NULL, binding_revision TEXT NOT NULL, session_id TEXT NOT NULL, turn_id TEXT NOT NULL, request_id TEXT NOT NULL, response JSONB NOT NULL, expires_at TIMESTAMPTZ NOT NULL, consumed_at TIMESTAMPTZ, PRIMARY KEY(namespace,token))"
     , "ALTER TABLE telegram_connector_offsets ENABLE ROW LEVEL SECURITY"
@@ -173,6 +175,8 @@ postgreSQLDeliveryStore store authorize decode = Connector.DeliveryStore
                         rejectDeliveryPart store delivery DeliveryUncertain
                     Connector.DeliveryRejected ->
                         rejectDeliveryPart store delivery DeliveryRejected
+                    Connector.DeliveryRetryAfter seconds ->
+                        retryDeliveryPart store delivery seconds
                     Connector.DeliveryUncertain ->
                         rejectDeliveryPart store delivery DeliveryUncertain
                 pure True
@@ -251,7 +255,7 @@ enqueueDelivery store identifier binding chat parts = do
 -- The caller revalidates and locks the application binding before transmission.
 claimDelivery :: PostgreSQLStore -> IO (Maybe DeliveryRecord)
 claimDelivery store = listToMaybe <$> query store.connection
-    "UPDATE telegram_connector_deliveries SET status = 'sending' WHERE (namespace,id) = (SELECT namespace,id FROM telegram_connector_deliveries WHERE namespace = ? AND status = 'pending' AND next_part < jsonb_array_length(parts) ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING id,binding_revision,chat_id,next_part,parts->next_part"
+    "UPDATE telegram_connector_deliveries SET status = 'sending' WHERE (namespace,id) = (SELECT namespace,id FROM telegram_connector_deliveries WHERE namespace = ? AND status = 'pending' AND retry_at <= NOW() AND next_part < jsonb_array_length(parts) ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING id,binding_revision,chat_id,next_part,parts->next_part"
     (Only store.namespace)
 
 -- | Compare-and-set progress and insert receipt in one transaction. A duplicate
@@ -266,6 +270,13 @@ completeDeliveryPart store delivery messageIdentifier = withTransaction store.co
             "INSERT INTO telegram_connector_receipts(namespace,delivery_id,part_index,telegram_message_id) VALUES (?,?,?,?)"
             (store.namespace, delivery.deliveryIdentifier, delivery.partIndex, messageIdentifier)
         pure True
+
+-- | A definite rejection did not transmit this part. Preserve its payload and
+-- progress and durably postpone the next claim, including across restarts.
+retryDeliveryPart :: PostgreSQLStore -> DeliveryRecord -> Int -> IO ()
+retryDeliveryPart store delivery seconds = void $ execute store.connection
+    "UPDATE telegram_connector_deliveries SET status = 'pending', retry_at = clock_timestamp() + (? * INTERVAL '1 second') WHERE namespace = ? AND id = ? AND status = 'sending' AND next_part = ?"
+    (max 1 seconds, store.namespace, delivery.deliveryIdentifier, delivery.partIndex)
 
 rejectDeliveryPart :: PostgreSQLStore -> DeliveryRecord -> DeliveryDisposition -> IO ()
 rejectDeliveryPart store delivery disposition = void $ execute store.connection

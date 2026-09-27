@@ -6,7 +6,7 @@ import Agent.OsPath (unsafeToFilePath)
 import Agent.Runtime.ManagedTurn (ManagedTurnMedia(..), ManagedTurnRequest(..))
 import Agent.Runtime.AgentSessions.Process (classifyManagedTurnFailure)
 import qualified Agent.Telegram.Bridge as Bridge
-import Agent.Telegram.Session.Local (localSessionBackend)
+import Agent.Telegram.Session.Local (localSessionBackend, retryExecutionUpdateId)
 import Agent.Telegram.Connector.Session
 import Agent.Telegram.Types
     ( TelegramApprovalMode(..)
@@ -68,6 +68,39 @@ decodeWith decoder =
 spec :: Spec
 spec = describe "Agent.Telegram" do
     describe "Local connector session backend" do
+        it "persists a retry identity without replacing the next real pending update" do
+            let key = TelegramChatKey 123 Nothing
+                retryId = retryExecutionUpdateId 123
+                retried = RunPendingTurn (TelegramPendingTurn retryId 77 key "retry" Nothing)
+                incoming = RunPendingTurn (TelegramPendingTurn 124 78 key "next" Nothing)
+                state = emptyTelegramState
+                    { pendingQueues = Map.singleton key
+                        (Map.fromList [(retryId, retried), (124, incoming)])
+                    }
+            (decodeWith telegramStateDecoder (encode state) :: Either String TelegramState)
+                `shouldBe` Right state
+            nextPendingAction key state `shouldBe` Just retried
+        it "keeps explicit retry checkpoints separate from subsequent Telegram updates" $
+            withSystemTempDirectory "telegram-retry-execution" \directory -> do
+                launches <- newIORef (0 :: Int)
+                let retryId = retryExecutionUpdateId 123
+                    execute identifier prompt =
+                        let requestId = Text.pack (show identifier)
+                        in advanceSessionExecution
+                            (localSessionBackend (directory <> "/" <> show identifier <> ".json")
+                                (pure False) (pure ())
+                                (modifyIORef' launches (+ 1) >> pure (Right prompt)))
+                            (SessionExecution requestId "session" prompt Nothing)
+                retryId `shouldSatisfy` (< 0)
+                retryExecutionUpdateId 124 `shouldNotBe` retryId
+                execute retryId "retried prompt"
+                    `shouldReturn` ExecutionCompleted (Text.pack (show retryId)) "retried prompt"
+                -- Reconstruct the backend as after a restart: no second launch.
+                execute retryId "retried prompt"
+                    `shouldReturn` ExecutionCompleted (Text.pack (show retryId)) "retried prompt"
+                execute 124 "next real prompt"
+                    `shouldReturn` ExecutionCompleted "124" "next real prompt"
+                readIORef launches `shouldReturn` 2
         it "recovers completed output without launching the same request again" $
             withSystemTempDirectory "telegram-execution" \directory -> do
                 launches <- newIORef (0 :: Int)

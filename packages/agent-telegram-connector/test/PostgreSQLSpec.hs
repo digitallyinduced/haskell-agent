@@ -118,6 +118,32 @@ spec connection otherConnection = describe "connector PostgreSQL persistence" $ 
             "SELECT failure_code FROM telegram_connector_inbox WHERE namespace = 'adapter-inbox'"
             :: IO [Only (Maybe Text)]
         failures `shouldBe` [Only Nothing]
+    it "durably defers rate-limited parts without advancing or replaying receipts" $ do
+        let store = PostgreSQLStore connection "rate-limit"
+            restarted = PostgreSQLStore otherConnection "rate-limit"
+            attempt = Connector.DeliveryAttempt (TelegramChatKey 42 Nothing) Nothing "part" Nothing
+            delivery = postgreSQLDeliveryStore store (\_ action -> Just <$> action) (const (Right attempt))
+        enqueueDelivery store "response" "binding" 42 [String "first", String "second"]
+        first <- requireJust =<< claimDelivery store
+        completeDeliveryPart store first 101 `shouldReturn` True
+        delivery.withNextDelivery (\_ -> pure (Connector.DeliveryRetryAfter 37)) `shouldReturn` True
+        claimDelivery restarted `shouldReturn` Nothing
+        rows <- query connection
+            "SELECT next_part,status,retry_at > NOW() + INTERVAL '30 seconds' FROM telegram_connector_deliveries WHERE namespace = 'rate-limit'"
+            () :: IO [(Int,Text,Bool)]
+        rows `shouldBe` [(1,"pending",True)]
+        void $ execute_ connection
+            "UPDATE telegram_connector_deliveries SET retry_at = NOW() - INTERVAL '1 second' WHERE namespace = 'rate-limit'"
+        retried <- requireJust =<< claimDelivery restarted
+        retried.partIndex `shouldBe` 1
+        retried.partPayload `shouldBe` String "second"
+        completeDeliveryPart restarted retried 102 `shouldReturn` True
+        retryDeliveryPart store retried 37
+        claimDelivery restarted `shouldReturn` Nothing
+        receipts <- query connection
+            "SELECT part_index,telegram_message_id FROM telegram_connector_receipts WHERE namespace = 'rate-limit' ORDER BY part_index"
+            () :: IO [(Int,Int64)]
+        receipts `shouldBe` [(0,101),(1,102)]
     it "adapts delivery claims, receipts and scoped authorization" $ do
         let store = PostgreSQLStore connection "adapter-delivery"
             attempt = Connector.DeliveryAttempt (TelegramChatKey 42 Nothing) Nothing "part" Nothing

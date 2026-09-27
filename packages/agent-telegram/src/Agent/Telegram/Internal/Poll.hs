@@ -33,6 +33,7 @@ import Agent.Telegram.Classify
     , telegramReplyText
     )
 import Agent.Telegram.Internal.Model (modelCommand)
+import Agent.Telegram.Session.Local (retryExecutionUpdateId)
 import Agent.Telegram.Internal.Allowlist
     ( AllowlistChange(..)
     , applyAllowlistChange
@@ -488,7 +489,7 @@ runQueuedTurn runtime pending =
             retryLastDeadLetter
                 runtime
                 pending.pendingTurnChat
-                (pending.pendingTurnUpdateId + 1)
+                (retryExecutionUpdateId pending.pendingTurnUpdateId)
         Just "allow" -> withoutProgress $
             applyAllowlistChange
                 runtime

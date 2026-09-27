@@ -100,7 +100,13 @@ Uncertain responses do not authorize replay.
 
 Delivery adapters persist chunk boundaries and commit a sending claim before
 the single transport attempt. Only positive receipts acknowledge a part;
-uncertain sends are not automatically retried.
+uncertain sends are not automatically retried. Definite rate-limit rejections
+return `DeliveryRetryAfter seconds`: adapters must persist a deadline without
+advancing the part, and must not claim it before that deadline. The PostgreSQL
+adapter preserves this state across restarts in `retry_at`; run
+`initializePostgreSQLStore` explicitly during deployment to add that column to
+existing installations. Permanent 4xx rejections remain failed; server and
+transport failures remain uncertain.
 
 The standalone Telegram application shares the ordered conversation queue,
 session lifecycle, and media normalization. Its group allowlists, commands,

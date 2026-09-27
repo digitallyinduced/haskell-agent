@@ -11,6 +11,7 @@ module Agent.Telegram.Connector
     , runTelegramConnector, runSessionConnector, pollConnectorUpdates, processConnectorUpdate
     , processConnectorExecution, processConnectorDelivery
     , classifyPrivateConversationUpdate, deliverConnectorMessage, prepareDeliveryPayload
+    , classifyDeliveryFailure
     , runConversationQueue, ConversationQueue(..)
     ) where
 
@@ -90,6 +91,9 @@ data DeliveryAttempt = DeliveryAttempt
 data DeliveryOutcome
     = DeliveryAcknowledged !Integer
     | DeliveryRejected
+    -- | Definite rejection; persist a retry deadline in seconds without advancing
+    -- the part. This is not permission to retry an uncertain transport outcome.
+    | DeliveryRetryAfter !Int
     | DeliveryUncertain
     deriving (Eq, Show)
 
@@ -204,15 +208,23 @@ deliverConnectorMessage :: TelegramClient -> DeliveryAttempt -> IO DeliveryOutco
 deliverConnectorMessage client attempt = do
     result <- Telegram.telegramRequestOnce client "sendMessage" (prepareDeliveryPayload attempt) 20
     pure $ case result of
-        Left failure
-            | Just code <- failure.telegramErrorCode
-            , code >= 400 && code < 500 -> DeliveryRejected
-        Left _ -> DeliveryUncertain
+        Left failure -> classifyDeliveryFailure failure
         Right bytes -> case eitherDecode bytes >>= Aeson.parseEither
             (withObject "Telegram response" \response ->
                 response .: "result" >>= withObject "Telegram message" (.: "message_id")) of
                     Right identifier | identifier > 0 -> DeliveryAcknowledged identifier
                     _ -> DeliveryUncertain
+
+-- | Retry only definite client-side rejections. Server errors and missing
+-- responses can follow acceptance and must never cause an automatic resend.
+classifyDeliveryFailure :: Telegram.TelegramRequestError -> DeliveryOutcome
+classifyDeliveryFailure failure
+    | Just code <- failure.telegramErrorCode
+    , code >= 400 && code < 500 =
+        if failure.telegramErrorRetryable
+            then DeliveryRetryAfter (max 1 (maybe 1 id failure.telegramRetryAfter))
+            else DeliveryRejected
+    | otherwise = DeliveryUncertain
 
 -- | Freeze formatting before persistence; prepared payloads are never rendered
 -- or segmented again when a pending outbox part resumes after an upgrade.

@@ -1,6 +1,7 @@
 module Main where
 
 import Agent.Telegram.Connector
+import Agent.Telegram.Client (TelegramRequestError(..))
 import Agent.Telegram.Connector.Controls
 import Agent.Telegram.Connector.Media
 import Agent.Telegram.Types.Wire
@@ -23,6 +24,21 @@ coreTests :: IO ()
 coreTests = hspec do
     ServerSpec.spec
     InputSpec.spec
+    describe "Single-attempt delivery failures" do
+        it "retains definite rate-limit rejections and their retry deadline" do
+            classifyDeliveryFailure (TelegramRequestError "limited" (Just 429) (Just 37) True)
+                `shouldBe` DeliveryRetryAfter 37
+            classifyDeliveryFailure (TelegramRequestError "limited" (Just 429) Nothing True)
+                `shouldBe` DeliveryRetryAfter 1
+            classifyDeliveryFailure (TelegramRequestError "limited" (Just 429) (Just (-1)) True)
+                `shouldBe` DeliveryRetryAfter 1
+        it "never retries uncertain transport/server errors or permanent rejections" do
+            classifyDeliveryFailure (TelegramRequestError "lost" Nothing (Just 10) True)
+                `shouldBe` DeliveryUncertain
+            classifyDeliveryFailure (TelegramRequestError "server" (Just 500) (Just 10) True)
+                `shouldBe` DeliveryUncertain
+            classifyDeliveryFailure (TelegramRequestError "forbidden" (Just 403) Nothing False)
+                `shouldBe` DeliveryRejected
     describe "Scoped one-use controls" do
         it "rejects a different binding, actor, message or expired token" do
             let now = UTCTime (fromGregorian 2026 1 1) 0

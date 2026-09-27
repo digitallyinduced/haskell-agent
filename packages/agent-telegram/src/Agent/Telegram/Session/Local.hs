@@ -4,7 +4,7 @@
 -- cache terminal output before returning it to Telegram, and never relaunch an
 -- interrupted admission. The shared connector performs identity validation and
 -- terminal-state interpretation for this backend and the HTTP backend alike.
-module Agent.Telegram.Session.Local (localSessionBackend) where
+module Agent.Telegram.Session.Local (localSessionBackend, retryExecutionUpdateId) where
 
 import Agent.Telegram.Connector.Session
 import Agent.FileRetry (writeLazyFileAtomically)
@@ -16,6 +16,13 @@ import qualified Data.Text as Text
 import System.Directory (doesFileExist)
 import System.FileLock (SharedExclusive(Exclusive), withFileLock)
 import System.OsPath (unsafeEncodeUtf)
+
+-- | Reserve the negative namespace for explicit retry executions. Telegram
+-- update IDs are nonnegative; deriving from the /retry command (not the failed
+-- turn) gives every explicit retry a distinct, restart-stable identity. The
+-- returned identifier must be persisted with the pending action before launch.
+retryExecutionUpdateId :: Integer -> Integer
+retryExecutionUpdateId commandUpdateId = negate (abs commandUpdateId) - 1
 
 data LocalCheckpoint = LocalCheckpoint
     { checkpointSession :: !Text
