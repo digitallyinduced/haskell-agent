@@ -62,7 +62,8 @@ uses its scoped inline approval buttons, while `--deny-mutations` blocks them.
 Top-level Codex sessions use deferred discovery regardless of startup strategy: initially
 only `tool_search` is published for MCP tool discovery. Search matches become
 direct `server__tool` functions on the next model request. With code mode, the
-next `exec` declaration includes the matching `tools.server__tool` methods;
+next `exec` declaration includes the matching `tools.server__tool` methods
+(or generated `Tools.server__tool` bindings with the Haskell backend);
 searching does not change the tools available inside an already-running cell.
 Discovery is session-local, while server connections remain shared. Built-in
 tools are not deferred. This uses an ordinary function tool, not Codex's native

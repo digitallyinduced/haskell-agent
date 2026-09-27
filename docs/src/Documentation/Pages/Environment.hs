@@ -78,6 +78,8 @@ page = Page
         to the shipped transport default.</p>
         <h2 id="helpers">Local helpers and browser selection</h2>
         <table><thead><tr><th>Variable</th><th>Behavior</th></tr></thead><tbody>
+            <tr><td><code>HASKELL_AGENT_GHCI</code></td><td>GHCi executable for experimental Haskell code mode; defaults to <code>ghci</code> on PATH. See <a href="/reference/tool-execution/#haskell-code-mode">compiler setup and backend selection</a>. Ignored by JavaScript code mode.</td></tr>
+            <tr><td><code>HASKELL_AGENT_GHCI_RTS</code></td><td>Runtime options supplied to the GHCi worker via GHCRTS; defaults to <code>-M1G</code> (1 GiB maximum Haskell heap). This is not an operating-system memory limit or sandbox.</td></tr>
             <tr><td><code>CLAUDE_CODE_EXECUTABLE</code></td><td>Select the Claude Code executable for authentication/runtime discovery; use a trusted installed program</td></tr>
             <tr><td><code>HASKELL_AGENT_APPLE_SESSION_TITLE</code></td><td>Select the on-device title helper. The Darwin package sets this to the binary built by Nix; otherwise discovery uses <code>apple-session-title</code> on <code>PATH</code></td></tr>
             <tr><td><code>BROWSER</code></td><td>Single executable name or path, launched with the authorization URL as one argument; not a shell command with flags</td></tr>

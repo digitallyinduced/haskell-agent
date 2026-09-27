@@ -1,5 +1,7 @@
 module Agent.Tools.Types
     ( AppTool(..)
+    , ToolOutputMetadata(..)
+    , ToolOutputFormat(..)
     , ToolAsyncCapability(..)
     , AppToolGroup(..)
     , appToolsFromGroups
@@ -186,6 +188,16 @@ data ToolExecutionPolicy
 type ToolResourceResolver =
     ToolCall -> IO (Either Text [ToolResourceClaim])
 
+-- | Output information for programmatic consumers. This is independent of
+-- the provider's input schema and does not grant any dispatch capability.
+data ToolOutputFormat = JsonToolOutput | McpToolOutput
+    deriving (Eq, Show)
+
+data ToolOutputMetadata = ToolOutputMetadata
+    { outputSchema :: !(Maybe Value)
+    , outputFormat :: !ToolOutputFormat
+    } deriving (Eq, Show)
+
 data AppTool = AppTool
     { appToolName :: !Text
     , appToolDescription :: !Text
@@ -195,6 +207,7 @@ data AppTool = AppTool
     , appToolExecution :: !ToolExecutionPolicy
     , appToolResourceClaims :: !(Maybe ToolResourceResolver)
     , appToolAsyncCapability :: !ToolAsyncCapability
+    , appToolOutputMetadata :: !(Maybe ToolOutputMetadata)
     }
 
 -- | A construction-time partition between ambient execution handlers and
@@ -443,6 +456,7 @@ jsonAppToolWithExecution
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
     , appToolAsyncCapability = BlockingOnly
+    , appToolOutputMetadata = Nothing
     }
 
 -- | Construct a JSON tool from an already-built JSON Schema value. Dynamic
@@ -476,6 +490,7 @@ rawJsonAppToolWithExecution
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
     , appToolAsyncCapability = BlockingOnly
+    , appToolOutputMetadata = Nothing
     }
 
 withToolResourceClaims
@@ -540,6 +555,7 @@ freeformApplyPatchAppToolWithExecution
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
     , appToolAsyncCapability = BlockingOnly
+    , appToolOutputMetadata = Nothing
     }
 
 -- | Construct a freeform tool that advertises an explicit grammar.
@@ -562,6 +578,7 @@ freeformGrammarAppToolWithExecution
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
     , appToolAsyncCapability = BlockingOnly
+    , appToolOutputMetadata = Nothing
     }
 
 mkToolRegistry :: [AppTool] -> Either Text ToolRegistry

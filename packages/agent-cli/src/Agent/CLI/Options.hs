@@ -11,6 +11,7 @@ module Agent.CLI.Options
     , McpAddTransport(..)
     , McpCommand(..)
     , CodeModeOption(..)
+    , CodeModeBackend(..)
     , ScreenMode(..)
     , SessionOutputFormat(..)
     , SessionPageRequest(..)
@@ -54,6 +55,7 @@ import Agent.Runtime.Options
     )
 import Agent.CLI.Timestamp (MessageClock)
 import Agent.TUI.Motion (MotionMode(..))
+import Agent.Tools.CodeMode.Backend (CodeModeBackend(..))
 import Data.Char (toLower)
 import Data.Foldable (asum)
 import Data.Int (Int64)
@@ -134,7 +136,7 @@ data ScreenMode
     | ScreenMinimal
     deriving (Eq, Show)
 
--- | How to start JavaScript code mode for a session.
+-- | How to start code mode for a session.
 --
 -- Codex resolves catalog @tool_mode@ first. Local enablement is only the
 -- fallback when the catalog omits a recognized selector. Local disablement
@@ -214,8 +216,12 @@ data CliOptions = CliOptions
       -- ^ Allow the model to request control of the local Linux/macOS desktop.
       -- Interactive terminal sessions default to 'True'.
     , optCodeMode :: !CodeModeOption
-      -- ^ Whether to start JavaScript code mode. 'CodeModeCatalog' follows
+      -- ^ Whether to start code mode. 'CodeModeCatalog' follows
       -- the model catalog's @tool_mode@ (Codex default).
+    , optCodeModeBackend :: !CodeModeBackend
+      -- ^ Execution language when code mode is active; JavaScript by default.
+    , optCodeModeRepair :: !Bool
+      -- ^ Opt in to isolated compiler-error repair for Haskell code mode.
     , optScreenMode :: !ScreenMode
     , optMotionMode :: !MotionMode
     -- | Conversation starter's wall-clock. 'Nothing' uses the process locale.
@@ -246,6 +252,8 @@ defaultCliOptions = CliOptions
     , optBash = True
     , optComputerUse = Inherit
     , optCodeMode = CodeModeCatalog
+    , optCodeModeBackend = JavaScriptBackend
+    , optCodeModeRepair = False
     , optScreenMode = ScreenAuto
     , optMotionMode = MotionFull
     , optMessageClock = Nothing
@@ -664,9 +672,19 @@ optionUpdateParser = asum
             { optComputerUse = Explicit value
             })
     , codeModeFlagUpdate "code-mode" CodeModeEnabled
-        "Enable JavaScript code mode when the catalog omits tool_mode"
+        "Enable code mode when the catalog omits tool_mode"
     , codeModeFlagUpdate "no-code-mode" CodeModeDisabled
         "Disable full code mode even when the catalog selects it"
+    , optionUpdate "code-mode-backend" "LANGUAGE"
+        "Code-mode execution language: javascript (default) or haskell"
+        codeModeBackendReader
+        (\value options -> options { optCodeModeBackend = value })
+    , boolFlagUpdate "code-mode-repair" True
+        "Repair Haskell compiler errors with isolated gpt-6-luna requests (OpenAI only)"
+        (\value options -> options { optCodeModeRepair = value })
+    , boolFlagUpdate "no-code-mode-repair" False
+        "Disable automatic Haskell compiler-error repair (default)"
+        (\value options -> options { optCodeModeRepair = value })
     , screenFlagUpdate "fullscreen" ScreenFullscreen
         "Use the retained full-screen TUI"
     , screenFlagUpdate "minimal" ScreenMinimal
@@ -743,6 +761,12 @@ codeModeFlagUpdate name value description =
 
 textReader :: Options.ReadM Text
 textReader = Text.pack <$> Options.str
+
+codeModeBackendReader :: Options.ReadM CodeModeBackend
+codeModeBackendReader = Options.eitherReader \case
+    "javascript" -> Right JavaScriptBackend
+    "haskell" -> Right HaskellBackend
+    _ -> Left "--code-mode-backend must be javascript or haskell"
 
 pathReader :: Options.ReadM OsPath
 pathReader = unsafeEncodeUtf <$> Options.str

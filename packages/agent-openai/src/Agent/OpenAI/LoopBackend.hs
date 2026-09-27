@@ -805,7 +805,10 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
         showRawReasoning transientPolicy reconnectPolicy send getParams =
     backendWithCallbacks \snapshot legacyPreviousResponseId inputs callbacks -> do
         callbacks.onCancellationMode CancelSubmission
-        baseParams <- sanitizeCodexRequest <$> getParams
+        -- Keep the local Responses Lite instruction-prefix marker until
+        -- withRequestInput has copied the prefix. Wire sanitization removes
+        -- that marker, so doing it here silently drops developer instructions.
+        baseParams <- getParams
         let history = snapshot.backendItems
             previousResponseId =
                 backendContinuationToken "openai.responses" snapshot

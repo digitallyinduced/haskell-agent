@@ -10,6 +10,9 @@ import Agent.MCP.Fleet
     , closeMcpFleet
     , mcpFleetInstructions
     , mcpFleetToolsForArtifactDirectory
+    , mcpCallTool
+    , grokUseTool
+    , deferredCatalogTool
     )
 import Agent.MCP.Supervisor
     ( acquireMcpFleetProgressiveWithInMemory
@@ -29,6 +32,9 @@ import Agent.ToolDSL
     )
 import Agent.ToolDispatch
     ( ToolCallResult(..)
+    , toolCallResultStructured
+    , toolCallResultOutcome
+    , ToolOutcome(..)
     , dispatchToolCall
     , functionToolCall
     , noArgsTool
@@ -39,6 +45,8 @@ import Agent.Tools.Types
     , ToolApproval(..)
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
+    , ToolOutputMetadata(..)
+    , ToolOutputFormat(..)
     , appToolHandlers
     , freeformApplyPatchAppToolWithExecution
     , jsonAppToolWithExecution
@@ -47,6 +55,7 @@ import Data.Aeson (Value(..), object, (.=), toEncoding)
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Foldable (toList)
+import qualified Data.Map.Strict as Map
 import Data.IORef
     ( modifyIORef'
     , newIORef
@@ -61,6 +70,55 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "in-process MCP server" do
+    it "carries the original structured envelope through dispatch once, including failures" do
+        adapter <- testServer (const (pure ToolApprovalGranted)) [echoTool]
+        calls <- newIORef (0 :: Int)
+        let base = inProcessMcpToolServer adapter
+            payload = object ["answer" .= (42 :: Int)]
+            endpoint failed = base
+                { toolServerCallTool = \_ -> do
+                    modifyIORef' calls (+ 1)
+                    pure (Right (McpCallToolResult failed ["display"]
+                        (Just (rawJsonFromEncoding (toEncoding payload)))))
+                }
+        mapM_ (\failed ->
+            bracket
+                (startMcpFleetWithInMemory defaultMcpHostHooks
+                    (const (pure ())) [] [(memoryConfig, endpoint failed)])
+                closeMcpFleet \fleet -> do
+                    catalog <- readTVarIO fleet.mcpFleetCatalog
+                    entry <- maybe (fail "missing echo catalog entry") pure
+                        (Map.lookup "memory__echo" catalog)
+                    direct <- case mcpFleetToolsForArtifactDirectory Nothing fleet of
+                        [tool] -> pure tool
+                        _ -> fail "expected one direct tool"
+                    let routes =
+                            [ (direct, "{}")
+                            , (deferredCatalogTool Nothing fleet "memory__echo" entry, "{}")
+                            , (mcpCallTool Nothing fleet,
+                                "{\"name\":\"memory__echo\",\"arguments\":{}}")
+                            , (grokUseTool Nothing fleet,
+                                "{\"tool_name\":\"memory__echo\",\"tool_input\":{}}")
+                            ]
+                    mapM_ (\(tool, arguments) -> do
+                        let call = functionToolCall "payload" tool.appToolName arguments
+                        case tool.appToolApproval of
+                            ClassifyApproval classify -> classify call >> pure ()
+                            _ -> pure ()
+                        result <- dispatchToolCall defaultLoopDispatch
+                            (appToolHandlers [tool]) call
+                        toolCallResultStructured result `shouldBe` Just (object
+                            [ "isError" .= failed
+                            , "content" .= [object
+                                ["type" .= ("text" :: Text), "text" .= ("display" :: Text)]]
+                            , "structuredContent" .= payload
+                            ])
+                        toolCallResultOutcome result `shouldBe`
+                            Just (if failed then ToolFailed else ToolSucceeded)
+                        ) routes
+            ) [False, True]
+        readIORef calls `shouldReturn` 8
+
     it "reserves exact tools at discovery and dispatch without blocking other tools" do
         adapter <- testServer (const (pure ToolApprovalGranted)) [echoTool]
         let base = inProcessMcpToolServer adapter
@@ -124,6 +182,14 @@ spec = describe "in-process MCP server" do
         called <- handleToolServerMessage endpoint
             (request 2 "tools/call" (object ["name" .= ("echo" :: Text)]))
         lookupPath ["result", "structuredContent", "answer"] called `shouldBe` Just (Number 42)
+        bracket
+            (startMcpFleetWithInMemory defaultMcpHostHooks (const (pure ())) [] [(memoryConfig, endpoint)])
+            closeMcpFleet \fleet -> do
+                let tools = mcpFleetToolsForArtifactDirectory Nothing fleet
+                map (.appToolOutputMetadata) tools `shouldBe`
+                    [Just (ToolOutputMetadata
+                        (Just (object ["type" .= ("object" :: Text)]))
+                        McpToolOutput)]
 
     it "shares typed server instructions with the ordinary fleet" do
         adapter <- testServer (const (pure ToolApprovalGranted)) [echoTool]

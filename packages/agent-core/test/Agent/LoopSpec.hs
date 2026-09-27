@@ -930,6 +930,35 @@ spec = describe "runLoop" do
                 expectationFailure $
                     "unexpected submitted backend state: " <> show state
 
+    it "normalizes structured tool result images without dropping the JSON payload" do
+        submittedInputs <- newIORef []
+        let payload = Aeson.object ["count" Aeson..= (42 :: Int)]
+            sourceUrl = "data:image/bmp;base64,"
+                <> TextEncoding.decodeUtf8 (Base64.encode oversizedFixtureBytes)
+            result = ToolCallResultWithStructured
+                "structured-image" "viewed image" FunctionCallKind AsyncToolCall
+                [ToolResultImage sourceUrl (Just "auto")] (Just ToolSucceeded) payload []
+            backend = Backend \_state _previous inputs _onEvent -> do
+                writeIORef submittedInputs inputs
+                pure (Left (ConnectionError "down"))
+        config <- testConfig backend
+        execution <- runLoopInputsDetailed config Nothing [CompletedTool result]
+        execution.executionResult
+            `shouldBe` Left (LoopTransport (ConnectionError "down"))
+        readIORef submittedInputs >>= \case
+            [CompletedTool normalized] -> do
+                toolCallResultStructured normalized `shouldBe` Just payload
+                normalized.output `shouldBe` "viewed image"
+                normalized.callId `shouldBe` "structured-image"
+                toolCallResultMode normalized `shouldBe` AsyncToolCall
+                toolCallResultOutcome normalized `shouldBe` Just ToolSucceeded
+                case normalized.toolResultImages of
+                    [image] -> do
+                        image.imageUrl `shouldNotBe` sourceUrl
+                        image.imageDetail `shouldBe` Just "auto"
+                    images -> expectationFailure ("unexpected images: " <> show images)
+            inputs -> expectationFailure ("unexpected inputs: " <> show inputs)
+
     it "normalizes oversized tool images before follow-up submission" do
         submissions <- newIORef []
         backend <- scriptedBackend submissions

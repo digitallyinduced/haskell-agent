@@ -15,6 +15,7 @@ extra-source-files: README.md
                   , benchmark/ArtifactRetrieval.md
                   , benchmark/ArtifactStorage.md
 data-files:         data/code-mode/worker.mjs
+                  , data/code-mode/CodeModeSupport.hs
 
 common common-opts
     default-language: Haskell2010
@@ -42,8 +43,12 @@ library
     exposed-modules:  Agent.Tools.Background
                     , Agent.Tools.CodeMode
                     , Agent.Tools.CodeMode.Client
+                    , Agent.Tools.CodeMode.Backend
+                    , Agent.Tools.CodeMode.Haskell.Bindings
+                    , Agent.Tools.CodeMode.Haskell.Host
                     , Agent.Tools.CodeMode.Host
                     , Agent.Tools.CodeMode.Protocol
+                    , Agent.Tools.CodeMode.ReturnShape
                     , Agent.Tools.CodeMode.Tool
                     , Agent.Tools.Dangerous
                     , Agent.Tools.Environment
@@ -160,6 +165,22 @@ benchmark read-file-streaming-bench
                     , text
                     , unix
 
+benchmark code-mode-comparison-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          CodeModeComparison.hs
+    ghc-options:      -O2 -rtsopts -threaded
+    build-depends:    agent-tools
+                    , aeson
+                    , base >= 4.14 && < 5
+                    , bytestring
+                    , directory
+                    , filepath
+                    , safe-exceptions
+                    , text
+                    , vector
+
 benchmark code-mode-pool-bench
     import:           common-opts
     type:             exitcode-stdio-1.0
@@ -187,12 +208,17 @@ benchmark artifact-retrieval-bench
 
 test-suite agent-tools-test
     import:           common-opts
+    ghc-options:      -threaded
     type:             exitcode-stdio-1.0
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.Tools.CodeMode.HostSpec
+                    , Agent.Tools.CodeMode.Haskell.BindingsSpec
+                    , Agent.Tools.CodeMode.Haskell.HostSpec
+                    , Agent.Tools.CodeMode.ToolSpec
                     , Agent.ToolDispatchSpec
                     , Agent.Tools.CodeMode.ProtocolSpec
+                    , Agent.Tools.CodeMode.ReturnShapeSpec
                     , Agent.Tools.DangerousSpec
                     , Agent.Tools.EnvironmentSpec
                     , Agent.Tools.FileSystem.GrepSpec
@@ -232,3 +258,4 @@ test-suite agent-tools-test
                     , text
                     , time
                     , unix
+                    , vector

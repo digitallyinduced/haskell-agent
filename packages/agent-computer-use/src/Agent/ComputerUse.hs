@@ -205,6 +205,7 @@ computerUseToolWithExecutor executeCall = AppTool
     , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
     , appToolAsyncCapability = BlockingOnly
+    , appToolOutputMetadata = Nothing
     }
   where
     handler =

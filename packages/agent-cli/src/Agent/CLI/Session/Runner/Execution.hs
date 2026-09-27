@@ -1242,18 +1242,13 @@ buildSessionShellRuntime host controls SessionRequest{..} =
         wireTools <- case codeModeRuntime of
             Nothing -> pure []
             Just runtime ->
-                case deferredTools of
-                    Nothing -> pure runtime.codeModeWireTools
-                    Just _ ->
-                        runtime.codeModeRefreshTools enabledTools >>=
-                            either (fail . Text.unpack) pure
-        case deferredTools of
-            Nothing -> pure ()
-            Just _ -> do
-                registry <- requireToolRegistry $
-                    sessionDirectTools allTools codeModeRuntime
-                        <> discovered <> wireTools
-                writeIORef controls.controlCurrentToolRegistry registry
+                runtime.codeModeRefreshTools enabledTools >>=
+                    either (fail . Text.unpack) pure
+        when (needsDynamicToolRefresh deferredTools codeModeRuntime) do
+            registry <- requireToolRegistry $
+                sessionDirectTools allTools codeModeRuntime
+                    <> discovered <> wireTools
+            writeIORef controls.controlCurrentToolRegistry registry
         let
             enabledNames = map (.appToolName) enabledTools
             instructionText =
@@ -1410,9 +1405,9 @@ buildSessionLoopConfig
             }
         , loopTools = controls.controlToolRegistry
         , loopReadTools =
-            case deferredTools of
-                Nothing -> Nothing
-                Just _ -> Just do
+            if not (needsDynamicToolRefresh deferredTools codeModeRuntime)
+                then Nothing
+                else Just do
                     shellRuntime.shellRefreshRequestParams
                     readIORef controls.controlCurrentToolRegistry
         , loopDispatch =

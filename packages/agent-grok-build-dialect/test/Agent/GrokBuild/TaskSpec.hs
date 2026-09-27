@@ -494,6 +494,7 @@ fake name = AppTool
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
     , appToolAsyncCapability = BlockingOnly
+    , appToolOutputMetadata = Nothing
     }
 
 raceArgs :: Text

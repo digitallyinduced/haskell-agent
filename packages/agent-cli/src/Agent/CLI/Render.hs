@@ -1096,7 +1096,7 @@ toolChrome name = case canonicalToolName name of
     "shell_command" -> ToolChromeShell
     "write_stdin" -> ToolChrome "Continued" ToolDetailMuted
     "run_ghci" -> ToolChromeShell
-    "exec" -> ToolChrome "JavaScript execution" ToolDetailNone
+    "exec" -> ToolChrome "Code execution" ToolDetailNone
     "get_task_output" -> ToolChrome "Read" ToolDetailMuted
     "wait_tasks" -> ToolChrome "Waited" ToolDetailMuted
     "kill_task" -> ToolChrome "Killed" ToolDetailMuted

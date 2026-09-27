@@ -1028,20 +1028,22 @@ spec = describe "fullscreen UI reducer" do
                 ])
             ["shell_command", "run_terminal_cmd"]
 
-    it "stores exec source as JavaScript code" do
-        let source = "const answer = await tools.read_file({target_file: \"A.hs\"});"
+    it "stores exec source without assuming its backend language" do
+        let source = "do\n  text \"Haskell execution\"\n  text \"42\""
             call = customToolCall "c1" "exec" source
             state = apply [UiLoop TurnStarted, UiLoop (ToolStarted call)]
         case Foldable.toList state.uiBlocks of
             [block] -> do
                 block.blockKind `shouldBe` BlockShell
-                block.blockTitle `shouldBe` "JavaScript execution"
+                block.blockTitle `shouldBe` "Code execution"
                 block.blockDetail `shouldBe` source
-                blockCodeLanguage block `shouldBe` Just "javascript"
+                blockCodeLanguage block `shouldBe` Nothing
                 blockCodeLanguage block{blockTitle = "$ exec"}
+                    `shouldBe` Nothing
+                blockCodeLanguage block{blockTitle = "JavaScript execution"}
                     `shouldBe` Just "javascript"
                 block.blockExpanded `shouldBe` False
-                state.uiActivity `shouldBe` "JavaScript execution"
+                state.uiActivity `shouldBe` "Code execution"
             _ -> expectationFailure "expected one running exec block"
 
     it "keeps streaming exec source collapsed and retains it for expansion" do
@@ -1065,7 +1067,7 @@ spec = describe "fullscreen UI reducer" do
         map (.blockExpanded) (Foldable.toList running.uiBlocks) `shouldBe` [False]
         map (.blockExpanded) (Foldable.toList expanded.uiBlocks) `shouldBe` [True]
         map (.blockDetail) (Foldable.toList expanded.uiBlocks) `shouldBe` [source]
-        running.uiActivity `shouldBe` "JavaScript execution"
+        running.uiActivity `shouldBe` "Code execution"
 
     it "retains independent parallel nested operations beside collapsed exec" do
         let source = "await Promise.all([tools.inspect_configuration(), tools.inspect_dependencies()]);"
@@ -1112,7 +1114,7 @@ spec = describe "fullscreen UI reducer" do
             `shouldBe` [BlockRunning, BlockRunning, BlockComplete]
         map (.blockState) blocks `shouldBe` [BlockFailed, BlockFailed, BlockComplete]
         map (.blockTitle) blocks
-            `shouldBe` ["JavaScript execution", "inspect_configuration", "inspect_dependencies"]
+            `shouldBe` ["Code execution", "inspect_configuration", "inspect_dependencies"]
         map (.blockBody) blocks
             `shouldBe` ["Error: nested operation failed", "Error: denied", "done"]
         Map.null executionFailed.uiToolCalls `shouldBe` True

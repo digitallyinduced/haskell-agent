@@ -3,11 +3,17 @@ module Agent.CLI.ToolsSpec (spec) where
 import Agent.CLI.Tools
 import Agent.CLI.ChartImage (terminalChartTool)
 import Agent.ComputerUse (computerUseTool)
+import Agent.Runtime.ProviderRequest (requestPromptParts)
 import Agent.CLI.CodeModeRuntime
     ( CodeModeProjectionStrategy(..)
+    , needsDynamicToolRefresh
     , CodeModeRuntimePlan(..)
     , CodeModeToolProjection(..)
     , codeModeRuntimePlan
+    , codeModeBackendInstructions
+    , codeModeRepairRequestParams
+    , requestCodeModeRepair
+    , codeModeRepairHandlerWithUsage
     , filterStartupUnavailableTools
     , imageGenerationCodeModeProjection
     , projectCodeModeTools
@@ -27,7 +33,11 @@ import Agent.Dialect
     , codexDialect
     , grokBuildDialect
     )
-import Agent.Loop (LoopError(..), ImageAttachment(..))
+import Agent.Loop
+    ( LoopError(..), ImageAttachment(..), Backend(..), BackendResult(..)
+    , TurnInput(..), TurnOutput(..), TurnCompletion(..)
+    , emptyBackendSnapshot, emptyTurnOutput, TokenUsage(..)
+    )
 import Agent.Json (RawJson, rawJsonBytes, rawJsonFromEncoding)
 import Agent.Json.Decode qualified as Hermes
 import Agent.Responses.Types
@@ -55,6 +65,7 @@ import Agent.Codex.Dialect.Runtime
     )
 import Agent.Tools.MultiAgents (MultiAgentContext(..), multiAgentTools)
 import Agent.Tools.CodeMode.Tool (ToolMode(..))
+import Agent.Tools.CodeMode.Backend (CodeModeBackend(..))
 import Agent.Tools.FileSystem.Grep (grepTool)
 import Agent.Tools.Types
     ( AppTool(..)
@@ -72,6 +83,7 @@ import Control.Monad (join)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import Data.IORef (newIORef, readIORef, modifyIORef')
+import Agent.Tools.CodeMode.Haskell.Host (HaskellRepairRequest(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Info (os)
@@ -80,6 +92,101 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "schemasFromAppTools" do
+    it "refreshes code-mode registries without deferred discovery while leaving static sessions alone" do
+        needsDynamicToolRefresh Nothing Nothing `shouldBe` False
+        needsDynamicToolRefresh (Just ()) Nothing `shouldBe` True
+        needsDynamicToolRefresh Nothing (Just ()) `shouldBe` True
+        needsDynamicToolRefresh (Just ()) (Just ()) `shouldBe` True
+
+    it "isolates compiler repair requests from conversation and tool authority" do
+        let params = codeModeRepairRequestParams
+        params.model `shouldBe` Just "gpt-6-luna"
+        params.tools `shouldBe` Nothing
+        params.toolChoice `shouldBe` Just (ToolChoiceMode ToolChoiceNone)
+        params.previousResponseId `shouldBe` Nothing
+        params.conversation `shouldBe` Nothing
+        params.prompt `shouldBe` Nothing
+        params.promptCacheKey `shouldBe` Nothing
+        params.maxOutputTokens `shouldBe` Nothing
+        params.parallelToolCalls `shouldBe` Just False
+        let (instructions, tools) = requestPromptParts params
+        tools `shouldBe` []
+        instructions `shouldSatisfy` Text.isInfixOf "Preserve intent"
+
+    it "submits only the compiler context and returns corrected source" do
+        let factory params = Backend \snapshot previous inputs _ -> do
+                params `shouldBe` codeModeRepairRequestParams
+                snapshot `shouldBe` emptyBackendSnapshot
+                previous `shouldBe` Nothing
+                inputs `shouldBe` [UserMessage "failed cell and diagnostics"]
+                pure (Right (BackendResult
+                    (emptyTurnOutput "repair" [] (Just "pure ()"))
+                    emptyBackendSnapshot))
+        requestCodeModeRepair factory "failed cell and diagnostics"
+            `shouldReturn` Right "pure ()"
+
+    it "rejects incomplete compiler repairs and tool calls" do
+        let factory output _ = Backend \_ _ _ _ ->
+                pure (Right (BackendResult output emptyBackendSnapshot))
+            incomplete = (emptyTurnOutput "repair" [] (Just "pure ()"))
+                { completion = TurnIncomplete "max_output_tokens" Nothing }
+            toolAttempt = emptyTurnOutput "repair"
+                [functionToolCall "repair-tool" "shell_command" "{}"] (Just "pure ()")
+        requestCodeModeRepair (factory incomplete) "diagnostics"
+            `shouldReturn` Left "compiler repair response was incomplete"
+        requestCodeModeRepair (factory toolAttempt) "diagnostics"
+            `shouldReturn` Left "compiler repair model attempted a tool call"
+
+    it "unwraps only a single complete Haskell source fence" do
+        let factory source _ = Backend \_ _ _ _ ->
+                pure (Right (BackendResult
+                    (emptyTurnOutput "repair" [] (Just source))
+                    emptyBackendSnapshot))
+        mapM_ (\source -> requestCodeModeRepair (factory source) "diagnostics"
+            `shouldReturn` Right "print (1 :: Int)")
+            [ "```haskell\nprint (1 :: Int)\n```"
+            , "```\nprint (1 :: Int)\n```"
+            ]
+        mapM_ (\source -> requestCodeModeRepair (factory source) "diagnostics"
+            `shouldReturn` Right source)
+            [ "Here is the fix:\n```haskell\npure ()\n```"
+            , "```python\npass\n```"
+            , "```haskell\npure ()"
+            , "```haskell\npure ()\n```\n```haskell\npure ()\n```"
+            ]
+
+    it "does not submit oversized compiler contexts" do
+        requestCodeModeRepair (const (error "unexpected model submission"))
+            (Text.replicate 160001 "x")
+            `shouldReturn` Left "compiler repair context exceeds the size limit"
+
+    it "accounts for repair tokens even when the model declines" do
+        recorded <- newIORef []
+        let usage = TokenUsage 30 4 10
+            output = (emptyTurnOutput "repair" [] (Just "CANNOT_REPAIR"))
+                { tokenUsage = usage }
+            factory _ = Backend \_ _ _ _ ->
+                pure (Right (BackendResult output emptyBackendSnapshot))
+            request = HaskellRepairRequest
+                { repairOriginalSource = "print missing"
+                , repairCurrentSource = "print missing"
+                , repairDiagnostics = "Not in scope: missing"
+                , repairEnvironment = "Prelude"
+                , repairBindings = ""
+                , repairAttempt = 1
+                }
+        codeModeRepairHandlerWithUsage
+            (\value -> modifyIORef' recorded (<> [value])) factory request
+            `shouldReturn` Nothing
+        readIORef recorded `shouldReturn` [usage]
+
+    it "keeps default prompts unchanged and states the Haskell execution contract explicitly" do
+        codeModeBackendInstructions JavaScriptBackend `shouldBe` ""
+        codeModeBackendInstructions HaskellBackend
+            `shouldSatisfy` Text.isInfixOf "exec tool in this session executes Haskell"
+        codeModeBackendInstructions HaskellBackend
+            `shouldSatisfy` Text.isInfixOf "complete IO ()"
+
     describe "terminalChartTool" do
         let input = "{\"version\":1,\"kind\":\"line\",\"title\":\"Revenue\",\"x_axis\":{\"type\":\"number\"},\"y_axis\":{},\"series\":[{\"name\":\"Sales\",\"points\":[{\"x\":1,\"y\":2},{\"x\":2,\"y\":3}]}]}"
             config = ToolDispatchConfig
@@ -244,6 +351,41 @@ spec = describe "schemasFromAppTools" do
             `shouldBe` ["shell_command", "write_stdin"]
         map (.appToolName) projection.nestedCodeModeTools
             `shouldBe` ["read_file", "shell_command", "write_stdin", "apply_patch"]
+
+    mapM_ (\mode ->
+        it ("keeps planning and user interaction tools direct-only in " <> show mode) do
+            let controls =
+                    [ "update_plan", "enter_plan_mode", "write_plan", "exit_plan_mode"
+                    , "ask_user_question", "ask_secret"
+                    ]
+                ordinary = ["read_file", "shell_command", "write_stdin"]
+                tools = map testTool (controls <> ordinary)
+                projection = projectCodeModeTools mode tools
+                expectedDirect = controls <> case mode of
+                    CodeOnlyToolMode -> ["shell_command", "write_stdin"]
+                    _ -> ordinary
+                expectedNested = case mode of
+                    ConventionalToolMode -> []
+                    _ -> ordinary
+            map (.appToolName) projection.directCodeModeTools
+                `shouldBe` expectedDirect
+            map (.appToolName) projection.nestedCodeModeTools
+                `shouldBe` expectedNested
+        ) [ConventionalToolMode, CodeToolMode, CodeOnlyToolMode]
+
+    it "keeps newly available planning controls direct-only after code-mode reprojection" do
+        let controls =
+                [ "update_plan", "enter_plan_mode", "write_plan", "exit_plan_mode"
+                , "ask_user_question", "ask_secret"
+                ]
+            tools = map testTool (["read_file", "imagegen"] <> controls)
+            full = projectCodeModeToolsFor FullCodeModeProjection tools
+            imageOnly = projectCodeModeToolsFor ImageGenerationOnlyCodeModeProjection tools
+        map (.appToolName) full.directCodeModeTools `shouldBe` controls
+        map (.appToolName) full.nestedCodeModeTools `shouldBe` ["read_file", "imagegen"]
+        map (.appToolName) imageOnly.directCodeModeTools `shouldBe` ("read_file" : controls)
+        map (.appToolName) imageOnly.nestedCodeModeTools `shouldBe` ["imagegen"]
+
     it "keeps raw Nix environment input direct in code-only mode" do
         env <- defaultToolEnv (unsafeEncodeUtf ".")
         environmentTool <- newEnvironmentTool env

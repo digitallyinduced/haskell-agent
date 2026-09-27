@@ -56,7 +56,9 @@ page = Page
             <tr><td><code>--bash</code>, <code>--no-ghci</code></td><td>Explicitly enable shell execution or disable persistent GHCi</td></tr>
             <tr><td><code>--agents-md</code>, <code>--skills</code></td><td>Explicitly enable instruction or skill discovery</td></tr>
             <tr><td><code>--computer-use</code></td><td>Explicitly enable supported desktop tools; approval is still separate</td></tr>
-            <tr><td><code>--code-mode</code></td><td>Enable JavaScript tool orchestration when the model catalog does not select a tool mode</td></tr>
+            <tr><td><code>--code-mode</code></td><td>Enable tool orchestration when the model catalog does not select a tool mode</td></tr>
+            <tr><td><code>--code-mode-backend javascript|haskell</code></td><td>Select the orchestration language; JavaScript is the default. Haskell requires GHCi and does not enable code mode by itself.</td></tr>
+            <tr><td><code>--code-mode-repair</code></td><td>Opt into isolated gpt-6-luna compiler repair for Haskell code mode in OpenAI sessions. At most two repair attempts; runtime failures are not retried.</td></tr>
             <tr><td><code>--no-code-mode</code></td><td>Disable full code mode even when selected by the catalog</td></tr>
         </tbody></table>
         <p>Code mode is a model-facing tool orchestration capability, not the documentation

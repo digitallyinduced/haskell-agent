@@ -25,6 +25,51 @@ import Agent.OpenAI.LoopBackendSpec.Fixtures
 
 spec :: Spec
 spec = do
+    describe "Responses Lite request prefixes" do
+        it "preserves developer instructions on fresh, delta and full replay requests while stripping local markers" do
+            requests <- newIORef []
+            let additional = AdditionalToolsItemValue
+                    (AdditionalToolsItem Nothing "developer" [])
+                developer metadata = MessageItem ResponseMessage
+                    { messageId = Nothing
+                    , content = MessageContentText "Return only corrected Haskell, no prose."
+                    , role = RoleDeveloper
+                    , status = Nothing
+                    , phase = Nothing
+                    , passthrough = metadata
+                    }
+                marker = Just InternalChatMetadata
+                    { turnId = Nothing
+                    , createTime = Nothing
+                    , contentItemKinds = Just ["model.base_instructions"]
+                    , executedToolCalls = Nothing
+                    }
+                params = case baseParams of
+                    ResponseCreateParams{..} -> ResponseCreateParams
+                        { model = Just "gpt-6-luna"
+                        , instructions = Nothing
+                        , input = Just (ResponseInputItems [additional, developer marker])
+                        , ..
+                        }
+                send request previous _ = do
+                    modifyIORef' requests (<> [(inputItems request, previous)])
+                    pure (Right (testResponse "response" [assistantItem "done"]))
+                backend = openAiBackendWith send (pure params)
+                history = turnInputsToItems [UserMessage "earlier"]
+                snapshot = advanceBackendSnapshot emptyBackendSnapshot history
+                    (Just (BackendContinuation "openai.responses" "previous"))
+                fullSnapshot = advanceBackendSnapshot emptyBackendSnapshot history Nothing
+                inputs = [UserMessage "repair"]
+                prefix = [additional, developer Nothing]
+            _ <- backend.submitTurn emptyBackendSnapshot Nothing inputs (const (pure ()))
+            _ <- backend.submitTurn snapshot Nothing inputs (const (pure ()))
+            _ <- backend.submitTurn fullSnapshot Nothing inputs (const (pure ()))
+            readIORef requests `shouldReturn`
+                [ (prefix <> turnInputsToItems inputs, Nothing)
+                , (prefix <> turnInputsToItems inputs, Just "previous")
+                , (prefix <> history <> turnInputsToItems inputs, Nothing)
+                ]
+
     describe "OpenAI interruption recovery" do
         it "replays completed items without a response ID after cancellation, not partial text" do
             ready <- newEmptyMVar

@@ -33,7 +33,9 @@ import Agent.CLI.CodeModeRuntime
     ( CodeModeRuntimePlan(..)
     , CodeModeSessionRuntime(..)
     , CodexCatalogSession(..)
-    , codeModeRuntimeFor
+    , codeModeRuntimeForBackend
+    , codeModeBackendInstructions
+    , codeModeRepairHandlerWithUsage
     , codeModeRuntimePlan
     , filterStartupUnavailableTools
     , loadCodexCatalogModelInfo
@@ -73,7 +75,7 @@ import Agent.CLI.Options
     ( ApprovalPolicy
     , CodeModeOption(..)
     , isOneShot
-    , CliOptions(optCodeMode, optCompactThreshold, optShowRawReasoning)
+    , CliOptions(optCodeMode, optCodeModeBackend, optCodeModeRepair, optCompactThreshold, optShowRawReasoning)
     )
 import Agent.CLI.PendingInputs (PendingInputs, withPendingInputs)
 import Agent.CLI.Project ( ModelSwitchScope(..) )
@@ -511,7 +513,8 @@ prepareSessionCodeRuntime AgentSessionRequest
             | not nativeCapabilities.nativeHostExtensions =
                 pure (Right Nothing)
             | otherwise =
-                codeModeRuntimeFor codeModePlan sessionModelInfo tools
+                codeModeRuntimeForBackend options.optCodeModeBackend
+                    codeModePlan sessionModelInfo tools
         codeModeFallbackWarning =
             case codeModePlan of
                 PlanImageGenerationCodeMode ->
@@ -545,6 +548,9 @@ prepareSessionCodeRuntime AgentSessionRequest
             filterStartupUnavailableTools
                 suppressDirectImageGeneration
                 allTools
+        executionLanguageInstructions =
+            maybe "" (const (codeModeBackendInstructions options.optCodeModeBackend))
+                sessionCodeModeRuntime
         sessionCatalogSession = sessionModelInfo <&> \info ->
             CodexCatalogSession
                 { catalogInstructionsFor = \toolNames sessionTmpDir ->
@@ -556,6 +562,7 @@ prepareSessionCodeRuntime AgentSessionRequest
                         info
                         toolNames
                         sessionTmpDir
+                        <> executionLanguageInstructions
                 , catalogEnvironmentContext =
                     codexEnvironmentContext cwd today Nothing Nothing
                 }
@@ -576,6 +583,7 @@ prepareSessionCodeRuntime AgentSessionRequest
                         (Just sessionTmp)
                         today
                         (isOneShot options)
+                        <> executionLanguageInstructions
         modelSupportsAsync =
             catalogSupportsAsyncToolCallsForTransport
                 catalog
@@ -1208,6 +1216,17 @@ launchProvider request promptRuntime liveRuntime shouldProbeAtStartup startupUna
             }
         use runtime = do
             installProviderSubagents request liveRuntime runtime.subagents
+            forM_ promptRuntime.sessionCodeRuntime.sessionCodeModeRuntime $
+                \codeRuntime -> codeRuntime.codeModeSetRepair Nothing
+            when request.options.optCodeModeRepair $
+                if request.provider == OpenAIProvider
+                    then forM_ promptRuntime.sessionCodeRuntime.sessionCodeModeRuntime $
+                        \codeRuntime -> codeRuntime.codeModeSetRepair
+                            (Just (codeModeRepairHandlerWithUsage
+                                (recordSessionCompactionUsage request liveRuntime.sessionUsageRef)
+                                runtime.sessionBackend.btwBackend))
+                    else reportStartupWarning request.startup
+                        "Haskell compiler repair requires an OpenAI session; repair is disabled."
             let sessionBackend = runtime.sessionBackend
                 noticingBackend = case request.provider of
                     ClaudeCodeProvider -> sessionBackend.backend
@@ -1218,8 +1237,10 @@ launchProvider request promptRuntime liveRuntime shouldProbeAtStartup startupUna
                     Just _ ->
                         writeIORef request.mcpSamplingRef $
                             Just (mcpSamplingHandler request.model sessionBackend.btwBackend)
-                restoreSampling =
+                restoreSampling = do
                     writeIORef request.mcpSamplingRef previousSampling
+                    forM_ promptRuntime.sessionCodeRuntime.sessionCodeModeRuntime $
+                        \codeRuntime -> codeRuntime.codeModeSetRepair Nothing
             installSampling
             (do
                 activeBackend <- prepareTransitionBackend

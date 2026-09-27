@@ -46,6 +46,53 @@ echoArgsDecoder = objectArgs $ \object -> EchoArgs
 
 spec :: Spec
 spec = describe "dispatchToolCall" do
+    describe "structured result transport" do
+        let payload = Aeson.object ["count" Aeson..= (42 :: Int)]
+            call = functionToolCall "structured-1" "structured" "{}"
+            handler result = streamingRichTextTool "structured" (\_ _ -> pure (Right result))
+        it "preserves JSON independently of formatted and truncated text" do
+            let config = testConfig
+                    { toolDispatchFormatResult = const "formatted"
+                    , toolDispatchFinalizeOutput = \_ _ -> pure "truncated"
+                    }
+            result <- dispatchToolCall config
+                [handler (withToolHandlerStructuredResult payload (ToolHandlerResult "original" []))] call
+            result.output `shouldBe` "truncated"
+            toolCallResultStructured result `shouldBe` Just payload
+            toolCallResultStructured (withToolCallResultMode AsyncToolCall result)
+                `shouldBe` Just payload
+            toolCallResultStructured (withToolCallOutcome (Just ToolFailed) result)
+                `shouldBe` Just payload
+            toolCallResultOutcome result `shouldBe` Just ToolSucceeded
+        it "does not invent structured payloads for plain text or dispatch errors" do
+            plain <- dispatchToolCall testConfig [handler (ToolHandlerResult "{\"count\":42}" [])] call
+            failed <- dispatchToolCall testConfig [] call
+            toolCallResultStructured plain `shouldBe` Nothing
+            toolCallResultStructured failed `shouldBe` Nothing
+            toolCallResultOutcome failed `shouldBe` Just ToolFailed
+        it "preserves native files when attaching and replacing structured payloads" do
+            let file = ToolResultFile "report.pdf" "application/pdf" "%PDF-1.4"
+                rich = ToolHandlerResultWithFiles "report" [] [file]
+            plain <- dispatchToolCall testConfig [handler rich] call
+            toolCallResultStructured plain `shouldBe` Nothing
+            toolCallResultFiles plain `shouldBe` [file]
+            result <- dispatchToolCall testConfig
+                [handler (withToolHandlerStructuredResult payload
+                    (withToolHandlerStructuredResult Aeson.Null rich))] call
+            toolCallResultStructured result `shouldBe` Just payload
+            toolCallResultFiles result `shouldBe` [file]
+            toolCallResultFiles (withToolCallOutcome (Just ToolFailed) result)
+                `shouldBe` [file]
+            toolCallResultFiles (withToolCallResultMode AsyncToolCall result)
+                `shouldBe` [file]
+            toolCallResultOutcome result `shouldBe` Just ToolSucceeded
+        it "does not turn explicit failure into success when attaching a payload" do
+            result <- dispatchToolCallDetailed testConfig
+                [handler (withToolHandlerStructuredResult payload
+                    (ToolHandlerResultWithOutcome "failure" [] ToolFailed))] call
+            result.toolDispatchSucceeded `shouldBe` False
+            toolCallResultOutcome result.toolDispatchResult `shouldBe` Just ToolFailed
+            toolCallResultStructured result.toolDispatchResult `shouldBe` Just payload
     describe "shell escalation authorization" do
         let decode = decodeToolArguments (Json.object shellPermissionFieldsDecoder)
             escalation = RequireEscalatedSandbox "Compile the local application"
@@ -605,4 +652,5 @@ computerTool action = AppTool
     , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
     , appToolAsyncCapability = BlockingOnly
+    , appToolOutputMetadata = Nothing
     }

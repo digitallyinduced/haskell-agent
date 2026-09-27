@@ -117,13 +117,14 @@ toolBlockKind rawName
 
 -- | Syntax grammar for code carried in a shell-style tool block.
 -- The title is retained alongside the source after the original call leaves
--- the live-tool map, so it identifies GHCi and exec source; other shell
--- commands use Bash.
+-- the live-tool map. Generic exec titles do not identify the selected backend,
+-- so only explicitly language-specific titles select a grammar.
 blockCodeLanguage :: UiBlock -> Maybe Text
 blockCodeLanguage block
     | block.blockKind /= BlockShell = Nothing
     | Text.null (Text.strip block.blockDetail) = Nothing
-    | block.blockTitle `elem` ["JavaScript execution", "$ exec"] = Just "javascript"
+    | block.blockTitle `elem` ["Code execution", "$ exec"] = Nothing
+    | block.blockTitle == "JavaScript execution" = Just "javascript"
     | block.blockTitle == "$ ghci" = Just "haskell"
     | otherwise = Just "bash"
 

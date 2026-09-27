@@ -92,7 +92,7 @@ spec = do
                 , [RefreshToolThinking]
                 ]
             formatToolStartedRelative False "/workspace" code
-                `shouldSatisfy` Text.isInfixOf "JavaScript execution"
+                `shouldSatisfy` Text.isInfixOf "Code execution"
             formatToolBody False code `shouldBe` ""
 
         it "retains readable nested calls beside the compact exec wrapper" do

@@ -390,6 +390,7 @@ computerTool session = AppTool
     , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
     , appToolAsyncCapability = BlockingOnly
+    , appToolOutputMetadata = Nothing
     }
 
 invokeComputerSessionRequest
