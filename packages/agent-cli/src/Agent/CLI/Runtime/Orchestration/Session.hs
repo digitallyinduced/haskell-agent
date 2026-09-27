@@ -189,6 +189,7 @@ import Agent.CLI.Subagents.Runtime
                       subagentSessions, subagentStoreRoot, subagentTypes,
                       subagentLegacyTarget, subagentConnection, subagentMapModel,
                       subagentCreateWorktree, subagentSessionTmp,
+                      subagentShellEnvironment, subagentShellEnvironmentLock,
                       subagentOutputMemoryStore, subagentOutputMemoryCap,
                       subagentSpawnModelGuidance, subagentAllowedChildModels,
                       subagentResolveChildModel, subagentChildModelAllowed) )
@@ -245,7 +246,7 @@ import Agent.ToolDispatch (canonicalToolName, ToolDispatchConfig(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ToolSchema(..)
-    , ToolEnv(toolAllowedRoots, toolRootAccessRequest, toolSkillRoots, toolSessionTmp, toolResourceArbiter, toolOutputMemoryStore, toolOutputMemoryCap)
+    , ToolEnv(toolAllowedRoots, toolRootAccessRequest, toolSkillRoots, toolSessionTmp, toolShellEnvironment, toolShellEnvironmentLock, toolResourceArbiter, toolOutputMemoryStore, toolOutputMemoryCap)
     )
 import Control.Applicative ( (<|>) )
 import Control.Concurrent.Async ( waitSTM, withAsync )
@@ -783,6 +784,8 @@ buildSessionSubagentRuntime AgentSessionRequest
         , subagentMapModel = transportModel
         , subagentCreateWorktree = Just createSubagentWorktree
         , subagentSessionTmp = toolEnv.toolSessionTmp
+        , subagentShellEnvironment = toolEnv.toolShellEnvironment
+        , subagentShellEnvironmentLock = toolEnv.toolShellEnvironmentLock
         , subagentOutputMemoryStore = toolEnv.toolOutputMemoryStore
         , subagentOutputMemoryCap = toolEnv.toolOutputMemoryCap
         , subagentSpawnModelGuidance =

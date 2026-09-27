@@ -15,6 +15,7 @@ module Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , ToolRegistry
     , ToolEnv(..)
+    , ShellEnvironment(..)
     , OutputArtifactMemoryStore
     , MemoryOutputArtifact(..)
     , insertMemoryOutputArtifact
@@ -87,6 +88,7 @@ import Agent.Tools.Scheduling
     )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (race_)
+import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Concurrent.STM (STM, TVar, atomically, newTVarIO, retry)
 import Control.Exception.Safe (bracket_, tryAny)
 import Control.Monad (foldM)
@@ -252,6 +254,14 @@ noBackgroundTaskHooks = BackgroundTaskHooks
     , backgroundTaskDismissed = \_ -> pure ()
     }
 
+-- | A realized Nix development environment owned by one session directory.
+-- The harness process itself never enters this environment.
+data ShellEnvironment = ShellEnvironment
+    { environmentDirectory :: !OsPath
+    , environmentNixExecutable :: !FilePath
+    , environmentProfile :: !OsPath
+    } deriving (Eq, Show)
+
 data ToolEnv = ToolEnv
     { toolCwd :: !OsPath
     , toolResourceArbiter :: !ToolResourceArbiter
@@ -272,6 +282,10 @@ data ToolEnv = ToolEnv
       -- Kept separate so catalog refreshes can replace them without
       -- disturbing other explicitly allowed roots.
     , toolSessionTmp :: !(IORef (Maybe OsPath))
+    , toolShellEnvironment :: !(IORef (Maybe ShellEnvironment))
+    , toolShellEnvironmentLock :: !(MVar ())
+      -- | Shared with the session directory and active revision by child
+      -- agents. Serializes activation, restoration, and session resets.
     , toolOutputInlineCap :: !Int
     , toolOutputPreviewCap :: !Int
     , toolOutputArtifactCap :: !Int
@@ -299,6 +313,8 @@ defaultToolEnv cwd = do
     humanInputWaitHooks <- newIORef (pure (), pure ())
     skillRoots <- newIORef []
     sessionTmp <- newIORef Nothing
+    shellEnvironment <- newIORef Nothing
+    shellEnvironmentLock <- newMVar ()
     outputMemory <- newOutputArtifactMemoryStore
     backgroundTaskHooks <- newIORef noBackgroundTaskHooks
     backgroundTasks <- newTVarIO Map.empty
@@ -311,6 +327,8 @@ defaultToolEnv cwd = do
         , toolHumanInputWaitHooks = humanInputWaitHooks
         , toolSkillRoots = skillRoots
         , toolSessionTmp = sessionTmp
+        , toolShellEnvironment = shellEnvironment
+        , toolShellEnvironmentLock = shellEnvironmentLock
         , toolOutputInlineCap = 50 * 1024
         , toolOutputPreviewCap = 8 * 1024
         , toolOutputArtifactCap = 64 * 1024 * 1024
@@ -371,11 +389,13 @@ setToolSkillRoots env = writeIORef env.toolSkillRoots
 -- target of the system-temp aliases directly, so changing it cannot get out of
 -- sync with a separately maintained roots list.
 setToolSessionTmp :: ToolEnv -> Maybe OsPath -> IO ()
-setToolSessionTmp env directory = do
+setToolSessionTmp env directory = withMVar env.toolShellEnvironmentLock \() -> do
     previous <- readIORef env.toolSessionTmp
     if previous == directory
         then pure ()
-        else clearMemoryOutputArtifacts env.toolOutputMemoryStore
+        else do
+            clearMemoryOutputArtifacts env.toolOutputMemoryStore
+            writeIORef env.toolShellEnvironment Nothing
     writeIORef env.toolSessionTmp directory
 
 -- | Construct a JSON tool whose approval is selected from a simple read-only

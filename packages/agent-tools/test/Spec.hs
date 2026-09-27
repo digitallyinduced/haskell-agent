@@ -4,6 +4,7 @@ import qualified Agent.ToolDispatchSpec as ToolDispatchSpec
 import qualified Agent.Tools.CodeMode.HostSpec as CodeModeHostSpec
 import qualified Agent.Tools.CodeMode.ProtocolSpec as CodeModeProtocolSpec
 import qualified Agent.Tools.DangerousSpec as DangerousSpec
+import qualified Agent.Tools.EnvironmentSpec as EnvironmentSpec
 import qualified Agent.Tools.FileSystem.GrepSpec as GrepSpec
 import qualified Agent.Tools.FileSystem.ListDirSpec as ListDirSpec
 import qualified Agent.Tools.FileSystem.ReadFileSpec as ReadFileSpec
@@ -44,3 +45,4 @@ main = hspec do
     CodeModeHostSpec.spec
     CodeModeProtocolSpec.spec
     DangerousSpec.spec
+    EnvironmentSpec.spec

@@ -147,7 +147,6 @@ import Agent.Tools.Types
     , ToolEnv(..)
     , ToolRegistry
     , defaultToolEnv
-    , setToolSessionTmp
     )
 import Control.Concurrent.MVar
     (modifyMVar, modifyMVar_, newMVar)
@@ -1234,11 +1233,12 @@ prepareChild
             { toolAllowedRoots = runtime.subagentAllowedRoots
             , toolResourceArbiter = runtime.subagentToolResourceArbiter
             , toolRootAccessRequest = runtime.subagentRootAccessRequest
+            , toolSessionTmp = runtime.subagentSessionTmp
+            , toolShellEnvironment = runtime.subagentShellEnvironment
+            , toolShellEnvironmentLock = runtime.subagentShellEnvironmentLock
             }
     skillRoots <- readIORef runtime.subagentSkillRoots
     writeIORef childEnv.toolSkillRoots skillRoots
-    sessionTmp <- readIORef runtime.subagentSessionTmp
-    setToolSessionTmp childEnv sessionTmp
     childPath <-
         fromMaybe taskPathRoot
             <$> getTaskPath runtime.subagentRegistry env.subId
