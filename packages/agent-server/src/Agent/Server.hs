@@ -22,11 +22,17 @@ import Agent.Server.SessionSetup (SessionEventSink (..))
 import Agent.Server.Supervisor
 import Agent.Server.Tenant hiding (resolveTenantWorkspacePath)
 import Agent.Server.Types
+import Control.Concurrent (myThreadId, throwTo)
 import Control.Exception.Safe (bracket)
+import Control.Monad (unless)
 import Data.ByteString.Lazy qualified as LazyByteString
+import Data.IORef (atomicModifyIORef', newIORef)
 import Data.String (fromString)
+import Data.Text (Text)
+import Data.Text.IO qualified as TextIO
 import Paths_agent_server (getDataFileName)
-import System.Exit (die)
+import System.Exit (ExitCode (..), die)
+import System.IO (stderr)
 import Network.Wai.Handler.Warp
     ( defaultSettings
     , runSettings
@@ -44,7 +50,8 @@ runServer = do
         Right config -> do
             openApiPath <- getDataFileName "openapi.json"
             openApi <- LazyByteString.readFile openApiPath
-            openServerRuntime config >>= \case
+            onTurnOwnerLost <- exitOnTurnOwnerLoss
+            openServerRuntime config onTurnOwnerLost >>= \case
                 Left err -> die ("agent-server: " <> show err)
                 Right runtime ->
                     bracket
@@ -123,3 +130,33 @@ runServer = do
                                                 defaultSettings
                                         )
                                         application
+
+{- | Leave the process once a turn owner has lost its liveness fence.
+
+That owner identity must never be revived, so it refuses every new turn for
+the rest of the process lifetime; in multi-tenant mode its tenant would stay
+unusable until an unrelated restart. The main thread instead unwinds in order
+(closing the supervisor and runtimes) and the process exits non-zero, so the
+service manager starts a fresh process whose new owner recovers the durable
+turns. Only the first loss is acted upon; a second one must not interrupt the
+shutdown that is already under way.
+-}
+exitOnTurnOwnerLoss :: IO (Text -> IO ())
+exitOnTurnOwnerLoss = do
+    mainThread <- myThreadId
+    requested <- newIORef False
+    pure \reason -> do
+        alreadyRequested <-
+            atomicModifyIORef' requested (True,)
+        unless alreadyRequested do
+            TextIO.hPutStrLn stderr
+                ( "agent-server: "
+                    <> reason
+                    <> "; exiting so the service manager restarts the server"
+                    <> " under a fresh turn owner"
+                )
+            throwTo mainThread (ExitFailure turnOwnerLostExitCode)
+
+-- | EX_TEMPFAIL: the server can work again once it is restarted.
+turnOwnerLostExitCode :: Int
+turnOwnerLostExitCode = 75

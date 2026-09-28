@@ -196,10 +196,13 @@ installSessionEventSink :: ServerRuntime -> SessionEventSink -> IO ()
 installSessionEventSink runtime =
     writeIORef runtime.runtimeSessionEvents
 
+-- | The callback receives the reason once a turn owner has irrecoverably lost
+-- its liveness fence; see 'TurnStore.openTurnStoreOwner'.
 openServerRuntime
     :: ResolvedServerConfig
+    -> (Text -> IO ())
     -> IO (Either Text ServerRuntime)
-openServerRuntime config = mask \restore -> do
+openServerRuntime config onTurnOwnerLost = mask \restore -> do
     instanceId <- newUUIDv7Text
     sessionEvents <- newIORef noopSessionEventSink
     case config.resolvedServerMode of
@@ -218,6 +221,7 @@ openServerRuntime config = mask \restore -> do
                                 multi
                                 stores
                                 instanceId
+                                onTurnOwnerLost
                                 sessionEvents
                         pure $
                             Right ServerRuntime
@@ -236,7 +240,10 @@ openServerRuntime config = mask \restore -> do
                 Left err -> pure (Left (renderStoreError err))
                 Right store ->
                     restore
-                        (TurnStore.openTurnStoreOwner store instanceId)
+                        (TurnStore.openTurnStoreOwner
+                            store
+                            instanceId
+                            onTurnOwnerLost)
                         `onException` closeStore store
                         >>= \case
                             Left err -> do
@@ -327,6 +334,7 @@ data TenantRuntimeManager = TenantRuntimeManager
     , tenantRuntimeStores :: !TenantStoreManager
     , tenantRuntimeMaximum :: !Int
     , tenantRuntimeInstanceId :: !Text
+    , tenantRuntimeOwnerLost :: !(Text -> IO ())
     , tenantRuntimeState :: !(MVar TenantRuntimeState)
     , tenantRuntimeSessionEvents :: !(IORef SessionEventSink)
     }
@@ -345,9 +353,11 @@ newTenantRuntimeManager
     -> MultiTenantConfig
     -> TenantStoreManager
     -> Text
+    -> (Text -> IO ())
     -> IORef SessionEventSink
     -> IO TenantRuntimeManager
-newTenantRuntimeManager config multi stores instanceId sessionEvents = do
+newTenantRuntimeManager
+        config multi stores instanceId onTurnOwnerLost sessionEvents = do
     state <- newMVar TenantRuntimeState
         { tenantRuntimeClosed = False
         , tenantRuntimeSlots = Map.empty
@@ -358,6 +368,7 @@ newTenantRuntimeManager config multi stores instanceId sessionEvents = do
         , tenantRuntimeStores = stores
         , tenantRuntimeMaximum = config.resolvedMaxActiveTenants
         , tenantRuntimeInstanceId = instanceId
+        , tenantRuntimeOwnerLost = onTurnOwnerLost
         , tenantRuntimeState = state
         , tenantRuntimeSessionEvents = sessionEvents
         }
@@ -529,7 +540,8 @@ createTenantRuntime manager tenant = mask \restore ->
                                             restore
                                                 (TurnStore.openTurnStoreOwner
                                                     store
-                                                    manager.tenantRuntimeInstanceId)
+                                                    manager.tenantRuntimeInstanceId
+                                                    tenantOwnerLost)
                                                 `onException` closeComponents
                                                 >>= \case
                                                     Left err -> do
@@ -564,6 +576,14 @@ createTenantRuntime manager tenant = mask \restore ->
                                                                     , environmentSessionEvents =
                                                                         manager.tenantRuntimeSessionEvents
                                                                     }
+  where
+    tenantOwnerLost reason =
+        manager.tenantRuntimeOwnerLost
+            ( "turn owner of tenant "
+                <> renderTenantId tenant.resolvedTenantId
+                <> " lost its liveness fence: "
+                <> reason
+            )
 
 closeTenantRuntimeManager :: TenantRuntimeManager -> IO ()
 closeTenantRuntimeManager manager = mask \restore -> do

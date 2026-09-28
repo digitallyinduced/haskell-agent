@@ -42,20 +42,24 @@ import Control.Concurrent.STM (
     writeTVar,
  )
 import Control.Exception.Safe (finally, mask, onException, tryAny)
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Crypto.Hash (Digest, SHA256, hash)
 import Data.Aeson qualified as Aeson
 import Data.Bifunctor (first)
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
+import Data.Text.IO qualified as TextIO
 import Data.Time.Clock (
     UTCTime,
     getCurrentTime,
  )
+import GHC.Clock (getMonotonicTime)
+import System.IO (stderr)
 import System.Timeout (timeout)
 
 data TurnStoreOwner = TurnStoreOwner
@@ -87,8 +91,19 @@ data PendingHumanRequestCleanup = PendingHumanRequestCleanup
     }
     deriving (Eq)
 
-openTurnStoreOwner :: Store -> Text -> IO (Either Text TurnStoreOwner)
-openTurnStoreOwner store instanceId = mask \restore -> do
+{- | Register this process as the turn owner of one store.
+
+The callback runs once, from the heartbeat thread, after the owner has
+irrecoverably lost its liveness fence. The owner then refuses every new turn
+for the rest of the process lifetime, so the caller should replace the process.
+It does not run for an orderly 'closeTurnStoreOwner'.
+-}
+openTurnStoreOwner ::
+    Store ->
+    Text ->
+    (Text -> IO ()) ->
+    IO (Either Text TurnStoreOwner)
+openTurnStoreOwner store instanceId onOwnerLost = mask \restore -> do
     leaseResult <-
         restore $
             ServerTurnStore.openServerTurnOwnerLease
@@ -111,6 +126,7 @@ openTurnStoreOwner store instanceId = mask \restore -> do
                             lease
                             healthy
                             stopping
+                            onOwnerLost
                             pendingMutationReleases
                             pendingMutationReleaseCursor
                             pendingHumanRequestCleanups
@@ -152,6 +168,7 @@ ownerLifecycle ::
     ServerTurnStore.ServerTurnOwnerLease ->
     TVar Bool ->
     TVar Bool ->
+    (Text -> IO ()) ->
     TVar (Map MutationReleaseKey ServerTurnStore.ServerSessionMutation) ->
     TVar (Maybe MutationReleaseKey) ->
     TVar (Map HumanRequestCleanupKey PendingHumanRequestCleanup) ->
@@ -162,6 +179,7 @@ ownerLifecycle
     lease
     healthy
     stopping
+    onOwnerLost
     pendingMutationReleases
     pendingMutationReleaseCursor
     pendingHumanRequestCleanups
@@ -171,6 +189,7 @@ ownerLifecycle
                 store
                 lease
                 healthy
+                onOwnerLost
                 pendingMutationReleases
                 pendingMutationReleaseCursor
                 pendingHumanRequestCleanups
@@ -213,6 +232,7 @@ ownerHeartbeatLoop ::
     Store ->
     ServerTurnStore.ServerTurnOwnerLease ->
     TVar Bool ->
+    (Text -> IO ()) ->
     TVar (Map MutationReleaseKey ServerTurnStore.ServerSessionMutation) ->
     TVar (Maybe MutationReleaseKey) ->
     TVar (Map HumanRequestCleanupKey PendingHumanRequestCleanup) ->
@@ -222,6 +242,7 @@ ownerHeartbeatLoop
     store
     lease
     healthy
+    onOwnerLost
     pendingMutationReleases
     pendingMutationReleaseCursor
     pendingHumanRequestCleanups
@@ -229,7 +250,7 @@ ownerHeartbeatLoop
         threadDelay ownerHeartbeatIntervalMicroseconds
         result <-
             tryAny do
-                heartbeat <- heartbeatOwnerWithinDeadline lease
+                heartbeat <- heartbeatOwnerBeforeStall lease
                 case heartbeat of
                     Left err -> pure (Left err)
                     Right () -> do
@@ -248,39 +269,86 @@ ownerHeartbeatLoop
                     store
                     lease
                     healthy
+                    onOwnerLost
                     pendingMutationReleases
                     pendingMutationReleaseCursor
                     pendingHumanRequestCleanups
                     pendingHumanRequestCleanupCursor
-            _ -> do
-                -- Losing the connection-lifetime fence is irreversible for this
-                -- process identity. Never try to revive it after another server
-                -- may have recovered its turns.
-                atomically (writeTVar healthy False)
-                ServerTurnStore.abandonServerTurnOwnerLease lease
+            Right (Left err) -> ownerLost (renderStoreError err)
+            Left exception ->
+                ownerLost
+                    ( "server turn owner heartbeat failed: "
+                        <> Text.pack (show exception)
+                    )
+  where
+    ownerLost reason = do
+        -- Losing the connection-lifetime fence is irreversible for this
+        -- process identity. Never try to revive it after another server
+        -- may have recovered its turns.
+        atomically (writeTVar healthy False)
+        ServerTurnStore.abandonServerTurnOwnerLease lease
+        onOwnerLost reason
 
-heartbeatOwnerWithinDeadline ::
+{- | Refresh the owner registration, tolerating scheduler and I/O pauses.
+
+The owner fence is the liveness connection's advisory lock, not the timing of
+this heartbeat. The lock survives pauses, and a reaper can take this owner over
+only after PostgreSQL has released that lock and no action fence remains. A
+heartbeat that completes late on the still-open connection therefore proves
+uninterrupted ownership. Abandoning the lease because of a short delay would
+release the fence voluntarily and turn a pause into an outage for the rest of
+the process lifetime; in production, one heartbeat slower than 5 seconds was
+enough to leave a tenant refusing every turn for hours. Only a heartbeat that
+stays unanswered far beyond any plausible pause counts as a lost connection.
+-}
+heartbeatOwnerBeforeStall ::
     ServerTurnStore.ServerTurnOwnerLease ->
     IO (Either StoreError ())
-heartbeatOwnerWithinDeadline lease =
-    timeout
-        ownerHeartbeatTimeoutMicroseconds
-        (ServerTurnStore.heartbeatServerTurnOwner lease)
-        >>= \case
-            Nothing ->
-                pure
-                    ( Left
-                        ( StoreConnectionError
-                            "server turn owner heartbeat timed out"
-                        )
+heartbeatOwnerBeforeStall lease = do
+    startedAt <- getMonotonicTime
+    outcome <-
+        timeout
+            ownerHeartbeatStallMicroseconds
+            (ServerTurnStore.heartbeatServerTurnOwner lease)
+    finishedAt <- getMonotonicTime
+    let elapsedSeconds = finishedAt - startedAt
+    when (isJust outcome && elapsedSeconds >= slowOwnerHeartbeatSeconds) $
+        TextIO.hPutStrLn stderr
+            ( "agent-server: server turn owner heartbeat took "
+                <> Text.pack (show (round elapsedSeconds :: Int))
+                <> " seconds"
+            )
+    pure case outcome of
+        Nothing ->
+            Left
+                ( StoreConnectionError
+                    ( "server turn owner heartbeat stalled for more than "
+                        <> Text.pack
+                            ( show
+                                ( ownerHeartbeatStallMicroseconds
+                                    `div` (1000 * 1000)
+                                )
+                            )
+                        <> " seconds"
                     )
-            Just result -> pure result
+                )
+        Just result -> result
 
 ownerHeartbeatIntervalMicroseconds :: Int
 ownerHeartbeatIntervalMicroseconds = 5 * 1000 * 1000
 
+-- | Bound for the independent housekeeping and fence checks. The owner
+-- heartbeat itself uses 'ownerHeartbeatStallMicroseconds'.
 ownerHeartbeatTimeoutMicroseconds :: Int
 ownerHeartbeatTimeoutMicroseconds = 5 * 1000 * 1000
+
+-- | How long a heartbeat may stay unanswered before its liveness connection
+-- counts as lost. Far beyond any plausible scheduler, swap or fsync pause.
+ownerHeartbeatStallMicroseconds :: Int
+ownerHeartbeatStallMicroseconds = 120 * 1000 * 1000
+
+slowOwnerHeartbeatSeconds :: Double
+slowOwnerHeartbeatSeconds = 5
 
 data TurnStoreBackend = TurnStoreBackend
     { turnStoreReserve ::
