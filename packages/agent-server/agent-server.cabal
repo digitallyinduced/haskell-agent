@@ -60,6 +60,7 @@ library
                     , Agent.Server.Sandbox.Worker
                     , Agent.Server.Supervisor
                     , Agent.Server.Tenant
+                    , Agent.Server.ToolExecution
                     , Agent.Server.Types
     build-depends:    agent-cli >= 0.1 && < 0.2
                     , agent-runtime >= 0.1 && < 0.2
@@ -142,6 +143,7 @@ test-suite agent-server-test
                     , Agent.Server.SandboxSpec
                     , Agent.Server.SupervisorSpec
                     , Agent.Server.TenantSpec
+                    , Agent.Server.ToolExecutionSpec
     ghc-options:      -threaded
     build-depends:    agent-server
                     , agent-core

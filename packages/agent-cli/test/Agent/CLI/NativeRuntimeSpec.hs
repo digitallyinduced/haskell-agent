@@ -208,6 +208,7 @@ spec = describe "nativeTurnOptions" do
             request = NativeTurnRequest
                 { nativeTurnPrompt = "fix the tests"
                 , nativeTurnImages = []
+                , nativeTurnFiles = []
                 , nativeTurnSession = NativeNewSession
                 , nativeTurnProvider = Just OpenAIProvider
                 , nativeTurnModel = Just "gpt-5"
@@ -333,6 +334,7 @@ baseRequest :: NativeTurnRequest
 baseRequest = NativeTurnRequest
     { nativeTurnPrompt = "hello"
     , nativeTurnImages = []
+    , nativeTurnFiles = []
     , nativeTurnSession = NativeNewSession
     , nativeTurnProvider = Nothing
     , nativeTurnModel = Nothing

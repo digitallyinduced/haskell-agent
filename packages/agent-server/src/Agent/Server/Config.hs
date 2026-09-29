@@ -29,6 +29,7 @@ import Agent.Server.Tenant
     , loadTenantRegistryWithTrustPolicy
     , lookupTenant
     , tenantRegistryCredentials
+    , tenantRegistryRequiresSandbox
     , tenantRegistryTenants
     )
 import Agent.Server.Tenant qualified as Tenant
@@ -115,7 +116,8 @@ data ServerConfig = ServerConfig
 data MultiTenantConfig = MultiTenantConfig
     { multiTenantRegistry :: !TenantRegistry
     , multiTenantStateRoot :: !FilePath
-    , multiTenantSandboxRunner :: !FilePath
+    -- | Present whenever a tenant uses sandboxed tool execution.
+    , multiTenantSandboxRunner :: !(Maybe FilePath)
     }
 
 data ResolvedServerMode
@@ -229,7 +231,7 @@ serverConfigParser =
                 ( long "sandbox-runner"
                     <> metavar "PATH"
                     <> help
-                        "Prebuilt per-tenant microVM runner executable"
+                        "Prebuilt per-tenant sandbox runner executable (required when a tenant uses sandboxed tool execution)"
                 ))
         <*> switch
             ( long "yolo"
@@ -456,90 +458,81 @@ resolveMultiTenantMode
             (Left
                 "--workspace-root is local-mode only; configure roots per tenant")
     | otherwise =
-        case config.serverSandboxRunner of
-            Nothing ->
-                pure
-                    (Left
-                        "multi-tenant mode requires --sandbox-runner")
-            Just runner -> do
-                resolvedRunner <-
-                    tryIO (canonicalizePath =<< makeAbsolute runner)
-                case resolvedRunner of
-                    Left _ ->
-                        pure
-                            (Left
-                                "the configured sandbox runner is unavailable")
-                    Right canonicalRunner -> do
-                        runnerExists <- doesFileExist canonicalRunner
-                        runnerPermissions <- tryIO (getPermissions canonicalRunner)
-                        if
-                            not runnerExists
-                                || either
-                                    (const True)
-                                    (not . executable)
-                                    runnerPermissions
-                            then
+        resolveSandboxRunner trustPolicy config.serverSandboxRunner >>= \case
+            Left err -> pure (Left err)
+            Right runner -> do
+                let stateRoot =
+                        maybe
+                            (home </> ".haskell-agent" </> "server-tenants")
+                            id
+                            config.serverTenantStateRoot
+                loadTenantRegistryWithTrustPolicy
+                    trustPolicy
+                    stateRoot
+                    registryPath >>= \case
+                        Left err -> pure (Left err)
+                        Right registry ->
+                            pure (multiTenantMode stateRoot runner registry)
+  where
+    multiTenantMode stateRoot runner registry
+        | tenantRegistryRequiresSandbox registry
+        , Nothing <- runner =
+            Left
+                "tenants with sandboxed tool execution require --sandbox-runner"
+        | Just canonicalRunner <- runner
+        , runnerOverlapsTenant canonicalRunner registry =
+            Left
+                "the configured sandbox runner must be outside tenant-writable roots"
+        | length (tenantRegistryTenants registry)
+            > config.serverMaxActiveTenants =
+            Left "the tenant registry exceeds --max-active-tenants"
+        | otherwise =
+            Right
+                ( AuthConfig
+                    { authMode =
+                        TenantBearerAuth
+                            (tenantRegistryCredentials registry)
+                    , authCorsOrigins = corsOrigins config
+                    }
+                , []
+                , MultiTenantMode
+                    MultiTenantConfig
+                        { multiTenantRegistry = registry
+                        , multiTenantStateRoot = stateRoot
+                        , multiTenantSandboxRunner = runner
+                        }
+                )
+
+-- | Validate an explicitly configured runner even if no current tenant
+-- needs it, so a misconfiguration never waits for the first sandboxed tenant.
+resolveSandboxRunner
+    :: TrustedPathPolicy
+    -> Maybe FilePath
+    -> IO (Either Text (Maybe FilePath))
+resolveSandboxRunner _ Nothing = pure (Right Nothing)
+resolveSandboxRunner trustPolicy (Just runner) = do
+    resolvedRunner <- tryIO (canonicalizePath =<< makeAbsolute runner)
+    case resolvedRunner of
+        Left _ ->
+            pure (Left "the configured sandbox runner is unavailable")
+        Right canonicalRunner -> do
+            runnerExists <- doesFileExist canonicalRunner
+            runnerPermissions <- tryIO (getPermissions canonicalRunner)
+            if not runnerExists
+                || either (const True) (not . executable) runnerPermissions
+                then
+                    pure
+                        (Left
+                            "the configured sandbox runner is not an executable file")
+                else
+                    validateTrustedPathWithPolicy trustPolicy canonicalRunner
+                        >>= \case
+                            Left err ->
                                 pure
                                     (Left
-                                        "the configured sandbox runner is not an executable file")
-                            else do
-                                validateTrustedPathWithPolicy trustPolicy
-                                    canonicalRunner >>= \case
-                                        Left err ->
-                                            pure
-                                                (Left
-                                                    ("the configured sandbox runner is not trusted: "
-                                                        <> err))
-                                        Right () -> do
-                                            let stateRoot =
-                                                    maybe
-                                                        (home
-                                                            </> ".haskell-agent"
-                                                            </> "server-tenants")
-                                                        id
-                                                        config.serverTenantStateRoot
-                                            loadTenantRegistryWithTrustPolicy
-                                                trustPolicy
-                                                stateRoot
-                                                registryPath >>= \case
-                                                    Left err -> pure (Left err)
-                                                    Right registry
-                                                        | runnerOverlapsTenant
-                                                            canonicalRunner
-                                                            registry ->
-                                                            pure
-                                                                (Left
-                                                                    "the configured sandbox runner must be outside tenant-writable roots")
-                                                        | length
-                                                            (tenantRegistryTenants
-                                                                registry)
-                                                            > config.serverMaxActiveTenants ->
-                                                            pure
-                                                                (Left
-                                                                    "the tenant registry exceeds --max-active-tenants")
-                                                        | otherwise ->
-                                                            pure
-                                                                (Right
-                                                                    ( AuthConfig
-                                                                    { authMode =
-                                                                        TenantBearerAuth
-                                                                            (tenantRegistryCredentials
-                                                                                registry)
-                                                                    , authCorsOrigins =
-                                                                        corsOrigins
-                                                                            config
-                                                                    }
-                                                                , []
-                                                                , MultiTenantMode
-                                                                    MultiTenantConfig
-                                                                        { multiTenantRegistry =
-                                                                            registry
-                                                                        , multiTenantStateRoot =
-                                                                            stateRoot
-                                                                        , multiTenantSandboxRunner =
-                                                                            canonicalRunner
-                                                                        }
-                                                                    ))
+                                        ("the configured sandbox runner is not trusted: "
+                                            <> err))
+                            Right () -> pure (Right (Just canonicalRunner))
 
 runnerOverlapsTenant :: FilePath -> TenantRegistry -> Bool
 runnerOverlapsTenant runner =

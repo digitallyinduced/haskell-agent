@@ -1,8 +1,12 @@
--- | Scoped materialization of uploaded files inside the session workspace.
+-- | Uploaded turn files: scoped materialization inside the session workspace,
+-- or direct model input for tenants that cannot open workspace files.
 module Agent.Server.Runtime.Attachments
-    ( withMaterializedTurnFiles
+    ( TurnModelInput(..)
+    , withMaterializedTurnFiles
+    , inlineTurnFiles
     ) where
 
+import Agent.Loop qualified as Loop
 import Agent.Server.Identifier (newUUIDv7Text)
 import Agent.Server.Types (FileAttachment(..), TurnSpec(..))
 import Control.Exception.Safe (bracket, tryAny)
@@ -24,6 +28,58 @@ import System.FilePath
     , normalise
     , (</>)
     )
+
+-- | What the model receives for one submitted turn.
+data TurnModelInput = TurnModelInput
+    { modelPrompt :: !Text
+    , modelImages :: ![Loop.ImageAttachment]
+    , modelFiles :: ![Loop.FileAttachment]
+    }
+
+-- | Supply uploads directly to the model. Images and PDFs become native model
+-- inputs; any other upload is named in the prompt so the model can tell the
+-- user that it could not be opened.
+inlineTurnFiles :: TurnSpec -> TurnModelInput
+inlineTurnFiles spec =
+    TurnModelInput
+        { modelPrompt =
+            if null unsupported
+                then turnBasePrompt spec
+                else unreadablePrompt (turnBasePrompt spec) unsupported
+        , modelImages =
+            spec.turnSpecImages
+                <> [ Loop.ImageAttachment (inlineMime file) file.fileBytes
+                   | file <- images
+                   ]
+        , modelFiles =
+            [ Loop.FileAttachment
+                (Just file.fileName)
+                (inlineMime file)
+                file.fileBytes
+            | file <- documents
+            ]
+        }
+  where
+    images = filter ((`elem` inlineImageMimes) . inlineMime) spec.turnSpecFiles
+    documents = filter ((== "application/pdf") . inlineMime) spec.turnSpecFiles
+    unsupported =
+        filter
+            (\file ->
+                inlineMime file `notElem` ("application/pdf" : inlineImageMimes))
+            spec.turnSpecFiles
+    inlineMime file = Text.toLower file.fileMime
+    inlineImageMimes = ["image/png", "image/jpeg", "image/gif", "image/webp"]
+
+unreadablePrompt :: Text -> [FileAttachment] -> Text
+unreadablePrompt prompt files =
+    prompt
+        <> (if Text.null (Text.strip prompt) then "" else "\n\n")
+        <> "The user also attached files that cannot be opened in this "
+        <> "environment:\n"
+        <> Text.unlines
+            [ "- " <> file.fileName <> " (" <> file.fileMime <> ")"
+            | file <- files
+            ]
 
 withMaterializedTurnFiles
     :: FilePath

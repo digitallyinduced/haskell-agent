@@ -9,12 +9,15 @@ module Agent.Server.Tenant
     , Principal(..)
     , AccessBoundary(..)
     , ResolvedTenant(..)
+    , TenantToolExecution(..)
     , TenantRegistry
     , loadTenantRegistry
     , loadTenantRegistryWithTrustPolicy
     , tenantRegistryCredentials
     , tenantRegistryTenants
+    , tenantRegistryRequiresSandbox
     , lookupTenant
+    , prepareTenantDirectories
     , resolveTenantWorkspacePath
     , renderTenantDatabaseName
     , renderTenantRuntimeRole
@@ -43,7 +46,7 @@ import Agent.Server.Types
     , renderCredentialId
     , renderTenantId
     )
-import Control.Exception.Safe (tryIO)
+import Control.Exception.Safe (displayException, tryAny, tryIO)
 import Control.Monad (unless)
 import Crypto.Hash (Digest, SHA256, hash)
 import Data.Aeson
@@ -51,7 +54,9 @@ import Data.Aeson
     , Object
     , eitherDecodeStrict'
     , withObject
+    , withText
     , (.:)
+    , (.:?)
     )
 import Data.Aeson.Key (Key)
 import Data.Aeson.KeyMap qualified as KeyMap
@@ -62,6 +67,7 @@ import Data.ByteString qualified as ByteString
 import Data.List (tails)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -96,7 +102,18 @@ data TenantSpec = TenantSpec
     { tenantSpecId :: !TenantId
     , tenantSpecCredentials :: ![CredentialSpec]
     , tenantSpecWorkspaceRoot :: !FilePath
+    , tenantSpecToolExecution :: !TenantToolExecution
     }
+
+-- | Where a tenant's model-controlled execution tools (shell, files,
+-- processes, network) run. Host services such as MCP, plans, memory and
+-- delegated agents stay in the server process either way.
+data TenantToolExecution
+    = TenantSandboxExecution
+    -- ^ Execution tools run in the tenant's gVisor sandbox.
+    | TenantNoToolExecution
+    -- ^ No execution tools are offered and no sandbox is ever started.
+    deriving (Eq, Show)
 
 data CredentialSpec = CredentialSpec
     { credentialSpecId :: !CredentialId
@@ -112,6 +129,7 @@ data ResolvedTenant = ResolvedTenant
     , resolvedTenantStateDirectory :: !FilePath
     , resolvedTenantDatabase :: !Text
     , resolvedTenantRuntimeRole :: !Text
+    , resolvedTenantToolExecution :: !TenantToolExecution
     }
     deriving (Eq, Show)
 
@@ -130,6 +148,12 @@ lookupTenant :: TenantRegistry -> TenantId -> Maybe ResolvedTenant
 lookupTenant registry tenantId =
     Map.lookup tenantId registry.registryTenants
 
+-- | Whether any tenant needs the sandbox runner.
+tenantRegistryRequiresSandbox :: TenantRegistry -> Bool
+tenantRegistryRequiresSandbox =
+    any ((== TenantSandboxExecution) . (.resolvedTenantToolExecution))
+        . tenantRegistryTenants
+
 -- | Load a versioned, owner-only registry.
 --
 -- Example:
@@ -144,6 +168,10 @@ lookupTenant registry tenantId =
 --   }]
 -- }]}
 -- @
+--
+-- A tenant may add @"toolExecution":"none"@ to receive no shell, filesystem,
+-- process or network tools. The default, @"sandbox"@, runs them in the
+-- tenant's gVisor sandbox.
 loadTenantRegistry
     :: FilePath
     -- ^ Server-owned tenant state base.
@@ -274,6 +302,8 @@ resolveTenant trustPolicy stateBase spec
                         renderTenantDatabaseName spec.tenantSpecId
                     , resolvedTenantRuntimeRole =
                         renderTenantRuntimeRole spec.tenantSpecId
+                    , resolvedTenantToolExecution =
+                        spec.tenantSpecToolExecution
                     }
                 , loadedSecrets
                 )
@@ -396,14 +426,26 @@ instance FromJSON TenantSpec where
     parseJSON = withObject "Tenant" \value -> do
         rejectUnknownFields
             "Tenant"
-            ["id", "credentials", "workspaceRoot"]
+            ["id", "credentials", "workspaceRoot", "toolExecution"]
             value
         rawId <- value .: "id"
         tenantSpecId <-
             either (fail . Text.unpack) pure (parseTenantId rawId)
         tenantSpecCredentials <- value .: "credentials"
         tenantSpecWorkspaceRoot <- value .: "workspaceRoot"
+        tenantSpecToolExecution <-
+            fromMaybe TenantSandboxExecution <$> value .:? "toolExecution"
         pure TenantSpec {..}
+
+instance FromJSON TenantToolExecution where
+    parseJSON = withText "TenantToolExecution" \case
+        "sandbox" -> pure TenantSandboxExecution
+        "none" -> pure TenantNoToolExecution
+        other ->
+            fail
+                ("unsupported toolExecution "
+                    <> show other
+                    <> "; expected \"sandbox\" or \"none\"")
 
 instance FromJSON CredentialSpec where
     parseJSON = withObject "TenantCredential" \value -> do
@@ -427,6 +469,28 @@ rejectUnknownFields typeName allowed value =
                     <> typeName
                     <> ": "
                     <> unwords (map show unknown))
+
+-- | Create the tenant's private home and state directories. Every tenant
+-- runtime needs its home; the state directory backs its sandbox, if any.
+prepareTenantDirectories :: ResolvedTenant -> IO (Either Text ())
+prepareTenantDirectories tenant =
+    tryAny
+        (mapM_
+            prepare
+            [ tenant.resolvedTenantHome
+            , tenant.resolvedTenantStateDirectory
+            , tenant.resolvedTenantStateDirectory </> "tmp"
+            ]) >>= \case
+                Left exception ->
+                    pure
+                        (Left
+                            ("could not prepare tenant state: "
+                                <> Text.pack (displayException exception)))
+                Right () -> pure (Right ())
+  where
+    prepare path = do
+        createDirectoryIfMissing True path
+        setFileMode path 0o700
 
 prepareStateBase :: FilePath -> IO (Either Text FilePath)
 prepareStateBase path = do

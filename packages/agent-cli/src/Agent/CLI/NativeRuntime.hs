@@ -51,7 +51,7 @@ import Agent.Runtime.StartupPolicy
     , NativeExecutionFacilities(..)
     )
 import Agent.Loop
-    ( TurnAttachment(ImageAttachmentItem)
+    ( TurnAttachment(FileAttachmentItem, ImageAttachmentItem)
     , userMessageWithAttachments
     )
 import Agent.CLI.Options
@@ -213,7 +213,8 @@ runNativeTurn runtime output hooks request =
                         Just
                             [ userMessageWithAttachments
                                 initialPrompt
-                                (map ImageAttachmentItem request.nativeTurnImages)
+                                (map ImageAttachmentItem request.nativeTurnImages
+                                    <> map FileAttachmentItem request.nativeTurnFiles)
                             ]
                     }
                 options
@@ -221,6 +222,8 @@ runNativeTurn runtime output hooks request =
     initialPrompt
         | Text.null (Text.strip request.nativeTurnPrompt)
         , not (null request.nativeTurnImages) = "Image attached."
+        | Text.null (Text.strip request.nativeTurnPrompt)
+        , not (null request.nativeTurnFiles) = "File attached."
         | otherwise = request.nativeTurnPrompt
 
 -- | Lower a typed native request into the existing orchestration options.

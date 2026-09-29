@@ -15,6 +15,7 @@ import Agent.Dialect (DialectId, dialectSlug)
 import Agent.Server.Identifier (isUUIDText, newUUIDv7Text)
 import Agent.Server.Tenant
     ( ResolvedTenant(..)
+    , prepareTenantDirectories
     , renderTenantId
     )
 import Agent.ToolDispatch
@@ -88,9 +89,6 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
 import Data.Text.IO qualified as TextIO
-import System.Directory
-    ( createDirectoryIfMissing
-    )
 import System.Environment (getEnvironment)
 import System.FilePath
     ( addTrailingPathSeparator
@@ -110,7 +108,6 @@ import System.IO
     , withBinaryFile
     , stderr
     )
-import System.Posix.Files (setFileMode)
 import System.Posix.Signals
     ( sigKILL
     , signalProcessGroup
@@ -930,26 +927,6 @@ isSafeImageDataUrl url =
         , "data:image/bmp;base64,"
         , "data:image/tiff;base64,"
         ]
-
-prepareTenantDirectories :: ResolvedTenant -> IO (Either Text ())
-prepareTenantDirectories tenant =
-    tryAny
-        (mapM_
-            prepare
-            [ tenant.resolvedTenantHome
-            , tenant.resolvedTenantStateDirectory
-            , tenant.resolvedTenantStateDirectory </> "tmp"
-            ]) >>= \case
-                Left exception ->
-                    pure
-                        (Left
-                            ("could not prepare tenant sandbox state: "
-                                <> Text.pack (displayException exception)))
-                Right () -> pure (Right ())
-  where
-    prepare path = do
-        createDirectoryIfMissing True path
-        setFileMode path 0o700
 
 sanitizedRunnerEnvironment
     :: ResolvedTenant

@@ -41,6 +41,7 @@ request :: NativeTurnRequest
 request = NativeTurnRequest
     { nativeTurnPrompt = "fix the tests"
     , nativeTurnImages = []
+    , nativeTurnFiles = []
     , nativeTurnSession = NativeNewSession
     , nativeTurnProvider = Nothing
     , nativeTurnModel = Nothing

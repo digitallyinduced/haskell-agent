@@ -3,19 +3,22 @@ module Agent.Server.TenantSpec (spec) where
 import Agent.Server.Tenant
     ( ResolvedTenant(..)
     , TenantRegistry
+    , TenantToolExecution(..)
     , loadTenantRegistryWithTrustPolicy
     , resolveTenantWorkspacePath
     , tenantRegistryCredentials
+    , tenantRegistryRequiresSandbox
     , tenantRegistryTenants
     )
 import Agent.Server.PrivateFile (trustedPathPolicyWithin)
 import Agent.Server.Types (ApiError(..))
 import Data.Aeson
-    ( Value
+    ( Value(Object, String)
     , encode
     , object
     , (.=)
     )
+import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.List (tails)
 import Data.Text qualified as Text
@@ -47,6 +50,41 @@ spec = describe "tenant registry" do
                 `shouldSatisfy` allDistinct
             map (.resolvedTenantStateDirectory) tenants
                 `shouldSatisfy` allDistinct
+
+    it "sandboxes tool execution unless a tenant opts out of it" do
+        withTwoTenantRegistry id (withToolExecution "none") \root registryPath -> do
+            registry <-
+                loadFixtureRegistry root
+                    (root </> "server-state")
+                    registryPath
+                    >>= either (fail . Text.unpack) pure
+            map (.resolvedTenantToolExecution)
+                (tenantRegistryTenants registry)
+                `shouldBe` [TenantSandboxExecution, TenantNoToolExecution]
+            tenantRegistryRequiresSandbox registry `shouldBe` True
+
+        withTwoTenantRegistry
+            (withToolExecution "none")
+            (withToolExecution "none")
+            \root registryPath -> do
+                registry <-
+                    loadFixtureRegistry root
+                        (root </> "server-state")
+                        registryPath
+                        >>= either (fail . Text.unpack) pure
+                tenantRegistryRequiresSandbox registry `shouldBe` False
+
+    it "rejects an unknown tool execution mode" do
+        withTwoTenantRegistry id (withToolExecution "host") \root registryPath ->
+            loadFixtureRegistry root
+                (root </> "server-state")
+                registryPath >>= \case
+                    Left err ->
+                        err `shouldSatisfy`
+                            Text.isInfixOf "not valid versioned JSON"
+                    Right _ ->
+                        expectationFailure
+                            "accepted an unknown tool execution mode"
 
     it "rejects credential material shared by two tenants" do
         withSystemTempDirectory "agent-tenant-registry" \root -> do
@@ -142,7 +180,15 @@ spec = describe "tenant registry" do
 withRegistryFixture
     :: (FilePath -> FilePath -> IO value)
     -> IO value
-withRegistryFixture action =
+withRegistryFixture = withTwoTenantRegistry id id
+
+-- | Two valid tenants; each function may add fields to one tenant object.
+withTwoTenantRegistry
+    :: (Value -> Value)
+    -> (Value -> Value)
+    -> (FilePath -> FilePath -> IO value)
+    -> IO value
+withTwoTenantRegistry adjustA adjustB action =
     withSystemTempDirectory "agent-tenant-registry" \temporaryRoot -> do
         root <- makeAbsolute temporaryRoot
         let workspaceA = root </> "workspace-a"
@@ -157,10 +203,16 @@ withRegistryFixture action =
             "tenant-b-secret-with-at-least-32-bytes\n"
         writePrivateJson registryPath $
             registryValue
-                [ tenantValue tenantA credentialA workspaceA tokenA
-                , tenantValue tenantB credentialB workspaceB tokenB
+                [ adjustA (tenantValue tenantA credentialA workspaceA tokenA)
+                , adjustB (tenantValue tenantB credentialB workspaceB tokenB)
                 ]
         action root registryPath
+
+withToolExecution :: Text.Text -> Value -> Value
+withToolExecution mode = \case
+    Object fields ->
+        Object (KeyMap.insert "toolExecution" (String mode) fields)
+    other -> other
 
 loadFixtureRegistry
     :: FilePath

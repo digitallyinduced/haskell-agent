@@ -151,6 +151,46 @@ the module must be canonical absolute non-root paths: `.` and `..` components,
 repeated or trailing separators, and systemd `%` specifiers are rejected.
 `maxActiveTenants` must cover the complete registry.
 
+### Tenants without tool execution
+
+A tenant can opt out of model-controlled execution:
+
+```json
+{
+  "id": "018f6a14-7d52-7a52-9c00-66d5e7d70334",
+  "workspaceRoot": "/srv/agent-workspaces/acme",
+  "toolExecution": "none",
+  "credentials": [
+    {
+      "id": "018f6a14-7d52-7a52-9c00-66d5e7d70335",
+      "tokenFile": "/run/credentials/acme-agent-token"
+    }
+  ]
+}
+```
+
+`toolExecution` defaults to `"sandbox"`. With `"none"`, the tenant's agents
+receive no shell, filesystem, process, or network tools, and the server never
+starts a sandbox for it. They keep every host service: MCP servers, plans and
+questions, the tenant memory database, learned skills, delegated agents, and
+the readers for retained tool output. Uploaded turn files reach the model
+directly instead of through the workspace: images and PDFs become model
+inputs, and any other file is named in the prompt as unreadable. The server
+requires `--sandbox-runner` only when at least one tenant uses sandboxed
+execution.
+
+### Delegated agents
+
+Tenant sessions can delegate to child agents when their tool dialect uses the
+Codex collaboration tools. Delegation runs in the server process, and every
+child composes its tools through its tenant's policy: sandboxed tenants route
+the child's execution tools into the same tenant sandbox, and tenants without
+tool execution withhold them. Tenants cannot create worktrees for children or
+start persisted background agent sessions, since both need host facilities.
+Children cannot raise approval requests: unless the server runs with `--yolo`,
+a child's call that needs approval, such as a mutating MCP tool, is refused and
+left to the parent.
+
 The gVisor sandbox receives only two writable directory bind mounts: the
 tenant workspace as `/workspace` and a dedicated guest-data directory as
 `/state`. The bootstrap trace remains inside the bounded `/run` tmpfs. On
