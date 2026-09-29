@@ -12,6 +12,8 @@ module Agent.Runtime.Host
     , fullNativeRunCapabilities
     , nativeLoadsHostWorkspaceContext
     , nativePreparedDiscovery
+    , nativeToolComposer
+    , nativeAllowsWorkspaceCreation
     , foregroundRunMode
     , backgroundRunMode
     , nativeRunMode
@@ -27,11 +29,14 @@ import Agent.Loop ( LoopEvent, TurnInput )
 import qualified Agent.OpenAI.Live.Call
 import Agent.Provider ( Credential, TokenProvider )
 import Agent.Runtime.Request (NativeInteractionMode(..), NativeShellMode(..))
-import Agent.Runtime.StartupPolicy (NativeStartupPolicy)
+import Agent.Runtime.StartupPolicy
+    ( NativeExecutionFacilities(..)
+    , NativeStartupPolicy(..)
+    )
 import Agent.Store.Postgres ( Store )
 import Agent.ToolDispatch ( ToolCall )
 import Agent.Tools.PlanMode ( PlanModeHooks )
-import Agent.Tools.Types ( AppTool, AppToolGroup )
+import Agent.Tools.Types ( AppTool, AppToolGroup, appToolsFromGroups )
 import Data.IORef ( IORef )
 import Data.Text ( Text )
 import System.IO ( Handle, stderr, stdout )
@@ -167,6 +172,20 @@ data NativeRunHooks = NativeRunHooks
     -- | Startup permissions owned by the embedding, not an options callback.
     , nativeStartupPolicy :: !NativeStartupPolicy
     }
+
+-- | The tool composition shared by every agent of one run. Delegated agents
+-- compose through the root's hook, so an embedding that routes or withholds
+-- execution tools does so for the whole agent tree.
+nativeToolComposer :: Maybe NativeRunHooks -> [AppToolGroup] -> [AppTool]
+nativeToolComposer = maybe appToolsFromGroups (.nativeComposeTools)
+
+-- | Creating host workspaces, such as isolated worktrees for delegated
+-- agents, is a host startup facility that restricted embeddings withhold.
+nativeAllowsWorkspaceCreation :: Maybe NativeRunHooks -> Bool
+nativeAllowsWorkspaceCreation =
+    maybe True \hooks ->
+        hooks.nativeStartupPolicy.nativeExecutionFacilities
+            == HostStartupFacilities
 
 data AgentRunMode = AgentRunMode
     { runStdout :: !Handle

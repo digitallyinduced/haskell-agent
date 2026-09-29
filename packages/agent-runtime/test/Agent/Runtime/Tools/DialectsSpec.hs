@@ -14,8 +14,16 @@ import Agent.Dialect
     , genericResponsesDialect
     , grokBuildDialect
     )
+import Agent.Loop (LoopError(LoopNoResponseId))
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
+import Agent.Subagents
+    ( closeSubagentRegistry
+    , defaultSubagentConfig
+    , newSubagentRegistry
+    )
+import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.ToolDispatch (noArgsTool)
+import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.Secret (SecretPromptHooks(..))
 import Agent.Tools.ShowImage (ImageDisplayHooks(..))
 import Agent.Tools.Types
@@ -169,6 +177,36 @@ spec = describe "Agent.Runtime.Tools.Dialects" do
                                 \name -> hostNames `shouldNotContain` [name]
                     assertions `finally` coding.codingClose
 
+    it "classifies Codex delegation as host services without reordering tools" do
+        withTempToolEnv \env ->
+            withCollaborationContext \collaboration -> do
+                coding <-
+                    codingToolsFor
+                        codexDialect env Nothing Nothing Nothing (Just collaboration)
+                let names = map (.appToolName)
+                    delegation =
+                        [ "spawn_agent"
+                        , "wait_agent"
+                        , "send_message"
+                        , "followup_task"
+                        , "list_agents"
+                        , "interrupt_agent"
+                        , "analyze_tool_output"
+                        ]
+                    assertions = do
+                        names (appToolsFromGroups coding.codingAppToolGroups)
+                            `shouldBe` names coding.codingAppTools
+                        forM_ delegation \name -> do
+                            names (hostToolsFromGroups coding.codingAppToolGroups)
+                                `shouldContain` [name]
+                            names (executionToolsFromGroups coding.codingAppToolGroups)
+                                `shouldNotContain` [name]
+                        -- Delegation still follows the shell tools.
+                        let flat = names coding.codingAppTools
+                        zip flat (drop 1 flat)
+                            `shouldContain` [("write_stdin", "spawn_agent")]
+                assertions `finally` coding.codingClose
+
     it "filters shell and ghci tools independently" do
         let tools = map fakeTool
                 [ "run_ghci"
@@ -207,3 +245,30 @@ fakeTool :: Text.Text -> AppTool
 fakeTool name =
     jsonAppTool name "" [] AlwaysReadOnly
         (noArgsTool name (pure (Right "")))
+
+withCollaborationContext :: (MultiAgentContext -> IO a) -> IO a
+withCollaborationContext action =
+    bracket
+        (newSubagentRegistry
+            defaultSubagentConfig
+            (unsafeEncodeUtf "/tmp")
+            (\_ _ _ _ -> pure (Left LoopNoResponseId))
+            (\_ _ -> pure ()))
+        closeSubagentRegistry
+        \registry ->
+            action MultiAgentContext
+                { multiRegistry = registry
+                , multiCwd = unsafeEncodeUtf "/tmp"
+                , multiSelfId = Nothing
+                , multiDepth = 0
+                , multiTaskPath = taskPathRoot
+                , multiRootTurnId = pure Nothing
+                , multiResumeFromDisk = Nothing
+                , multiCreateWorktree = Nothing
+                , multiPrepareSpawn = Nothing
+                , multiSendToRoot = Nothing
+                , multiSpawnModelGuidance = Nothing
+                , multiAllowedChildModels = Nothing
+                , multiResolveChildModel = Nothing
+                , multiChildModelAllowed = Nothing
+                }

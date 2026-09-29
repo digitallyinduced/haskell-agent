@@ -535,10 +535,12 @@ newSessionControlRuntime AgentToolsRequest
                     other -> pure (Just other)
             }
         -- Persisted agent-session tools recursively start another native
-        -- runtime, so they require an explicit collaboration capability from
-        -- the embedding.
+        -- runtime without the embedding's hooks, so they require both the
+        -- collaboration capability and host extensions. Delegated subagents
+        -- compose their tools through the embedding instead.
         controlSessionTools
-            | not nativeCapabilities.nativeCollaboration = []
+            | not nativeCapabilities.nativeCollaboration
+                || not nativeCapabilities.nativeHostExtensions = []
             | otherwise = agentSessionTools sessionToolsEnv
     pure SessionControlRuntime{..}
 

@@ -6,6 +6,8 @@ module Agent.Tools.OutputArtifact
     ( OutputArtifact(..)
     , OutputArtifactWriter
     , artifactTools
+    , artifactReaderTools
+    , artifactAnalysisTools
     , finalizeToolOutput
     , boundedPreview
     , OutputArtifactMetadata(..)
@@ -122,6 +124,12 @@ artifactTools
     -> Maybe (ToolCall -> Text -> Text -> IO (Either Text Text))
     -> [AppTool]
 artifactTools env analysis =
+    artifactReaderTools env <> artifactAnalysisTools env analysis
+
+-- | Direct access to retained output. Embeddings may route these tools to an
+-- execution sandbox that retains its own artifacts.
+artifactReaderTools :: ToolEnv -> [AppTool]
+artifactReaderTools env =
     [ jsonTool "read_tool_output"
         "Read oversized tool output. Defaults to a lossless character page; pass next_cursor as cursor to continue, including within single-line JSON. Explicit offset/limit selects legacy line previews."
         [ PropertySchema "handle" PropertyString True Nothing
@@ -157,7 +165,15 @@ artifactTools env analysis =
         (typedTool "export_tool_output" (objectArgs (\o -> reqText o "handle"))
             (exportOutputArtifact env))
     ]
-    <> maybe [] (\spawn ->
+
+-- | Delegated analysis of retained output. The spawned child composes its own
+-- tools, so this is an orchestration service rather than an execution tool.
+artifactAnalysisTools
+    :: ToolEnv
+    -> Maybe (ToolCall -> Text -> Text -> IO (Either Text Text))
+    -> [AppTool]
+artifactAnalysisTools env analysis =
+    maybe [] (\spawn ->
         [ jsonTool "analyze_tool_output"
             "Spawn a tracked child agent to analyze an oversized tool-output artifact. \
             \Use wait_agent for its report."

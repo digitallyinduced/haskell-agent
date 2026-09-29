@@ -46,7 +46,7 @@ import Agent.Tools.MultiAgents
     ( MultiAgentContext(..)
     , spawnSharedSubagent
     )
-import Agent.Tools.OutputArtifact (artifactTools)
+import Agent.Tools.OutputArtifact (artifactAnalysisTools, artifactReaderTools)
 import Agent.Tools.PlanMode
     ( PlanModeEnv
     , PlanModeHooks
@@ -160,7 +160,13 @@ codingToolsForWithTypes
                     toolGroups
                         <> [ ExecutionToolGroup
                                 (if includeArtifacts
-                                    then environmentTool : artifactTools env analysisSpawner
+                                    then environmentTool : artifactReaderTools env
+                                    else [])
+                           -- The analysis child composes its own tools, so
+                           -- delegation itself stays with the host.
+                           , HostToolGroup
+                                (if includeArtifacts
+                                    then artifactAnalysisTools env analysisSpawner
                                     else [])
                            , HostToolGroup (secretTools <> imageTools)
                            ]

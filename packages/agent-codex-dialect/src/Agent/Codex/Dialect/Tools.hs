@@ -123,6 +123,9 @@ codexTools env shellSession ghci planMode taskPlan multi =
             [ ExecutionToolGroup executionPrefix
             , HostToolGroup hostServices
             , ExecutionToolGroup executionSuffix
+            -- Delegated agents run in the orchestrator and compose their own
+            -- tools through the embedding, so collaboration is a host service.
+            , HostToolGroup (maybe [] multiAgentTools multi)
             ]
         }
   where
@@ -144,7 +147,6 @@ codexTools env shellSession ghci planMode taskPlan multi =
         [ shellCommandTool env shellSession
         , writeStdinTool shellSession
         ]
-            <> maybe [] multiAgentTools multi
 
 --------------------------------------------------------------------------------
 -- shell_command

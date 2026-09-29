@@ -10,7 +10,7 @@ module Agent.CLI.Subagents.Runtime
     , runHttpSubagent, runXaiParentSubagent, runGatewaySubagent
     , runXaiSubagent, resolveGatewaySubagentTarget, grokSpawnedChildIdentity
     , usesOpenAiChildTransport, validatePersistedSubagentTarget
-    , runChildWithBackgroundTasks
+    , runChildWithBackgroundTasks, childToolGroups
     ) where
 import Agent.Runtime.Session.Request
     ( readSessionRequestParams
@@ -142,6 +142,7 @@ import Agent.Tools.MultiAgents
     )
 import Agent.Tools.Types
     ( AppTool(..)
+    , AppToolGroup(..)
     , BackgroundTaskHooks(..)
     , BackgroundTaskNotice(..)
     , ToolEnv(..)
@@ -769,19 +770,15 @@ prepareCodexChildTools runtime env preparation coding = do
     today <- utctDay <$> getCurrentTime
     shellPath <-
         Text.pack . fromMaybe defaultShell <$> lookupEnv "SHELL"
-    ghciEnabled <- readIORef runtime.subagentGhciEnabled
-    bashEnabled <- readIORef runtime.subagentBashEnabled
     let childDialect = preparation.codexPreparationDialect
-        childTools =
-            codexChildToolsForProtocol
+    tools <-
+        composeChildTools
+            runtime
+            (codexChildToolsForProtocol
                 preparation.codexPreparationAgentType
-                childDialect
-                coding.codingAppTools
-        codingTools =
-            filterGhciTools ghciEnabled $
-                filterBashTools bashEnabled childTools
-        tools = codingTools <> runtime.subagentMcpTools
-        instructions =
+                childDialect)
+            coding.codingAppToolGroups
+    let instructions =
             codexChildInstructions
                 preparation env today shellPath tools
         childParams =
@@ -793,6 +790,47 @@ prepareCodexChildTools runtime env preparation coding = do
                 preparation.codexPreparationEffort
     toolRegistry <- requireToolRegistry tools
     pure (toolRegistry, childParams)
+
+-- | Compose a child's tools through the root run's hook, never by
+-- flattening its groups directly.
+composeChildTools
+    :: SubagentRuntime
+    -> ([AppTool] -> [AppTool])
+    -> [AppToolGroup]
+    -> IO [AppTool]
+composeChildTools runtime selectTools groups = do
+    ghciEnabled <- readIORef runtime.subagentGhciEnabled
+    bashEnabled <- readIORef runtime.subagentBashEnabled
+    pure $
+        runtime.subagentComposeTools
+            (childToolGroups
+                ghciEnabled
+                bashEnabled
+                selectTools
+                runtime.subagentMcpTools
+                groups)
+
+-- | A child's construction groups before composition. Selection is by tool
+-- name, so selecting within each group yields the same surface as selecting
+-- from the flattened list. MCP clients and their credentials stay host
+-- services.
+childToolGroups
+    :: Bool
+    -> Bool
+    -> ([AppTool] -> [AppTool])
+    -> [AppTool]
+    -> [AppToolGroup]
+    -> [AppToolGroup]
+childToolGroups ghciEnabled bashEnabled selectTools mcpTools groups =
+    map selectGroup groups <> [HostToolGroup mcpTools]
+  where
+    select =
+        filterGhciTools ghciEnabled
+            . filterBashTools bashEnabled
+            . selectTools
+    selectGroup = \case
+        ExecutionToolGroup tools -> ExecutionToolGroup (select tools)
+        HostToolGroup tools -> HostToolGroup (select tools)
 
 codexChildToolsForProtocol :: Text -> Dialect -> [AppTool] -> [AppTool]
 codexChildToolsForProtocol agentType childDialect appTools =
@@ -1104,24 +1142,12 @@ runHttpSubagentWith
                     today <- utctDay <$> getCurrentTime
                     shellPath <-
                         Text.pack . fromMaybe defaultShell <$> lookupEnv "SHELL"
-                    let childTools = case
-                                dialectChildAgentProtocol childDialect of
-                            CodexCollaborationProtocol -> coding.codingAppTools
-                            GrokTaskProtocol ->
-                                filterChildGrokTools agentType coding.codingAppTools
-                            GenericTaskProtocol ->
-                                filterChildGrokTools
-                                    agentType coding.codingAppTools
-                            NoHostChildAgentProtocol ->
-                                []
-                    ghciEnabled <- readIORef runtime.subagentGhciEnabled
-                    bashEnabled <- readIORef runtime.subagentBashEnabled
-                    let codingTools =
-                            filterGhciTools ghciEnabled $
-                                filterBashTools bashEnabled childTools
-                        tools =
-                            codingTools <> runtime.subagentMcpTools
-                        baseInstructions =
+                    tools <-
+                        composeChildTools
+                            runtime
+                            (codexChildToolsForProtocol agentType childDialect)
+                            coding.codingAppToolGroups
+                    let baseInstructions =
                             case dialectChildAgentProtocol childDialect of
                                 CodexCollaborationProtocol ->
                                     systemPromptForTools
