@@ -20,6 +20,7 @@ import Agent.Provider (Provider(..))
 import Agent.ReasoningEffort (ReasoningEffort(..))
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryTakeMVar)
 import Control.Exception.Safe (bracket, finally, throwIO)
+import Control.Monad (foldM)
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
@@ -215,17 +216,27 @@ spec = do
 
     describe "renderPickerFrame" do
         it "mentions all providers, current model, and controls" do
-            let frame =
-                    renderPickerFrame False $
-                        initialPickerState
-                            catalog
-                            "xai"
-                            XAIProvider
-                            "grok-4.6"
-                            GrokBuildDialect
+            let models =
+                    initialPickerState
+                        catalog
+                        "xai"
+                        XAIProvider
+                        "grok-4.6"
+                        GrokBuildDialect
+                frame = renderPickerFrame False models
             frame `shouldSatisfy` Text.isInfixOf "xai"
             frame `shouldSatisfy` Text.isInfixOf "openai"
-            frame `shouldSatisfy` Text.isInfixOf "openrouter"
+            -- The catalog outgrows the first viewport page, so reach the
+            -- remaining providers through search.
+            searched <-
+                foldM
+                    (\state character ->
+                        rightState
+                            (applyModelPickerEvent (PickerType character) state))
+                    (initialModelPickerState EffortMedium models)
+                    ("openrouter" :: String)
+            renderModelPickerFrame False searched
+                `shouldSatisfy` Text.isInfixOf "openrouter/"
             frame `shouldSatisfy` Text.isInfixOf "all providers"
             frame `shouldSatisfy` Text.isInfixOf "gpt-6-sol"
             defaultModelFor catalog XAIProvider
