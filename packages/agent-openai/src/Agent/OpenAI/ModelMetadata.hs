@@ -27,6 +27,12 @@ defaultCodexEffectiveContextWindow = 258_400
 
 codexModelMetadata :: Text -> Maybe CodexModelMetadata
 codexModelMetadata modelName
+    | modelName == "gpt-6.1-sol" =
+        Just CodexModelMetadata
+            { modelContextWindow = 1_050_000
+            , modelEffectiveContextWindow = 997_500
+            , modelAutoCompactTokenLimit = 945_000
+            }
     | isCodexResponsesLiteModel modelName =
         Just CodexModelMetadata
             { modelContextWindow = 272_000
@@ -43,7 +49,8 @@ codexModelMetadata modelName
 isCodexResponsesLiteModel :: Text -> Bool
 isCodexResponsesLiteModel modelName =
     modelName `elem`
-        [ "gpt-6-sol"
+        [ "gpt-6.1-sol"
+        , "gpt-6-sol"
         , "gpt-6-luna"
         , "gpt-6-astra"
         , "gpt-5.6-sol"

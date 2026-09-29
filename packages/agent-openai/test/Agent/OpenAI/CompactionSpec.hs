@@ -1098,6 +1098,17 @@ spec = do
                 (>= max 1 (resizedImageBytesEstimate `div` 4))
 
     describe "Codex model metadata" do
+        it "uses the documented GPT-6.1 Sol context window" do
+            codexModelMetadata "gpt-6.1-sol"
+                `shouldBe` Just CodexModelMetadata
+                    { modelContextWindow = 1_050_000
+                    , modelEffectiveContextWindow = 997_500
+                    , modelAutoCompactTokenLimit = 945_000
+                    }
+            isCodexResponsesLiteModel "gpt-6.1-sol" `shouldBe` True
+            codexAutoCompactTokenLimitFor (Just "gpt-6.1-sol")
+                `shouldBe` 945_000
+
         it "derives the 90% auto-compaction limit for curated 272k models" do
             codexModelMetadata "gpt-6-astra"
                 `shouldBe` Just CodexModelMetadata
