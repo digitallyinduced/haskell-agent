@@ -42,6 +42,15 @@
       "fallback_priority": 1
     },
     {
+      "id": "gpt-6.1-sol",
+      "connection": "openai",
+      "dialect": "codex",
+      "context_window": 1050000,
+      "label": "frontier",
+      "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+      "default_reasoning_effort": "low"
+    },
+    {
       "id": "gpt-6-astra",
       "connection": "openai",
       "dialect": "codex",

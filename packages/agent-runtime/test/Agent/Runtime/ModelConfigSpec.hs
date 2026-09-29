@@ -73,12 +73,15 @@ spec = describe "Agent.Runtime.ModelConfig" do
             (catalogModelsForConnection "openai" catalog)
             `shouldBe`
                 [ "gpt-6-sol"
+                , "gpt-6.1-sol"
                 , "gpt-6-astra"
                 , "gpt-5.6-terra"
                 , "gpt-6-luna"
                 , "gpt-5.6-sol"
                 , "gpt-5.6-luna"
                 ]
+        catalogContextWindowFor catalog "openai" "gpt-6.1-sol"
+            `shouldBe` Just 1_050_000
         fmap
             (\model ->
                 ( model.catalogModelId
@@ -87,6 +90,7 @@ spec = describe "Agent.Runtime.ModelConfig" do
             (catalogModelsForConnection "openai" catalog)
             `shouldBe`
                 [ ("gpt-6-sol", Just 1)
+                , ("gpt-6.1-sol", Nothing)
                 , ("gpt-6-astra", Just 0)
                 , ("gpt-5.6-terra", Just 3)
                 , ("gpt-6-luna", Just 4)
@@ -183,6 +187,7 @@ spec = describe "Agent.Runtime.ModelConfig" do
             (catalogModelsForConnection "openai" catalog)
             `shouldBe`
                 [ ("gpt-6-sol", False)
+                , ("gpt-6.1-sol", False)
                 , ("gpt-6-astra", True)
                 , ("gpt-5.6-terra", False)
                 , ("gpt-6-luna", False)
