@@ -13,7 +13,8 @@ import Agent.MCP.Fleet
     )
 import Agent.MCP.Supervisor (acquireMcpFleetWith)
 import Agent.MCP.Client
-    ( ProbeOutcome(..)
+    ( McpResultImages(..)
+    , ProbeOutcome(..)
     , annotateHeaderParams
     , boundedTaskPollDelayMicros
     , cancelMcpTask
@@ -28,6 +29,7 @@ import Agent.MCP.Client
     , headerParamValues
     , listMcpTasks
     , mcpResourceSubscriptions
+    , normalizeMcpToolResultWith
     , readBounded
     , readBoundedWithLimit
     , responseBodyLimitFor
@@ -89,6 +91,7 @@ import qualified Data.Map.Strict as Map
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult(..)
+    , ToolResultImage(..)
     , dispatchToolCall
     , functionToolCall
     )
@@ -643,6 +646,57 @@ spec = describe "Agent.MCP" do
                         ]
                     ])
                 `shouldBe` Left "denied"
+
+    describe "normalizeMcpToolResultWith" do
+        let imageResult :: Text.Text -> Bool -> RawJson
+            imageResult mimeType failed =
+                rawJsonFromEncoding . Data.Aeson.toEncoding $ object
+                    [ "isError" .= failed
+                    , "content" .=
+                        [ object
+                            [ "type" .= ("text" :: Text.Text)
+                            , "text" .= ("page 1" :: Text.Text)
+                            ]
+                        , object
+                            [ "type" .= ("image" :: Text.Text)
+                            , "mimeType" .= mimeType
+                            , "data" .= ("iVBORw0KGgo=" :: Text.Text)
+                            ]
+                        ]
+                    ]
+
+        it "attaches supported images for rich tool handlers" do
+            let (rendered, images) =
+                    normalizeMcpToolResultWith
+                        AttachResultImages
+                        (imageResult "image/png" False)
+            rendered `shouldBe` Right "page 1\n[image image/png attached]"
+            map (.imageUrl) images
+                `shouldBe` ["data:image/png;base64,iVBORw0KGgo="]
+
+        it "keeps the size placeholder for text-only callers" do
+            let result = imageResult "image/png" False
+                placeholder =
+                    "page 1\n[image image/png, 12 base64 bytes; binary content is not shown]"
+            normalizeMcpToolResultWith DescribeResultImages result
+                `shouldBe` (Right placeholder, [])
+            normalizeMcpToolResult result `shouldBe` Right placeholder
+
+        it "describes image types the model cannot receive" do
+            let (rendered, images) =
+                    normalizeMcpToolResultWith
+                        AttachResultImages
+                        (imageResult "image/svg+xml" False)
+            images `shouldBe` []
+            rendered `shouldSatisfy`
+                either (const False) ("binary content is not shown" `Text.isInfixOf`)
+
+        it "never attaches images to failed calls" do
+            snd
+                (normalizeMcpToolResultWith
+                    AttachResultImages
+                    (imageResult "image/png" True))
+                `shouldBe` []
 
     it "does not retry a tool that requires fresh approval" do
         let sensitive = (schemaTool [])
