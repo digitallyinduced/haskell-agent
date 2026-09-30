@@ -491,6 +491,7 @@ options =
     , ("--tenant-state-root", "none", "Server-owned tenant storage.")
     , ("--sandbox-runner", "none", "Trusted runner for sandboxed tenants; use the NixOS service boundary.")
     , ("--yolo", "false", "Auto-approve server-turn mutations; distinct from sandbox execution policy.")
+    , ("--gateway-integrations", "false", "Connect sessions to the organization gateway's integrations and distributed skills; otherwise sessions have only their configured MCP servers.")
     , ("--cors-origin", "none", "Repeat for each explicitly allowed browser origin.")
     , ("--workspace-root", "current directory", "Repeatable canonical local workspace root; registry controls tenant workspaces.")
     , ("--max-concurrent-turns", "3", "Global running-turn capacity.")

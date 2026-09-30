@@ -2,6 +2,7 @@
 -- extensions require a separate explicit distribution opt-in.
 module Agent.CLI.IntegrationGateway
     ( gatewayIntegrationAuthority
+    , sessionIntegrationAuthority
     , gatewayIntegrationMcpConfig
     , availableIntegrationServerName
     , integrationEndpointServers
@@ -17,6 +18,14 @@ gatewayIntegrationAuthority :: Maybe GatewayCredential -> IntegrationAuthority
 gatewayIntegrationAuthority =
     maybe LocalIntegrationAuthority
         (OrganizationIntegrationAuthority . gatewayIntegrationMcpConfig)
+
+-- | The integration authority of a session, or none when the host withholds
+-- the connected gateway's organization integrations. A connected gateway stays
+-- authoritative even then: the session does not fall back to local accounts.
+sessionIntegrationAuthority :: Bool -> Maybe GatewayCredential -> Maybe IntegrationAuthority
+sessionIntegrationAuthority gatewayIntegrations connected = case connected of
+    Just _ | not gatewayIntegrations -> Nothing
+    _ -> Just (gatewayIntegrationAuthority connected)
 
 gatewayIntegrationMcpConfig :: GatewayCredential -> McpServerConfig
 gatewayIntegrationMcpConfig credential = McpServerConfig

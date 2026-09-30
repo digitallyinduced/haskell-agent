@@ -99,6 +99,9 @@ data ServerConfig = ServerConfig
     , serverTenantStateRoot :: !(Maybe FilePath)
     , serverSandboxRunner :: !(Maybe FilePath)
     , serverYolo :: !Bool
+    -- | Connect sessions to the organization gateway's integrations and
+    -- distributed skills. Off unless @--gateway-integrations@ opts in.
+    , serverGatewayIntegrations :: !Bool
     , serverCorsOrigins :: ![String]
     , serverWorkspaceRoots :: ![FilePath]
     , serverMaxConcurrentTurns :: !Int
@@ -134,6 +137,7 @@ data ResolvedServerConfig = ResolvedServerConfig
     , resolvedStateDirectory :: !FilePath
     , resolvedServerMode :: !ResolvedServerMode
     , resolvedYolo :: !Bool
+    , resolvedGatewayIntegrations :: !Bool
     , resolvedMaxConcurrentTurns :: !Int
     , resolvedMaxConcurrentTurnsPerTenant :: !Int
     , resolvedMaxQueuedTurns :: !Int
@@ -155,6 +159,7 @@ defaultServerConfig = ServerConfig
     , serverTenantStateRoot = Nothing
     , serverSandboxRunner = Nothing
     , serverYolo = False
+    , serverGatewayIntegrations = False
     , serverCorsOrigins = []
     , serverWorkspaceRoots = []
     , serverMaxConcurrentTurns = 3
@@ -236,6 +241,11 @@ serverConfigParser =
         <*> switch
             ( long "yolo"
                 <> help "Auto-approve mutating tools for server turns"
+            )
+        <*> switch
+            ( long "gateway-integrations"
+                <> help
+                    "Connect sessions to the organization gateway's integrations and distributed skills; otherwise sessions have only their configured MCP servers"
             )
         <*> manyStringOption
             "cors-origin"
@@ -386,6 +396,7 @@ resolveServerConfigWithTrustPolicy trustPolicy config
                 , resolvedStateDirectory = home </> ".haskell-agent"
                 , resolvedServerMode = mode
                 , resolvedYolo = config.serverYolo
+                , resolvedGatewayIntegrations = config.serverGatewayIntegrations
                 , resolvedMaxConcurrentTurns =
                     config.serverMaxConcurrentTurns
                 , resolvedMaxConcurrentTurnsPerTenant =

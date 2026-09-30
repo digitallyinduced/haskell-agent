@@ -120,6 +120,11 @@ data NativeRunCapabilities = NativeRunCapabilities
     -- dialect, keeping long pages as tool-output artifacts. Otherwise only
     -- Grok Build sessions with host extensions offer it.
     , nativeMcpTools :: !Bool
+    -- ^ Connect a session whose model access goes through an organization
+    -- gateway to the gateway's organization MCP endpoint, which supplies the
+    -- organization's configured integrations and distributed skills.
+    -- Otherwise the session has only the MCP servers it configures itself.
+    , nativeGatewayIntegrations :: !Bool
     , nativeCollaboration :: !Bool
     , nativeProviderNativeTools :: !Bool
     }
@@ -133,6 +138,7 @@ fullNativeRunCapabilities = NativeRunCapabilities
     -- Local sessions keep web_fetch a Grok Build tool.
     , nativeHostWebFetch = False
     , nativeMcpTools = True
+    , nativeGatewayIntegrations = True
     , nativeCollaboration = True
     , nativeProviderNativeTools = True
     }

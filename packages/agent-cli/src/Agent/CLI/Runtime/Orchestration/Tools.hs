@@ -43,7 +43,7 @@ import Agent.CLI.LearnedSkills.Store
     )
 import Agent.Runtime.Lsp
     ( LspStartup(..), lspRuntimeTool )
-import Agent.CLI.IntegrationGateway (gatewayIntegrationAuthority)
+import Agent.CLI.IntegrationGateway (sessionIntegrationAuthority)
 import Agent.Integration.API
     ( IntegrationRuntime
     , acquireIntegrationRuntime
@@ -218,7 +218,8 @@ runAgentTools request = withSessionResourceScopes \resources -> do
                 toolModelRuntime
                 collaborationRuntime)
             (logSlowCleanup "session temporary resources" . (.scratchCleanup))
-    integrationRuntime <- acquireSessionIntegrationRuntime request
+    integrationRuntime <-
+        acquireSessionIntegrationRuntime request toolStartup.toolNativeCapabilities
     let localAcquisitions =
             localToolAcquisitions
                 (localToolSettings request toolStartup toolModelRuntime)
@@ -296,21 +297,25 @@ runAgentTools request = withSessionResourceScopes \resources -> do
         sessionControlRuntime
         sessionToolsRuntime
 
--- The connected gateway is authoritative: an unavailable organization
--- integration does not fall back to local account data.
+-- The connected gateway is authoritative: an unavailable or withheld
+-- organization integration does not fall back to local account data.
 acquireSessionIntegrationRuntime
     :: AgentToolsRequest windowTitleResult
+    -> NativeRunCapabilities
     -> IO (Maybe IntegrationRuntime)
-acquireSessionIntegrationRuntime request =
-    acquireIntegrationRuntime
-        request.processRuntime.processIntegrationSupervisor
-        authority >>= \case
-        Left err -> do
-            reportStartupWarning request.startup err
-            pure Nothing
-        Right runtime -> pure (Just runtime)
-  where
-    authority = gatewayIntegrationAuthority request.connectedGateway
+acquireSessionIntegrationRuntime request capabilities =
+    case sessionIntegrationAuthority
+            capabilities.nativeGatewayIntegrations
+            request.connectedGateway of
+        Nothing -> pure Nothing
+        Just authority ->
+            acquireIntegrationRuntime
+                request.processRuntime.processIntegrationSupervisor
+                authority >>= \case
+                Left err -> do
+                    reportStartupWarning request.startup err
+                    pure Nothing
+                Right runtime -> pure (Just runtime)
 
 acquireLocalToolRuntime
     :: AgentToolsRequest windowTitleResult
