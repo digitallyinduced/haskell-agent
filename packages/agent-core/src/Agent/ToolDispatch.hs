@@ -63,6 +63,7 @@ import Agent.Dialect
     , grokBuildCanonicalToolName
     )
 import Agent.Json.Decode (Decoder)
+import Agent.ToolArgs (objectArgs, reqText)
 import qualified Agent.Json.Decode as Json
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (SomeException, bracket, tryAny)
@@ -521,7 +522,17 @@ streamingRichTextTool
     -> ((Text -> IO ()) -> Text -> IO (Either Text ToolHandlerResult))
     -> ToolHandler
 streamingRichTextTool name run =
-    ToolHandler name \emit _call value -> run emit value
+    ToolHandler name \emit call value ->
+        case call.callKind of
+            -- Providers without custom calls expose freeform tools as
+            -- functions with a single string argument instead.
+            FunctionCallKind ->
+                case decodeToolArguments
+                    (objectArgs \object -> reqText object "input")
+                    value of
+                    Left err -> pure (Left err)
+                    Right input -> run emit input
+            _ -> run emit value
 
 passthroughTool
     :: Text
@@ -531,7 +542,8 @@ passthroughTool name run =
     ToolHandler name \emit call _value -> run emit call
 
 noArgsTool :: Text -> IO (Either Text Text) -> ToolHandler
-noArgsTool name run = textTool name (\_value -> run)
+noArgsTool name run =
+    ToolHandler name \_emit _call _value -> plainResult <$> run
 
 plainResult :: Either Text Text -> Either Text ToolHandlerResult
 plainResult = fmap \text -> ToolHandlerResult text []

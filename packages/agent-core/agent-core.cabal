@@ -219,6 +219,7 @@ test-suite visible-loop-state-test
                     , Agent.Provider
                     , Agent.Telemetry
                     , Agent.TextBuffer
+                    , Agent.ToolArgs
                     , Agent.ToolDispatch
     build-depends:    agent-json
                     , agent-responses-types
@@ -229,6 +230,7 @@ test-suite visible-loop-state-test
                     , containers
                     , hspec
                     , safe-exceptions
+                    , scientific
                     , stm
                     , text
                     , time

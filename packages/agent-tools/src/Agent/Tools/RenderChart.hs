@@ -8,7 +8,8 @@ module Agent.Tools.RenderChart
     , chartResultFallback
     ) where
 
-import Agent.ToolDispatch (textTool)
+import Agent.ToolDispatch (typedTool)
+import Agent.Json (rawJsonBytes, rawJsonDecoder)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Tools.Types (AppTool, ToolExecutionPolicy(..), jsonTool)
 import Control.Monad (unless, when)
@@ -36,7 +37,10 @@ renderChartToolName = "render_chart"
 renderChartTool :: AppTool
 renderChartTool =
     jsonTool renderChartToolName description properties True ParallelSafe
-        (textTool renderChartToolName (pure . renderChartResult))
+        -- Keep JSON function calls intact: freeform text handlers unwrap the
+        -- "input" field of function calls for providers without custom tools.
+        (typedTool renderChartToolName rawJsonDecoder
+            (pure . renderChartResult . TextEncoding.decodeUtf8 . rawJsonBytes))
   where
     description =
         "Present an interactive native chart in the conversation. Use line/area for trends, \

@@ -48,7 +48,7 @@ spec :: Spec
 spec = describe "dispatchToolCall" do
     describe "structured result transport" do
         let payload = Aeson.object ["count" Aeson..= (42 :: Int)]
-            call = functionToolCall "structured-1" "structured" "{}"
+            call = functionToolCall "structured-1" "structured" "{\"input\":\"\"}"
             handler result = streamingRichTextTool "structured" (\_ _ -> pure (Right result))
         it "preserves JSON independently of formatted and truncated text" do
             let config = testConfig
@@ -525,6 +525,19 @@ spec = describe "dispatchToolCall" do
             toolCallResultImages outcome.toolDispatchResult `shouldBe` [image]
             readIORef snapshots `shouldReturn` [(call, "partial:hello")]
             ) handlers
+
+    it "unwraps function calls for freeform tools without changing custom calls" do
+        let handler = streamingRichTextTool "echo" \_emit input ->
+                pure (Right (ToolHandlerResult input []))
+        functionResultValue <- dispatchToolCall testConfig [handler]
+            (functionToolCall "function" "echo" "{\"input\":\"line one\\nline two\"}")
+        functionResultValue.output `shouldBe` "line one\nline two"
+        customResultValue <- dispatchToolCall testConfig [handler]
+            (customToolCall "custom" "echo" "line one\nline two")
+        customResultValue.output `shouldBe` "line one\nline two"
+        invalid <- dispatchToolCallDetailed testConfig [handler]
+            (functionToolCall "invalid" "echo" "{\"input\":42}")
+        invalid.toolDispatchSucceeded `shouldBe` False
 
     it "forwards the original call to a passthrough broker without decoding it" do
         calls <- newIORef []
