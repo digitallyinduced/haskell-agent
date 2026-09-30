@@ -2,13 +2,26 @@ module Agent.CLI.IntegrationGatewaySpec (spec) where
 
 import Agent.Runtime.GatewayClient (GatewayCredential(..))
 import Agent.CLI.IntegrationGateway
-    (availableIntegrationServerName, gatewayIntegrationMcpConfig, integrationEndpointServers)
-import Agent.Integration.API (IntegrationEndpoint(..))
+    ( availableIntegrationServerName
+    , gatewayIntegrationMcpConfig
+    , integrationEndpointServers
+    , sessionIntegrationAuthority
+    )
+import Agent.Integration.API (IntegrationAuthority(..), IntegrationEndpoint(..))
 import Agent.MCP (McpServerConfig(..), McpToolServer(..))
 import Test.Hspec
 
 spec :: Spec
 spec = describe "generic gateway integrations" do
+    it "withholds a connected gateway's integrations without falling back to local ones" do
+        let credential =
+                GatewayCredential "https://gateway.example" "wss://gateway.example/ws" "token"
+        sessionIntegrationAuthority True (Just credential)
+            `shouldBe` Just (OrganizationIntegrationAuthority (gatewayIntegrationMcpConfig credential))
+        sessionIntegrationAuthority False (Just credential) `shouldBe` Nothing
+        sessionIntegrationAuthority True Nothing `shouldBe` Just LocalIntegrationAuthority
+        sessionIntegrationAuthority False Nothing `shouldBe` Just LocalIntegrationAuthority
+
     it "gives explicit device tools the canonical namespace and excludes only reserved remote names" do
         let config = gatewayIntegrationMcpConfig
                 (GatewayCredential "https://gateway.example" "wss://gateway.example/ws" "token")

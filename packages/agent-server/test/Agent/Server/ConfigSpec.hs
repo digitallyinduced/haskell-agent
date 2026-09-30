@@ -59,6 +59,27 @@ spec = describe "server configuration" do
                 Right config ->
                     config.resolvedYolo `shouldBe` True
 
+    it "withholds gateway integrations by default" do
+        defaultServerConfig.serverGatewayIntegrations `shouldBe` False
+        withTokenEnvironmentUnset do
+            resolved <- resolveServerConfig defaultServerConfig
+            case resolved of
+                Left err ->
+                    expectationFailure (Text.unpack err)
+                Right resolvedConfig ->
+                    resolvedConfig.resolvedGatewayIntegrations `shouldBe` False
+
+    it "parses --gateway-integrations as an explicit opt-in" do
+        config <- withArgs ["--gateway-integrations"] parseServerConfig
+        config.serverGatewayIntegrations `shouldBe` True
+        withTokenEnvironmentUnset do
+            resolved <- resolveServerConfig config
+            case resolved of
+                Left err ->
+                    expectationFailure (Text.unpack err)
+                Right resolvedConfig ->
+                    resolvedConfig.resolvedGatewayIntegrations `shouldBe` True
+
     it "reads a newline-terminated private token file through EOF" do
         withTokenEnvironmentUnset $
             withPrivateTokenFile "correct-token\n" \path -> do

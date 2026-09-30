@@ -204,6 +204,17 @@ Children cannot raise approval requests: unless the server runs with `--yolo`,
 a child's call that needs approval, such as a mutating MCP tool, is refused and
 left to the parent.
 
+### Gateway integrations
+
+An organization gateway can supply more than model access: its organization
+MCP endpoint serves the MCP servers that the organization's administrators
+configured, such as mail or banking, and the organization's distributed skills.
+The server connects sessions to that endpoint only when it runs with
+`--gateway-integrations`. By default a session has only the MCP servers and
+skills of its own configuration. Model access through the gateway is the same
+either way, and a session never falls back to integrations of the host account
+instead.
+
 The gVisor sandbox receives only two writable directory bind mounts: the
 tenant workspace as `/workspace` and a dedicated guest-data directory as
 `/state`. The bootstrap trace remains inside the bounded `/run` tmpfs. On

@@ -85,6 +85,7 @@ let
     (toString cfg.maximumRequestBytes)
   ]
   ++ optional cfg.allowRemote "--allow-remote"
+  ++ optional cfg.gatewayIntegrations "--gateway-integrations"
   ++ concatMap (origin: [
     "--cors-origin"
     origin
@@ -181,6 +182,16 @@ in
       description = ''
         Permit a non-loopback listener. Remote deployments still require
         trusted TLS termination in front of agent-server.
+      '';
+    };
+
+    gatewayIntegrations = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Connect sessions to the organization gateway's integrations and
+        distributed skills. Otherwise sessions have only the MCP servers of
+        their own configuration.
       '';
     };
 

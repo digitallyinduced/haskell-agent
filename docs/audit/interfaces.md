@@ -102,7 +102,7 @@ The dispatchers contain **20 explicit method/path branches**: 3 operational rout
 
 ## Server configuration: complete explicit option inventory
 
-The parser exposes **19 explicit options**, excluding standard generated help. Defaults, positive-value validation and cross-field constraints must be documented together, not inferred from flag names. `docs/agent-server.md` already discusses many of these; none are in the website.
+The parser exposes **20 explicit options**, excluding standard generated help. Defaults, positive-value validation and cross-field constraints must be documented together, not inferred from flag names. `docs/agent-server.md` already discusses many of these; none are in the website.
 
 | ID | Option or behavior | Source | Website coverage | Missing detail |
 | --- | --- | --- | --- | --- |
@@ -125,6 +125,7 @@ The parser exposes **19 explicit options**, excluding standard generated help. D
 | IF-SERVER-17 | `--max-event-subscribers-per-tenant` | `packages/agent-server/src/Agent/Server/Config.hs:277` | Covered | `Server.hs#options`, `#authentication`, `#events`, `#recovery`: every remaining explicit flag/default, quota constraints, approval risk, CORS and queue/replay behavior. Historical audit context: Tenant SSE quota and global constraint. |
 | IF-SERVER-18 | `--event-replay-limit` | `packages/agent-server/src/Agent/Server/Config.hs:282` | Covered | `Server.hs#options`, `#authentication`, `#events`, `#recovery`: every remaining explicit flag/default, quota constraints, approval risk, CORS and queue/replay behavior. Historical audit context: Retention unit, cursor expiry and recovery. |
 | IF-SERVER-19 | `--maximum-request-bytes` | `packages/agent-server/src/Agent/Server/Config.hs:287` | Covered | `Server.hs#options`, `#authentication`, `#events`, `#recovery`: every remaining explicit flag/default, quota constraints, approval risk, CORS and queue/replay behavior. Historical audit context: Body limit, failure response, attachment sizing guidance. |
+| IF-SERVER-20 | `--gateway-integrations` | `packages/agent-server/src/Agent/Server/Config.hs:246` | Covered | `Server.hs#options`: opts every session in to the organization gateway's integrations and distributed skills; off by default. |
 
 ## Runtime daemon and embedding
 

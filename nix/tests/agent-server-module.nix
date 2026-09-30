@@ -49,6 +49,7 @@ let
     host = "0.0.0.0";
     port = 4444;
     allowRemote = true;
+    gatewayIntegrations = true;
     corsOrigins = [ "https://console.example.test" ];
     environment.MODULE_TEST = "present";
     environmentFiles = [
@@ -80,6 +81,8 @@ let
       wants
       ;
     requiresMountsFor = service.unitConfig.RequiresMountsFor;
+    defaultExecStart =
+      (evaluate { }).config.systemd.services.haskell-agent-server.serviceConfig.ExecStart;
     inherit (service.serviceConfig)
       AmbientCapabilities
       CapabilityBoundingSet
@@ -308,6 +311,8 @@ pkgs.runCommand "haskell-agent-server-module-test"
       and (.ExecStart | contains("--event-replay-limit 31"))
       and (.ExecStart | contains("--maximum-request-bytes 65536"))
       and (.ExecStart | contains("--allow-remote"))
+      and (.ExecStart | contains("--gateway-integrations"))
+      and (.defaultExecStart | contains("--gateway-integrations") | not)
       and (.ExecStart | contains("--cors-origin https://console.example.test"))
       and (.ExecStart | contains($runner) | not)
     ' >/dev/null

@@ -1616,10 +1616,12 @@ nativeHooks environment control sessionId cwd dialect = NativeRunHooks
                 , nativeHostExtensions = False
                 , nativeHostWebFetch = True
                 , nativeMcpTools = True
+                , nativeGatewayIntegrations = gatewayIntegrations
                 , nativeCollaboration = hostCollaboration
                 , nativeProviderNativeTools = False
                 }
             else fullNativeRunCapabilities
+                { nativeGatewayIntegrations = gatewayIntegrations }
     , nativeStartupPolicy =
         if restricted
             then restrictedNativeStartupPolicy
@@ -1627,6 +1629,8 @@ nativeHooks environment control sessionId cwd dialect = NativeRunHooks
     }
   where
     restricted = isRestrictedEnvironment environment
+    gatewayIntegrations =
+        environment.environmentConfig.resolvedGatewayIntegrations
     -- Codex collaboration tools are host services whose children compose
     -- their tools through 'nativeComposeTools'. Other dialects' delegation
     -- tools still belong to their execution groups.
