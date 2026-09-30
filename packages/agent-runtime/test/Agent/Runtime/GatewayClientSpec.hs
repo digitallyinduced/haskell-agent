@@ -38,7 +38,7 @@ import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
 import Network.HTTP.Client qualified as HTTP
-import Network.HTTP.Types (hConnection, hContentType, status200)
+import Network.HTTP.Types (hConnection, hContentType, status200, status400, status502)
 import Network.HTTP.Types.URI (parseQueryText)
 import Network.Wai qualified as Wai
 import Network.Wai.Handler.Warp qualified as Warp
@@ -353,6 +353,45 @@ spec = describe "gateway device authorization" do
                 [ "audio:\"pcm\""
                 , "text:gateway transcript"
                 ]
+
+    it "resends the same buffered dictation after a gateway 502" $
+        withTempHome \home ->
+            withHomeEnvironment home do
+                requests <- newIORef ([] :: [BS.ByteString])
+                captures <- newIORef (0 :: Int)
+                let application request respond
+                        | Wai.requestMethod request == "POST" = do
+                            body <- LBS.toStrict <$> Wai.strictRequestBody request
+                            previous <- atomicModifyIORef' requests \bodies ->
+                                (bodies <> [body], length bodies)
+                            respond $
+                                if previous == 0
+                                    then Wai.responseLBS status502 [] "deployment"
+                                    else Wai.responseLBS status200
+                                        [(hContentType, "application/json")]
+                                        "{\"text\":\"recovered transcript\"}"
+                        | otherwise =
+                            respond (Wai.responseLBS status400 [] "no stream")
+                Warp.testWithApplication (pure application) \port -> do
+                    let base = "http://127.0.0.1:" <> Text.pack (show port)
+                        credential = GatewayCredential base
+                            (Text.replace "http://" "ws://" base <> "/v1/responses")
+                            "test-token"
+                    saveGatewayCredentialAt home credential `shouldReturn` Right ()
+                    access <- newGatewayModelAccess credential
+                    transcripts <- newIORef ([] :: [Text.Text])
+                    result <- transcribeGatewayPcm access
+                        (\send -> do
+                            modifyIORef' captures (+ 1)
+                            send (BS.replicate 128 1))
+                        (modifyIORef' transcripts . (:))
+                    result `shouldBe` Right "recovered transcript"
+                    readIORef captures `shouldReturn` 1
+                    readIORef transcripts `shouldReturn` ["recovered transcript"]
+                    bodies <- readIORef requests
+                    case bodies of
+                        [first, second] -> first `shouldBe` second
+                        _ -> expectationFailure "expected two HTTP dictation requests"
 
     it "retains cached gateway models when a fetch throws" do
         calls <- newIORef (0 :: Int)
