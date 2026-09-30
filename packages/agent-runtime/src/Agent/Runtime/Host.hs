@@ -115,6 +115,10 @@ data NativeRunCapabilities = NativeRunCapabilities
     { nativeProviderFallback :: !Bool
     , nativeProviderHostedTools :: !Bool
     , nativeHostExtensions :: !Bool
+    , nativeHostWebFetch :: !Bool
+    -- ^ Offer the configured @web_fetch@ as a host service in every tool
+    -- dialect, keeping long pages as tool-output artifacts. Otherwise only
+    -- Grok Build sessions with host extensions offer it.
     , nativeMcpTools :: !Bool
     , nativeCollaboration :: !Bool
     , nativeProviderNativeTools :: !Bool
@@ -126,6 +130,8 @@ fullNativeRunCapabilities = NativeRunCapabilities
     { nativeProviderFallback = True
     , nativeProviderHostedTools = True
     , nativeHostExtensions = True
+    -- Local sessions keep web_fetch a Grok Build tool.
+    , nativeHostWebFetch = False
     , nativeMcpTools = True
     , nativeCollaboration = True
     , nativeProviderNativeTools = True

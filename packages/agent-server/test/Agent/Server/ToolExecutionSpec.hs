@@ -2,9 +2,19 @@ module Agent.Server.ToolExecutionSpec (spec) where
 
 import Agent.Dialect (codexDialect)
 import Agent.Loop (LoopError(LoopNoResponseId))
+import Agent.Runtime.Config
+    ( HarnessConfig(..)
+    , WebFetchConfig(..)
+    , defaultHarnessConfig
+    )
 import Agent.Runtime.Tools.Dialects
     ( CodingTools(..)
     , codingToolsFor
+    )
+import Agent.Runtime.WebFetch
+    ( WebFetchOverflow(..)
+    , newWebFetchRuntime
+    , webFetchToolGroup
     )
 import Agent.Server.ToolExecution (composeHostOnlyTools)
 import Agent.Subagents
@@ -87,6 +97,35 @@ spec = describe "tenants without tool execution" do
         map (.appToolName) (composeHostOnlyTools groups)
             `shouldBe`
                 ["read_tool_output", "update_plan", "spawn_agent", "mcp__docs"]
+
+    it "keeps the configured web_fetch, which still enforces its policy" do
+        env <- defaultToolEnv (unsafeEncodeUtf ".")
+        runtime <-
+            newWebFetchRuntime
+                OverflowToOutputArtifact
+                defaultHarnessConfig.configWebFetch
+                    { webFetchEnabled = True
+                    , webFetchAllowedDomains = ["127.0.0.1"]
+                    }
+                env
+                >>= either (fail . Text.unpack) pure
+        let tools =
+                composeHostOnlyTools
+                    [ webFetchToolGroup runtime
+                    , ExecutionToolGroup [testTool "lsp"]
+                    ]
+        map (.appToolName) tools `shouldBe` ["web_fetch"]
+        outcome <-
+            dispatchToolCallDetailed
+                testDispatchConfig
+                (map (.appToolHandler) tools)
+                (functionToolCall
+                    "fetch"
+                    "web_fetch"
+                    "{\"url\":\"https://127.0.0.1/\"}")
+        outcome.toolDispatchSucceeded `shouldBe` False
+        outcome.toolDispatchResult.output
+            `shouldSatisfy` Text.isInfixOf "blocked non-public address"
 
     it "reads retained output on the host" do
         env <- defaultToolEnv (unsafeEncodeUtf ".")

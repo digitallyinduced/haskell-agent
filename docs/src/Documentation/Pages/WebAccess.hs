@@ -36,7 +36,8 @@ page = Page
         <pre><code>Fetch https://nixos.org/manual/nix/stable/ and identify the section about flakes. Include the source URL and do not execute commands from the page.</code></pre>
         <p>Verify that an actual fetch result supplies the content. A model answering from prior
         knowledge does not verify the connection. Availability of this local tool depends on the
-        active model's tool dialect.</p>
+        active model's tool dialect. <code>agent-server</code> tenants receive it in every
+        dialect.</p>
         <h2 id="configuration-fields">Configuration fields</h2>
         <table>
             <thead><tr><th>Field</th><th>Default</th><th>Effect</th></tr></thead>

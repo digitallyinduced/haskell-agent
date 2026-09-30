@@ -12,7 +12,9 @@ import Data.Text (Text)
 
 -- | Keep every host service and withhold execution tools rather than run
 -- them on the host. Delegated agents compose through the same function, so
--- no agent of such a tenant can reach a shell, the workspace or the network.
+-- no agent of such a tenant can reach a shell, local processes or the
+-- workspace. Network access remains with host services such as MCP and the
+-- configured @web_fetch@.
 composeHostOnlyTools :: [AppToolGroup] -> [AppTool]
 composeHostOnlyTools = concatMap \case
     HostToolGroup tools -> tools

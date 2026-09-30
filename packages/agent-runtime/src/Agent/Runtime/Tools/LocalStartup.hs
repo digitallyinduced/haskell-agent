@@ -18,13 +18,19 @@ import Agent.Runtime.Config (WebFetchConfig, LspConfig)
 import Agent.Runtime.Lsp
     ( LspStartup(..), newLspRuntime, closeLspRuntime )
 import Agent.Runtime.WebFetch
-    ( WebFetchRuntime, newWebFetchRuntime, closeWebFetchRuntime )
+    ( WebFetchOverflow(..)
+    , WebFetchRuntime
+    , newWebFetchRuntime
+    , closeWebFetchRuntime
+    )
 import Agent.Tools.Types (ToolEnv)
 import Data.Acquire (Acquire, mkAcquire)
 import Data.Text (Text)
 
 data LocalToolSettings = LocalToolSettings
     { localHostExtensions :: !Bool
+    , localHostWebFetch :: !Bool
+    -- ^ Offer the configured @web_fetch@ as a host service in every dialect.
     , localDialectId :: !DialectId
     , localProvider :: !Provider
     , localPlatform :: !Text
@@ -33,6 +39,7 @@ data LocalToolSettings = LocalToolSettings
 
 data LocalToolPolicy = LocalToolPolicy
     { localGrokToolsEnabled :: !Bool
+    , localWebFetchEnabled :: !Bool
     , localComputerUseAvailable :: !Bool
     , localComputerToolExposed :: !Bool
     }
@@ -41,15 +48,18 @@ data LocalToolPolicy = LocalToolPolicy
 -- | Preserve the distinction between computer-use availability and exposure.
 -- Its runtime has historically been acquired for supported OpenAI hosts even
 -- when the session does not expose its tool; host-extension permission gates
--- Grok's web/LSP tools, not this independent availability decision.
+-- Grok's web/LSP tools, not this independent availability decision. A host
+-- that offers web fetching as a host service enables it in every dialect.
 resolveLocalToolPolicy :: LocalToolSettings -> LocalToolPolicy
 resolveLocalToolPolicy settings = LocalToolPolicy
-    { localGrokToolsEnabled =
-        settings.localHostExtensions && settings.localDialectId == GrokBuildDialect
+    { localGrokToolsEnabled = grokTools
+    , localWebFetchEnabled = grokTools || settings.localHostWebFetch
     , localComputerUseAvailable = available
     , localComputerToolExposed = available && settings.localComputerUseEnabled
     }
   where
+    grokTools =
+        settings.localHostExtensions && settings.localDialectId == GrokBuildDialect
     available =
         settings.localProvider == OpenAIProvider
             && settings.localPlatform `elem` ["darwin", "linux"]
@@ -69,7 +79,7 @@ selectLocalToolAcquisitions
     -> LocalToolAcquisitions web lsp computer
 selectLocalToolAcquisitions policy emptyLsp acquisitions = LocalToolAcquisitions
     { localAcquireWebFetch =
-        if policy.localGrokToolsEnabled
+        if policy.localWebFetchEnabled
             then acquisitions.localAcquireWebFetch
             else pure Nothing
     , localAcquireLsp =
@@ -84,7 +94,8 @@ selectLocalToolAcquisitions policy emptyLsp acquisitions = LocalToolAcquisitions
 
 -- | Pair concrete resources with their finalizers at the ownership boundary.
 -- The host supplies web-fetch failure presentation; it must either abort or
--- explicitly recover with a replacement runtime.
+-- explicitly recover with a replacement runtime. As a host service, web fetch
+-- keeps long pages where the host's artifact readers find them.
 localToolAcquisitions
     :: LocalToolSettings
     -> WebFetchConfig
@@ -97,7 +108,8 @@ localToolAcquisitions settings webConfig lspConfig toolEnv onWebFetchFailure =
         LspStartup { lspStartupRuntime = Nothing, lspStartupWarnings = [] }
         LocalToolAcquisitions
             { localAcquireWebFetch = mkAcquire
-                (newWebFetchRuntime webConfig toolEnv >>= either onWebFetchFailure pure)
+                (newWebFetchRuntime overflow webConfig toolEnv
+                    >>= either onWebFetchFailure pure)
                 (logSlowCleanup "web fetch runtime" . mapM_ closeWebFetchRuntime)
             , localAcquireLsp = mkAcquire
                 (newLspRuntime lspConfig toolEnv)
@@ -108,3 +120,7 @@ localToolAcquisitions settings webConfig lspConfig toolEnv onWebFetchFailure =
                 (logSlowCleanup "computer use runtime"
                     . mapM_ ComputerUse.closeComputerUseRuntime)
             }
+  where
+    overflow
+        | settings.localHostWebFetch = OverflowToOutputArtifact
+        | otherwise = OverflowToScratchFile

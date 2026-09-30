@@ -325,11 +325,15 @@ page = Page
         can have external effects even inside a sandbox: do not provision unintended production
         credentials there. Failed sandbox admission never falls back to host execution.</p>
         <p>A tenant with <code>toolExecution</code> set to <code>none</code> receives no shell,
-        filesystem, process or network tools and never starts a sandbox. It keeps MCP, plans,
+        filesystem or process tools and never starts a sandbox. It keeps MCP, plans,
         memory, learned skills and delegated agents, and uploaded images and PDFs reach the
         model directly. The runner is required only while some tenant uses sandboxed
         execution. Delegated agents of every tenant compose their tools through that tenant's
         policy.</p>
+        <p>A tenant whose own harness configuration enables <code>webFetch</code> receives
+        <code>web_fetch</code> in every tool dialect, with or without a sandbox. The server runs
+        it as a host service under the tenant's allowlist and keeps long pages as tool-output
+        artifacts.</p>
         <p>Operators still own TLS, rate limits, disk/database quotas and backups. Each sandbox
         process tree is limited to two CPUs, 2 GiB RAM without swap and 512 processes.
         Outbound networking denies private/host/metadata destinations; no inbound service

@@ -170,14 +170,27 @@ A tenant can opt out of model-controlled execution:
 ```
 
 `toolExecution` defaults to `"sandbox"`. With `"none"`, the tenant's agents
-receive no shell, filesystem, process, or network tools, and the server never
-starts a sandbox for it. They keep every host service: MCP servers, plans and
-questions, the tenant memory database, learned skills, delegated agents, and
-the readers for retained tool output. Uploaded turn files reach the model
-directly instead of through the workspace: images and PDFs become model
-inputs, and any other file is named in the prompt as unreadable. The server
-requires `--sandbox-runner` only when at least one tenant uses sandboxed
-execution.
+receive no shell, filesystem, or process tools, and the server never starts a
+sandbox for it. They keep every host service: MCP servers, plans and
+questions, the tenant memory database, learned skills, delegated agents,
+`web_fetch` when configured, and the readers for retained tool output.
+Uploaded turn files reach the model directly instead of through the
+workspace: images and PDFs become model inputs, and any other file is named
+in the prompt as unreadable. The server requires `--sandbox-runner` only when
+at least one tenant uses sandboxed execution.
+
+### Web fetching
+
+A tenant gets `web_fetch` when its own harness configuration enables it: the
+`webFetch` object in `<tenant-state-root>/<tenant id>/home/.haskell-agent/config.json`,
+with the same fields as the CLI configuration. The server offers the tool in
+every tool dialect and runs it in the server process as a host service, for
+sandboxed tenants and tenants without tool execution alike. It reaches only
+the configured `allowedDomains` over the default HTTP and HTTPS ports, checks
+every redirect against that allowlist, and refuses non-public addresses.
+Pages over `maxInlineBytes` are kept as tool-output artifacts for
+`read_tool_output` and `search_tool_output`. Delegated agents do not receive
+the tool.
 
 ### Delegated agents
 

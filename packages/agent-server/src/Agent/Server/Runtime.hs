@@ -1614,6 +1614,7 @@ nativeHooks environment control sessionId cwd dialect = NativeRunHooks
                 { nativeProviderFallback = False
                 , nativeProviderHostedTools = False
                 , nativeHostExtensions = False
+                , nativeHostWebFetch = True
                 , nativeMcpTools = True
                 , nativeCollaboration = hostCollaboration
                 , nativeProviderNativeTools = False

@@ -26,10 +26,24 @@ spec :: Spec
 spec = describe "local tool startup" do
     it "requires both host extensions and the Grok dialect for web-fetch and LSP" do
         forM_ [False, True] \host ->
-            forM_ [CodexDialect, GrokBuildDialect] \dialect ->
+            forM_ [CodexDialect, GrokBuildDialect] \dialect -> do
                 let policy = resolveLocalToolPolicy settings
                         { localHostExtensions = host, localDialectId = dialect }
-                in policy.localGrokToolsEnabled
+                policy.localGrokToolsEnabled
+                    `shouldBe` (host && dialect == GrokBuildDialect)
+                policy.localWebFetchEnabled
+                    `shouldBe` (host && dialect == GrokBuildDialect)
+
+    it "offers web-fetch as a host service in every dialect without LSP" do
+        forM_ [False, True] \host ->
+            forM_ [CodexDialect, GrokBuildDialect] \dialect -> do
+                let policy = resolveLocalToolPolicy settings
+                        { localHostExtensions = host
+                        , localHostWebFetch = True
+                        , localDialectId = dialect
+                        }
+                policy.localWebFetchEnabled `shouldBe` True
+                policy.localGrokToolsEnabled
                     `shouldBe` (host && dialect == GrokBuildDialect)
 
     it "only makes computer use available for OpenAI on Linux and macOS" do
@@ -46,7 +60,7 @@ spec = describe "local tool startup" do
                 , localDialectId = CodexDialect
                 , localComputerUseEnabled = False
                 }
-        policy `shouldBe` LocalToolPolicy False True False
+        policy `shouldBe` LocalToolPolicy False False True False
 
     it "never exposes computer use without a supported runtime" do
         let policy = resolveLocalToolPolicy settings { localPlatform = "mingw32" }
@@ -54,7 +68,7 @@ spec = describe "local tool startup" do
         (resolveLocalToolPolicy settings).localComputerToolExposed `shouldBe` True
 
     it "does not evaluate disabled acquisition factories or finalizers" do
-        let disabled = selectLocalToolAcquisitions (LocalToolPolicy False False False)
+        let disabled = selectLocalToolAcquisitions (LocalToolPolicy False False False False)
                 ("empty LSP" :: Text)
                 (error "disabled factories were evaluated" :: LocalToolAcquisitions Text Text Text)
         withSessionResourceScopes \scopes -> do
@@ -89,6 +103,20 @@ spec = describe "local tool startup" do
             resources <- acquireToolStartup scopes (startupFor selected (pure ()))
             isNothing resources.startupWebFetch `shouldBe` True
         readIORef errors `shouldReturn` ["webFetch allowedDomains must not contain empty entries"]
+
+    it "acquires host-service web-fetch without the Grok LSP" do
+        released <- newIORef []
+        let policy = resolveLocalToolPolicy settings
+                { localHostExtensions = False
+                , localHostWebFetch = True
+                , localDialectId = CodexDialect
+                }
+            selected = selectLocalToolAcquisitions policy "empty LSP" $
+                factories released
+        withSessionResourceScopes \scopes -> do
+            resources <- acquireToolStartup scopes (startupFor selected (pure ()))
+            resources.startupWebFetch `shouldBe` Just "web"
+            resources.startupLsp `shouldBe` "empty LSP"
 
     it "retains an available computer runtime even when the tool is not exposed" do
         released <- newIORef []
@@ -173,6 +201,7 @@ spec = describe "local tool startup" do
 settings :: LocalToolSettings
 settings = LocalToolSettings
     { localHostExtensions = True
+    , localHostWebFetch = False
     , localDialectId = GrokBuildDialect
     , localProvider = OpenAIProvider
     , localPlatform = "linux"

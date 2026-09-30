@@ -11,8 +11,10 @@ import Agent.ToolDispatch
     , dispatchToolCall
     , functionToolCall
     )
+import Agent.Tools.OutputArtifact (readOutputArtifact)
 import Agent.Tools.Types
     ( AppTool(..)
+    , ToolEnv
     , appToolHandlers
     , defaultToolEnv
     , setToolSessionTmp
@@ -147,6 +149,35 @@ spec = describe "web_fetch and LSP runtime support" do
         rendered `shouldSatisfy` Text.isInfixOf "Hello world"
         rendered `shouldSatisfy` Text.isInfixOf "- One"
         rendered `shouldNotSatisfy` Text.isInfixOf "steal"
+
+    it "saves long pages to a scratch file for read_file by default" $
+        withTempDir "agent-web-fetch-scratch-" \directory -> do
+            let root = unsafeEncodeUtf directory
+            env <- defaultToolEnv root
+            setToolSessionTmp env (Just root)
+            rendered <- renderLongPage OverflowToScratchFile env
+            rendered `shouldSatisfy` Text.isInfixOf "0123456789"
+            rendered `shouldNotSatisfy` Text.isInfixOf "TAIL-OF-PAGE"
+            let savedPath =
+                    Text.unpack
+                        (between
+                            "Full content saved to: "
+                            ". Use read_file with offsets and limits"
+                            rendered)
+            BS.readFile savedPath `shouldReturn` Text.encodeUtf8 longPage
+
+    it "keeps long pages as tool-output artifacts for host services" do
+        env <- defaultToolEnv (unsafeEncodeUtf ".")
+        rendered <- renderLongPage OverflowToOutputArtifact env
+        rendered `shouldSatisfy` Text.isInfixOf "0123456789"
+        rendered `shouldNotSatisfy` Text.isInfixOf "TAIL-OF-PAGE"
+        rendered `shouldNotSatisfy` Text.isInfixOf "read_file"
+        let handle =
+                between
+                    "tool-output artifact "
+                    ". Use read_tool_output or search_tool_output"
+                    rendered
+        readOutputArtifact env handle `shouldReturn` Right longPage
 
     it "encodes byte-accurate LSP Content-Length framing" do
         let value = object ["jsonrpc" .= ("2.0" :: Text.Text), "id" .= (1 :: Int)]
@@ -496,6 +527,34 @@ callLsp tool arguments =
 
 fromStringBytes :: String -> BS.ByteString
 fromStringBytes = BS.pack . map (fromIntegral . fromEnum)
+
+longPage :: Text.Text
+longPage = "0123456789TAIL-OF-PAGE"
+
+-- | Render a page just over a ten-byte inline limit.
+renderLongPage :: WebFetchOverflow -> ToolEnv -> IO Text.Text
+renderLongPage overflow env = do
+    runtime <-
+        newWebFetchRuntime
+            overflow
+            defaultHarnessConfig.configWebFetch
+                { webFetchEnabled = True
+                , webFetchAllowedDomains = ["example.com"]
+                , webFetchMaxInlineBytes = 10
+                }
+            env
+            >>= either (fail . Text.unpack) (maybe (fail "web_fetch is disabled") pure)
+    renderFetchedPage runtime FetchedPage
+        { fetchedUrl = "https://example.com/"
+        , fetchedStatus = 200
+        , fetchedContentType = "text/plain"
+        , fetchedBody = Text.encodeUtf8 longPage
+        }
+        >>= either (fail . Text.unpack) pure
+
+between :: Text.Text -> Text.Text -> Text.Text -> Text.Text
+between start end =
+    fst . Text.breakOn end . Text.drop (Text.length start) . snd . Text.breakOn start
 
 withTempDir :: String -> (FilePath -> IO a) -> IO a
 withTempDir prefix action = do

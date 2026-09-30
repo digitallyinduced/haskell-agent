@@ -99,7 +99,7 @@ import Agent.Runtime.SessionLock
 import Agent.CLI.Startup.Auth (startupDie)
 import Agent.CLI.Skills (loadMcpSkillsCatalog)
 import Agent.Runtime.WebFetch
-    ( webFetchRuntimeTool )
+    ( webFetchToolGroup )
 import Agent.Dialect (DialectId(CodexDialect, GrokBuildDialect))
 import Agent.OpenAI.ImageGeneration
     ( clearImageGenerationHistory
@@ -164,7 +164,7 @@ data LocalToolRuntime = LocalToolRuntime
 
 data CodingRuntime = CodingRuntime
     { runtimeCoding :: CodingTools
-    , runtimeExtraTools :: [AppTool]
+    , runtimeExtraToolGroups :: [AppToolGroup]
     , runtimeComputerUse :: Maybe ComputerUse.ComputerUseRuntime
     }
 
@@ -249,9 +249,10 @@ runAgentTools request = withSessionResourceScopes \resources -> do
         (initialContext, initialContextPreload) = startupResources.startupInitialContext
         lspRuntime = lspStartup.lspStartupRuntime
         runtimeCoding = localToolRuntime.localCoding
-        runtimeExtraTools =
-            maybe [] (pure . webFetchRuntimeTool) webFetchRuntime
-                <> maybe [] (pure . lspRuntimeTool) lspRuntime
+        runtimeExtraToolGroups =
+            [ webFetchToolGroup webFetchRuntime
+            , ExecutionToolGroup (maybe [] (pure . lspRuntimeTool) lspRuntime)
+            ]
         codingRuntime = CodingRuntime{..}
     mapM_
         (reportStartupWarning request.startup)
@@ -372,6 +373,7 @@ localToolSettings AgentToolsRequest
     , toolProvider = provider
     } = LocalToolSettings
         { localHostExtensions = nativeCapabilities.nativeHostExtensions
+        , localHostWebFetch = nativeCapabilities.nativeHostWebFetch
         , localDialectId = dialectId
         , localProvider = provider
         , localPlatform = Text.pack os
@@ -586,7 +588,7 @@ assembleSessionToolsRuntime request@AgentToolsRequest
     , runtimeMcpFleet = mcpFleet
     } CodingRuntime
     { runtimeCoding = coding
-    , runtimeExtraTools = extraTools
+    , runtimeExtraToolGroups = extraToolGroups
     , runtimeComputerUse = computerUseRuntime
     } SessionControlRuntime
     { controlSkillInvocationsRef = skillInvocationsRef
@@ -687,17 +689,17 @@ assembleSessionToolsRuntime request@AgentToolsRequest
                 == builtinConnectionId OpenAIProvider
             ]
         surroundingToolGroupsFor selectedComputerTools =
-            [ ExecutionToolGroup extraTools
-            -- MCP clients and their tenant credentials stay in the
-            -- orchestrator process; only execution tools cross a sandbox.
-            , HostToolGroup sessionMcpTools
-            , HostToolGroup persistedSessionTools
-            , HostToolGroup sessionGatewayTools
-            , HostToolGroup sessionDatabaseTools
-            , HostToolGroup sessionLearnedSkillTools
-            , HostToolGroup externalSessionAppTools
-            , HostToolGroup terminalChartTools
-            ]
+            extraToolGroups
+                -- MCP clients and their tenant credentials stay in the
+                -- orchestrator process; only execution tools cross a sandbox.
+                <> [ HostToolGroup sessionMcpTools
+                   , HostToolGroup persistedSessionTools
+                   , HostToolGroup sessionGatewayTools
+                   , HostToolGroup sessionDatabaseTools
+                   , HostToolGroup sessionLearnedSkillTools
+                   , HostToolGroup externalSessionAppTools
+                   , HostToolGroup terminalChartTools
+                   ]
                 <> nativeToolGroups
                 <> [ HostToolGroup imageGenerationTools
                    , ExecutionToolGroup selectedComputerTools
@@ -791,7 +793,7 @@ launchAgentToolsSession codeModeResourceScope AgentToolsRequest{..} ToolStartup
     , runtimeMcpInstructions = mcpInstructions
     } CodingRuntime
     { runtimeCoding = coding
-    , runtimeExtraTools = extraTools
+    , runtimeExtraToolGroups = extraToolGroups
     } initialContext initialContextPreload SessionControlRuntime
     { controlGhciEnabledRef = ghciEnabledRef
     , controlBashEnabledRef = bashEnabledRef
@@ -850,7 +852,7 @@ launchAgentToolsSession codeModeResourceScope AgentToolsRequest{..} ToolStartup
         , dialect
         , effortText
         , stdinControl
-        , extraTools
+        , extraTools = appToolsFromGroups extraToolGroups
         , fullscreen
         , gatewayTools
         , ghciEnabledRef
