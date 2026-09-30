@@ -324,6 +324,16 @@ page = Page
         dangerous-command restrictions still apply. Network access means a shell command
         can have external effects even inside a sandbox: do not provision unintended production
         credentials there. Failed sandbox admission never falls back to host execution.</p>
+        <p>A tenant with <code>toolExecution</code> set to <code>none</code> receives no shell,
+        filesystem or process tools and never starts a sandbox. It keeps MCP, plans,
+        memory, learned skills and delegated agents, and uploaded images and PDFs reach the
+        model directly. The runner is required only while some tenant uses sandboxed
+        execution. Delegated agents of every tenant compose their tools through that tenant's
+        policy.</p>
+        <p>A tenant whose own harness configuration enables <code>webFetch</code> receives
+        <code>web_fetch</code> in every tool dialect, with or without a sandbox. The server runs
+        it as a host service under the tenant's allowlist and keeps long pages as tool-output
+        artifacts.</p>
         <p>Operators still own TLS, rate limits, disk/database quotas and backups. Each sandbox
         process tree is limited to two CPUs, 2 GiB RAM without swap and 512 processes.
         Outbound networking denies private/host/metadata destinations; no inbound service
@@ -479,7 +489,7 @@ options =
     , ("--token-file", "none", "Owner-only single-user bearer file; alternative to AGENT_SERVER_TOKEN.")
     , ("--tenant-registry", "none", "Enable versioned multi-tenant credential registry.")
     , ("--tenant-state-root", "none", "Server-owned tenant storage.")
-    , ("--sandbox-runner", "none", "Trusted runner; use the NixOS service boundary.")
+    , ("--sandbox-runner", "none", "Trusted runner for sandboxed tenants; use the NixOS service boundary.")
     , ("--yolo", "false", "Auto-approve server-turn mutations; distinct from sandbox execution policy.")
     , ("--cors-origin", "none", "Repeat for each explicitly allowed browser origin.")
     , ("--workspace-root", "current directory", "Repeatable canonical local workspace root; registry controls tenant workspaces.")

@@ -228,7 +228,8 @@ the authorization flow.
 
 ## Not implemented
 
-- Image and audio content blocks are described to the model but their bytes
-  are not forwarded.
+- Audio content blocks are described to the model but their bytes are not
+  forwarded. Model-facing tool calls forward up to 16 PNG, JPEG, GIF, or WebP
+  images of at most about 20 MiB each; other images are described the same way.
 - Task identifiers are not persisted across restarts.
 - Icon metadata is retained but the terminal UI does not currently render it.

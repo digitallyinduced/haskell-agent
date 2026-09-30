@@ -15,6 +15,7 @@ import Agent.Server.Sandbox.Worker
     )
 import Agent.Server.Tenant
     ( ResolvedTenant(..)
+    , TenantToolExecution(..)
     , parseTenantId
     )
 import Agent.Dialect (DialectId(CodexDialect))
@@ -639,6 +640,7 @@ withTenantFixture mode action =
                 , resolvedTenantStateDirectory = stateRoot
                 , resolvedTenantDatabase = "ha_test_tenant"
                 , resolvedTenantRuntimeRole = "ha_test_runtime"
+                , resolvedTenantToolExecution = TenantSandboxExecution
                 }
         writeFile modePath (mode <> "\n")
         action tenant modePath

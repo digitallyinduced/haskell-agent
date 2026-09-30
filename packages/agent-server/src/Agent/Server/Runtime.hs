@@ -71,7 +71,12 @@ import Agent.Runtime.Session
     , setSessionArchived
     )
 import Agent.Runtime.Session.Codec (fromStoredMetadata)
-import Agent.Dialect (DialectId)
+import Agent.Dialect
+    ( ChildAgentProtocol(..)
+    , DialectId
+    , dialectChildAgentProtocol
+    , dialectForId
+    )
 import Agent.Loop qualified as Loop
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider
@@ -97,7 +102,11 @@ import Agent.Server.Event
     )
 import Agent.Server.Identifier (newUUIDv7Text)
 import Agent.Server.Runtime.SessionCodec
-import Agent.Server.Runtime.Attachments (withMaterializedTurnFiles)
+import Agent.Server.Runtime.Attachments
+    ( TurnModelInput(..)
+    , inlineTurnFiles
+    , withMaterializedTurnFiles
+    )
 import Agent.Server.RepositoryCheckout qualified as RepositoryCheckout
 import Agent.Server.SessionSetup
     ( SessionEventSink(..)
@@ -121,7 +130,11 @@ import Agent.Server.Supervisor
     , TurnPersistence(..)
     )
 import Agent.Server.Tenant
-    ( ResolvedTenant(..) )
+    ( ResolvedTenant(..)
+    , TenantToolExecution(..)
+    , prepareTenantDirectories
+    )
+import Agent.Server.ToolExecution (composeHostOnlyTools)
 import Agent.Server.Types
 import Agent.Store.Postgres
     ( Store
@@ -281,7 +294,8 @@ openServerRuntime config onTurnOwnerLost = mask \restore -> do
                                                     localTenantId
                                                 , environmentHome =
                                                     config.resolvedHome
-                                                , environmentSandbox = Nothing
+                                                , environmentToolExecution =
+                                                    LocalHostExecution
                                                 , environmentSetups = setups
                                                 , environmentSessionEvents =
                                                     sessionEvents
@@ -313,10 +327,30 @@ data RuntimeEnvironment = RuntimeEnvironment
     , environmentRoot :: !OsPath
     , environmentTenantId :: !TenantId
     , environmentHome :: !FilePath
-    , environmentSandbox :: !(Maybe TenantSandbox)
+    , environmentToolExecution :: !RuntimeToolExecution
     , environmentSetups :: !SessionSetupRegistry
     , environmentSessionEvents :: !(IORef SessionEventSink)
     }
+
+-- | Where model-controlled execution tools run. Every tenant runtime is
+-- restricted; only local single-user mode executes on the host.
+data RuntimeToolExecution
+    = LocalHostExecution
+    | TenantSandboxedExecution !TenantSandbox
+    | TenantWithoutExecution
+
+isRestrictedEnvironment :: RuntimeEnvironment -> Bool
+isRestrictedEnvironment environment =
+    case environment.environmentToolExecution of
+        LocalHostExecution -> False
+        TenantSandboxedExecution _ -> True
+        TenantWithoutExecution -> True
+
+closeRuntimeToolExecution :: RuntimeToolExecution -> IO ()
+closeRuntimeToolExecution = \case
+    TenantSandboxedExecution sandbox -> closeTenantSandbox sandbox
+    LocalHostExecution -> pure ()
+    TenantWithoutExecution -> pure ()
 
 data TenantRuntimeSlot
     = TenantRuntimeOpening
@@ -503,22 +537,20 @@ createTenantRuntime manager tenant = mask \restore ->
     of
         Left err -> pure (Left (storeApiError err))
         Right database ->
-            openTenantSandbox
-                manager.tenantRuntimeMultiConfig.multiTenantSandboxRunner
-                tenant >>= \case
+            openTenantToolExecution manager tenant >>= \case
                     Left err ->
                         pure (Left (tenantRuntimeUnavailable err))
-                    Right sandbox -> do
+                    Right toolExecution -> do
                         let root =
                                 sessionsRoot
                                     (unsafeEncodeUtf tenant.resolvedTenantHome)
                         nativeResult <-
                             tryAny
                                 (restore (newNativeProcessRuntime root))
-                                `onException` closeTenantSandbox sandbox
+                                `onException` closeRuntimeToolExecution toolExecution
                         case nativeResult of
                             Left _ -> do
-                                closeTenantSandbox sandbox
+                                closeRuntimeToolExecution toolExecution
                                 pure
                                     (Left
                                         (tenantRuntimeUnavailable
@@ -527,7 +559,7 @@ createTenantRuntime manager tenant = mask \restore ->
                                 let closeComponents =
                                         closeNativeProcessRuntime native
                                             `finally`
-                                                closeTenantSandbox sandbox
+                                                closeRuntimeToolExecution toolExecution
                                 in restore
                                     (acquireTenantStore
                                         manager.tenantRuntimeStores
@@ -569,8 +601,8 @@ createTenantRuntime manager tenant = mask \restore ->
                                                                         tenant.resolvedTenantId
                                                                     , environmentHome =
                                                                         tenant.resolvedTenantHome
-                                                                    , environmentSandbox =
-                                                                        Just sandbox
+                                                                    , environmentToolExecution =
+                                                                        toolExecution
                                                                     , environmentSetups =
                                                                         setups
                                                                     , environmentSessionEvents =
@@ -584,6 +616,27 @@ createTenantRuntime manager tenant = mask \restore ->
                 <> " lost its liveness fence: "
                 <> reason
             )
+
+-- | A sandbox handle starts no process; its runner launches on the first
+-- execution tool call. Tenants without tool execution never get one.
+openTenantToolExecution
+    :: TenantRuntimeManager
+    -> ResolvedTenant
+    -> IO (Either Text RuntimeToolExecution)
+openTenantToolExecution manager tenant =
+    case tenant.resolvedTenantToolExecution of
+        TenantNoToolExecution ->
+            fmap (const TenantWithoutExecution)
+                <$> prepareTenantDirectories tenant
+        TenantSandboxExecution ->
+            case manager.tenantRuntimeMultiConfig.multiTenantSandboxRunner of
+                Nothing ->
+                    pure
+                        (Left
+                            "sandboxed tool execution requires a sandbox runner")
+                Just runner ->
+                    fmap TenantSandboxedExecution
+                        <$> openTenantSandbox runner tenant
 
 closeTenantRuntimeManager :: TenantRuntimeManager -> IO ()
 closeTenantRuntimeManager manager = mask \restore -> do
@@ -623,7 +676,8 @@ closeRuntimeEnvironment environment =
         `finally`
             ( closeNativeProcessRuntime environment.environmentNative
                 `finally`
-                    ( mapM_ closeTenantSandbox environment.environmentSandbox
+                    ( closeRuntimeToolExecution
+                        environment.environmentToolExecution
                         `finally`
                             TurnStore.closeTurnStoreOwner
                                 environment.environmentTurnStoreOwner
@@ -1372,7 +1426,7 @@ runTurn environment control spec =
                                     case parseReasoningEffort meta.metaEffort of
                                         Left err -> pure (Left err)
                                         Right effort ->
-                                            withMaterializedTurnFiles cwd spec \turnPrompt ->
+                                            withTurnModelInput environment cwd spec \turnInput ->
                                                 withFile "/dev/null" WriteMode \output -> do
                                                     finalOutput <- newIORef Nothing
                                                     let baseHooks =
@@ -1399,9 +1453,11 @@ runTurn environment control spec =
                                                         hooks
                                                         NativeTurnRequest
                                                             { nativeTurnPrompt =
-                                                                turnPrompt
+                                                                turnInput.modelPrompt
                                                             , nativeTurnImages =
-                                                                spec.turnSpecImages
+                                                                turnInput.modelImages
+                                                            , nativeTurnFiles =
+                                                                turnInput.modelFiles
                                                             , nativeTurnSession =
                                                                 NativeResumeSession
                                                                     spec.turnSpecSessionId
@@ -1432,6 +1488,28 @@ runTurn environment control spec =
                                                                             ( Right
                                                                                 . turnExecutionOutput
                                                                             )
+
+-- | Tenants without tool execution cannot open workspace files, so their
+-- uploads reach the model directly; everyone else receives workspace paths.
+withTurnModelInput
+    :: RuntimeEnvironment
+    -> FilePath
+    -> TurnSpec
+    -> (TurnModelInput -> IO (Either Text a))
+    -> IO (Either Text a)
+withTurnModelInput environment cwd spec action =
+    case environment.environmentToolExecution of
+        TenantWithoutExecution -> action (inlineTurnFiles spec)
+        LocalHostExecution -> materialized
+        TenantSandboxedExecution _ -> materialized
+  where
+    materialized =
+        withMaterializedTurnFiles cwd spec \prompt ->
+            action TurnModelInput
+                { modelPrompt = prompt
+                , modelImages = spec.turnSpecImages
+                , modelFiles = []
+                }
 
 nativeClock :: TurnMessageClock -> NativeMessageClock
 nativeClock clock =
@@ -1480,36 +1558,39 @@ nativeHooks environment control sessionId cwd dialect = NativeRunHooks
     , nativeRequestFreshApproval =
         requestFreshToolApproval control.turnControlRequestInput
     , nativeRequestRootAccess =
-        case environment.environmentSandbox of
-            Just _ -> const (pure False)
-            Nothing ->
+        if restricted
+            then const (pure False)
+            else
                 requestRootAccess
                     environment.environmentConfig
                     environment.environmentTenantId
                     control
     , nativeToolGroups = []
+    -- Delegated agents compose through this same hook, so the sandbox
+    -- routing or withheld execution also bounds every child.
     , nativeComposeTools =
-        case environment.environmentSandbox of
-            Nothing -> appToolsFromGroups
-            Just sandbox ->
+        case environment.environmentToolExecution of
+            LocalHostExecution -> appToolsFromGroups
+            TenantSandboxedExecution sandbox ->
                 composeSandboxTools sandbox sessionId cwd dialect
+            TenantWithoutExecution -> composeHostOnlyTools
     , nativePlanHooks = planHooks control
     , nativeInteractionMode = serverInteractionMode environment
     , nativeRegisterInteractionMode = Nothing
     , nativeShellMode = tenantShellMode environment
     , nativeHome =
-        case environment.environmentSandbox of
-            Nothing -> Just (unsafeEncodeUtf environment.environmentHome)
-            Just _ -> Nothing
+        if restricted
+            then Nothing
+            else Just (unsafeEncodeUtf environment.environmentHome)
     , nativeDatabaseStore = Just environment.environmentStore
     , nativeDatabaseScopeNamespace =
-        renderTenantId environment.environmentTenantId
-            <$ environment.environmentSandbox
+        if restricted
+            then Just (renderTenantId environment.environmentTenantId)
+            else Nothing
     , nativeExposeHarnessCatalog = False
     , nativeWorkspaceDiscovery =
-        case environment.environmentSandbox of
-            Nothing -> DiscoverHostWorkspace
-            Just _ ->
+        if restricted
+            then
                 UsePreparedWorkspace NativeDiscoveryContext
                     { nativeDiscoveryHome =
                         unsafeEncodeUtf environment.environmentHome
@@ -1521,30 +1602,47 @@ nativeHooks environment control sessionId cwd dialect = NativeRunHooks
                         defaultProjectSettings
                     , nativeDiscoveryGitBranch = ""
                     , nativeDiscoveryOperatingSystem = "Linux"
-                    , nativeDiscoveryShell = "/bin/bash"
+                    , nativeDiscoveryShell =
+                        case environment.environmentToolExecution of
+                            TenantWithoutExecution -> "none"
+                            _ -> "/bin/bash"
                     }
+            else DiscoverHostWorkspace
     , nativeCapabilities =
-        case environment.environmentSandbox of
-            Nothing -> fullNativeRunCapabilities
-            Just _ -> NativeRunCapabilities
+        if restricted
+            then NativeRunCapabilities
                 { nativeProviderFallback = False
                 , nativeProviderHostedTools = False
                 , nativeHostExtensions = False
+                , nativeHostWebFetch = True
                 , nativeMcpTools = True
-                , nativeCollaboration = False
+                , nativeCollaboration = hostCollaboration
                 , nativeProviderNativeTools = False
                 }
+            else fullNativeRunCapabilities
     , nativeStartupPolicy =
-        case environment.environmentSandbox of
-            Nothing -> hostNativeStartupPolicy
-            Just _ -> restrictedNativeStartupPolicy
+        if restricted
+            then restrictedNativeStartupPolicy
+            else hostNativeStartupPolicy
     }
+  where
+    restricted = isRestrictedEnvironment environment
+    -- Codex collaboration tools are host services whose children compose
+    -- their tools through 'nativeComposeTools'. Other dialects' delegation
+    -- tools still belong to their execution groups.
+    hostCollaboration =
+        case dialectChildAgentProtocol (dialectForId dialect) of
+            CodexCollaborationProtocol -> True
+            GrokTaskProtocol -> False
+            GenericTaskProtocol -> False
+            NoHostChildAgentProtocol -> False
 
 tenantShellMode :: RuntimeEnvironment -> NativeShellMode
 tenantShellMode environment =
-    case environment.environmentSandbox of
-        Nothing -> NativeShellBoth
-        Just _ -> NativeShellBash
+    case environment.environmentToolExecution of
+        LocalHostExecution -> NativeShellBoth
+        TenantSandboxedExecution _ -> NativeShellBash
+        TenantWithoutExecution -> NativeShellNone
 
 serverInteractionMode :: RuntimeEnvironment -> NativeInteractionMode
 serverInteractionMode environment
@@ -1717,9 +1815,9 @@ loadModelOptions environment expected cwd = do
     let home = unsafeEncodeUtf environment.environmentHome
         cwdPath = unsafeEncodeUtf cwd
         catalogRoot =
-            case environment.environmentSandbox of
-                Nothing -> cwdPath
-                Just _ -> home
+            if isRestrictedEnvironment environment
+                then home
+                else cwdPath
     loadGatewayBoundarySnapshotAt home >>= \case
         Left err -> pure (Left (gatewayApiError err))
         Right snapshot ->
@@ -1751,13 +1849,13 @@ loadModelOptions environment expected cwd = do
                                 in pure $
                                     Right
                                         ( catalog
-                                        , case environment.environmentSandbox of
-                                            Nothing -> options
-                                            Just _ ->
+                                        , if isRestrictedEnvironment environment
+                                            then
                                                 filter
                                                     ((/= ClaudeCodeProvider)
                                                         . (.modelTarget.targetProvider))
                                                     options
+                                            else options
                                         )
 
 selectModel

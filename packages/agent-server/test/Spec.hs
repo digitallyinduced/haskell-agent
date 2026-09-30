@@ -11,6 +11,7 @@ import Agent.Server.SessionSetupSpec qualified
 import Agent.Server.SandboxSpec qualified
 import Agent.Server.SupervisorSpec qualified
 import Agent.Server.TenantSpec qualified
+import Agent.Server.ToolExecutionSpec qualified
 import System.Environment (getArgs)
 
 main :: IO ()
@@ -29,5 +30,6 @@ main = do
                 Agent.Server.SessionSetupSpec.spec
                 Agent.Server.SupervisorSpec.spec
                 Agent.Server.TenantSpec.spec
+                Agent.Server.ToolExecutionSpec.spec
                 Agent.Server.SandboxSpec.spec
                 Agent.Server.ApplicationSpec.spec

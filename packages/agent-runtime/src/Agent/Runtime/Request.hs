@@ -12,7 +12,7 @@ module Agent.Runtime.Request
     , validateNativeTurnRequest
     ) where
 
-import Agent.Loop (ImageAttachment)
+import Agent.Loop (FileAttachment, ImageAttachment)
 import Agent.Provider (Provider)
 import Agent.ReasoningEffort (ReasoningEffort)
 import Data.Text (Text)
@@ -57,6 +57,9 @@ data NativeMessageClock = NativeMessageClock
 data NativeTurnRequest = NativeTurnRequest
     { nativeTurnPrompt :: !Text
     , nativeTurnImages :: ![ImageAttachment]
+    -- | Documents supplied inline to the model, for embeddings whose model
+    -- cannot open workspace files.
+    , nativeTurnFiles :: ![FileAttachment]
     , nativeTurnSession :: !NativeSessionTarget
     , nativeTurnProvider :: !(Maybe Provider)
     , nativeTurnModel :: !(Maybe Text)

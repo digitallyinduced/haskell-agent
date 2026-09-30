@@ -63,7 +63,7 @@ import Agent.MCP.Types
       projectRawOr )
 import Agent.ToolDispatch
     ( typedStreamingRichTool, ToolHandlerResult(..), ToolOutcome(..),
-      withToolHandlerStructuredResult )
+      ToolResultImage(..), withToolHandlerStructuredResult )
 import Agent.Tools.Types
     ( AppTool(..),
       ToolOutputMetadata(..),
@@ -559,6 +559,7 @@ appToolForArtifactDirectory artifactDirectory client tool = AppTool
                         -- appended to the text already shown for this call.
                         shown <- newIORef Text.empty
                         fmap richMcpToolResult $ callDiscoveredToolPayloadWith
+                            AttachResultImages
                             artifactDirectory
                             client
                             tool
@@ -664,25 +665,47 @@ callDiscoveredToolWith
     -> Maybe (McpProgress -> IO ())
     -> IO (Either Text Text)
 callDiscoveredToolWith directory client tool arguments progress =
-    fst <$> callDiscoveredToolPayloadWith directory client tool arguments progress
+    (.payloadText) <$>
+        callDiscoveredToolPayloadWith
+            DescribeResultImages directory client tool arguments progress
+
+-- | How image content in a tool result reaches the caller.
+data McpResultImages
+    = DescribeResultImages
+    -- ^ Text-only callers receive a size placeholder.
+    | AttachResultImages
+    -- ^ Rich tool handlers forward supported images to the model.
+    deriving (Eq, Show)
+
+-- | One executed tool call: presentation text, the original envelope, and any
+-- images forwarded to the model.
+data McpToolPayload = McpToolPayload
+    { payloadText :: !(Either Text Text)
+    , payloadEnvelope :: !(Maybe Value)
+    , payloadImages :: ![ToolResultImage]
+    }
+
+textOnlyPayload :: Either Text Text -> Maybe Value -> McpToolPayload
+textOnlyPayload text envelope = McpToolPayload text envelope []
 
 -- Keep the original envelope separate from presentation and local artifact paths.
 -- Both public text calls and rich handlers execute this path exactly once.
 callDiscoveredToolPayloadWith
-    :: Maybe FilePath
+    :: McpResultImages
+    -> Maybe FilePath
     -> McpClient
     -> McpTool
     -> RawJson
     -> Maybe (McpProgress -> IO ())
-    -> IO (Either Text Text, Maybe Value)
-callDiscoveredToolPayloadWith _ client tool _ _
+    -> IO McpToolPayload
+callDiscoveredToolPayloadWith _ _ client tool _ _
     | tool.discoveredName `elem` client.clientConfig.mcpServerExcludedTools =
-        pure (Left "This tool is owned by another integration endpoint.", Nothing)
-callDiscoveredToolPayloadWith artifactDirectory client tool arguments _
+        pure (textOnlyPayload (Left "This tool is owned by another integration endpoint.") Nothing)
+callDiscoveredToolPayloadWith _ artifactDirectory client tool arguments _
     | McpClientInMemory server _ <- client.clientTransport = do
         state <- readTVarIO client.clientLifecycle
         case state of
-            ClientClosed -> pure (Left "MCP server closed", Nothing)
+            ClientClosed -> pure (textOnlyPayload (Left "MCP server closed") Nothing)
             _ -> do
                 outcome <- tryAny $
                     server.toolServerCallTool
@@ -692,11 +715,13 @@ callDiscoveredToolPayloadWith artifactDirectory client tool arguments _
                             Nothing
                             artifactDirectory)
                 pure $ case outcome of
-                    Left _ -> (Left "Internal MCP tool error", Nothing)
-                    Right (Left err) -> (Left (renderMcpError err), Nothing)
+                    Left _ -> textOnlyPayload (Left "Internal MCP tool error") Nothing
+                    Right (Left err) -> textOnlyPayload (Left (renderMcpError err)) Nothing
                     Right (Right result) ->
-                        (renderInMemoryToolResult result, Just (inMemoryToolEnvelope result))
-callDiscoveredToolPayloadWith artifactDirectory client tool arguments onProgress = do
+                        textOnlyPayload
+                            (renderInMemoryToolResult result)
+                            (Just (inMemoryToolEnvelope result))
+callDiscoveredToolPayloadWith images artifactDirectory client tool arguments onProgress = do
     let parameters =
             "name" .= tool.discoveredName
                 <> AesonEncoding.pair "arguments" (rawJsonEncoding arguments)
@@ -708,9 +733,11 @@ callDiscoveredToolPayloadWith artifactDirectory client tool arguments onProgress
             , requestAllowReissue = toolAllowsAutomaticReissue tool
             }
         >>= \case
-        Left err -> pure (Left (renderMcpError err), Nothing)
+        Left err -> pure (textOnlyPayload (Left (renderMcpError err)) Nothing)
         Right result -> do
-            renderedResult <- case normalizeMcpToolResult result of
+            let (normalized, attachedImages) =
+                    normalizeMcpToolResultWith images result
+            renderedResult <- case normalized of
                 Left err -> pure (Left err)
                 Right rendered -> case artifactDirectory of
                     Nothing -> pure (Right rendered)
@@ -718,17 +745,26 @@ callDiscoveredToolPayloadWith artifactDirectory client tool arguments onProgress
                         materializeArtifacts directory
                             (readMcpResourceWithArtifactLimit True client) result
                             >>= pure . fmap (\paths -> Text.intercalate "\n" (rendered : paths))
-            pure (renderedResult, Just (toJSON result))
+            pure McpToolPayload
+                { payloadText = renderedResult
+                , payloadEnvelope = Just (toJSON result)
+                , payloadImages = attachedImages
+                }
 
-richMcpToolResult
-    :: (Either Text Text, Maybe Value) -> Either Text ToolHandlerResult
-richMcpToolResult (rendered, Nothing) =
-    fmap (\text -> ToolHandlerResult text []) rendered
-richMcpToolResult (rendered, Just envelope) =
-    Right $ withToolHandlerStructuredResult envelope $
-        case rendered of
-            Left err -> ToolHandlerResultWithOutcome ("Error: " <> err) [] ToolFailed
-            Right text -> ToolHandlerResult text []
+richMcpToolResult :: McpToolPayload -> Either Text ToolHandlerResult
+richMcpToolResult payload =
+    case payload.payloadEnvelope of
+        Nothing ->
+            fmap
+                (\text -> ToolHandlerResult text payload.payloadImages)
+                payload.payloadText
+        Just envelope ->
+            Right $ withToolHandlerStructuredResult envelope $
+                case payload.payloadText of
+                    Left err ->
+                        ToolHandlerResultWithOutcome
+                            ("Error: " <> err) [] ToolFailed
+                    Right text -> ToolHandlerResult text payload.payloadImages
 
 callDiscoveredToolRichWith
     :: Maybe FilePath
@@ -739,7 +775,8 @@ callDiscoveredToolRichWith
     -> IO (Either Text ToolHandlerResult)
 callDiscoveredToolRichWith directory client tool arguments progress =
     richMcpToolResult <$>
-        callDiscoveredToolPayloadWith directory client tool arguments progress
+        callDiscoveredToolPayloadWith
+            AttachResultImages directory client tool arguments progress
 
 inMemoryToolEnvelope :: McpCallToolResult -> Value
 inMemoryToolEnvelope result =
@@ -771,18 +808,70 @@ renderInMemoryToolResult result =
     in if result.callToolIsError then Left output else Right output
 
 normalizeMcpToolResult :: RawJson -> Either Text Text
-normalizeMcpToolResult result =
+normalizeMcpToolResult =
+    fst . normalizeMcpToolResultWith DescribeResultImages
+
+-- | Render a tool result for the model. When attaching, supported image
+-- blocks become tool-result images and the text refers to them instead of
+-- describing withheld binary content. Failed calls never attach images.
+normalizeMcpToolResultWith
+    :: McpResultImages -> RawJson -> (Either Text Text, [ToolResultImage])
+normalizeMcpToolResultWith images result =
     case Json.decodeEither mcpToolResultDecoder (rawJsonBytes result) of
-        Left _ -> Right (compactRawJson result)
+        Left _ -> (Right (compactRawJson result), [])
         Right (isError, structured, blocks) ->
-            let rendered = mapMaybe renderContentBlock blocks
+            let (rendered, attached)
+                    | isError = (mapMaybe renderContentBlock blocks, [])
+                    | otherwise = renderToolResultBlocks images blocks
                 output
                     | isJust structured && not (null rendered) =
                         compactRawJson result
                     | Just value <- structured = compactRawJson value
                     | not (null rendered) = Text.intercalate "\n" rendered
                     | otherwise = compactRawJson result
-            in if isError then Left output else Right output
+            in if isError then (Left output, []) else (Right output, attached)
+
+-- | Attach the first supported images, in order, up to a bounded count.
+-- Every other block keeps its ordinary rendering.
+renderToolResultBlocks
+    :: McpResultImages -> [McpContentBlock] -> ([Text], [ToolResultImage])
+renderToolResultBlocks images = go 0
+  where
+    go :: Int -> [McpContentBlock] -> ([Text], [ToolResultImage])
+    go _ [] = ([], [])
+    go attachedCount (block : rest)
+        | AttachResultImages <- images
+        , attachedCount < maximumAttachedResultImages
+        , McpImageBlock (Just mimeType) payload <- block
+        , Just image <- attachableResultImage mimeType payload =
+            let (texts, attached) = go (attachedCount + 1) rest
+            in ("[image " <> mimeType <> " attached]" : texts, image : attached)
+        | otherwise =
+            let (texts, attached) = go attachedCount rest
+            in (maybe texts (: texts) (renderContentBlock block), attached)
+
+-- | Image types accepted by the Responses image-input API. The agent loop
+-- still validates and normalizes the decoded bytes before a provider sees
+-- them, so this only bounds what a server can make the harness retain.
+attachableResultImage :: Text -> Text -> Maybe ToolResultImage
+attachableResultImage mimeType payload
+    | normalizedMime `elem` ["image/png", "image/jpeg", "image/gif", "image/webp"]
+    , not (Text.null payload)
+    , Text.length payload <= maximumAttachedResultImageBase64 =
+        Just ToolResultImage
+            { imageUrl = "data:" <> normalizedMime <> ";base64," <> payload
+            , imageDetail = Just "high"
+            }
+    | otherwise = Nothing
+  where
+    normalizedMime = Text.toLower (Text.strip mimeType)
+
+maximumAttachedResultImages :: Int
+maximumAttachedResultImages = 16
+
+-- | About 20 MiB decoded, the largest image a turn may attach directly.
+maximumAttachedResultImageBase64 :: Int
+maximumAttachedResultImageBase64 = 28 * 1024 * 1024
 
 -- | Flatten a resolved prompt into one user turn. Assistant-authored
 -- messages are labelled so the model can tell the two roles apart.
@@ -807,7 +896,8 @@ renderMcpPromptResult result =
 
 data McpContentBlock
     = McpTextBlock !Text
-    | McpImageBlock !(Maybe Text) !Int
+    | McpImageBlock !(Maybe Text) !Text
+    -- ^ MIME type and base64 payload.
     | McpAudioBlock !(Maybe Text) !Int
     | McpResourceLinkBlock !Text !(Maybe Text) !(Maybe Text) !(Maybe Text)
     | McpEmbeddedResourceBlock !McpResourceContent
@@ -817,9 +907,10 @@ data McpContentBlock
 renderContentBlock :: McpContentBlock -> Maybe Text
 renderContentBlock = \case
     McpTextBlock text -> Just text
-    McpImageBlock mimeType size ->
+    McpImageBlock mimeType payload ->
         Just ("[image " <> fromMaybe "image" mimeType <> ", "
-            <> Text.pack (show size) <> " base64 bytes; binary content is not shown]")
+            <> Text.pack (show (Text.length payload))
+            <> " base64 bytes; binary content is not shown]")
     McpAudioBlock mimeType size ->
         Just ("[audio " <> fromMaybe "audio" mimeType <> ", "
             <> Text.pack (show size) <> " base64 bytes; binary content is not shown]")
@@ -860,7 +951,7 @@ contentBlockDecoder = Json.object do
         "image" ->
             McpImageBlock
                 <$> Json.optionalKey "mimeType" Json.text
-                <*> (maybe 0 Text.length <$> Json.optionalKey "data" Json.text)
+                <*> (fromMaybe "" <$> Json.optionalKey "data" Json.text)
         "audio" ->
             McpAudioBlock
                 <$> Json.optionalKey "mimeType" Json.text

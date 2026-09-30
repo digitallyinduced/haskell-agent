@@ -1,10 +1,14 @@
--- | Disabled-by-default, policy-bound client-side URL fetching for Grok.
+-- | Disabled-by-default, policy-bound client-side URL fetching.
 module Agent.Runtime.WebFetch
     ( WebFetchRuntime
+    , WebFetchOverflow(..)
     , AllowedDomain(..)
+    , FetchedPage(..)
     , newWebFetchRuntime
     , closeWebFetchRuntime
     , webFetchRuntimeTool
+    , webFetchToolGroup
+    , renderFetchedPage
     , parseAllowedDomain
     , domainAllowed
     , htmlToMarkdown
@@ -18,7 +22,8 @@ import Agent.GrokBuild.Dialect.WebFetch
     , webFetchTool
     )
 import Agent.OsPath (unsafeToFilePath)
-import Agent.Tools.Types (AppTool, ToolEnv(..))
+import Agent.Tools.OutputArtifact (writeOutputArtifact)
+import Agent.Tools.Types (AppTool, AppToolGroup(..), ToolEnv(..))
 import Control.Concurrent.MVar
     ( MVar
     , modifyMVar
@@ -85,10 +90,21 @@ data AllowedDomain = AllowedDomain
     }
     deriving (Eq, Show)
 
+-- | Where a page over the inline limit keeps its full content.
+data WebFetchOverflow
+    = OverflowToScratchFile
+    -- ^ A session scratch file, read back with @read_file@.
+    | OverflowToOutputArtifact
+    -- ^ A tool-output artifact, read back with @read_tool_output@ or
+    -- @search_tool_output@. For hosts whose file tools, if any, cannot reach
+    -- the harness's scratch storage.
+    deriving (Eq, Show)
+
 data WebFetchRuntime = WebFetchRuntime
     { runtimeManager :: !Http.Manager
     , runtimeAllowedDomains :: ![AllowedDomain]
     , runtimeConfig :: !WebFetchConfig
+    , runtimeOverflow :: !WebFetchOverflow
     , runtimeToolEnv :: !ToolEnv
     , runtimeArtifactCounter :: !(MVar Int)
     }
@@ -107,10 +123,11 @@ data HopResult
 -- | Build the optional runtime. Disabled configuration returns 'Nothing';
 -- malformed allowlist entries fail before a tool can be advertised.
 newWebFetchRuntime
-    :: WebFetchConfig
+    :: WebFetchOverflow
+    -> WebFetchConfig
     -> ToolEnv
     -> IO (Either Text (Maybe WebFetchRuntime))
-newWebFetchRuntime config env
+newWebFetchRuntime overflow config env
     | not config.webFetchEnabled = pure (Right Nothing)
     | otherwise =
         case traverse parseAllowedDomain config.webFetchAllowedDomains of
@@ -128,6 +145,7 @@ newWebFetchRuntime config env
                             { runtimeManager = manager
                             , runtimeAllowedDomains = allowed
                             , runtimeConfig = config
+                            , runtimeOverflow = overflow
                             , runtimeToolEnv = env
                             , runtimeArtifactCounter = counter
                             }
@@ -143,6 +161,12 @@ closeWebFetchRuntime _ =
 webFetchRuntimeTool :: WebFetchRuntime -> AppTool
 webFetchRuntimeTool runtime =
     webFetchTool (runWebFetch runtime)
+
+-- | Fetching runs in the harness process and reaches only allowlisted public
+-- hosts, like the MCP clients, so it is a host service rather than execution.
+webFetchToolGroup :: Maybe WebFetchRuntime -> AppToolGroup
+webFetchToolGroup =
+    HostToolGroup . maybe [] (pure . webFetchRuntimeTool)
 
 runWebFetch
     :: WebFetchRuntime
@@ -357,7 +381,7 @@ renderFetchedPage runtime page =
                                     <> "\n\n[web_fetch content truncated; "
                                     <> err
                                     <> "]"
-                        Right path ->
+                        Right location ->
                             pure . Right $
                                 header
                                     <> truncateUtf8 cap content
@@ -365,10 +389,9 @@ renderFetchedPage runtime page =
                                     <> Text.pack (show cap)
                                     <> " of "
                                     <> Text.pack (show bytes)
-                                    <> " bytes shown. Full content saved to: "
-                                    <> Text.pack path
-                                    <> ". Use read_file with offsets and limits \
-                                       \to inspect it.]"
+                                    <> " bytes shown. "
+                                    <> location
+                                    <> "]"
 
 decodeContent
     :: Text
@@ -416,12 +439,37 @@ isTextMime mime =
         || "+json" `Text.isSuffixOf` mime
         || "+xml" `Text.isSuffixOf` mime
 
+-- | Keep an oversized page's full content and say how the model reads it.
 saveOverflow
     :: WebFetchRuntime
     -> Text
     -> Text
+    -> IO (Either Text Text)
+saveOverflow runtime contentType content =
+    case runtime.runtimeOverflow of
+        OverflowToScratchFile ->
+            fmap
+                (fmap \path ->
+                    "Full content saved to: "
+                        <> Text.pack path
+                        <> ". Use read_file with offsets and limits to \
+                           \inspect it.")
+                (saveScratchFile runtime contentType content)
+        OverflowToOutputArtifact ->
+            fmap
+                (fmap \handle ->
+                    "Full content stored as tool-output artifact "
+                        <> handle
+                        <> ". Use read_tool_output or search_tool_output \
+                           \with this handle to inspect it.")
+                (writeOutputArtifact runtime.runtimeToolEnv content)
+
+saveScratchFile
+    :: WebFetchRuntime
+    -> Text
+    -> Text
     -> IO (Either Text FilePath)
-saveOverflow runtime contentType content = do
+saveScratchFile runtime contentType content = do
     sessionTmp <- readIORef runtime.runtimeToolEnv.toolSessionTmp
     case sessionTmp of
         Nothing ->

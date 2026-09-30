@@ -154,6 +154,49 @@ spec = describe "server configuration" do
                         expectationFailure
                             "accepted a tenant-writable sandbox runner"
 
+    it "resolves tenants without tool execution without a sandbox runner" do
+        withTokenEnvironmentUnset $
+            withSingleTenantRegistry (Just "none") \root registryPath -> do
+                trustPolicy <-
+                    trustedPathPolicyWithin root
+                        >>= either (fail . Text.unpack) pure
+                resolved <-
+                    resolveServerConfigWithTrustPolicy
+                        trustPolicy
+                        defaultServerConfig
+                            { serverTenantRegistry = Just registryPath
+                            , serverTenantStateRoot = Just (root </> "state")
+                            }
+                case resolved of
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right config -> case config.resolvedServerMode of
+                        MultiTenantMode multi ->
+                            multi.multiTenantSandboxRunner `shouldBe` Nothing
+                        LocalSingleUserMode ->
+                            expectationFailure
+                                "a tenant registry resolved to local mode"
+
+    it "requires a sandbox runner for sandboxed tenants" do
+        withTokenEnvironmentUnset $
+            withSingleTenantRegistry Nothing \root registryPath -> do
+                trustPolicy <-
+                    trustedPathPolicyWithin root
+                        >>= either (fail . Text.unpack) pure
+                resolved <-
+                    resolveServerConfigWithTrustPolicy
+                        trustPolicy
+                        defaultServerConfig
+                            { serverTenantRegistry = Just registryPath
+                            , serverTenantStateRoot = Just (root </> "state")
+                            }
+                case resolved of
+                    Left err ->
+                        err `shouldBe`
+                            "tenants with sandboxed tool execution require --sandbox-runner"
+                    Right _ ->
+                        expectationFailure
+                            "resolved a sandboxed tenant without a runner"
+
     it "confines an explicit build trust policy to its declared root" do
         withSystemTempDirectory "agent-server-trust" \outer -> do
             let trustedRoot = outer </> "trusted"
@@ -177,6 +220,48 @@ spec = describe "server configuration" do
                 Right _ ->
                     expectationFailure
                         "accepted a regular file as a trust boundary"
+
+-- | One tenant with an optional explicit @toolExecution@ mode.
+withSingleTenantRegistry
+    :: Maybe Text.Text
+    -> (FilePath -> FilePath -> IO value)
+    -> IO value
+withSingleTenantRegistry toolExecution action =
+    withSystemTempDirectory "agent-server-config" \root -> do
+        let workspace = root </> "workspace"
+            tokenPath = root </> "token"
+            registryPath = root </> "registry.json"
+        createDirectory workspace
+        writeFile tokenPath
+            "tenant-secret-with-at-least-thirty-two-bytes\n"
+        setFileMode tokenPath 0o600
+        LazyByteString.writeFile registryPath $
+            encode $
+                object
+                    [ "version" .= (1 :: Int)
+                    , "tenants" .=
+                        [ object $
+                            [ "id" .=
+                                ("018f6a14-7d52-7a52-9c00-66d5e7d70334"
+                                    :: String)
+                            , "workspaceRoot" .= workspace
+                            , "credentials" .=
+                                [ object
+                                    [ "id" .=
+                                        ("018f6a14-7d52-7a52-9c00-66d5e7d70335"
+                                            :: String)
+                                    , "tokenFile" .= tokenPath
+                                    ]
+                                ]
+                            ]
+                            <> maybe
+                                []
+                                (\mode -> ["toolExecution" .= mode])
+                                toolExecution
+                        ]
+                    ]
+        setFileMode registryPath 0o600
+        action root registryPath
 
 withPrivateTokenFile
     :: ByteString.ByteString

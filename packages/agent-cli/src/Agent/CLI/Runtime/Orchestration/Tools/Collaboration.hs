@@ -21,7 +21,11 @@ import Agent.CLI.Prompt (subscriptionSubagentModelGuidance)
 import Agent.CLI.Runtime.Orchestration.Startup (reportStartupWarning)
 import Agent.CLI.Runtime.Orchestration.Tools.Model
 import Agent.CLI.Runtime.Orchestration.Tools.Request
-import Agent.CLI.Runtime.Orchestration.Types (NativeRunCapabilities(..))
+import Agent.CLI.Runtime.Orchestration.Types
+    ( NativeRunCapabilities(..)
+    , nativeAllowsWorkspaceCreation
+    )
+import Agent.CLI.Session.Runtime.Types (StartupRuntime(..))
 import Agent.Runtime.Session (Persistence(..))
 import Agent.Runtime.SessionLock (SessionLock)
 import Agent.CLI.Subagents.Runtime
@@ -80,6 +84,7 @@ acquireCollaborationRuntime
     -> Acquire CollaborationRuntime
 acquireCollaborationRuntime AgentToolsRequest
     { resumeLock
+    , startup
     , options
     , projectSettings
     , cwd
@@ -191,7 +196,10 @@ acquireCollaborationRuntime AgentToolsRequest
                         collaborationSubagentSessions
                         collaborationResolveChildModel
                         collaborationAgentTypes)
-                , multiCreateWorktree = Just collaborationCreateWorktree
+                , multiCreateWorktree =
+                    if nativeAllowsWorkspaceCreation startup.startupNativeHooks
+                        then Just collaborationCreateWorktree
+                        else Nothing
                 , multiPrepareSpawn = Just
                     (prepareCollaborationSpawn
                         provider

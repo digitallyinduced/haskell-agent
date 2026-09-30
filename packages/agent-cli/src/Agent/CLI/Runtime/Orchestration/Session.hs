@@ -113,7 +113,9 @@ import Agent.CLI.Runtime.Orchestration.Types
     ( NativeRunCapabilities(..)
     , NativeRunHooks(nativeCapabilities, nativeWorkspaceDiscovery)
     , fullNativeRunCapabilities
+    , nativeAllowsWorkspaceCreation
     , nativeLoadsHostWorkspaceContext
+    , nativeToolComposer
     )
 import Agent.CLI.Runtime.Recap (runSessionRecap, runSessionTurnSummary)
 import Agent.CLI.Runtime.Repl
@@ -187,7 +189,8 @@ import Agent.CLI.Subagents.Runtime
                       subagentGhciEnabled, subagentBashEnabled,
                       subagentPolicy, subagentPlanHooks, subagentSkillRoots,
                       subagentAllowedRoots, subagentToolResourceArbiter, subagentRootAccessRequest,
-                      subagentParams, subagentMcpTools, subagentRegistry,
+                      subagentParams, subagentMcpTools, subagentComposeTools,
+                      subagentRegistry,
                       subagentSessions, subagentStoreRoot, subagentTypes,
                       subagentLegacyTarget, subagentConnection, subagentMapModel,
                       subagentCreateWorktree, subagentSessionTmp,
@@ -783,6 +786,8 @@ buildSessionSubagentRuntime AgentSessionRequest
                     (Just (unsafeToFilePath sessionTmp)) mcpFleet
                     <> MCP.mcpFleetResourceTools mcpFleet
                 else mcpTools
+        , subagentComposeTools =
+            nativeToolComposer startup.startupNativeHooks
         , subagentRegistry = registry
         , subagentSessions = subagentSessions
         , subagentStoreRoot = subagentStoreRoot
@@ -790,7 +795,10 @@ buildSessionSubagentRuntime AgentSessionRequest
         , subagentLegacyTarget = legacySubagentTarget
         , subagentConnection = inferredTarget.targetConnectionId
         , subagentMapModel = transportModel
-        , subagentCreateWorktree = Just createSubagentWorktree
+        , subagentCreateWorktree =
+            if nativeAllowsWorkspaceCreation startup.startupNativeHooks
+                then Just createSubagentWorktree
+                else Nothing
         , subagentSessionTmp = toolEnv.toolSessionTmp
         , subagentShellEnvironment = toolEnv.toolShellEnvironment
         , subagentShellEnvironmentLock = toolEnv.toolShellEnvironmentLock

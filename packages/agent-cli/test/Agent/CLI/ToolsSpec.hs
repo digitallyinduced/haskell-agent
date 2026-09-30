@@ -64,6 +64,13 @@ import Agent.Codex.Dialect.Runtime
     , newCodexCodingTools
     )
 import Agent.Tools.MultiAgents (MultiAgentContext(..), multiAgentTools)
+import Agent.CLI.Subagents.Runtime (childToolGroups)
+import Agent.Runtime.Tools.Dialects
+    ( CodingTools(..)
+    , codingToolsFor
+    , filterBashTools
+    , filterGhciTools
+    )
 import Agent.Tools.CodeMode.Tool (ToolMode(..))
 import Agent.Tools.CodeMode.Backend (CodeModeBackend(..))
 import Agent.Tools.FileSystem.Grep (grepTool)
@@ -71,6 +78,8 @@ import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
     , ToolSchema(..)
+    , appToolsFromGroups
+    , hostToolsFromGroups
     , withAsyncToolCalls
     , defaultToolEnv
     , freeformApplyPatchAppTool
@@ -79,7 +88,7 @@ import Agent.Tools.Types
     , rawJsonAppTool
     )
 import Control.Exception.Safe (bracket)
-import Control.Monad (join)
+import Control.Monad (forM_, join)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import Data.IORef (newIORef, readIORef, modifyIORef')
@@ -757,6 +766,60 @@ spec = describe "schemasFromAppTools" do
                         ("expected one nested tool, got " <> show other)
             other -> expectationFailure
                 ("expected collaboration namespace, got " <> show other)
+
+    it "hands child tools to the root composer as the flat child surface" do
+        bracket
+            (newSubagentRegistry
+                defaultSubagentConfig
+                (unsafeEncodeUtf "/tmp")
+                (\_ _ _ _ -> pure (Left LoopNoResponseId))
+                (\_ _ -> pure ()))
+            closeSubagentRegistry
+            \registry -> do
+                env <- defaultToolEnv (unsafeEncodeUtf "/tmp")
+                coding <-
+                    codingToolsFor
+                        codexDialect
+                        env
+                        Nothing
+                        Nothing
+                        Nothing
+                        (Just MultiAgentContext
+                            { multiRegistry = registry
+                            , multiCwd = unsafeEncodeUtf "/tmp"
+                            , multiSelfId = Nothing
+                            , multiDepth = 1
+                            , multiTaskPath = taskPathRoot
+                            , multiRootTurnId = pure Nothing
+                            , multiResumeFromDisk = Nothing
+                            , multiCreateWorktree = Nothing
+                            , multiPrepareSpawn = Nothing
+                            , multiSendToRoot = Nothing
+                            , multiSpawnModelGuidance = Nothing
+                            , multiAllowedChildModels = Nothing
+                            , multiResolveChildModel = Nothing
+                            , multiChildModelAllowed = Nothing
+                            })
+                let names = map (.appToolName)
+                    mcp =
+                        [ jsonAppTool "docs__search" "" [] AlwaysReadOnly
+                            (noArgsTool "docs__search" (pure (Right "")))
+                        ]
+                    groups =
+                        childToolGroups False True id mcp coding.codingAppToolGroups
+                names (appToolsFromGroups groups)
+                    `shouldBe`
+                        names
+                            (filterGhciTools False
+                                (filterBashTools True coding.codingAppTools)
+                                <> mcp)
+                -- A composer that withholds execution still gets delegation
+                -- and MCP as host services.
+                forM_ ["spawn_agent", "docs__search"] \name ->
+                    names (hostToolsFromGroups groups) `shouldContain` [name]
+                forM_ ["shell_command", "read_file"] \name ->
+                    names (hostToolsFromGroups groups) `shouldNotContain` [name]
+                coding.codingClose
 
     it "keeps reserved collaboration schemas exact and exposes worktree spawn separately" do
         bracket

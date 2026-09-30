@@ -3,8 +3,13 @@
 -- :main
 module Main (main) where
 
+import Agent.Loop qualified as Loop
 import Agent.Server.Identifier (newUUIDv7Text)
-import Agent.Server.Runtime.Attachments (withMaterializedTurnFiles)
+import Agent.Server.Runtime.Attachments
+    ( TurnModelInput(..)
+    , inlineTurnFiles
+    , withMaterializedTurnFiles
+    )
 import Agent.Server.Types
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.Async (cancel, waitCatch, withAsync)
@@ -73,7 +78,32 @@ main = withWorkspace \cwd -> do
     empty
     untouched <- withMaterializedTurnFiles (cwd </> "absent") (spec {turnSpecFiles = []}) (pure . Right)
     check (untouched == Right "Inspect this") "empty attachment path changed"
-    putStrLn "Attachment scope: 6 checks passed"
+    let inline = inlineTurnFiles spec
+            { turnSpecPrompt = "Book this"
+            , turnSpecFiles =
+                [ FileAttachment "receipt.pdf" "application/pdf" "%PDF-1.7"
+                , FileAttachment "photo.jpg" "image/JPEG" "\xff\xd8\xff"
+                , FileAttachment "notes.txt" "text/plain" "hello"
+                ]
+            }
+    case inline.modelImages of
+        [Loop.ImageAttachment mime bytes] ->
+            check (mime == "image/jpeg" && bytes == "\xff\xd8\xff") "inline image changed"
+        _ -> fail "expected one inline image"
+    case inline.modelFiles of
+        [Loop.FileAttachment name mime bytes] ->
+            check
+                (name == Just "receipt.pdf"
+                    && mime == "application/pdf"
+                    && bytes == "%PDF-1.7")
+                "inline PDF changed"
+        _ -> fail "expected one inline PDF"
+    check ("Book this" `Text.isPrefixOf` inline.modelPrompt) "inline prompt changed"
+    check ("- notes.txt (text/plain)" `Text.isInfixOf` inline.modelPrompt) "unreadable upload not named"
+    check (not ("receipt.pdf" `Text.isInfixOf` inline.modelPrompt)) "readable upload named as unreadable"
+    listDirectory attachments >>= \entries ->
+        check (null entries) "inline uploads touched the workspace"
+    putStrLn "Attachment scope: 12 checks passed"
 
 check :: Bool -> String -> IO ()
 check condition message = unless condition (fail message)

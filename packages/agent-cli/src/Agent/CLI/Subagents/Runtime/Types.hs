@@ -25,7 +25,7 @@ import Agent.Tools.MultiAgents
     , SubagentWorktree
     )
 import Agent.Tools.PlanMode (PlanModeHooks)
-import Agent.Tools.Types (AppTool, ToolEnv, OutputArtifactMemoryStore, ShellEnvironment)
+import Agent.Tools.Types (AppTool, AppToolGroup, ToolEnv, OutputArtifactMemoryStore, ShellEnvironment)
 import Agent.Tools.ResourceArbiter (ToolResourceArbiter)
 import Agent.Dialect (DialectId)
 import Control.Concurrent.MVar (MVar)
@@ -75,6 +75,10 @@ data SubagentRuntime = SubagentRuntime
     , subagentOutputMemoryStore :: !OutputArtifactMemoryStore
     , subagentOutputMemoryCap :: !Int
     , subagentMcpTools :: ![AppTool]
+    -- | The root run's tool composition. Children never flatten their tool
+    -- groups themselves, so an embedding's sandbox routing or execution
+    -- policy also bounds every delegated agent.
+    , subagentComposeTools :: !([AppToolGroup] -> [AppTool])
     , subagentParams :: !(SessionRequestState)
     , subagentRegistry :: !SubagentRegistry
     , subagentSessions :: !(IORef (Map SubagentId SubagentSession))
