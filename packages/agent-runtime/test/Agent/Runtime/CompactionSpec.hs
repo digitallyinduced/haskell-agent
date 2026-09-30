@@ -1446,6 +1446,125 @@ spec = do
     TaskPlan.spec
 
     describe "autoCompactOpenAiBackendWith" do
+        describe "provider context-limit recovery" do
+            let contextError =
+                    ProviderError ContextWindowExceeded "Prompt is too long" Nothing
+                params = (defaultResponseCreateParams :: ResponseCreateParams)
+                    { model = Just "gpt-6.1-sol" }
+                history = [userTextItem "old context"]
+                output = TurnOutput
+                    { responseId = "resp-recovered"
+                    , toolCalls = []
+                    , assistantText = Just "ok"
+                    , tokenUsage = TokenUsage 20 5 0
+                    , contextUsage = Just (TokenUsage 20 5 0)
+                    , providerTelemetry = Nothing
+                    , completion = TurnCompleted
+                    }
+
+            it "proactively compacts GPT-6.1 Sol at Codex's 244800-token default" do
+                contextState <- newIORef
+                    (Just (reportedOccupancy 244_800 (length history)))
+                compactCalls <- newIORef (0 :: Int)
+                let sender _request = do
+                        modifyIORef' compactCalls (+ 1)
+                        pure (Right remoteCompactionResponse)
+                    base = Backend \state previous _inputs _onEvent -> do
+                        previous `shouldBe` Nothing
+                        state.backendItems `shouldSatisfy` hasCompactionCheckpoint
+                        pure (successful state output)
+                    backend = autoCompactOpenAiBackendWithSender
+                        Nothing sender (const (pure ())) (pure params)
+                        contextState base
+                result <- backend.submitTurn
+                    (initialBackendSnapshot history) (Just "resp-old")
+                    [UserMessage "continue"] (const (pure ()))
+                result `shouldSatisfy` either (const False) (const True)
+                readIORef compactCalls `shouldReturn` 1
+
+            it "compacts below the estimated threshold and durably preserves pending input" do
+                contextState <- newIORef
+                    (Just (reportedOccupancy 200_000 (length history)))
+                requests <- newIORef []
+                compactCalls <- newIORef (0 :: Int)
+                installed <- newIORef []
+                recordedUsage <- newIORef []
+                let sender _request = do
+                        modifyIORef' compactCalls (+ 1)
+                        pure (Right remoteCompactionResponse)
+                    base = Backend \state previous inputs _onEvent -> do
+                        preceding <- readIORef requests
+                        modifyIORef' requests (<> [(state, previous, inputs)])
+                        pure $
+                            if null preceding
+                                then Left contextError
+                                else successful state output
+                    backend =
+                        autoCompactOpenAiBackendWithSenderAndHook
+                            Nothing sender
+                            (\usage -> modifyIORef' recordedUsage (<> [usage]))
+                            (pure params)
+                            (\outcome inputs -> do
+                                writeIORef installed
+                                    (outcome.compactHistory <> turnInputsToItems inputs)
+                                pure CompactionInstalled)
+                            contextState base
+                result <- backend.submitTurn
+                    (initialBackendSnapshot history) (Just "resp-old")
+                    [UserMessage "continue"] (const (pure ()))
+                result `shouldSatisfy` either (const False) (const True)
+                readIORef compactCalls `shouldReturn` 1
+                readIORef recordedUsage `shouldReturn` [compactionUsage]
+                durableHistory <- readIORef installed
+                durableHistory `shouldSatisfy` hasCompactionCheckpoint
+                last durableHistory `shouldBe` userTextItem "continue"
+                readIORef requests >>= \case
+                    [(_, Just "resp-old", [UserMessage "continue"]), (state, previous, inputs)] -> do
+                        state.backendItems `shouldBe` durableHistory
+                        previous `shouldBe` Nothing
+                        inputs `shouldBe` []
+                    _ -> expectationFailure "expected rejected and recovered submissions"
+
+            it "does not repeat compaction when the continuation is also rejected" do
+                contextState <- newIORef Nothing
+                compactCalls <- newIORef (0 :: Int)
+                submissions <- newIORef (0 :: Int)
+                let sender _request = do
+                        modifyIORef' compactCalls (+ 1)
+                        pure (Right remoteCompactionResponse)
+                    base = Backend \_ _ _ _ -> do
+                        modifyIORef' submissions (+ 1)
+                        pure (Left contextError)
+                    backend = autoCompactOpenAiBackendWithSender
+                        Nothing sender (const (pure ())) (pure params)
+                        contextState base
+                backend.submitTurn (initialBackendSnapshot history) Nothing
+                    [UserMessage "continue"] (const (pure ()))
+                    `shouldReturn` Left contextError
+                readIORef compactCalls `shouldReturn` 1
+                readIORef submissions `shouldReturn` 2
+                readIORef contextState `shouldReturn` Nothing
+
+            mapM_ (\(description, sourceHistory, failure) ->
+                it description do
+                    contextState <- newIORef Nothing
+                    compactCalls <- newIORef (0 :: Int)
+                    let sender _request = do
+                            modifyIORef' compactCalls (+ 1)
+                            pure (Right remoteCompactionResponse)
+                        base = Backend \_ _ _ _ -> pure (Left failure)
+                        backend = autoCompactOpenAiBackendWithSender
+                            Nothing sender (const (pure ())) (pure params)
+                            contextState base
+                    backend.submitTurn (initialBackendSnapshot sourceHistory) Nothing
+                        [UserMessage "continue"] (const (pure ()))
+                        `shouldReturn` Left failure
+                    readIORef compactCalls `shouldReturn` 0)
+                [ ("does not compact an empty history", [], contextError)
+                , ("does not compact for unrelated provider errors", history,
+                    ProviderError RateLimitError "rate limited" Nothing)
+                ]
+
         it "decorates before publishing and continuing automatic compaction" do
             let history = [userTextItem "old"]
                 threshold = 2_000

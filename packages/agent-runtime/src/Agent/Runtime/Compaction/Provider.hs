@@ -1520,12 +1520,27 @@ autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
         let shouldCompact =
                 not (null history)
                     && projectedTokens >= tokenLimit
+            canCompact =
+                not (null history)
+                    && (absorbCompletedTools || not (any isCompletedTool inputs))
         if shouldCompact
-            && (absorbCompletedTools || not (any isCompletedTool inputs))
+            && canCompact
             then compactThenSubmit
                 tokenLimit contextState snapshot history inputs callbacks
-            else submitAndTrack
-                contextState snapshot previous inputs callbacks
+            else do
+                result <- submitAndTrack
+                    contextState snapshot previous inputs callbacks
+                case result of
+                    -- Provider token accounting and enforced limits can differ
+                    -- from the local projection. Recover once through the same
+                    -- durable compaction boundary as proactive compaction.
+                    -- The continuation submits directly to the inner backend,
+                    -- so another rejection cannot create a compaction loop.
+                    Left (ProviderError ContextWindowExceeded _ _)
+                        | canCompact ->
+                            compactThenSubmit
+                                tokenLimit contextState snapshot history inputs callbacks
+                    _ -> pure result
   where
     runCompaction history inputs =
         fmap

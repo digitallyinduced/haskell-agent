@@ -81,7 +81,7 @@ spec = describe "Agent.Runtime.ModelConfig" do
                 , "gpt-5.6-luna"
                 ]
         catalogContextWindowFor catalog "openai" "gpt-6.1-sol"
-            `shouldBe` Just 1_050_000
+            `shouldBe` Just 272_000
         fmap
             (\model ->
                 ( model.catalogModelId
