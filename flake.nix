@@ -887,6 +887,8 @@
                                 pkgs.bash
                                 pkgs.coreutils
                                 pkgs.git
+                                pkgs.lsof
+                                pkgs.cabal-install
                                 bun_1_4
                                 pkgs.postgresql_18
                                 pkgs.python3
