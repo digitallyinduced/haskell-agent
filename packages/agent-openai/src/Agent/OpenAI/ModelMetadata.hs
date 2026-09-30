@@ -27,12 +27,11 @@ defaultCodexEffectiveContextWindow = 258_400
 
 codexModelMetadata :: Text -> Maybe CodexModelMetadata
 codexModelMetadata modelName
-    | modelName == "gpt-6.1-sol" =
-        Just CodexModelMetadata
-            { modelContextWindow = 1_050_000
-            , modelEffectiveContextWindow = 997_500
-            , modelAutoCompactTokenLimit = 945_000
-            }
+    -- Codex's GPT-6.1 Sol entry uses context_window = 272000,
+    -- independently of its larger max_context_window. Compaction is based
+    -- on the default window, not the maximum supported window.
+    -- Source: openai/codex, codex-rs/models-manager/models.json,
+    -- revision 67727e7cf114cf3e1b71db368d74b24e32f6cb12.
     | isCodexResponsesLiteModel modelName =
         Just CodexModelMetadata
             { modelContextWindow = 272_000
