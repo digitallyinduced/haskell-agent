@@ -1529,6 +1529,7 @@ spec = do
                                             , Loop.loopApprove = \_ -> pure Loop.ToolApprovalGranted
                                             , Loop.loopReadSteering = pure []
                                             , Loop.loopCommitSteering = \_ -> pure ()
+                                            , Loop.loopCloseSteering = pure []
                                             , Loop.loopInterrupt = pure ()
                                             , Loop.loopCancel = cancel
                                             }

@@ -21,6 +21,7 @@ import Agent.CLI.SteeringInputs
     , awaitSteeringInputReady
     , awaitUserSteering
     , clearSteeringInputs
+    , closeSteeringInputs
     , commitSteeringInputs
     , dismissBackgroundCompletion
     , enqueueBackgroundCompletion
@@ -716,6 +717,23 @@ spec = do
             `shouldReturn` Right ()
         readSteeringInputs steering `shouldReturn`
             drop 2 queued <> [UserMessage "new-1", UserMessage "new-2"]
+
+    it "hands late guidance to a finishing loop and closes only when idle" do
+        steering <- newSteeringInputs
+        enqueueSteeringInputs steering [UserMessage "use unit 2"]
+            `shouldReturn` Right ()
+        closeSteeringInputs steering `shouldReturn` [UserMessage "use unit 2"]
+        enqueueSteeringInputs steering [UserMessage "and 3"]
+            `shouldReturn` Right ()
+        commitSteeringInputs steering 2
+        closeSteeringInputs steering `shouldReturn` []
+        enqueueSteeringInputs steering [UserMessage "too late"]
+            `shouldReturn`
+                Left "The turn has already answered; submit guidance as a new turn."
+        readSteeringInputs steering `shouldReturn` []
+        clearSteeringInputs steering
+        enqueueSteeringInputs steering [UserMessage "new conversation"]
+            `shouldReturn` Right ()
 
     it "wakes for ordinary input, retains it until commit, and does not hot-loop" do
         steering <- newSteeringInputs

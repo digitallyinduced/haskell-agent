@@ -956,6 +956,59 @@ spec = describe "agent-server WAI application" do
                 `shouldContain` "\"assistantTextTruncated\":false"
             readIORef runCount `shouldReturn` 1
 
+    it "steers a running turn and refuses one that has finished" do
+        registered <- newEmptyMVar
+        release <- newEmptyMVar
+        let runner control _ = do
+                control.turnControlRegisterSteering \_ -> pure (Right ())
+                putMVar registered ()
+                takeMVar release
+                pure (Right successfulOutput)
+        withDurableApplication runner \application terminal -> do
+            created <-
+                perform
+                    application
+                    methodPost
+                    ["v1", "sessions", "session-a", "turns"]
+                    validHeaders
+                    "{\"clientRequestId\":\"01999999-1111-7111-8111-555555555555\",\"input\":\"hello\"}"
+            created.simpleStatus `shouldBe` status202
+            turnId <- responseTurnId created
+            takeMVar registered
+            let steer body =
+                    perform
+                        application
+                        methodPost
+                        ["v1", "turns", turnId, "steer"]
+                        validHeaders
+                        body
+
+            accepted <-
+                steer
+                    "{\"clientRequestId\":\"01999999-2222-7222-8222-555555555555\",\"input\":\"use unit 2\"}"
+            accepted.simpleStatus `shouldBe` status202
+            empty <-
+                steer
+                    "{\"clientRequestId\":\"01999999-2222-7222-8222-555555555556\",\"input\":\" \"}"
+            empty.simpleStatus `shouldBe` status422
+
+            putMVar release ()
+            takeMVar terminal
+            late <-
+                steer
+                    "{\"clientRequestId\":\"01999999-2222-7222-8222-555555555557\",\"input\":\"too late\"}"
+            late.simpleStatus `shouldBe` status409
+            LBS8.unpack late.simpleBody
+                `shouldContain` "\"code\":\"turn_not_steerable\""
+            missing <-
+                perform
+                    application
+                    methodPost
+                    ["v1", "turns", "01999999-9999-7999-8999-999999999999", "steer"]
+                    validHeaders
+                    "{\"clientRequestId\":\"01999999-2222-7222-8222-555555555558\",\"input\":\"hello\"}"
+            missing.simpleStatus `shouldBe` status404
+
     it "durably cancels a reserved turn before local admission" do
         createdAt <- getCurrentTime
         let boundary =

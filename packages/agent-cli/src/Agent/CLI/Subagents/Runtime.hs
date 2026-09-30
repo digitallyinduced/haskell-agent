@@ -1451,6 +1451,7 @@ runPreparedChild runtime env session toolEnv toolRegistry backend onEvent runChi
                     childApprove policy toolRegistry call
             , loopReadSteering = readSteeringInputs steering
             , loopCommitSteering = commitSteeringInputs steering
+            , loopCloseSteering = pure []
             , loopInterrupt = pure ()
             , loopCancel = env.subCancel
             }

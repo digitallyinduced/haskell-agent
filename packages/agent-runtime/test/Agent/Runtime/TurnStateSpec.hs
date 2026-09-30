@@ -263,6 +263,7 @@ recoveryConfig backend tools items = do
         , loopApprove = const (pure ToolApprovalGranted)
         , loopReadSteering = pure []
         , loopCommitSteering = const (pure ())
+        , loopCloseSteering = pure []
         , loopInterrupt = pure ()
         , loopCancel = cancel
         }

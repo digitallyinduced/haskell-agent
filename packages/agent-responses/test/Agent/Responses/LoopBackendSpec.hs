@@ -1353,6 +1353,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 , loopApprove = const (pure Loop.ToolApprovalGranted)
                 , loopReadSteering = pure []
                 , loopCommitSteering = const (pure ())
+                , loopCloseSteering = pure []
                 , loopInterrupt = pure ()
                 , loopCancel = cancel
                 }

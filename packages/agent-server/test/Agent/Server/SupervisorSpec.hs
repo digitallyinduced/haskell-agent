@@ -25,6 +25,7 @@ import Control.Concurrent.STM (
     newTVarIO,
     readTBQueue,
     readTVar,
+    readTVarIO,
     writeTVar,
  )
 import Control.Exception.Safe (bracket, finally)
@@ -68,6 +69,64 @@ spec = describe "turn supervisor" do
             first `shouldSatisfy` isRight
             submitTurn supervisor (turnSpec "session-a")
                 `shouldReturn` Left SubmitSessionBusy
+            putMVar release ()
+
+    it "steers a running turn once per client request" do
+        registered <- newEmptyMVar
+        release <- newEmptyMVar
+        guidance <- newTVarIO []
+        answered <- newTVarIO False
+        let runner control _ = do
+                control.turnControlRegisterSteering \input -> do
+                    closed <- readTVar answered
+                    if closed
+                        then pure (Left "already answered")
+                        else Right () <$ modifyTVar' guidance (<> [input])
+                putMVar registered ()
+                takeMVar release
+                pure (Right testOutput)
+        withSupervisor runner \supervisor -> do
+            turn <- submitTurn supervisor (turnSpec "session-a") >>= expectRight
+            let steer boundary requestId =
+                    steerTurn supervisor boundary turn.turnRecordId requestId
+            takeWithin registered
+            steer localAccessBoundary firstSteering "use unit 2"
+                >>= void . expectRight
+            steer localAccessBoundary firstSteering "use unit 2"
+                >>= void . expectRight
+            readTVarIO guidance `shouldReturn` ["use unit 2"]
+            steer (testBoundary tenantAId Nothing) secondSteering "x"
+                >>= expectLeft SteerTurnNotFound
+            atomically (writeTVar answered True)
+            steer localAccessBoundary secondSteering "too late"
+                >>= expectLeft (SteerTurnRejected "already answered")
+            putMVar release ()
+            _ <- awaitCompleted supervisor turn.turnRecordId
+            steer localAccessBoundary secondSteering "after completion"
+                >>= expectLeft SteerTurnNotRunning
+            steer localAccessBoundary firstSteering "use unit 2"
+                >>= void . expectRight
+            readTVarIO guidance `shouldReturn` ["use unit 2"]
+
+    it "refuses guidance for a turn that has not started" do
+        started <- newEmptyMVar
+        release <- newEmptyMVar
+        let runner control _ = do
+                control.turnControlRegisterSteering \_ -> pure (Right ())
+                void (tryPutMVar started ())
+                takeMVar release
+                pure (Right testOutput)
+        withSupervisor runner \supervisor -> do
+            _ <- submitTurn supervisor (turnSpec "session-a") >>= expectRight
+            takeWithin started
+            queued <- submitTurn supervisor (turnSpec "session-b") >>= expectRight
+            steerTurn
+                supervisor
+                localAccessBoundary
+                queued.turnRecordId
+                firstSteering
+                "wait for me"
+                >>= expectLeft SteerTurnNotRunning
             putMVar release ()
 
     it "scopes the active-session lock to the exact access boundary" do
@@ -1233,6 +1292,12 @@ testBoundary rawTenant gatewayIdentity =
             either (error . show) id (parseTenantId rawTenant)
         , accessGatewayBoundary = GatewayBoundary gatewayIdentity
         }
+
+firstSteering :: Text
+firstSteering = "01999999-2222-7222-8222-222222222222"
+
+secondSteering :: Text
+secondSteering = "01999999-3333-7333-8333-333333333333"
 
 tenantAId :: Text
 tenantAId = "018f6a14-7d52-7a52-9c00-66d5e7d70334"

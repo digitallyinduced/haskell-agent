@@ -5,10 +5,12 @@ module Agent.CLI.SteeringInputs
     , awaitSteeringInputReady
     , awaitUserSteering
     , clearSteeringInputs
+    , closeSteeringInputs
     , commitSteeringInputs
     , dismissBackgroundCompletion
     , enqueueBackgroundCompletion
     , enqueueSteeringInputs
+    , enqueueSteeringInputsSTM
     , hasSteeringInputWake
     , hasBackgroundCompletions
     , newSteeringInputs
@@ -61,39 +63,51 @@ data SteeringState = SteeringState
     , deferredCompletions :: !(Seq.Seq SteeringEntry)
     , steeringBytes :: !Int
     , steeringEpoch :: !Word
+    -- | Set by 'closeSteeringInputs' once the loop has finished answering.
+    , steeringClosed :: !Bool
     }
 
 newtype SteeringInputs = SteeringInputs (TVar SteeringState)
 
 newSteeringInputs :: IO SteeringInputs
 newSteeringInputs =
-    SteeringInputs <$> newTVarIO (SteeringState Seq.empty Seq.empty 0 0)
+    SteeringInputs <$> newTVarIO (SteeringState Seq.empty Seq.empty 0 0 False)
 
 enqueueSteeringInputs
     :: SteeringInputs
     -> [TurnInput]
     -> IO (Either Text ())
-enqueueSteeringInputs (SteeringInputs ref) inputs =
-    atomically do
-        state <- readTVar ref
-        let measured =
-                [ SteeringEntry
-                    input
-                    (logicalTurnInputBytes input)
-                    Nothing
-                    True
-                | input <- inputs
-                ]
-            addedCount = length measured
-            addedBytes =
-                foldr
-                    (\entry total ->
-                        entry.steeringBytes `saturatingAdd` total)
-                    0
-                    measured
-            nextCount = Seq.length state.steeringQueue + addedCount
-            nextBytes = state.steeringBytes `saturatingAdd` addedBytes
-        if nextCount > steeringInputCountLimit
+enqueueSteeringInputs inputs = atomically . enqueueSteeringInputsSTM inputs
+
+-- | Lets a host record its acceptance of guidance in the same transaction.
+enqueueSteeringInputsSTM
+    :: SteeringInputs
+    -> [TurnInput]
+    -> STM (Either Text ())
+enqueueSteeringInputsSTM (SteeringInputs ref) inputs = do
+    state <- readTVar ref
+    let measured =
+            [ SteeringEntry
+                input
+                (logicalTurnInputBytes input)
+                Nothing
+                True
+            | input <- inputs
+            ]
+        addedCount = length measured
+        addedBytes =
+            foldr
+                (\entry total ->
+                    entry.steeringBytes `saturatingAdd` total)
+                0
+                measured
+        nextCount = Seq.length state.steeringQueue + addedCount
+        nextBytes = state.steeringBytes `saturatingAdd` addedBytes
+    if state.steeringClosed
+        then
+            pure $ Left
+                "The turn has already answered; submit guidance as a new turn."
+        else if nextCount > steeringInputCountLimit
                 || nextBytes > steeringInputByteLimit
             then
                 pure $ Left
@@ -179,6 +193,20 @@ readSteeringInputs :: SteeringInputs -> IO [TurnInput]
 readSteeringInputs (SteeringInputs ref) = do
     state <- readTVarIO ref
     pure [entry.steeringInput | entry <- toList state.steeringQueue]
+
+-- | The loop's 'Agent.Loop.loopCloseSteering' for a host that answers all
+-- accepted guidance within one turn: hand back what arrived after the last
+-- read, or refuse all further guidance when nothing is pending.
+closeSteeringInputs :: SteeringInputs -> IO [TurnInput]
+closeSteeringInputs (SteeringInputs ref) =
+    atomically do
+        state <- readTVar ref
+        if Seq.null state.steeringQueue
+            then do
+                writeTVar ref state { steeringClosed = True }
+                pure []
+            else
+                pure [entry.steeringInput | entry <- toList state.steeringQueue]
 
 -- | Snapshot an idle wake's display text and pending inputs together. Inputs
 -- remain queued until the provider acknowledges them; the text is metadata
@@ -303,4 +331,4 @@ commitSteeringInputs (SteeringInputs ref) count =
 clearSteeringInputs :: SteeringInputs -> IO ()
 clearSteeringInputs (SteeringInputs ref) =
     atomically $ modifyTVar' ref \state ->
-        SteeringState Seq.empty Seq.empty 0 (state.steeringEpoch + 1)
+        SteeringState Seq.empty Seq.empty 0 (state.steeringEpoch + 1) False

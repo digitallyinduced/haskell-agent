@@ -498,6 +498,8 @@ newSessionControlRuntime host SessionRequest{..} = do
     currentToolRegistry <- newIORef toolRegistry
     steeringInputs <- newSteeringInputs
     installBackgroundTaskSteering toolEnv steeringInputs
+    forM_ (startup.startupNativeHooks >>= (.nativeRegisterSteering)) \register ->
+        register \text -> enqueueSteeringInputsSTM steeringInputs [UserMessage text]
     spinnerRef <- newIORef Nothing
     renderStateRef <- newIORef emptyRenderState
     allowedToolsRef <- newIORef Set.empty
@@ -1427,6 +1429,13 @@ buildSessionLoopConfig
             readSteeringInputs controls.controlSteeringInputs
         , loopCommitSteering = \count ->
             commitSteeringInputs controls.controlSteeringInputs count
+        -- A native host that steers the turn needs every accepted input
+        -- answered before the turn ends; the terminal REPL instead answers
+        -- late guidance in a follow-up turn.
+        , loopCloseSteering =
+            case startup.startupNativeHooks >>= (.nativeRegisterSteering) of
+                Just _ -> closeSteeringInputs controls.controlSteeringInputs
+                Nothing -> pure []
         , loopInterrupt = interruptBackend
         , loopCancel = toolEnv.toolCancel
         }

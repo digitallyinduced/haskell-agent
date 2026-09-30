@@ -1577,6 +1577,7 @@ nativeHooks environment control sessionId cwd dialect = NativeRunHooks
     , nativePlanHooks = planHooks control
     , nativeInteractionMode = serverInteractionMode environment
     , nativeRegisterInteractionMode = Nothing
+    , nativeRegisterSteering = Just control.turnControlRegisterSteering
     , nativeShellMode = tenantShellMode environment
     , nativeHome =
         if restricted

@@ -168,6 +168,7 @@ runWorkload workload callCount delayMicros = do
             , loopApprove = \_ -> pure ToolApprovalGranted
             , loopReadSteering = pure []
             , loopCommitSteering = \_ -> pure ()
+            , loopCloseSteering = pure []
             , loopInterrupt = pure ()
             , loopCancel = cancel
             }

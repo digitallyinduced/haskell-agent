@@ -35,6 +35,22 @@ spec = describe "agent-server client protocol" do
                     ]
                 )
 
+    it "encodes steering with its idempotency key" do
+        let request =
+                AgentServerSteerTurnRequest
+                    { steerTurnClientRequestId =
+                        "01991f6d-7200-7000-8000-000000000004"
+                    , steerTurnInput = "use the second unit"
+                    }
+        Aeson.toJSON request
+            `shouldBe` Aeson.object
+                [ "clientRequestId"
+                    Aeson..= ( "01991f6d-7200-7000-8000-000000000004" ::
+                                Text
+                             )
+                , "input" Aeson..= ("use the second unit" :: Text)
+                ]
+
     it "base64-encodes generic files with their name and media type" do
         let request =
                 AgentServerCreateTurnRequest

@@ -145,6 +145,7 @@ runNativeTurn
             , nativeRegisterInteractionMode = Just $ \setter ->
                 modifyMVar_ interactions.interactionModeSetters $
                     pure . Map.insert control.turnControlId setter
+            , nativeRegisterSteering = Nothing
             , nativeShellMode = turnOptions.nativeTurnShellMode
             , nativeHome = Nothing
             , nativeDatabaseStore = Nothing

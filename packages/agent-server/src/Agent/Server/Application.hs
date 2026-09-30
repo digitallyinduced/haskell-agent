@@ -22,6 +22,7 @@ import Agent.Server.Supervisor
     , HumanRequestResolutionError(..)
     , SubmitError(..)
     , SessionMutationError(..)
+    , SteerTurnError(..)
     , Supervisor
     , TurnPersistence(..)
     , cancelTurn
@@ -30,6 +31,7 @@ import Agent.Server.Supervisor
     , lookupTurn
     , lookupTurnAgents
     , resolveHumanRequest
+    , steerTurn
     , submitReservedTurnChecked
     , subscribeEvents
     , trySubmitReservedTurnChecked
@@ -279,6 +281,9 @@ dispatchBoundary
                 . fmap (jsonResponse status200 headers . toJSONValue)
         ("POST", ["v1", "turns", rawTurnId, "cancel"]) ->
             cancelTurnResponse backend supervisor boundary rawTurnId headers
+        ("POST", ["v1", "turns", rawTurnId, "steer"]) ->
+            steerTurnResponse
+                config backend supervisor boundary rawTurnId headers request
         ("GET", ["v1", "turns", rawTurnId, "agents"]) ->
             turnAgentsResponse backend supervisor boundary rawTurnId headers
         ("GET", ["v1", "requests"]) ->
@@ -547,6 +552,61 @@ cancelTurnResponse backend supervisor boundary rawTurnId headers =
                         responseStatus
                         headers
                         (toJSONValue turn))
+
+-- | Accepted guidance is answered by the running turn before it completes.
+-- A turn that is queued, finishing, or finished answers 409, and the client
+-- submits the guidance as a new turn instead.
+steerTurnResponse
+    :: ApplicationConfig
+    -> Backend
+    -> Supervisor
+    -> AccessBoundary
+    -> Text
+    -> [Header]
+    -> Request
+    -> IO (Either ApiError Response)
+steerTurnResponse config backend supervisor boundary rawTurnId headers request =
+    case canonicalTurnId rawTurnId of
+        Nothing -> pure (Left turnNotFound)
+        Just turnId ->
+            withJsonBody config request \(body :: SteerTurnRequest) ->
+                if Text.null (Text.strip body.steerTurnInput)
+                    then
+                        pure $
+                            Left ApiError
+                                { apiErrorStatus = 422
+                                , apiErrorCode = "empty_input"
+                                , apiErrorMessage = "steering input is required"
+                                , apiErrorDetails = Nothing
+                                }
+                    else
+                        steerTurn
+                            supervisor
+                            boundary
+                            turnId
+                            body.steerTurnClientRequestId.unClientRequestId
+                            body.steerTurnInput >>= \case
+                                Right turn ->
+                                    pure $
+                                        Right $
+                                            jsonResponse
+                                                status202
+                                                headers
+                                                (toJSONValue turn)
+                                Left SteerTurnNotFound ->
+                                    backend.backendLookupTurn boundary turnId
+                                        >>= \case
+                                            Left err -> pure (Left err)
+                                            Right Nothing -> pure (Left turnNotFound)
+                                            Right (Just _) ->
+                                                pure $
+                                                    Left $
+                                                        turnNotSteerable
+                                                            "the turn is not running on this server instance"
+                                Left SteerTurnNotRunning ->
+                                    pure (Left (turnNotSteerable "the turn is not running"))
+                                Left (SteerTurnRejected reason) ->
+                                    pure (Left (turnNotSteerable reason))
 
 turnAgentsResponse
     :: Backend
@@ -1649,6 +1709,14 @@ turnNotFound = ApiError
     { apiErrorStatus = 404
     , apiErrorCode = "turn_not_found"
     , apiErrorMessage = "turn not found"
+    , apiErrorDetails = Nothing
+    }
+
+turnNotSteerable :: Text -> ApiError
+turnNotSteerable message = ApiError
+    { apiErrorStatus = 409
+    , apiErrorCode = "turn_not_steerable"
+    , apiErrorMessage = message
     , apiErrorDetails = Nothing
     }
 

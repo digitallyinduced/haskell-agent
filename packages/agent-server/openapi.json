@@ -437,6 +437,35 @@
         }
       }
     },
+    "/v1/turns/{turnId}/steer": {
+      "parameters": [
+        { "$ref": "#/components/parameters/TurnId" }
+      ],
+      "post": {
+        "tags": ["turns"],
+        "operationId": "steerTurn",
+        "description": "Hand text guidance to the turn's running loop. The loop reads it at its next model boundary and answers it before the turn completes. A queued, cancelling, finishing, or finished turn, or one executed by another server instance, answers 409 turn_not_steerable; submit the guidance as a new turn instead.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SteerTurn" }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Guidance accepted, or already accepted under the same clientRequestId.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Turn" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
     "/v1/turns/{turnId}/agents": {
       "parameters": [
         { "$ref": "#/components/parameters/TurnId" }
@@ -854,6 +883,19 @@
           "value": { "type": "string" }
         },
         "required": ["decision"],
+        "additionalProperties": false
+      },
+      "SteerTurn": {
+        "type": "object",
+        "properties": {
+          "clientRequestId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Makes steering idempotent: a retry is acknowledged without steering twice."
+          },
+          "input": { "type": "string", "minLength": 1 }
+        },
+        "required": ["clientRequestId", "input"],
         "additionalProperties": false
       },
       "ErrorEnvelope": {

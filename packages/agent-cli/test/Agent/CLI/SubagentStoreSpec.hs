@@ -103,6 +103,7 @@ backgroundChildConfig steering requests = do
         , loopApprove = const (fail "unexpected tool request")
         , loopReadSteering = readSteeringInputs steering
         , loopCommitSteering = commitSteeringInputs steering
+        , loopCloseSteering = pure []
         , loopInterrupt = pure ()
         , loopCancel = cancel
         }
