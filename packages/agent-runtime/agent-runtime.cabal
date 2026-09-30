@@ -50,7 +50,6 @@ library
                     , Agent.Runtime.Compaction.Continuation
                     , Agent.Runtime.ConversationStore.Lifecycle
                     , Agent.Runtime.Gateway.Catalog
-                    , Agent.Runtime.Gateway.Dictation
                     , Agent.Runtime.Gateway.Http
                     , Agent.Runtime.Gateway.OAuth
                     , Agent.Runtime.Gateway.McpDistribution
@@ -63,6 +62,7 @@ library
                     , Agent.Runtime.Session.Transfer
                     , Paths_agent_runtime
     exposed-modules:  Agent.Runtime.AgentSessions.Process
+                    , Agent.Runtime.Gateway.Dictation
                     , Agent.Runtime.AgentSnapshot
                     , Agent.Runtime.Browser
                     , Agent.Runtime.Config
@@ -293,6 +293,7 @@ test-suite agent-runtime-test
                     , Agent.Runtime.TurnExecutionSpec
                     , Agent.Runtime.SessionOwnerSpec
     build-depends:    agent-runtime
+                    , agent-audio
                     , agent-accounts
                     , agent-connectivity
                     , agent-core

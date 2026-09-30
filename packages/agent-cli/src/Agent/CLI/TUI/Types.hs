@@ -56,7 +56,7 @@ import Agent.CLI.Command
     , SlashCommand(..)
     , parseReplLineWithCatalog
     )
-import Agent.CLI.Dictation (DictationTarget)
+import Agent.CLI.Dictation (DictationResult, DictationTarget)
 import Agent.CLI.TUI.ClipboardTip
     ( ClipboardFocusTipState
     , ClipboardImageProbe
@@ -230,7 +230,7 @@ data AppEvent
       -- originating tool call id.
     | AppDictationRecording !(MVar ())
     | AppDictationPartial !Text
-    | AppDictationFinished !(Either Text Text)
+    | AppDictationFinished !DictationResult
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
     | AppSetWindowTitle !Text
     | AppSetMouseCapture !Bool

@@ -1,12 +1,18 @@
 module Agent.CLI.DictationCaptureSpec (spec) where
 
 import Agent.CLI.Dictation.Capture (withBufferedCapture)
+import Agent.CLI.Dictation (saveFailedDictationRecording)
 import Control.Concurrent.Async (cancel, withAsync)
 import Control.Concurrent.MVar
     ( newEmptyMVar, putMVar, readMVar, takeMVar, tryReadMVar )
 import Control.Exception.Safe (finally)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.List (isSuffixOf)
+import System.Directory (listDirectory)
+import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -111,6 +117,34 @@ spec = around_ within $ describe "buffered dictation capture" do
             (\send -> send BS.empty) collect
         result `shouldBe` BS.empty
         readIORef notices `shouldReturn` 0
+
+    it "saves the original buffered audio as WAV after transcription fails" do
+        withSystemTempDirectory "dictation-recovery" \root -> do
+            starts <- newIORef (0 :: Int)
+            let capture send = do
+                    modifyIORef' starts (+ 1)
+                    send "\x01\x02"
+                    send "\x03\x04"
+                directory = root </> "recordings"
+            saved <- withBufferedCapture 1024 (pure ()) capture \produce -> do
+                collect produce `shouldReturn` "\x01\x02\x03\x04"
+                saveFailedDictationRecording directory 24_000 produce
+            path <- case saved of
+                Just path -> pure path
+                Nothing -> expectationFailure "recording was not saved" >> pure ""
+            (".wav" `isSuffixOf` path) `shouldBe` True
+            wav <- LBS.readFile path
+            LBS.take 4 wav `shouldBe` "RIFF"
+            LBS.take 4 (LBS.drop 8 wav) `shouldBe` "WAVE"
+            LBS.drop 44 wav `shouldBe` "\x01\x02\x03\x04"
+            readIORef starts `shouldReturn` 1
+
+    it "does not create an empty fallback recording" do
+        withSystemTempDirectory "dictation-recovery" \root -> do
+            let directory = root </> "recordings"
+            saveFailedDictationRecording directory 24_000 (\_ -> pure ())
+                `shouldReturn` Nothing
+            listDirectory root `shouldReturn` []
 
 collect :: ((BS.ByteString -> IO ()) -> IO ()) -> IO BS.ByteString
 collect produce = do

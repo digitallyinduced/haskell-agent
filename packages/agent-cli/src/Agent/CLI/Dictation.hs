@@ -15,6 +15,7 @@ module Agent.CLI.Dictation
     , dictationBackendUnavailable
     , insertDictation
     , loadDictationBackendAuth
+    , saveFailedDictationRecording
     , selectDictationBackend
     , transcribeAudio
     ) where
@@ -31,7 +32,8 @@ import Agent.Runtime.GatewayClient
     , transcribeGatewayPcm
     )
 import Agent.OpenAI.Transcription
-    ( openAITranscriptionSampleRate
+    ( encodePcm16Wav
+    , openAITranscriptionSampleRate
     , transcribePcmWithOpenAI
     )
 import Agent.Provider
@@ -51,6 +53,7 @@ import Control.Exception.Safe
     , bracket
     , displayException
     , finally
+    , onException
     , throwIO
     , try
     , tryAny
@@ -58,7 +61,9 @@ import Control.Exception.Safe
 import Control.Exception (AsyncException(UserInterrupt))
 import Control.Monad (unless, void)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isSpace)
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.List.NonEmpty as NonEmpty
 import Data.Maybe (mapMaybe)
@@ -66,8 +71,13 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import System.Directory
-    ( findExecutable
+    ( createDirectoryIfMissing
+    , findExecutable
+    , getHomeDirectory
+    , removeFile
+    , renameFile
     )
+import System.FilePath ((</>))
 import System.Exit (ExitCode(..))
 import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
 import System.IO
@@ -78,6 +88,7 @@ import System.IO
     , hGetChar
     , hPutStrLn
     , hSetBuffering
+    , openBinaryTempFile
     , stdin
     )
 import System.Process
@@ -98,6 +109,7 @@ data DictationControl = DictationControl
 data DictationResult
     = DictationTranscript !Text
     | DictationFailed !Text
+    | DictationRecordingSaved !Text !Text
     deriving (Eq, Show)
 
 data DictationBackend
@@ -287,6 +299,10 @@ dictateForTarget target = do
     case result of
         DictationTranscript transcript -> pure transcript
         DictationFailed err -> fail (Text.unpack err)
+        DictationRecordingSaved err path -> do
+            Text.hPutStrLn stderr
+                ("Dictation failed: " <> err <> ". Recording saved: " <> path)
+            pure path
 
 -- | Record microphone audio until the caller signals stop. Providers that
 -- stream partial transcripts deliver them through the control callback.
@@ -343,11 +359,31 @@ dictateWithTarget target control =
                                         (Text.strip transcript))
     -- Retain up to 32 MiB for provider retries (~11 minutes of
     -- 24 kHz mono PCM16), without unbounded startup buffering.
-    capture rate =
+    capture rate consume =
         withBufferedCapture
             (32 * 1024 * 1024)
             control.dictationOnRecording
             (streamMicrophone rate control.dictationWaitForStop)
+            \produceAudio -> do
+                result <- consume produceAudio
+                case result of
+                    DictationFailed err -> do
+                        saved <- tryAny do
+                            home <- getHomeDirectory
+                            saveFailedDictationRecording
+                                (home </> ".haskell-agent" </> "dictations")
+                                rate
+                                produceAudio
+                        pure $ case saved of
+                            Right (Just path) ->
+                                DictationRecordingSaved err (Text.pack path)
+                            Right Nothing -> result
+                            Left saveError ->
+                                DictationFailed
+                                    (err <> " (Could not save recording: "
+                                        <> Text.pack (displayException saveError)
+                                        <> ")")
+                    _ -> pure result
     sampleRate = \case
         OpenAIDictation -> openAITranscriptionSampleRate
         XAIDictation -> 16_000
@@ -369,6 +405,33 @@ dictateWithTarget target control =
             pure (DictationFailed (Text.pack (show err)))
         Right transcript ->
             pure (DictationTranscript (Text.strip transcript))
+
+-- | Replay the captured PCM only after transcription has definitively failed.
+-- Do not put recordings in a temporary directory: its cleanup could discard
+-- the only copy before the user can recover the dictation.
+saveFailedDictationRecording
+    :: FilePath
+    -> Int
+    -> ((BS.ByteString -> IO ()) -> IO ())
+    -> IO (Maybe FilePath)
+saveFailedDictationRecording directory sampleRate produceAudio = do
+    chunks <- newIORef []
+    produceAudio (modifyIORef' chunks . (:))
+    pcm <- BS.concat . reverse <$> readIORef chunks
+    if BS.null pcm
+        then pure Nothing
+        else case encodePcm16Wav sampleRate pcm of
+            Left err -> fail (show err)
+            Right wav -> do
+                createDirectoryIfMissing True directory
+                (temporary, handle) <-
+                    openBinaryTempFile directory "dictation-"
+                let path = temporary <> ".wav"
+                ( do
+                    LBS.hPut handle wav `finally` hClose handle
+                    renameFile temporary path
+                    pure (Just path)
+                    ) `onException` removeFile temporary
 
 requireExecutable :: String -> IO ()
 requireExecutable command =

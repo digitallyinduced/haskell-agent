@@ -418,11 +418,7 @@ runFullscreen runtime workerAction = do
                         , dictationOnTranscript =
                             enqueueAppEvent runtime . AppDictationPartial
                         }
-        enqueueAppEvent runtime $
-            AppDictationFinished $
-                case result of
-                    DictationTranscript transcript -> Right transcript
-                    DictationFailed message -> Left message
+        enqueueAppEvent runtime (AppDictationFinished result)
 
 -- | Restore the terminal cursor before every fullscreen Vty lifecycle ends.
 -- This includes Brick suspension, which rebuilds Vty later, and protects

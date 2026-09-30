@@ -1,5 +1,8 @@
 -- | Gateway-bound streaming dictation and its bounded HTTP fallback.
-module Agent.Runtime.Gateway.Dictation (transcribeGatewayPcmWith) where
+module Agent.Runtime.Gateway.Dictation
+    ( transcribeGatewayPcmWith
+    , retryGatewayTranscriptionWithin
+    ) where
 
 import Agent.Accounts.Gateway.Credentials
     ( loadGatewayCredential
@@ -16,6 +19,7 @@ import Agent.OpenAI.Transcription
     , transcribePcmWithChatGPTStreamAt
     )
 import Agent.Server.Client.GatewayIdentity (GatewayCredential(..))
+import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (throwString, tryAny)
 import Control.Monad (unless, when)
 import Data.Aeson ((.:))
@@ -38,6 +42,7 @@ import Network.HTTP.Types
     )
 import Network.URI qualified as URI
 import System.Entropy (getEntropy)
+import System.Timeout (timeout)
 
 transcribeGatewayPcmWith
     :: GatewayCredential
@@ -193,7 +198,7 @@ postGatewayTranscription credential wav =
                     Text.dropWhileEnd (== '/')
                         (Text.strip credential.gatewayBaseUrl)
                         <> "/v1/audio/transcriptions"
-            outcome <- tryAny do
+            prepared <- tryAny do
                 userAgent <- gatewayUserAgent
                 manager <- newTlsManager
                 initial <- HTTP.parseRequest (Text.unpack endpoint)
@@ -213,23 +218,70 @@ postGatewayTranscription credential wav =
                     (gatewayMaxPcmBytes + 4096)
                     baseRequest boundary "dictation" (LBS.toStrict wav) of
                     Left problem -> pure (Left problem)
-                    Right request ->
-                        Audio.performTranscriptionRequest manager gatewayMaxResponseBytes request
-            pure case outcome of
+                    Right request -> pure (Right (manager, request))
+            case prepared of
                 Left _ ->
-                    Left "Could not reach the organization gateway for dictation."
-                Right (Left Audio.TranscriptionResponseTooLarge) ->
-                    Left "Gateway dictation returned an oversized response."
+                    pure (Left "Could not reach the organization gateway for dictation.")
                 Right (Left _) ->
-                    Left "Could not reach the organization gateway for dictation."
-                Right (Right (status, responseBody))
-                    | statusIsSuccessful status ->
-                        decodeGatewayTranscript responseBody
-                    | statusCode status == 404 ->
-                        Left
-                            "Dictation is not supported by this organization gateway."
-                    | otherwise ->
-                        Left (gatewayDictationStatusError status responseBody)
+                    pure (Left "Gateway dictation request is invalid.")
+                Right (Right (manager, request)) ->
+                    retryGatewayTranscriptionWithin
+                        120_000_000
+                        [1_000_000, 2_000_000, 4_000_000]
+                        (Audio.performTranscriptionRequest
+                            manager gatewayMaxResponseBytes request)
+
+-- | Repeat only transport failures and temporary HTTP responses. The request
+-- contains the same buffered WAV on every attempt; capture is never restarted.
+-- One deadline covers all attempts and backoff, even when a request stalls.
+retryGatewayTranscriptionWithin
+    :: Int
+    -> [Int]
+    -> IO (Either Audio.TranscriptionFailure (Status, BS.ByteString))
+    -> IO (Either Text Text)
+retryGatewayTranscriptionWithin duration delays send =
+    timeout duration (retryGatewayTranscription delays send) >>= \case
+        Just result -> pure result
+        Nothing ->
+            pure (Left "Could not reach the organization gateway for dictation.")
+
+retryGatewayTranscription
+    :: [Int]
+    -> IO (Either Audio.TranscriptionFailure (Status, BS.ByteString))
+    -> IO (Either Text Text)
+retryGatewayTranscription delays send = do
+    outcome <- send
+    case (delays, outcome) of
+        (delay : remaining, Left Audio.TranscriptionUnavailable) -> do
+            threadDelay delay
+            retryGatewayTranscription remaining send
+        (delay : remaining, Right (status, _))
+            | retryableGatewayStatus status -> do
+                threadDelay delay
+                retryGatewayTranscription remaining send
+        _ -> pure (gatewayTranscriptionResult outcome)
+
+retryableGatewayStatus :: Status -> Bool
+retryableGatewayStatus status =
+    statusCode status == 408
+        || statusCode status == 429
+        || statusCode status >= 500 && statusCode status <= 599
+
+gatewayTranscriptionResult
+    :: Either Audio.TranscriptionFailure (Status, BS.ByteString)
+    -> Either Text Text
+gatewayTranscriptionResult = \case
+    Left Audio.TranscriptionResponseTooLarge ->
+        Left "Gateway dictation returned an oversized response."
+    Left _ ->
+        Left "Could not reach the organization gateway for dictation."
+    Right (status, responseBody)
+        | statusIsSuccessful status ->
+            decodeGatewayTranscript responseBody
+        | statusCode status == 404 ->
+            Left "Dictation is not supported by this organization gateway."
+        | otherwise ->
+            Left (gatewayDictationStatusError status responseBody)
 
 gatewayTranscriptionBoundary :: IO BS.ByteString
 gatewayTranscriptionBoundary =
