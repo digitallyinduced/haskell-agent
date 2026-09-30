@@ -1,6 +1,8 @@
 module Agent.Runtime.GatewayClientSpec (spec) where
 
 import Agent.Runtime.GatewayClient
+import Agent.Runtime.Gateway.Dictation (retryGatewayTranscriptionWithin)
+import Agent.Audio.Transcription (TranscriptionFailure(..))
 import Agent.Runtime.Config
     ( HarnessConfig(..), McpServerConfig(..), defaultHarnessConfig
     , loadHarnessConfig, modifyHarnessConfig
@@ -392,6 +394,27 @@ spec = describe "gateway device authorization" do
                     case bodies of
                         [first, second] -> first `shouldBe` second
                         _ -> expectationFailure "expected two HTTP dictation requests"
+
+    it "limits all gateway dictation retries to one deadline" do
+        attempts <- newIORef (0 :: Int)
+        let stalledRequest = do
+                modifyIORef' attempts (+ 1)
+                threadDelay 200_000
+                pure (Left TranscriptionUnavailable)
+        retryGatewayTranscriptionWithin 50_000 [1_000, 1_000] stalledRequest
+            `shouldReturn`
+                Left "Could not reach the organization gateway for dictation."
+        readIORef attempts `shouldReturn` 1
+
+    it "does not start another gateway dictation request after backoff expires" do
+        attempts <- newIORef (0 :: Int)
+        let failedRequest = do
+                modifyIORef' attempts (+ 1)
+                pure (Left TranscriptionUnavailable)
+        retryGatewayTranscriptionWithin 50_000 [200_000] failedRequest
+            `shouldReturn`
+                Left "Could not reach the organization gateway for dictation."
+        readIORef attempts `shouldReturn` 1
 
     it "retains cached gateway models when a fetch throws" do
         calls <- newIORef (0 :: Int)

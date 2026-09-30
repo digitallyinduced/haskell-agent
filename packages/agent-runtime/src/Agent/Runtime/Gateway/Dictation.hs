@@ -1,5 +1,8 @@
 -- | Gateway-bound streaming dictation and its bounded HTTP fallback.
-module Agent.Runtime.Gateway.Dictation (transcribeGatewayPcmWith) where
+module Agent.Runtime.Gateway.Dictation
+    ( transcribeGatewayPcmWith
+    , retryGatewayTranscriptionWithin
+    ) where
 
 import Agent.Accounts.Gateway.Credentials
     ( loadGatewayCredential
@@ -39,6 +42,7 @@ import Network.HTTP.Types
     )
 import Network.URI qualified as URI
 import System.Entropy (getEntropy)
+import System.Timeout (timeout)
 
 transcribeGatewayPcmWith
     :: GatewayCredential
@@ -221,12 +225,26 @@ postGatewayTranscription credential wav =
                 Right (Left _) ->
                     pure (Left "Gateway dictation request is invalid.")
                 Right (Right (manager, request)) ->
-                    retryGatewayTranscription [1_000_000, 2_000_000, 4_000_000]
+                    retryGatewayTranscriptionWithin
+                        120_000_000
+                        [1_000_000, 2_000_000, 4_000_000]
                         (Audio.performTranscriptionRequest
                             manager gatewayMaxResponseBytes request)
 
 -- | Repeat only transport failures and temporary HTTP responses. The request
 -- contains the same buffered WAV on every attempt; capture is never restarted.
+-- One deadline covers all attempts and backoff, even when a request stalls.
+retryGatewayTranscriptionWithin
+    :: Int
+    -> [Int]
+    -> IO (Either Audio.TranscriptionFailure (Status, BS.ByteString))
+    -> IO (Either Text Text)
+retryGatewayTranscriptionWithin duration delays send =
+    timeout duration (retryGatewayTranscription delays send) >>= \case
+        Just result -> pure result
+        Nothing ->
+            pure (Left "Could not reach the organization gateway for dictation.")
+
 retryGatewayTranscription
     :: [Int]
     -> IO (Either Audio.TranscriptionFailure (Status, BS.ByteString))
