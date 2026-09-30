@@ -15,6 +15,7 @@ module Agent.Server.Client.Protocol
     , AgentServerHumanRequest (..)
     , AgentServerRequestList (..)
     , AgentServerResolveRequest (..)
+    , AgentServerSteerTurnRequest (..)
     , AgentServerEventPayload (..)
     , AgentServerEvent (..)
     , AgentServerReplayReset (..)
@@ -233,6 +234,21 @@ instance ToJSON AgentServerResolveRequest where
         object
             [ "decision" .= request.resolveRequestDecision
             , "value" .= request.resolveRequestValue
+            ]
+
+-- | Guidance for a running turn. Retrying with the same client request
+-- identifier does not steer twice.
+data AgentServerSteerTurnRequest = AgentServerSteerTurnRequest
+    { steerTurnClientRequestId :: !Text
+    , steerTurnInput :: !Text
+    }
+    deriving (Eq, Show)
+
+instance ToJSON AgentServerSteerTurnRequest where
+    toJSON request =
+        object
+            [ "clientRequestId" .= request.steerTurnClientRequestId
+            , "input" .= request.steerTurnInput
             ]
 
 data AgentServerEventPayload

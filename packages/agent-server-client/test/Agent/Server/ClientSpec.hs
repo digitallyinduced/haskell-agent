@@ -57,6 +57,45 @@ spec = describe "agent-server HTTP client" do
             takeMVar observed
                 `shouldReturn` "/v1/turns/turn%2F..%2F%3Fadmin=true"
 
+    it "posts steering to the turn and surfaces a refusal" do
+        observed <- newEmptyMVar
+        let application request respond = do
+                body <- strictRequestBody request
+                putMVar observed (rawPathInfo request, Aeson.decode body)
+                respond $
+                    if rawPathInfo request == "/v1/turns/finished/steer"
+                        then
+                            responseLBS
+                                status409
+                                [(hContentType, "application/json")]
+                                "{\"error\":{\"code\":\"turn_not_steerable\",\"message\":\"the turn is not running\",\"requestId\":\"request-1\"}}"
+                        else
+                            responseLBS
+                                status202
+                                [(hContentType, "application/json")]
+                                turnPayload
+            steering =
+                AgentServerSteerTurnRequest
+                    { steerTurnClientRequestId =
+                        "01991f6d-7200-7000-8000-000000000004"
+                    , steerTurnInput = "use the second unit"
+                    }
+        withTestClient application \client -> do
+            steerAgentServerTurn client validTurnId steering
+                >>= (`shouldSatisfy` isRight)
+            takeMVar observed
+                `shouldReturn`
+                    ( "/v1/turns/01991f6d-7200-7000-8000-000000000001/steer"
+                    , Just (Aeson.toJSON steering)
+                    )
+            result <- steerAgentServerTurn client "finished" steering
+            case result of
+                Left (AgentServerHttpError 409 (Just "turn_not_steerable") _) ->
+                    pure ()
+                other ->
+                    expectationFailure
+                        ("unexpected steering refusal: " <> show other)
+
     it "does not follow redirects" do
         redirectVisits <- newIORef (0 :: Int)
         let application request respond =

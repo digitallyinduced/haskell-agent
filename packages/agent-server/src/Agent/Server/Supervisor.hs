@@ -9,6 +9,7 @@ module Agent.Server.Supervisor
     , CheckedSubmitError(..)
     , SessionMutationError(..)
     , EventSubscriptionError(..)
+    , SteerTurnError(..)
     , TurnControl(..)
     , TurnRunner
     , TurnBoundaryGuard
@@ -25,6 +26,7 @@ module Agent.Server.Supervisor
     , submitTurnChecked
     , submitReservedTurnChecked
     , trySubmitReservedTurnChecked
+    , steerTurn
     , cancelTurn
     , lookupTurn
     , listTurns
@@ -144,6 +146,8 @@ data TurnControl = TurnControl
     , turnControlRequestInput
         :: !(HumanRequestSpec -> IO (Either Text HumanResponse))
     , turnControlRegisterCancel :: !(IO () -> IO ())
+    -- | Register the running loop's guidance sink for 'steerTurn'.
+    , turnControlRegisterSteering :: !((Text -> STM (Either Text ())) -> IO ())
     , turnControlSetAgents :: !(IO Value -> IO ())
     }
 
@@ -165,6 +169,10 @@ data TurnSlot = TurnSlot
     , turnSlotRecord :: !TurnRecord
     , turnSlotCancelling :: !Bool
     , turnSlotCancel :: !(Maybe (IO ()))
+    , turnSlotSteer :: !(Maybe (Text -> STM (Either Text ())))
+    -- | Client request identifiers of accepted guidance, so a retried
+    -- request is acknowledged without steering twice.
+    , turnSlotSteeringRequests :: !(Set Text)
     , turnSlotAgents :: !(IO Value)
     }
 
@@ -567,6 +575,8 @@ enqueueTurnRecord supervisor reservationHeld spec record
                                                                 , turnSlotRecord = admitted
                                                                 , turnSlotCancelling = False
                                                                 , turnSlotCancel = Nothing
+                                                                , turnSlotSteer = Nothing
+                                                                , turnSlotSteeringRequests = Set.empty
                                                                 , turnSlotAgents = pure toJSONEmptyArray
                                                                 }
                                                         withTurn =
@@ -591,6 +601,60 @@ enqueueTurnRecord supervisor reservationHeld spec record
                                                     writeTVar supervisor.supervisorState state'
                                                     publishToSubscribers state' event
                                                     pure (Right admitted)
+
+data SteerTurnError
+    = SteerTurnNotFound
+    -- | Queued, cancelling, finished, or executed by another process.
+    | SteerTurnNotRunning
+    -- | The loop refused the guidance, e.g. because it has already answered.
+    | SteerTurnRejected !Text
+    deriving (Eq, Show)
+
+-- | Hand guidance to a turn's running loop, which answers it before the turn
+-- completes. A retry with the same client request identifier is acknowledged
+-- without steering twice, also after the turn has finished.
+steerTurn
+    :: Supervisor
+    -> AccessBoundary
+    -> TurnId
+    -> Text
+    -> Text
+    -> IO (Either SteerTurnError TurnRecord)
+steerTurn supervisor boundary turnId clientRequestId input =
+    atomically do
+        state <- readTVar supervisor.supervisorState
+        case Map.lookup turnId state.stateTurns of
+            Just slot
+                | slot.turnSlotRecord.turnRecordBoundary == boundary ->
+                    if Set.member clientRequestId slot.turnSlotSteeringRequests
+                        then pure (Right slot.turnSlotRecord)
+                        else case slot.turnSlotSteer of
+                            Just steer
+                                | not slot.turnSlotCancelling
+                                , isActiveStatus
+                                    slot.turnSlotRecord.turnRecordStatus ->
+                                    steer input >>= \case
+                                        Left reason ->
+                                            pure (Left (SteerTurnRejected reason))
+                                        Right () -> do
+                                            let accepted =
+                                                    slot
+                                                        { turnSlotSteeringRequests =
+                                                            Set.insert
+                                                                clientRequestId
+                                                                slot.turnSlotSteeringRequests
+                                                        }
+                                            writeTVar supervisor.supervisorState
+                                                state
+                                                    { stateTurns =
+                                                        Map.insert
+                                                            turnId
+                                                            accepted
+                                                            state.stateTurns
+                                                    }
+                                            pure (Right slot.turnSlotRecord)
+                            _ -> pure (Left SteerTurnNotRunning)
+            _ -> pure (Left SteerTurnNotFound)
 
 cancelTurn ::
     Supervisor ->
@@ -1339,6 +1403,11 @@ executeTurn supervisor turnId spec =
                 modifyTVar'
                     supervisor.supervisorState
                     (setTurnCancellation turnId action)
+        , turnControlRegisterSteering = \steer ->
+            atomically $
+                modifyTVar'
+                    supervisor.supervisorState
+                    (setTurnSteering turnId (Just steer))
         , turnControlSetAgents = \agents ->
             atomically $
                 modifyTVar'
@@ -1402,6 +1471,11 @@ executeTurn supervisor turnId spec =
                                                 SomeException
                                                 (Either Text TurnExecutionOutput)
                                             )
+                                -- No loop is left to answer guidance.
+                                atomically $
+                                    modifyTVar'
+                                        supervisor.supervisorState
+                                        (setTurnSteering turnId Nothing)
                                 let result = case outcome of
                                         Left _ ->
                                             Left
@@ -1501,6 +1575,7 @@ publishTerminalRecord supervisor canonical = do
                                         { turnSlotRecord = canonical
                                         , turnSlotCancelling = False
                                         , turnSlotCancel = Nothing
+                                        , turnSlotSteer = Nothing
                                         }
                                     state.stateTurns
                             , stateActiveSessions =
@@ -1568,6 +1643,7 @@ finalizeTurnStateOnly supervisor turnId err = do
                                     { turnSlotRecord = canonical
                                     , turnSlotCancelling = False
                                     , turnSlotCancel = Nothing
+                                    , turnSlotSteer = Nothing
                                     })
                             turnId
                             state.stateTurns
@@ -1802,6 +1878,25 @@ setTurnCancellation turnId action state =
                 state.stateTurns
         }
 
+setTurnSteering
+    :: TurnId
+    -> Maybe (Text -> STM (Either Text ()))
+    -> SupervisorState
+    -> SupervisorState
+setTurnSteering turnId steer state =
+    state
+        { stateTurns =
+            Map.adjust
+                (\slot ->
+                    if
+                        isActiveStatus slot.turnSlotRecord.turnRecordStatus
+                            && not slot.turnSlotCancelling
+                        then slot { turnSlotSteer = steer }
+                        else slot)
+                turnId
+                state.stateTurns
+        }
+
 setTurnAgents :: TurnId -> IO Value -> SupervisorState -> SupervisorState
 setTurnAgents turnId agents state =
     state
@@ -2026,6 +2121,7 @@ cancelSlot _now slot =
         slot
             { turnSlotCancelling = True
             , turnSlotCancel = Nothing
+            , turnSlotSteer = Nothing
             }
 
 resumeWaitingTurn

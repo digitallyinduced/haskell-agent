@@ -127,6 +127,12 @@ data LoopConfig = LoopConfig
     -- failed submission can be retried without losing it.
     , loopReadSteering :: !(IO [TurnInput])
     , loopCommitSteering :: !(Int -> IO ())
+    -- | Called before the loop finishes with a final answer. Return guidance
+    -- that arrived after the last 'loopReadSteering' to continue with it.
+    -- Return @[]@ only after atomically refusing further guidance, so none
+    -- that was accepted is left unanswered. Hosts that answer late guidance
+    -- in a follow-up turn use @pure []@.
+    , loopCloseSteering :: !(IO [TurnInput])
     -- | Ask the active provider to interrupt its turn in-band. The loop calls
     -- this before falling back to structured async teardown.
     , loopInterrupt :: !(IO ())
@@ -703,10 +709,21 @@ advanceCompletedTurn runtime turn results = do
                     nextEmptyContinuations
             runLoopState runtime
         FinishLoop result ->
-            finishLoopExecution runtime (Right result)
-        WarnAndFinishLoop result -> do
-            config.loopOnEvent (WarningRaised emptyContinuationWarning)
-            finishLoopExecution runtime (Right result)
+            finishUnlessSteered do
+                finishLoopExecution runtime (Right result)
+        WarnAndFinishLoop result ->
+            finishUnlessSteered do
+                config.loopOnEvent (WarningRaised emptyContinuationWarning)
+                finishLoopExecution runtime (Right result)
+  where
+    finishUnlessSteered finish = do
+        late <- runtime.loopRuntimeConfig.loopCloseSteering
+        if null late
+            then finish
+            else do
+                modifyIORef' runtime.loopRuntimeState $
+                    advanceLoopState turn (PendingInputs late (length late)) 0
+                runLoopState runtime
 
 runLoopWithEventPump
     :: LoopRuntime

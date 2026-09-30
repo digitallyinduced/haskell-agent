@@ -37,6 +37,7 @@ import Agent.Store.Postgres ( Store )
 import Agent.ToolDispatch ( ToolCall )
 import Agent.Tools.PlanMode ( PlanModeHooks )
 import Agent.Tools.Types ( AppTool, AppToolGroup, appToolsFromGroups )
+import Control.Concurrent.STM ( STM )
 import Data.IORef ( IORef )
 import Data.Text ( Text )
 import System.IO ( Handle, stderr, stdout )
@@ -164,6 +165,12 @@ data NativeRunHooks = NativeRunHooks
     -- | Register a turn-local mode setter. The host must stop calling it when
     -- the turn ends. Setters do not resolve already pending human input.
     , nativeRegisterInteractionMode :: !(Maybe ((NativeInteractionMode -> IO ()) -> IO ()))
+    -- | Register the turn's guidance sink. The host must stop calling it when
+    -- the turn ends. Guidance the sink accepts is answered by this turn: the
+    -- loop does not finish while any is pending, and the sink refuses guidance
+    -- once the loop has answered. The transaction lets the host record the
+    -- acceptance atomically with its own state.
+    , nativeRegisterSteering :: !(Maybe ((Text -> STM (Either Text ())) -> IO ()))
     , nativeShellMode :: !NativeShellMode
     -- | Optional home override while performing ordinary host discovery.
     -- Prepared discovery carries its required home in its context instead.

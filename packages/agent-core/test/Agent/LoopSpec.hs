@@ -2149,6 +2149,32 @@ spec = describe "runLoop" do
         readIORef submissions `shouldReturn`
             [(Nothing, [UserMessage "hello", UserMessage "also verify tests"])]
 
+    it "answers guidance that arrives after the final steering read" do
+        submissions <- newIORef []
+        closes <- newIORef (0 :: Int)
+        acknowledgements <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1" [] (Just "first answer")
+            , Right $ emptyTurnOutput "resp-2" [] (Just "answer with guidance")
+            ]
+        config0 <- testConfig backend
+        let config = config0
+                { loopCloseSteering = do
+                    count <- atomicModifyIORef' closes \n -> (n + 1, n)
+                    pure [UserMessage "use the second unit" | count == 0]
+                , loopCommitSteering = \count ->
+                    modifyIORef' acknowledgements (<> [count])
+                }
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        fmap (.finalText) execution.executionResult
+            `shouldBe` Right (Just "answer with guidance")
+        readIORef submissions `shouldReturn`
+            [ (Nothing, [UserMessage "hello"])
+            , (Just "resp-1", [UserMessage "use the second unit"])
+            ]
+        filter (/= 0) <$> readIORef acknowledgements `shouldReturn` [1]
+        readIORef closes `shouldReturn` 2
+
     it "interrupts the provider in-band before tearing down a cancelled submission" do
         started <- newEmptyMVar
         interrupted <- newEmptyMVar

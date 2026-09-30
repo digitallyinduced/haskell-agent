@@ -205,6 +205,7 @@ configFor state backend = do
         , loopApprove = const (pure ToolApprovalRejected)
         , loopReadSteering = pure []
         , loopCommitSteering = const (pure ())
+        , loopCloseSteering = pure []
         , loopInterrupt = pure ()
         , loopCancel = cancel
         }

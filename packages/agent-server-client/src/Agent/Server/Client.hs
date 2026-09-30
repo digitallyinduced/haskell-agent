@@ -15,6 +15,7 @@ module Agent.Server.Client (
     getAgentServerTurnResult,
     listAgentServerTurns,
     cancelAgentServerTurn,
+    steerAgentServerTurn,
     listAgentServerRequests,
     listAgentServerRequestsForTurn,
     resolveAgentServerRequest,
@@ -188,6 +189,24 @@ cancelAgentServerTurn client turnId =
         ("/v1/turns/" <> encodePathSegment turnId <> "/cancel")
         [200, 202]
         Nothing
+
+{- | Hand guidance to a running turn, which answers it before it completes.
+A queued, finishing, or finished turn rejects guidance with HTTP 409
+@turn_not_steerable@; submit it as a new turn instead.
+-}
+steerAgentServerTurn ::
+    AgentServerClient ->
+    Text ->
+    AgentServerSteerTurnRequest ->
+    IO (Either AgentServerClientError AgentServerTurn)
+steerAgentServerTurn client turnId =
+    performJsonRequest
+        client
+        "POST"
+        ("/v1/turns/" <> encodePathSegment turnId <> "/steer")
+        [202]
+        . Just
+        . Aeson.encode
 
 listAgentServerRequests ::
     AgentServerClient ->

@@ -40,6 +40,7 @@ module Agent.Server.Types
     , TurnMessageClock(..)
     , FileAttachment(..)
     , ResolveRequest(..)
+    , SteerTurnRequest(..)
     , SessionArchiveFilter(..)
     , archiveFilterText
     ) where
@@ -616,6 +617,26 @@ instance FromJSON ResolveRequest where
         ResolveRequest
             <$> value .: "decision"
             <*> value .:? "value"
+
+-- | Guidance for a running turn. The client request identifier makes a
+-- retried request idempotent.
+data SteerTurnRequest = SteerTurnRequest
+    { steerTurnClientRequestId :: !ClientRequestId
+    , steerTurnInput :: !Text
+    }
+    deriving (Eq, Show)
+
+instance FromJSON SteerTurnRequest where
+    parseJSON = withObject "SteerTurnRequest" \value -> do
+        rejectUnknownFields
+            "SteerTurnRequest"
+            ["clientRequestId", "input"]
+            value
+        candidate <- value .: "clientRequestId"
+        unless (isUUIDText candidate) $
+            fail "clientRequestId must be a UUID"
+        SteerTurnRequest (ClientRequestId (Text.toLower candidate))
+            <$> value .: "input"
 
 data SessionArchiveFilter
     = ActiveSessions

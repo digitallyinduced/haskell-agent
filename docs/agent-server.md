@@ -347,6 +347,22 @@ curl -X POST http://127.0.0.1:4096/v1/turns/TURN_ID/cancel
 The runtime first requests an in-band interruption, then performs structured
 worker cancellation and joins the worker before returning.
 
+Steer a running turn with text guidance, for example a follow-up message that
+arrived while the agent works:
+
+```console
+curl -X POST http://127.0.0.1:4096/v1/turns/TURN_ID/steer \
+  -H 'Content-Type: application/json' \
+  -d '{"clientRequestId":"01991f6d-7200-7000-8000-000000000004","input":"Use the second unit instead."}'
+```
+
+The loop reads guidance at its next model boundary and does not finish while
+accepted guidance is pending, so a `202` means the turn's result answers it.
+When the loop has already answered, or the turn is queued, being cancelled, or
+executed by another server instance, the server answers
+`409 turn_not_steerable`: submit the guidance as a new turn instead. Retrying
+with the same `clientRequestId` is acknowledged without steering twice.
+
 ## Session history and failed output
 
 Session lists and history use keyset cursors:
@@ -417,8 +433,8 @@ that tenant and is never accepted as a substitute for tenant authentication.
 
 The HTTP API deliberately excludes arbitrary CLI argument forwarding,
 auto-approval (`--yolo`), worktree creation, computer use, attachments, and
-mid-turn steering. Those capabilities require dedicated typed protocol
-designs rather than stringly command passthrough.
+steering with anything but text. Those capabilities require dedicated typed
+protocol designs rather than stringly command passthrough.
 
 Every error uses:
 
