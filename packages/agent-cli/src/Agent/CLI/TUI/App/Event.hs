@@ -792,7 +792,7 @@ handleDictationPartialEvent text = do
             (UiSetNotice (Just (Composer.dictationProgressNotice text)))
 
 handleDictationFinishedEvent
-    :: Either Text Text
+    :: DictationResult
     -> EventM Name AppState ()
 handleDictationFinishedEvent result = do
     state <- get
@@ -808,12 +808,23 @@ handleDictationFinishedEvent result = do
             UiSetNotice $
                 Just (infoNotice "Dictation cancelled.")
         else case result of
-            Left message ->
+            DictationFailed message ->
                 applyLocalUiEvent $
                     UiSetNotice $
                         Just $
                             warningNotice ("Dictation failed: " <> message)
-            Right transcript -> do
+            DictationRecordingSaved message path -> do
+                let ui = state.appUi
+                    (draft, cursor) =
+                        insertDictation ui.uiDraft ui.uiCursor path
+                applyLocalUiEvent (UiSetDraft draft cursor)
+                applyLocalUiEvent $
+                    UiSetNotice $
+                        Just $
+                            warningNotice
+                                ("Dictation failed: " <> message
+                                    <> ". Recording saved: " <> path)
+            DictationTranscript transcript -> do
                 let ui = state.appUi
                     (draft, cursor) =
                         insertDictation ui.uiDraft ui.uiCursor transcript

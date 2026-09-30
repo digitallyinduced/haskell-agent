@@ -769,7 +769,11 @@ appEventLogicalBytes = \case
     AppDictationRecording _ -> 256
     AppDictationPartial text -> logicalTextBytes text
     AppDictationFinished result ->
-        either logicalTextBytes logicalTextBytes result
+        case result of
+            DictationTranscript transcript -> logicalTextBytes transcript
+            DictationFailed message -> logicalTextBytes message
+            DictationRecordingSaved message path ->
+                saturatingAdd (logicalTextBytes message) (logicalTextBytes path)
     AppSetImagePreviews previews ->
         imagePreviewPairsLogicalBytes previews
     AppRefreshImagePreviews previews ->

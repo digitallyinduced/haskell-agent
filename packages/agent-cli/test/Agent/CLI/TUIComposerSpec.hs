@@ -467,6 +467,12 @@ spec = describe "fullscreen composer" do
             `shouldBe` ("please fix this now", 15)
         insertDictation "hello" 5 ", world"
             `shouldBe` ("hello, world", 12)
+        insertDictation "please now" 6
+            "/Users/example/.haskell-agent/dictations/dictation-123.wav"
+            `shouldBe`
+                ( "please /Users/example/.haskell-agent/dictations/dictation-123.wav now"
+                , 65
+                )
 
     it "routes dictation through the active model provider" do
         dictationBackendsForProvider OpenAIProvider
