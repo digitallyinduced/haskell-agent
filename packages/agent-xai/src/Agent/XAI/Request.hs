@@ -24,8 +24,11 @@ import Agent.XAI.ReasoningEffort
     , grokReasoningEffortText
     )
 import Agent.Responses.Types
+import Agent.Json (rawJsonFromEncoding)
 import Agent.XAI.ImageBudget (applyImageBudget)
 import Agent.XAI.Options (ClientOptions(..))
+import qualified Data.Aeson as Aeson
+import Data.Aeson ((.=))
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -93,6 +96,22 @@ buildRequest options request =
 
     xaiTool tool = case tool of
         FunctionToolValue {} -> Just tool
+        -- The Grok proxy does not accept Responses custom tool declarations.
+        -- Represent freeform input as a required string in a function call.
+        CustomToolValue custom -> Just $ FunctionToolValue FunctionTool
+            { name = custom.name
+            , description = fmap (<> "\nPass the complete input in the `input` string field.") custom.description
+            , parameters = Just . rawJsonFromEncoding . Aeson.toEncoding $
+                Aeson.object
+                    [ "type" .= ("object" :: Text)
+                    , "properties" .= Aeson.object
+                        [ "input" .= Aeson.object
+                            [ "type" .= ("string" :: Text) ] ]
+                    , "required" .= (["input"] :: [Text])
+                    ]
+            , strict = Nothing
+            , async = custom.async
+            }
         KnownResponseTool ToolWebSearch -> Just hostedWebSearchTool
         KnownResponseTool ToolXSearch -> Just hostedXSearchTool
         KnownResponseTool ToolComputer -> Nothing

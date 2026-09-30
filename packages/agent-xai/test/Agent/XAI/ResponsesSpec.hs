@@ -47,6 +47,36 @@ spec = do
                 `shouldBe` Just "organization-research"
 
     describe "buildRequest" do
+        it "projects custom freeform tools as functions accepted by Grok" do
+            let custom = CustomToolValue CustomTool
+                    { name = "apply_patch"
+                    , description = Just "Apply a patch"
+                    , format = Nothing
+                    , async = Nothing
+                    }
+                request = setTools (Just [custom]) sampleRequest
+            mapM_ (\options -> do
+                object <- expectObject (requestValue options request)
+                toolValues <- expectArray (KeyMap.lookup "tools" object)
+                tool <- case toolValues of
+                    firstTool : _ -> expectObject firstTool
+                    [] -> expectationFailure "missing custom tool" >> fail "unreachable"
+                KeyMap.lookup "type" tool `shouldBe` Just (Aeson.String "function")
+                KeyMap.lookup "name" tool `shouldBe` Just (Aeson.String "apply_patch")
+                parameters <- expectObject =<< maybe
+                    (expectationFailure "missing parameters" >> fail "unreachable")
+                    pure
+                    (KeyMap.lookup "parameters" tool)
+                KeyMap.lookup "required" parameters `shouldBe`
+                    Just (Aeson.toJSON (["input"] :: [Text]))
+                properties <- expectObject =<< maybe
+                    (expectationFailure "missing properties" >> fail "unreachable")
+                    pure
+                    (KeyMap.lookup "properties" parameters)
+                KeyMap.lookup "input" properties `shouldBe`
+                    Just (Aeson.object ["type" .= ("string" :: Text)])
+                ) [defaultClientOptions, gatewayClientOptions "https://gateway.example/"]
+
         it "maps canonical Responses fields onto the Grok proxy dialect" do
             let value = requestValue defaultClientOptions sampleRequest
             object <- expectObject value
