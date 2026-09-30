@@ -5,6 +5,7 @@ module Agent.OpenAI.Compaction.Request
     , estimateResponseCreateParamsTokens
     , estimateEncodedValue
     , resizedImageBytesEstimate
+    , pdfPageBytesEstimate
     ) where
 
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
@@ -12,6 +13,9 @@ import Agent.Responses.LoopBackend (withRequestInput)
 import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
+import Data.ByteString (ByteString)
+import qualified Data.ByteString.Base64 as Base64
+import qualified Data.ByteString.Char8 as Char8
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -64,6 +68,12 @@ estimateAdjustedJsonTokens json =
 resizedImageBytesEstimate :: Int
 resizedImageBytesEstimate = 7_373
 
+-- | OpenAI gives the model the extracted text and an image of every PDF
+-- page, so a page costs about one resized image plus its text, however many
+-- bytes its scans and fonts take.
+pdfPageBytesEstimate :: Int
+pdfPageBytesEstimate = resizedImageBytesEstimate + 2_000
+
 mediaEstimateAdjustment :: Aeson.Value -> (Int, Int)
 mediaEstimateAdjustment = \case
     Aeson.Array values ->
@@ -72,11 +82,10 @@ mediaEstimateAdjustment = \case
             (0, 0)
             values
     Aeson.Object fields ->
-        let isInputImage =
-                KeyMap.lookup "type" fields == Just (Aeson.String "input_image")
+        let partType = KeyMap.lookup "type" fields
         in foldl'
             (\acc (key, value) ->
-                addPair acc (fieldAdjustment isInputImage key value))
+                addPair acc (fieldAdjustment partType key value))
             (0, 0)
             (KeyMap.toList fields)
     _ ->
@@ -85,16 +94,18 @@ mediaEstimateAdjustment = \case
     addPair (payloadAcc, replacementAcc) (payload, replacement) =
         (payloadAcc + payload, replacementAcc + replacement)
 
-    fieldAdjustment isInputImage key value
-        | isInputImage && key == "image_url" =
+    fieldAdjustment partType key value
+        | partType == Just (Aeson.String "input_image") && key == "image_url" =
             imageUrlAdjustment value
+        | partType == Just (Aeson.String "input_file") && key == "file_data" =
+            pdfFileDataAdjustment value
         | otherwise =
             mediaEstimateAdjustment value
 
 imageUrlAdjustment :: Aeson.Value -> (Int, Int)
 imageUrlAdjustment = \case
     Aeson.String text ->
-        case parseBase64ImageDataUrl text of
+        case parseBase64DataUrl ("image/" `Text.isPrefixOf`) text of
             Just payload ->
                 (Text.length payload, resizedImageBytesEstimate)
             Nothing ->
@@ -102,8 +113,50 @@ imageUrlAdjustment = \case
     _ ->
         (0, 0)
 
-parseBase64ImageDataUrl :: Text -> Maybe Text
-parseBase64ImageDataUrl url
+pdfFileDataAdjustment :: Aeson.Value -> (Int, Int)
+pdfFileDataAdjustment = \case
+    Aeson.String text ->
+        case parseBase64DataUrl (== "application/pdf") text of
+            Just payload ->
+                ( Text.length payload
+                , pdfPageBytesEstimate
+                    * pdfPageCountEstimate
+                        (Base64.decodeLenient (TextEncoding.encodeUtf8 payload))
+                )
+            Nothing ->
+                (0, 0)
+    _ ->
+        (0, 0)
+
+-- | Count the page objects of a PDF (@/Type /Page@, but not @/Pages@ or
+-- @/PageLabel@). Files that compress their objects into object streams show
+-- none, so assume one page per 100 KiB for them.
+pdfPageCountEstimate :: ByteString -> Int
+pdfPageCountEstimate bytes =
+    case countPageObjects 0 bytes of
+        0 -> max 1 (Char8.length bytes `div` 102_400)
+        pages -> pages
+  where
+    countPageObjects count remaining =
+        case Char8.breakSubstring "/Type" remaining of
+            (_, match)
+                | Char8.null match -> count
+                | otherwise ->
+                    let afterKey = Char8.drop 5 match
+                    in countPageObjects
+                        (if isPageType afterKey then count + 1 else count)
+                        afterKey
+
+    isPageType afterKey =
+        let value = Char8.dropWhile isPdfWhitespace afterKey
+        in "/Page" `Char8.isPrefixOf` value
+            && maybe True isPdfNameEnd (Char8.indexMaybe value 5)
+
+    isPdfWhitespace = (`elem` ("\0\t\n\f\r " :: String))
+    isPdfNameEnd char = isPdfWhitespace char || char `elem` ("()<>[]{}/%" :: String)
+
+parseBase64DataUrl :: (Text -> Bool) -> Text -> Maybe Text
+parseBase64DataUrl acceptsMime url
     | not (hasInsensitivePrefix "data:" url) = Nothing
     | otherwise =
         case Text.break (== ',') (Text.drop 5 url) of
@@ -116,7 +169,7 @@ parseBase64ImageDataUrl url
                         [] -> Text.empty
                     hasBase64 =
                         any (\part -> Text.toLower part == "base64") parts
-                in if hasBase64 && hasInsensitivePrefix "image/" mime
+                in if hasBase64 && acceptsMime (Text.toLower mime)
                     then Just (Text.drop 1 payload)
                     else Nothing
 

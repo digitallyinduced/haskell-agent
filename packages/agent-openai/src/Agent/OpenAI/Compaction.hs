@@ -16,6 +16,7 @@ module Agent.OpenAI.Compaction
     , estimateResponseCreateParamsTokens
     , estimateRequestTokensWithItems
     , resizedImageBytesEstimate
+    , pdfPageBytesEstimate
     , trimResponseHistoryToFit
     , sanitizeCompactionHistory
     , collectRecentUserTexts
@@ -43,6 +44,7 @@ import Agent.OpenAI.Compaction.Request
     , estimateRequestTokensWithItems
     , estimateResponseCreateParamsTokens
     , resizedImageBytesEstimate
+    , pdfPageBytesEstimate
     )
 import Agent.OpenAI.Compaction.Commands
     ( clearSessionUserText

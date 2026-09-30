@@ -21,6 +21,7 @@ import Agent.Tools.TaskPlan
     )
 import qualified Agent.Responses.Codec as ResponsesCodec
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Either (isLeft)
 import qualified Data.Text as Text
@@ -1097,6 +1098,29 @@ spec = do
             estimated `shouldSatisfy`
                 (>= max 1 (resizedImageBytesEstimate `div` 4))
 
+    describe "PDF payload token estimates" do
+        it "estimates read PDFs per page instead of by their base64 payload" do
+            let item = pdfToolResult (scannedPdf 20)
+                estimated = estimateItemsTokens [item]
+            naiveEncodedTokens item `shouldSatisfy` (> 1_000_000)
+            estimated `shouldSatisfy` (>= 20 * pdfPageBytesEstimate `div` 4)
+            estimated `shouldSatisfy` (< 21 * pdfPageBytesEstimate `div` 4)
+
+        it "keeps a tool continuation with a large scanned PDF under the Codex context window" do
+            let params = (defaultResponseCreateParams :: ResponseCreateParams)
+                    { model = Just "gpt-5.6-sol" }
+                item = pdfToolResult (scannedPdf 20)
+                contextWindow = codexEffectiveContextWindowFor params.model
+            naiveEncodedTokens item `shouldSatisfy` (> contextWindow)
+            estimateRequestTokensWithItems params [item]
+                `shouldSatisfy` (< contextWindow)
+
+        it "assumes one page per 100 KiB when page objects are compressed" do
+            let compressed = "%PDF-1.7\n" <> BS.replicate 1_024_000 0x78
+                estimated = estimateItemsTokens [pdfToolResult compressed]
+            estimated `shouldSatisfy` (>= 10 * pdfPageBytesEstimate `div` 4)
+            estimated `shouldSatisfy` (< 11 * pdfPageBytesEstimate `div` 4)
+
     describe "Codex model metadata" do
         it "uses the documented GPT-6.1 Sol context window" do
             codexModelMetadata "gpt-6.1-sol"
@@ -1350,6 +1374,24 @@ spec = do
         , phase = Nothing
         , passthrough = Nothing
         }
+    pdfToolResult bytes =
+        toolResultToItem $
+            ToolCallResultWithFiles "pdf-call" "Loaded PDF file into model context: scan.pdf"
+                FunctionCallKind BlockingToolCall [] (Just ToolSucceeded)
+                [ToolResultFile "scan.pdf" "application/pdf" bytes]
+    -- Page objects spelled with and without whitespace, each followed by
+    -- 280 KB of scan data. The page tree and page label are not pages.
+    scannedPdf :: Int -> BS.ByteString
+    scannedPdf pages =
+        "%PDF-1.4\n<< /Type /Catalog /Pages 2 0 R >>\n\
+        \<< /Type /Pages /Kids [] >>\n<< /Type /PageLabel /S /D >>\n"
+            <> mconcat
+                [ pageObject <> BS.replicate 280_000 0xFF
+                | page <- [1 .. pages]
+                , let pageObject
+                        | even page = "<< /Type /Page\n/Parent 2 0 R >>\n"
+                        | otherwise = "<</Type/Page/Parent 2 0 R>>\n"
+                ]
     toolOutput output = FunctionCallOutputItem FunctionCallOutput
         { localOutcome = Nothing
         , itemId = Nothing
