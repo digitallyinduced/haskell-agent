@@ -180,6 +180,7 @@ benchmark display-journal-bench
                     , Agent.Provider
                     , Agent.Telemetry
                     , Agent.TextBuffer
+                    , Agent.ToolArgs
                     , Agent.ToolDispatch
     ghc-options:      -O2 -rtsopts "-with-rtsopts=-T"
     build-depends:    agent-json
@@ -229,6 +230,7 @@ test-suite visible-loop-state-test
                     , containers
                     , hspec
                     , safe-exceptions
+                    , scientific
                     , stm
                     , text
                     , time
