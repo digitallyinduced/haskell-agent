@@ -4,6 +4,7 @@ module Agent.Responses.SSE
     , newSseDecoder
     , feedSseDecoder
     , finishSseDecoder
+    , decodeSseC
     , parseSseEvents
     , parseSseEventsBytes
     ) where
@@ -13,6 +14,9 @@ import qualified Agent.Responses.Codec as ResponsesCodec
 import Agent.Responses.Types (ResponseStreamEvent)
 import qualified Agent.Transport.SSE as SSE
 import Agent.Transport.SSE (dropTrailingCarriageReturn)
+import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Except (ExceptT, except)
+import Data.Conduit (ConduitT, await, yield)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.Maybe as Maybe
@@ -26,6 +30,24 @@ newtype SseDecoder = SseDecoder SSE.SseFramer
 
 newSseDecoder :: SseDecoder
 newSseDecoder = SseDecoder SSE.newSseFramer
+
+-- | Decode chunks under downstream demand, flushing only on normal EOF.
+-- Keep the existing per-chunk validation boundary: a framing/UTF-8 error in
+-- a chunk is reported before any events from that chunk are delivered.
+-- Empty chunks here are harmless; the transport source owns EOF detection.
+decodeSseC
+    :: Monad m
+    => ConduitT BS.ByteString ResponseStreamEvent (ExceptT ApiError m) ()
+decodeSseC = go newSseDecoder
+  where
+    go decoder = await >>= \case
+        Nothing -> do
+            trailing <- lift (except (finishSseDecoder decoder))
+            mapM_ yield trailing
+        Just chunk -> do
+            (next, events) <- lift (except (feedSseDecoder decoder chunk))
+            mapM_ yield events
+            go next
 
 -- | Feed an arbitrary HTTP body chunk. Completed events are returned in wire
 -- order as soon as their terminating blank line arrives.

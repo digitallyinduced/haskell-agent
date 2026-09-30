@@ -54,6 +54,7 @@ library
                     , Agent.Responses.SSE
                     , Agent.Responses.ResponseMerge
                     , Agent.Responses.StreamAssembly
+                    , Agent.Responses.StreamPipeline
                     , Agent.Responses.LoopBackend
     other-modules:    Agent.Responses.LoopBackend.Input
                     , Agent.Responses.LoopBackend.Output
@@ -68,6 +69,7 @@ library
                     , base64-bytestring
                     , bytestring
                     , containers
+                    , conduit               >= 1.3 && < 1.4
                     , http-client
                     , http-client-tls
                     , http-conduit
@@ -76,6 +78,7 @@ library
                     , safe-exceptions
                     , scientific
                     , text
+                    , transformers
                     , vector
 
 test-suite agent-responses-test
@@ -90,6 +93,7 @@ test-suite agent-responses-test
                     , Agent.Responses.ResponseMergeSpec
                     , Agent.Responses.SSESpec
                     , Agent.Responses.StreamAssemblySpec
+                    , Agent.Responses.StreamPipelineSpec
                     , Agent.Responses.TestSupport
     build-depends:    base >= 4.14 && < 5
                     , agent-core
@@ -104,7 +108,10 @@ test-suite agent-responses-test
                     , http-types
                     , QuickCheck >= 2.14 && < 2.16
                     , retry
+                    , conduit
+                    , safe-exceptions
                     , text
+                    , transformers
                     , wai
                     , warp
 
