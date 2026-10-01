@@ -2,19 +2,68 @@ module Agent.XAI.TranscriptionSpec (spec) where
 
 import Agent.XAI.Transcription
 import Agent.XAI.TestSupport (requireLoopbackListener)
-import Control.Concurrent (newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent
+    ( newChan, newEmptyMVar, putMVar, readChan, takeMVar, threadDelay
+    , tryReadMVar, writeChan )
 import Control.Concurrent.Async (cancel, wait, withAsync)
+import Control.Exception (MaskingState(Unmasked), getMaskingState)
 import Control.Exception.Safe (bracket, finally, throwString)
-import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
+import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Network.Socket as Socket
 import qualified Network.WebSockets as WS
+import qualified Network.WebSockets.Stream as WSStream
 import qualified System.Timeout as Timeout
 import System.IO.Error (ioeGetErrorString)
 import Test.Hspec
 
 spec :: Spec
 spec = describe "xAI transcription events" do
+    mapM_ (\cancelParent ->
+        it (if cancelParent
+            then "bounds a blocked transcription close during cancellation"
+            else "bounds a blocked transcription close after capture failure") do
+            closeStarted <- newEmptyMVar
+            closeStopped <- newEmptyMVar
+            producerStarted <- newEmptyMVar
+            blocked <- newEmptyMVar
+            blockWrites <- newIORef False
+            let writer write bytes = do
+                    shouldBlock <- readIORef blockWrites
+                    case bytes of
+                        Just _ | shouldBlock ->
+                            (do
+                                getMaskingState >>= putMVar closeStarted
+                                -- Finite even on regression, so failed tests
+                                -- cannot leave an uninterruptible worker.
+                                threadDelay 3_000_000
+                                write bytes)
+                                `finally` putMVar closeStopped ()
+                        _ -> write bytes
+                producer _ = do
+                    writeIORef blockWrites True
+                    putMVar producerStarted ()
+                    if cancelParent
+                        then takeMVar blocked
+                        else fail "capture failed"
+            withChannelConnection writer \client server -> do
+                WS.sendTextData server
+                    ("{\"type\":\"transcript.created\"}" :: Text)
+                withAsync
+                    (transcribeOnConnection client producer (const (pure ())))
+                    \worker -> do
+                        takeMVar producerStarted
+                        Timeout.timeout 2_000_000 (do
+                            if cancelParent
+                                then cancel worker
+                                else wait worker `shouldThrow`
+                                    ((== "capture failed") . ioeGetErrorString))
+                            `shouldReturn` Just ()
+                        tryReadMVar closeStarted `shouldReturn` Just Unmasked
+                        tryReadMVar closeStopped `shouldReturn` Just ())
+        [False, True]
+
     it "replaces partial hypotheses rather than appending them" do
         callbacks <- newIORef []
         withTranscriptServer
@@ -138,6 +187,31 @@ withTranscriptServer events action =
             mapM_ (WS.sendTextData connection) events
             (WS.receiveData connection :: IO Text) `shouldThrow` anyException)
         action
+
+-- | Block the close write independently of handshake and readiness frames.
+withChannelConnection
+    :: ((Maybe LBS.ByteString -> IO ()) -> Maybe LBS.ByteString -> IO ())
+    -> (WS.Connection -> WS.Connection -> IO value)
+    -> IO value
+withChannelConnection wrapWriter action = do
+    clientToServer <- newChan
+    serverToClient <- newChan
+    clientStream <- WSStream.makeStream
+        (readChan serverToClient)
+        (wrapWriter (writeChan clientToServer . fmap LBS.toStrict))
+    serverStream <- WSStream.makeStream
+        (readChan clientToServer)
+        (writeChan serverToClient . fmap LBS.toStrict)
+    withAsync
+        (WS.makePendingConnectionFromStream serverStream WS.defaultConnectionOptions
+            >>= WS.acceptRequest)
+        \handshake -> do
+            client <- WS.newClientConnection clientStream "localhost" "/"
+                WS.defaultConnectionOptions []
+            server <- wait handshake
+            action client server `finally` do
+                WSStream.close clientStream
+                WSStream.close serverStream
 
 withRawTranscriptServer :: (WS.Connection -> IO ()) -> (WS.Connection -> IO a) -> IO a
 withRawTranscriptServer serve action =

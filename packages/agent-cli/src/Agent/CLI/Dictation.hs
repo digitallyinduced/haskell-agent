@@ -26,6 +26,7 @@ import Agent.Accounts.Auth
     , loadOpenAiDictationAuth
     )
 import Agent.CLI.Dictation.Capture (withBufferedCapture)
+import Agent.Process (terminateProcessGroup)
 import Agent.Runtime.Transcription (transcribeAudio)
 import Agent.Runtime.GatewayClient
     ( GatewayModelAccess
@@ -95,8 +96,8 @@ import System.Process
     ( CreateProcess(..)
     , StdStream(..)
     , createProcess
+    , getPid
     , proc
-    , terminateProcess
     , waitForProcess
     )
 
@@ -444,7 +445,7 @@ requireExecutable command =
 
 streamMicrophone :: Int -> IO () -> (BS.ByteString -> IO ()) -> IO ()
 streamMicrophone sampleRate waitForStop sendAudio =
-    bracket start stop \(input, output, process) ->
+    bracket start stop \(input, output, process, _) ->
         withAsync waitForStop \stopKey ->
             withAsync (pump output) \audioPump ->
                 waitEitherCatch stopKey audioPump >>= \case
@@ -486,13 +487,16 @@ streamMicrophone sampleRate waitForStop sendAudio =
                 { std_in = CreatePipe
                 , std_out = CreatePipe
                 , std_err = NoStream
+                , create_group = True
                 }
-        pure (input, output, process)
-    stop (input, output, process) = do
+        groupId <- getPid process
+        pure (input, output, process, groupId)
+    stop (input, output, process, groupId) = do
+        -- FFmpeg can ignore a cooperative signal during device startup.
+        -- Escalate before closing pipes, and never wait indefinitely here.
+        terminateProcessGroup groupId process
         void (tryAny (hClose input))
         void (tryAny (hClose output))
-        void (tryAny (terminateProcess process))
-        void (tryAny (waitForProcess process))
 
 renderLiveTranscript :: Text -> IO ()
 renderLiveTranscript text = do

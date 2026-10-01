@@ -1243,13 +1243,14 @@ spec = do
         it "does not erase a transcript that arrives before the ready event" do
             stop <- newEmptyMVar
             abort <- newIORef False
+            cancellation <- newEmptyMVar
             let ui = reduceUi
                     (UiSetNotice (Just Composer.dictationStartingNotice))
                     initialUiState
             runtime <- newScriptRuntime ui
             let initialState =
                     (initialFullscreenAppState runtime [] AgentRoot [] 0)
-                        { appDictation = Just (DictationSession stop abort) }
+                        { appDictation = Just (DictationSession stop abort cancellation) }
                 script =
                     [ FullscreenScriptApp (AppDictationPartial "opening words")
                     , FullscreenScriptApp (AppDictationRecording stop)

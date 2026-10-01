@@ -5,6 +5,7 @@ module Agent.CLI.TUI.App.Run where
 import Agent.CLI.TUI.Keyboard (mkKeyboardVty)
 
 import Agent.CLI.Clipboard ( formatImageSize )
+import Agent.CLI.Dictation.Capture (withDictationCancellation)
 import Agent.CLI.Dictation ( DictationControl(..)
     , DictationResult(..)
     , dictateWithTarget
@@ -406,6 +407,8 @@ runFullscreen runtime workerAction = do
                 pure $ DictationFailed
                     "Dictation is unavailable for the active session"
             Just target ->
+                fmap (fromMaybe (DictationTranscript "")) $
+                withDictationCancellation job.dictationJobWaitForCancel $
                 dictateWithTarget
                     target
                     DictationControl

@@ -51,7 +51,7 @@ import Agent.TUI.TextWidth
     , nextGraphemeBoundary
     , previousGraphemeBoundary
     )
-import Control.Concurrent (newEmptyMVar, readMVar)
+import Control.Concurrent (newEmptyMVar, readMVar, tryReadMVar)
 import Control.Concurrent.Async (withAsync, wait)
 import Control.Concurrent.STM (atomically)
 import Data.IORef (newIORef)
@@ -623,7 +623,8 @@ spec = describe "fullscreen composer" do
     it "ignores readiness for stopped, aborted, finished, or replaced sessions" do
         stop <- newEmptyMVar
         abort <- newIORef False
-        let session = DictationSession stop abort
+        cancellation <- newEmptyMVar
+        let session = DictationSession stop abort cancellation
         dictationSessionIsRecording stop (Just session) `shouldReturn` True
         other <- newEmptyMVar
         dictationSessionIsRecording other (Just session) `shouldReturn` False
@@ -634,10 +635,25 @@ spec = describe "fullscreen composer" do
         dictationSessionIsRecording stop (Just session) `shouldReturn` False
         abortStop <- newEmptyMVar
         aborted <- newIORef False
-        let abortSession = DictationSession abortStop aborted
+        abortCancellation <- newEmptyMVar
+        let abortSession = DictationSession abortStop aborted abortCancellation
         requestDictationStop abortSession True
+        readMVar abortCancellation
         dictationSessionIsRecording abortStop (Just abortSession)
             `shouldReturn` False
+
+    it "can cancel after a normal stop without consuming either signal" do
+        stop <- newEmptyMVar
+        abort <- newIORef False
+        cancellation <- newEmptyMVar
+        let session = DictationSession stop abort cancellation
+        requestDictationStop session False
+        tryReadMVar cancellation `shouldReturn` Nothing
+        requestDictationStop session True
+        requestDictationStop session True
+        tryReadMVar cancellation `shouldReturn` Just ()
+        tryReadMVar stop `shouldReturn` Just ()
+        readIORef abort `shouldReturn` True
 
     it "renders a non-transient listening notice for live transcripts" do
         let idle = dictationProgressNotice ""

@@ -1,13 +1,22 @@
 -- | Scoped, replayable microphone capture independent of provider startup.
-module Agent.CLI.Dictation.Capture (withBufferedCapture) where
+module Agent.CLI.Dictation.Capture
+    (withBufferedCapture, withDictationCancellation) where
 
-import Control.Concurrent.Async (wait, waitEitherCatch, withAsync)
+import Control.Concurrent.Async (race, wait, waitEitherCatch, withAsync)
 import Control.Concurrent.STM
     ( atomically, newTVarIO, readTVar, retry, throwSTM, writeTVar )
 import Control.Exception.Safe (throwIO)
 import Control.Monad (unless, when)
 import qualified Data.ByteString as BS
 import qualified Data.Sequence as Seq
+
+-- | Abort the entire dictation, including startup and final transcription.
+-- The losing worker is cancelled and joined before reporting cancellation.
+withDictationCancellation :: IO () -> IO a -> IO (Maybe a)
+withDictationCancellation waitForCancel action =
+    race waitForCancel action >>= \case
+        Left () -> pure Nothing
+        Right result -> pure (Just result)
 
 -- | Start capture before running the consumer (including its authentication
 -- and connection setup). Each invocation of the supplied producer replays the
