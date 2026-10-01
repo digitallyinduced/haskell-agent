@@ -485,12 +485,14 @@ data FullscreenRuntime = FullscreenRuntime
 
 data DictationJob = DictationJob
     { dictationJobWaitForStop :: IO ()
+    , dictationJobWaitForCancel :: IO ()
     , dictationJobRecordingSession :: !(MVar ())
     }
 
 data DictationSession = DictationSession
     { dictationStop :: !(MVar ())
     , dictationAbort :: !(IORef Bool)
+    , dictationCancel :: !(MVar ())
     }
 
 -- | Provider/session-scoped actions behind one long-lived terminal runtime.

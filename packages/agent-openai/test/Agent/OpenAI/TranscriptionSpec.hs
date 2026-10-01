@@ -16,13 +16,18 @@ import Agent.Provider
 import Control.Concurrent
     ( myThreadId
     , newEmptyMVar
+    , newChan
     , putMVar
     , readMVar
+    , readChan
     , takeMVar
     , threadDelay
     , throwTo
+    , tryReadMVar
+    , writeChan
     )
 import Control.Concurrent.Async (AsyncCancelled(..), cancel, wait, withAsync)
+import Control.Exception (MaskingState(Unmasked), getMaskingState)
 import Control.Exception.Safe (bracket, finally, throwString)
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
@@ -34,6 +39,7 @@ import Data.IORef
     , modifyIORef'
     , newIORef
     , readIORef
+    , writeIORef
     )
 import Data.Text (Text)
 import GHC.Clock (getMonotonicTimeNSec)
@@ -43,12 +49,60 @@ import qualified Network.HTTP.Types as HTTP
 import qualified Network.Socket as Socket
 import qualified Network.Wai as Wai
 import qualified Network.WebSockets as WS
+import qualified Network.WebSockets.Stream as WSStream
 import qualified System.Timeout as Timeout
 import System.IO.Error (ioeGetErrorString)
 import Test.Hspec
 
 spec :: Spec
 spec = describe "OpenAI transcription" do
+    mapM_ (\cancelParent ->
+        it (if cancelParent
+            then "bounds a blocked Realtime close during cancellation"
+            else "bounds a blocked Realtime close after capture failure") do
+            closeStarted <- newEmptyMVar
+            closeStopped <- newEmptyMVar
+            producerStarted <- newEmptyMVar
+            blocked <- newEmptyMVar
+            blockWrites <- newIORef False
+            let writer write bytes = do
+                    shouldBlock <- readIORef blockWrites
+                    case bytes of
+                        Just _ | shouldBlock ->
+                            (do
+                                getMaskingState >>= putMVar closeStarted
+                                -- Finite even on regression, so failed tests
+                                -- cannot leave an uninterruptible worker.
+                                threadDelay 3_000_000
+                                write bytes)
+                                `finally` putMVar closeStopped ()
+                        _ -> write bytes
+                producer _ = do
+                    writeIORef blockWrites True
+                    putMVar producerStarted ()
+                    if cancelParent
+                        then takeMVar blocked
+                        else fail "capture failed"
+            withChannelConnection writer \client server ->
+                withAsync (do
+                    _ <- WS.receiveData server :: IO Text
+                    WS.sendTextData server
+                        ("{\"type\":\"session.updated\"}" :: Text)
+                    takeMVar blocked) \_ ->
+                    withAsync
+                        (transcribeOnConnection client producer (const (pure ())))
+                        \worker -> do
+                            takeMVar producerStarted
+                            Timeout.timeout 2_000_000 (do
+                                if cancelParent
+                                    then cancel worker
+                                    else wait worker `shouldThrow`
+                                        ((== "capture failed") . ioeGetErrorString))
+                                `shouldReturn` Just ()
+                            tryReadMVar closeStarted `shouldReturn` Just Unmasked
+                            tryReadMVar closeStopped `shouldReturn` Just ())
+        [False, True]
+
     it "returns completed Realtime state despite malformed events and callback failures" do
         callbacks <- newIORef []
         let server pending = do
@@ -694,6 +748,32 @@ realtimeServer action pending = do
     _ <- WS.receiveData connection :: IO Text
     sendEvent connection $ Aeson.object ["type" .= ("session.updated" :: Text)]
     action connection
+
+-- | In-memory transport lets tests block only the final close write, without
+-- relying on operating-system socket-buffer sizes or requiring a listener.
+withChannelConnection
+    :: ((Maybe LBS.ByteString -> IO ()) -> Maybe LBS.ByteString -> IO ())
+    -> (WS.Connection -> WS.Connection -> IO value)
+    -> IO value
+withChannelConnection wrapWriter action = do
+    clientToServer <- newChan
+    serverToClient <- newChan
+    clientStream <- WSStream.makeStream
+        (readChan serverToClient)
+        (wrapWriter (writeChan clientToServer . fmap LBS.toStrict))
+    serverStream <- WSStream.makeStream
+        (readChan clientToServer)
+        (writeChan serverToClient . fmap LBS.toStrict)
+    withAsync
+        (WS.makePendingConnectionFromStream serverStream WS.defaultConnectionOptions
+            >>= WS.acceptRequest)
+        \handshake -> do
+            client <- WS.newClientConnection clientStream "localhost" "/"
+                WS.defaultConnectionOptions []
+            server <- wait handshake
+            action client server `finally` do
+                WSStream.close clientStream
+                WSStream.close serverStream
 
 expectCommit :: WS.Connection -> IO ()
 expectCommit connection = do

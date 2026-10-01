@@ -159,7 +159,9 @@ dictationProgressNotice transcript =
 
 requestDictationStop :: DictationSession -> Bool -> IO ()
 requestDictationStop session abort = do
-    when abort $ writeIORef session.dictationAbort True
+    when abort do
+        writeIORef session.dictationAbort True
+        void (tryPutMVar session.dictationCancel ())
     void (tryPutMVar session.dictationStop ())
 
 handleDictationKey
@@ -881,10 +883,12 @@ startDictation applyUiEvent = do
         Nothing -> do
             stop <- liftIO newEmptyMVar
             abort <- liftIO (newIORef False)
+            cancellation <- liftIO newEmptyMVar
             let session =
                     DictationSession
                         { dictationStop = stop
                         , dictationAbort = abort
+                        , dictationCancel = cancellation
                         }
             applyUiEvent
                 (UiSetNotice (Just dictationStartingNotice))
@@ -894,6 +898,7 @@ startDictation applyUiEvent = do
                     current.appRuntime.runtimeDictationJobs
                     DictationJob
                         { dictationJobWaitForStop = readMVar stop
+                        , dictationJobWaitForCancel = readMVar cancellation
                         , dictationJobRecordingSession = stop
                         }
 

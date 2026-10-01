@@ -37,9 +37,11 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
     ( Async
     , cancel
+    , wait
     , waitCatch
     , waitEitherCatch
     , withAsync
+    , withAsyncWithUnmask
     )
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import qualified Control.Concurrent.STM as STM
@@ -632,10 +634,7 @@ chatGPTStreamSession
                             runCapture finished
                                 `finally` do
                                     cancel receiver
-                                    ignoreSynchronousException $
-                                        WS.sendClose
-                                            connection
-                                            ("done" :: Text)
+                                    closeTranscriptionConnection connection
   where
     runCapture finished = do
         sendQueuedChatGPTAudio connection finished audio
@@ -1194,8 +1193,18 @@ transcribeOnConnection connection produceAudio onTranscript =
                     WS.sendTextData connection audioCommitMessage
                     waitForTranscript receiver)
                     `finally` do
-                        void (tryAny (WS.sendClose connection ("done" :: Text)))
+                        closeTranscriptionConnection connection
                         cancel receiver
+
+-- Safe.finally masks cleanup uninterruptibly. Run the close write in a scoped,
+-- explicitly unmasked worker so a stalled socket cannot delay cancellation.
+closeTranscriptionConnection :: WS.Connection -> IO ()
+closeTranscriptionConnection connection =
+    withAsyncWithUnmask
+        (\unmask -> unmask $
+            void $ Timeout.timeout 250_000 $
+                void (tryAny (WS.sendClose connection ("done" :: Text))))
+        wait
 
 sessionUpdateMessage :: Text
 sessionUpdateMessage =

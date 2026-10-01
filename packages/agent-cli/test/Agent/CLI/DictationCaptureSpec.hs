@@ -1,6 +1,6 @@
 module Agent.CLI.DictationCaptureSpec (spec) where
 
-import Agent.CLI.Dictation.Capture (withBufferedCapture)
+import Agent.CLI.Dictation.Capture (withBufferedCapture, withDictationCancellation)
 import Agent.CLI.Dictation (saveFailedDictationRecording)
 import Control.Concurrent.Async (cancel, withAsync)
 import Control.Concurrent.MVar
@@ -18,6 +18,54 @@ import Test.Hspec
 
 spec :: Spec
 spec = around_ within $ describe "buffered dictation capture" do
+    it "cancels blocked final transcription and joins both resources" do
+        cancellation <- newEmptyMVar
+        finalizing <- newEmptyMVar
+        captureClosed <- newEmptyMVar
+        providerClosed <- newEmptyMVar
+        never <- newEmptyMVar
+        let capture send =
+                send "speech"
+                    `finally` putMVar captureClosed ()
+            consume produce =
+                (produce (const (pure ())) >> putMVar finalizing () >> readMVar never)
+                    `finally` putMVar providerClosed ()
+        withAsync
+            (takeMVar finalizing >> putMVar cancellation ())
+            \_ -> do
+                withDictationCancellation (readMVar cancellation)
+                    (withBufferedCapture 1024 (pure ()) capture consume)
+                    `shouldReturn` (Nothing :: Maybe ())
+        tryReadMVar captureClosed `shouldReturn` Just ()
+        tryReadMVar providerClosed `shouldReturn` Just ()
+
+    it "cancels provider startup and joins an active microphone" do
+        cancellation <- newEmptyMVar
+        captured <- newEmptyMVar
+        providerStarted <- newEmptyMVar
+        captureClosed <- newEmptyMVar
+        providerClosed <- newEmptyMVar
+        never <- newEmptyMVar
+        let capture send =
+                (send "speech" >> putMVar captured () >> readMVar never)
+                    `finally` putMVar captureClosed ()
+            consume _ =
+                (putMVar providerStarted () >> readMVar never)
+                    `finally` putMVar providerClosed ()
+        withAsync
+            (takeMVar captured >> takeMVar providerStarted >> putMVar cancellation ())
+            \_ -> do
+                withDictationCancellation (readMVar cancellation)
+                    (withBufferedCapture 1024 (pure ()) capture consume)
+                    `shouldReturn` (Nothing :: Maybe ())
+        tryReadMVar captureClosed `shouldReturn` Just ()
+        tryReadMVar providerClosed `shouldReturn` Just ()
+
+    it "preserves completed transcription when no cancellation is requested" do
+        cancellation <- newEmptyMVar
+        withDictationCancellation (readMVar cancellation) (pure ("speech" :: BS.ByteString))
+            `shouldReturn` Just "speech"
+
     it "captures opening words while provider startup is blocked" do
         captured <- newEmptyMVar
         stop <- newEmptyMVar
