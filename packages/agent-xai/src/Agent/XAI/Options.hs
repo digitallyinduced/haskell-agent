@@ -36,7 +36,7 @@ grokClientIdentifier = "grok-shell"
 -- | Current Grok Build crate version (@xai-grok-version@). The proxy
 -- version-gates on @x-grok-client-version@.
 defaultGrokClientVersion :: Text
-defaultGrokClientVersion = "1.0.8"
+defaultGrokClientVersion = "1.0.13"
 
 -- | Context window advertised by the current Grok 4.5/4.6/4.7 model catalog.
 grokDefaultContextWindow :: Int
