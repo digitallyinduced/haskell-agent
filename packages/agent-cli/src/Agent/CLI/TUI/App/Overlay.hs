@@ -676,9 +676,11 @@ activateControl = \case
                 resolveTextPrompt True
             _ -> resolveChoice True
     ComposerModel ->
+        -- The fullscreen composer retains its draft across configuration.
+        -- Do not pass a snapshot that the REPL could restore after submission.
         Composer.handlePromptControlClick
             applyLocalUiEventWith
-            ReplChooseModel
+            (const (ReplChooseModel ""))
     ComposerEffort ->
         Composer.handleEffortControlClick applyLocalUiEventWith
     ComposerMode ->
@@ -688,7 +690,7 @@ activateControl = \case
     ComposerAccount ->
         Composer.handlePromptControlClick
             applyLocalUiEventWith
-            ReplChooseAccount
+            (const (ReplChooseAccount ""))
     ComposerImageRemove index ->
         Composer.handleImageRemoveClick applyLocalUiEventWith index
     QuickStartWorktree ->
@@ -699,7 +701,7 @@ activateControl = \case
     QuickStartModel ->
         Composer.handlePromptControlClick
             applyLocalUiEventWith
-            ReplChooseModel
+            (const (ReplChooseModel ""))
     QuickStartChangelog ->
         activateQuickStartCommand "/changelog"
     ChoiceRow index ->
