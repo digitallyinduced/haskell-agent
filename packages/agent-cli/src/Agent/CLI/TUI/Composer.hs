@@ -298,7 +298,9 @@ handleEffortControlClick applyUiEvent = do
                 || maybe False (const True) state.appMetaConsole
                 || maybe False (const True) ui.uiPermission
     if ui.uiAwaitingInput
-        then handlePromptControlClick applyUiEvent ReplChooseEffort
+        -- The UI owns the retained draft; restoring a captured copy after
+        -- configuration would overwrite edits or resurrect submitted text.
+        then handlePromptControlClick applyUiEvent (const (ReplChooseEffort ""))
         else if ui.uiRunning && not overlayOpen
             then do
                 let efforts = ui.uiPrompt.promptEffortOptions

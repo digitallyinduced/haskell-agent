@@ -13,6 +13,7 @@ import Agent.CLI.TUI.Keyboard
     )
 import Agent.CLI.TUI.App (finishedMarkdownProseCaches)
 import qualified Agent.CLI.TUI.App as Runtime
+import qualified Agent.CLI.TUI.App.Runtime as PromptRuntime
 import Control.Monad (forM_, when)
 import Control.Monad.IO.Class (liftIO)
 import Graphics.Vty.Platform.Unix.Input.Classify.Types (KClass(..))
@@ -97,6 +98,7 @@ import Agent.CLI.TUI.Types
     , AppEventMailbox(..)
     , AppEventMailboxState(..)
     , PendingAppEvent(..)
+    , PendingUiEvent(..)
     , AppState(..)
     , ChoiceOverlay(..)
     , newDynamicChoice
@@ -285,6 +287,79 @@ spec = do
                     <> map (`FullscreenScriptCachePresent` False) names
                     <> [FullscreenScriptHalt]
                 pure ()
+    describe "fullscreen configuration draft ownership" do
+        forM_
+            [ (False, "", "preserves an unsubmitted draft after configuration")
+            , (True, "", "does not restore a prompt submitted during configuration")
+            , (True, "next prompt", "preserves a new draft behind a submitted configuration prompt")
+            ] \(submitBeforeContinuation, subsequentDraft, description) ->
+            it description $
+                withSystemTempDirectory "agent-tui-configuration-draft" \directory ->
+                    bracket
+                        (lookupEnv "HOME")
+                        (\previous -> maybe (unsetEnv "HOME") (setEnv "HOME") previous)
+                        \_ -> do
+                            setEnv "HOME" directory
+                            forM_
+                                [ (ComposerModel, ReplChooseModel)
+                                , (ComposerAccount, ReplChooseAccount)
+                                , (ComposerEffort, ReplChooseEffort)
+                                , (QuickStartModel, ReplChooseModel)
+                                ] \(control, select) -> do
+                                    completed <- timeout 5_000_000 do
+                                        let draft = "configuration prompt"
+                                            ui = reduceUi (UiSetAwaitingInput True) $
+                                                reduceUi (UiSetDraft draft (Text.length draft))
+                                                    initialUiState
+                                        runtime <- newScriptRuntime ui
+                                        (_, configuring) <- runFullscreenScriptWithState
+                                            (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                                            [ FullscreenScriptMouseDown control V.BLeft (B.Location (0, 0))
+                                            , FullscreenScriptMouseRelease control V.BLeft (B.Location (0, 0))
+                                            , FullscreenScriptHalt
+                                            ]
+                                        configuring.appUi.uiDraft `shouldBe` draft
+                                        selection <- atomically $
+                                            Composer.takeFullscreenInput runtime.runtimeInput
+                                        selection.fullscreenInputLine `shouldBe` select ""
+                                        let initialDraft = case selection.fullscreenInputLine of
+                                                ReplChooseModel value -> value
+                                                ReplChooseAccount value -> value
+                                                ReplChooseEffort value -> value
+                                                _ -> error "expected a configuration selection input"
+                                            editing =
+                                                [FullscreenScriptVty (V.EvKey V.KEnter [])
+                                                | submitBeforeContinuation]
+                                                <> [FullscreenScriptVty (V.EvPaste (encoded subsequentDraft))
+                                                   | not (Text.null subsequentDraft)]
+                                        (_, edited) <- runFullscreenScriptWithState configuring $
+                                            editing <> [FullscreenScriptHalt]
+                                        resumed <- PromptRuntime.readFullscreenLineOrWithCatalog
+                                            runtime defaultSlashCatalog ui.uiPrompt initialDraft (pure ())
+                                        resumed `shouldBe`
+                                            if submitBeforeContinuation
+                                                then Right (ReplText draft, False)
+                                                else Left ()
+                                        let AppEventMailbox mailbox = runtime.runtimeMailbox
+                                        pending <- atomically (readTVar mailbox)
+                                        let events =
+                                                [ FullscreenScriptApp (AppUi event)
+                                                | PendingUi (PendingExactUi event) <-
+                                                    toList pending.mailboxPendingEvents
+                                                ]
+                                                <> [FullscreenScriptApp (AppUi (UiUserSubmitted draft))
+                                                   | submitBeforeContinuation]
+                                        (_, finalState) <- runFullscreenScriptWithState edited $
+                                            events <> [FullscreenScriptHalt]
+                                        finalState.appUi.uiDraft `shouldBe`
+                                            if submitBeforeContinuation then subsequentDraft else draft
+                                        finalState.appUi.uiCursor `shouldBe`
+                                            Text.length (if submitBeforeContinuation then subsequentDraft else draft)
+                                        toList finalState.appUi.uiQueuedInputs `shouldBe` []
+                                        map (.blockBody) (toList finalState.appUi.uiBlocks) `shouldBe`
+                                            [draft | submitBeforeContinuation]
+                                    completed `shouldBe` Just ()
+
     describe "active-turn prompt routing" do
         it "queues explicit queued prompts and steers explicit and plain prompts" $
             withSystemTempDirectory "agent-tui-prompt-routing" \directory ->
