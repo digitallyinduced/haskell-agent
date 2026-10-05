@@ -13,7 +13,6 @@ import Agent.CLI.TUI.Keyboard
     )
 import Agent.CLI.TUI.App (finishedMarkdownProseCaches)
 import qualified Agent.CLI.TUI.App as Runtime
-import qualified Agent.CLI.TUI.App.Runtime as PromptRuntime
 import Control.Monad (forM_, when)
 import Control.Monad.IO.Class (liftIO)
 import Graphics.Vty.Platform.Unix.Input.Classify.Types (KClass(..))
@@ -334,7 +333,7 @@ spec = do
                                                    | not (Text.null subsequentDraft)]
                                         (_, edited) <- runFullscreenScriptWithState configuring $
                                             editing <> [FullscreenScriptHalt]
-                                        resumed <- PromptRuntime.readFullscreenLineOrWithCatalog
+                                        resumed <- Runtime.readFullscreenLineOrWithCatalog
                                             runtime defaultSlashCatalog ui.uiPrompt initialDraft (pure ())
                                         resumed `shouldBe`
                                             if submitBeforeContinuation
