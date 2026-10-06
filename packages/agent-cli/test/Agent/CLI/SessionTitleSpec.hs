@@ -32,6 +32,17 @@ spec = describe "Agent.CLI.SessionTitle" do
             fmap Text.length (cleanGeneratedTitle (Text.replicate 100 "a"))
                 `shouldBe` Just 80
 
+        it "drops markdown copied from the conversation" do
+            cleanGeneratedTitle "**Arc-Cua Speed Analysis**"
+                `shouldBe` Just "Arc-Cua Speed Analysis"
+            cleanGeneratedTitle "## Umgesetzt - **Microsoft 365**"
+                `shouldBe` Just "Umgesetzt - Microsoft 365"
+            cleanGeneratedTitle "`Main.hs` auth fix"
+                `shouldBe` Just "Main.hs auth fix"
+            cleanGeneratedTitle "Haskell exec 6*7"
+                `shouldBe` Just "Haskell exec 6*7"
+            cleanGeneratedTitle "**" `shouldBe` Nothing
+
     describe "shouldRequestSessionTitle" do
         it "requests titles after the complete first, third, and sixth turns" do
             shouldRequestSessionTitle 1 0 `shouldBe` True

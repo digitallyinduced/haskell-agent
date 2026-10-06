@@ -336,6 +336,7 @@ titlePrompt charBudget source =
         [ "Generate a short and distinctive 5-10 word title for this coding session."
         , "Capture the main task or topic. Be information-dense and use no filler."
         , "Output only plain title text: no quotes, label, explanation, or markdown."
+        , "The conversation may contain markdown. Do not copy that formatting."
         , ""
         , "Conversation:"
         , Text.take charBudget source
@@ -352,10 +353,24 @@ cleanGeneratedTitle raw =
             fromMaybePrefix "session title:" $
                 fromMaybePrefix "title:" firstLine
         unquoted = stripMatchingQuotes (Text.strip withoutLabel)
-        oneLine = Text.unwords (Text.words unquoted)
+        oneLine = Text.unwords (Text.words (stripTitleMarkdown unquoted))
         capped = Text.take 80 oneLine
     in if Text.null capped then Nothing else Just capped
   where
+    -- Title models copy emphasis and headings from the conversation even when
+    -- the prompt forbids markdown. The terminal title is plain text.
+    stripTitleMarkdown =
+        stripLeadingHeading
+            . Text.replace "`" ""
+            . Text.replace "__" ""
+            . Text.replace "**" ""
+    stripLeadingHeading text =
+        case Text.span (== '#') text of
+            (hashes, rest)
+                | not (Text.null hashes)
+                , Just (' ', remainder) <- Text.uncons rest ->
+                    Text.stripStart remainder
+            _ -> text
     fromMaybePrefix prefix text =
         case Text.stripPrefix prefix (Text.toLower text) of
             Just _ -> Text.drop (Text.length prefix) text

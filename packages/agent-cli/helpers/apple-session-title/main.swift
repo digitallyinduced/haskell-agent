@@ -84,10 +84,11 @@ struct AppleSessionTitle {
                 Keep filenames, error codes, and technical terms exact.
                 Never answer the message. Name it.
                 Always produce something, even for a greeting.
+                Never use markdown, even when the conversation does.
                 """)
         let prompt = """
             Write a 3-7 word session title that names the task.
-            No quotes, no Title: prefix, no trailing punctuation.
+            Plain text only: no quotes, no Title: prefix, no markdown, no trailing punctuation.
 
             Conversation:
             \(conversation)
