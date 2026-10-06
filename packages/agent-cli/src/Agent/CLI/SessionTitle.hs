@@ -42,6 +42,7 @@ import Control.Concurrent.STM
 import Control.Exception.Safe (SomeException, displayException, tryAny)
 import Control.Monad (forever, void)
 import Control.Retry (limitRetries, retrying)
+import Data.Char (isAlphaNum, isAscii, isAsciiLower, isAsciiUpper)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -336,6 +337,7 @@ titlePrompt charBudget source =
         [ "Generate a short and distinctive 5-10 word title for this coding session."
         , "Capture the main task or topic. Be information-dense and use no filler."
         , "Output only plain title text: no quotes, label, explanation, or markdown."
+        , "The conversation may contain markdown. Do not copy that formatting."
         , ""
         , "Conversation:"
         , Text.take charBudget source
@@ -352,10 +354,60 @@ cleanGeneratedTitle raw =
             fromMaybePrefix "session title:" $
                 fromMaybePrefix "title:" firstLine
         unquoted = stripMatchingQuotes (Text.strip withoutLabel)
-        oneLine = Text.unwords (Text.words unquoted)
+        oneLine = Text.unwords (Text.words (stripTitleMarkdown unquoted))
         capped = Text.take 80 oneLine
     in if Text.null capped then Nothing else Just capped
   where
+    -- Title models copy emphasis and headings from the conversation even when
+    -- the prompt forbids markdown. The terminal title is plain text.
+    -- Double underscores that wrap an identifier are names such as __init__
+    -- or __main__, not emphasis, so those pairs stay.
+    stripTitleMarkdown =
+        stripOnlyMarkers
+            . stripLeadingHeading
+            . Text.replace "`" ""
+            . stripMatchedEmphasis "**" (const False)
+            . stripMatchedEmphasis "__" isDunderName
+    stripMatchedEmphasis marker preserveInside = go
+      where
+        markerLength = Text.length marker
+        go current =
+            case Text.breakOn marker current of
+                (_, "") -> current
+                (before, rest) ->
+                    let opened = Text.drop markerLength rest
+                    in case Text.breakOn marker opened of
+                        (_, "") -> current
+                        (inside, closer) ->
+                            let after = Text.drop markerLength closer
+                                kept
+                                    | preserveInside inside =
+                                        before <> marker <> inside <> marker
+                                    | otherwise = before <> inside
+                            in kept <> go after
+    isDunderName text =
+        case Text.uncons text of
+            Just (first, rest) ->
+                isNameStart first && Text.all isNameChar rest
+            Nothing -> False
+    isNameStart char =
+        isAscii char && (isAsciiLower char || isAsciiUpper char || char == '_')
+    isNameChar char =
+        isNameStart char || (isAscii char && isAlphaNum char)
+    stripOnlyMarkers text
+        | Text.null text = text
+        | Text.all isMarker text = ""
+        | otherwise = text
+      where
+        isMarker char =
+            char == '*' || char == '_' || char == '`' || char == '#'
+    stripLeadingHeading text =
+        case Text.span (== '#') text of
+            (hashes, rest)
+                | not (Text.null hashes)
+                , Just (' ', remainder) <- Text.uncons rest ->
+                    Text.stripStart remainder
+            _ -> text
     fromMaybePrefix prefix text =
         case Text.stripPrefix prefix (Text.toLower text) of
             Just _ -> Text.drop (Text.length prefix) text
