@@ -1313,6 +1313,72 @@ spec = do
                     (const (pure ()))
             fmap (.fullscreenInputLine) result `shouldBe` Just ReplEof
 
+        it "completes a suspension requested after shutdown EOF without the grace timeout" do
+            runtime <- newScriptRuntime initialUiState
+            invocations <- newIORef (0 :: Int)
+            result <- timeout 1_000_000 $
+                withFullscreenWorker
+                    (closeFullscreenChannels runtime)
+                    (do
+                        input <- atomically $
+                            Composer.takeFullscreenInput runtime.runtimeInput
+                        input.fullscreenInputLine `shouldBe` ReplEof
+                        Runtime.withFullscreenSuspended runtime do
+                            modifyIORef' invocations (+ 1)
+                            pure (42 :: Int))
+                    (const (pure ()))
+            result `shouldBe` Just 42
+            readIORef invocations `shouldReturn` 1
+
+        it "executes an unhandled pending suspension once after the UI closes" do
+            runtime <- newScriptRuntime initialUiState
+            invocations <- newIORef (0 :: Int)
+            result <- timeout 1_000_000 $
+                withFullscreenWorker
+                    (closeFullscreenChannels runtime)
+                    (Runtime.withFullscreenSuspended runtime do
+                        modifyIORef' invocations (+ 1)
+                        pure (42 :: Int))
+                    (const (void (waitForPendingSuspension runtime)))
+            result `shouldBe` Just 42
+            readIORef invocations `shouldReturn` 1
+
+        it "prefers a completed suspension reply when the mailbox closes simultaneously" do
+            runtime <- newScriptRuntime initialUiState
+            invocations <- newIORef (0 :: Int)
+            result <- timeout 1_000_000 $
+                withFullscreenWorker
+                    (closeFullscreenChannels runtime)
+                    (Runtime.withFullscreenSuspended runtime do
+                        modifyIORef' invocations (+ 1)
+                        pure (42 :: Int))
+                    (\_ -> waitForPendingSuspension runtime >>= \case
+                        AppSuspend action reply -> do
+                            value <- action
+                            atomically do
+                                putTMVar reply (Right value)
+                                Runtime.closeAppEventMailbox runtime.runtimeMailbox
+                        _ -> expectationFailure "expected a suspension event")
+            result `shouldBe` Just 42
+            readIORef invocations `shouldReturn` 1
+
+        it "does not repeat a started suspension whose reply was not published" do
+            runtime <- newScriptRuntime initialUiState
+            invocations <- newIORef (0 :: Int)
+            result <- timeout 1_000_000 $
+                catchUserInterrupt
+                    (withFullscreenWorker
+                        (closeFullscreenChannels runtime)
+                        (Runtime.withFullscreenSuspended runtime do
+                            modifyIORef' invocations (+ 1)
+                            pure False)
+                        (\_ -> waitForPendingSuspension runtime >>= \case
+                            AppSuspend action _ -> void action
+                            _ -> expectationFailure "expected a suspension event"))
+                    (pure True)
+            result `shouldBe` Just True
+            readIORef invocations `shouldReturn` 1
+
     describe "dictation readiness" do
         it "does not erase a transcript that arrives before the ready event" do
             stop <- newEmptyMVar
@@ -4777,6 +4843,17 @@ withPastedImageFixtures action =
             \_ -> do
                 setEnv "HOME" directory
                 action firstPath secondPath
+
+waitForPendingSuspension :: FullscreenRuntime -> IO AppEvent
+waitForPendingSuspension runtime = atomically do
+    let AppEventMailbox mailbox = runtime.runtimeMailbox
+    pending <- readTVar mailbox
+    case
+        [ event
+        | PendingEvent event@AppSuspend{} <- toList pending.mailboxPendingEvents
+        ] of
+        event : _ -> pure event
+        _ -> retry
 
 newScriptRuntime :: UiState -> IO FullscreenRuntime
 newScriptRuntime ui = do

@@ -303,6 +303,12 @@ closeAppEventMailbox (AppEventMailbox stateRef) = do
         , mailboxPendingBytes = 0
         }
 
+-- | The owner closes the mailbox only after the UI has released the terminal.
+waitAppEventMailboxClosed :: AppEventMailbox -> STM ()
+waitAppEventMailboxClosed (AppEventMailbox stateRef) = do
+    state <- readTVar stateRef
+    check state.mailboxClosed
+
 enqueueMailboxEvent :: AppEventMailbox -> AppEvent -> STM ()
 enqueueMailboxEvent (AppEventMailbox stateRef) event = do
     state <- readTVar stateRef

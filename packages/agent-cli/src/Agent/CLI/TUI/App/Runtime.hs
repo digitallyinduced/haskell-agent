@@ -5,6 +5,7 @@ module Agent.CLI.TUI.App.Runtime where
 import Agent.CLI.TUI.App.Mailbox
     ( appEventChannelCapacity
     , enqueueAppEvent
+    , waitAppEventMailboxClosed
     )
 
 import Agent.CLI.AppleFollowUp (defaultFollowUpRoute)
@@ -1362,8 +1363,26 @@ requestFullscreenSecret runtime title body = do
 withFullscreenSuspended :: FullscreenRuntime -> IO a -> IO a
 withFullscreenSuspended runtime action = do
     reply <- newEmptyTMVarIO
-    enqueueAppEvent runtime (AppSuspend action reply)
-    atomically (readTMVar reply) >>= either throwIO pure
+    started <- newTVarIO False
+    let runAction = do
+            wasStarted <- atomically do
+                previous <- readTVar started
+                writeTVar started True
+                pure previous
+            if wasStarted then throwIO UserInterrupt else action
+    enqueueAppEvent runtime (AppSuspend runAction reply)
+    result <- atomically $
+        (Just <$> readTMVar reply) `orElse` do
+            waitAppEventMailboxClosed runtime.runtimeMailbox
+            pure Nothing
+    case result of
+        Just outcome -> either throwIO pure outcome
+        Nothing -> do
+            -- Ctrl+C may stop Brick before the worker prints its resume hint.
+            -- Once the owner closes the mailbox the terminal is restored, so
+            -- an unhandled action can run here without asking Brick to suspend.
+            -- Never repeat an action interrupted before its reply was published.
+            runAction
 
 allocateNativePreviewImageIdBase :: IO Int
 allocateNativePreviewImageIdBase = do
