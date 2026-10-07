@@ -26,6 +26,7 @@ import Agent.Accounts.Gateway.Credentials (validateGatewayCredential)
 import Agent.Runtime.Gateway.Dictation (transcribeGatewayPcmWith)
 import Agent.Runtime.Gateway.Usage (fetchGatewayUsageWithCredential)
 import Agent.ClientIdentity (gatewayUserAgent)
+import Agent.Provider (Provider)
 import Agent.OpenAI.Usage (UsageSnapshot)
 import Agent.Server.Client.GatewayIdentity (GatewayCredential(..), gatewayCredentialIdentity)
 import Agent.Store.Postgres.Connection (StorePool)
@@ -141,7 +142,7 @@ data GatewayModelAccess = GatewayModelAccess
     , gatewayModelRefreshLock :: !(MVar ())
     , gatewayModelPersist :: !(Maybe [GatewayModel] -> IO ())
     , gatewayDictation
-        :: !(((BS.ByteString -> IO ()) -> IO ())
+        :: !(Provider -> ((BS.ByteString -> IO ()) -> IO ())
             -> (Text -> IO ())
             -> IO (Either Text Text))
     }
@@ -236,7 +237,7 @@ newGatewayModelAccessWithUsage fetch usage =
 -- access handle.
 newGatewayModelAccessWithDictation
     :: IO (Either Text [GatewayModel])
-    -> (((BS.ByteString -> IO ()) -> IO ())
+    -> (Provider -> ((BS.ByteString -> IO ()) -> IO ())
         -> (Text -> IO ())
         -> IO (Either Text Text))
     -> IO GatewayModelAccess
@@ -249,7 +250,7 @@ newGatewayModelAccessWithDictation fetch dictation =
 newGatewayModelAccessWithActions
     :: IO (Either GatewayModelFetchFailure [GatewayModel])
     -> (Text -> IO (Either Text UsageSnapshot))
-    -> (((BS.ByteString -> IO ()) -> IO ())
+    -> (Provider -> ((BS.ByteString -> IO ()) -> IO ())
         -> (Text -> IO ())
         -> IO (Either Text Text))
     -> IO GatewayModelAccess
@@ -275,10 +276,11 @@ unavailableGatewayUsage _ =
         Left "Usage is not available through this gateway connection."
 
 unavailableGatewayDictation
-    :: ((BS.ByteString -> IO ()) -> IO ())
+    :: Provider
+    -> ((BS.ByteString -> IO ()) -> IO ())
     -> (Text -> IO ())
     -> IO (Either Text Text)
-unavailableGatewayDictation _ _ =
+unavailableGatewayDictation _ _ _ =
     pure $
         Left "Dictation is not available through this gateway connection."
 
@@ -310,6 +312,7 @@ cachedGatewayUsage access model =
 -- | Record PCM through the opaque, gateway-bound dictation action.
 transcribeGatewayPcm
     :: GatewayModelAccess
+    -> Provider
     -> ((BS.ByteString -> IO ()) -> IO ())
     -> (Text -> IO ())
     -> IO (Either Text Text)

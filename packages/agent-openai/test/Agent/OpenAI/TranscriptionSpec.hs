@@ -669,6 +669,60 @@ spec = describe "OpenAI transcription" do
                 first == second
                     && "RIFF" `BS.isInfixOf` LBS.toStrict first
             _ -> False
+    it "keeps streaming across utterances and waits beyond eight seconds only after capture ends" do
+        firstTranscript <- newEmptyMVar
+        callbacks <- newIORef []
+        let finalEvent utterance text = Aeson.object
+                [ "type" .= ("transcript.final" :: Text)
+                , "utterance_id" .= (utterance :: Text)
+                , "revision" .= (1 :: Int)
+                , "text" .= (text :: Text)
+                ]
+            server pending = do
+                connection <- WS.acceptRequest pending
+                _ <- WS.receiveData connection :: IO Text
+                sendEvent connection $
+                    Aeson.object ["type" .= ("session.started" :: Text)]
+                _ <- WS.receiveData connection :: IO Text
+                sendEvent connection $ finalEvent "first" "First sentence."
+                -- The producer remains active after this utterance is final.
+                -- Its second audio frame must still arrive before session.close.
+                audio <- WS.receiveData connection :: IO Text
+                audio `shouldSatisfy` Text.isInfixOf "audio.append"
+                close <- WS.receiveData connection
+                decodeValue close `shouldBe` Aeson.object
+                    ["type" .= ("session.close" :: Text)]
+                -- Regression: the former eight-second client budget expired
+                -- before the gateway's ten-second completion budget.
+                threadDelay 9_000_000
+                sendEvent connection $ finalEvent "second" "Second sentence."
+                sendEvent connection $ Aeson.object
+                    [ "type" .= ("session.updated" :: Text)
+                    , "session" .= sessionValue "closed"
+                    ]
+            produce send = do
+                send "\x01\x00"
+                Timeout.timeout 5_000_000 (takeMVar firstTranscript)
+                    `shouldReturn` Just ()
+                threadDelay 9_000_000
+                send "\x02\x00"
+            onTranscript text = do
+                modifyIORef' callbacks (<> [text])
+                if text == "First sentence."
+                    then putMVar firstTranscript ()
+                    else pure ()
+        withWebSocketServer server \port -> do
+            result <- Timeout.timeout 25_000_000 $
+                transcribePcmWithChatGPTStreamAt
+                    ("ws://127.0.0.1:" <> Text.pack (show port)
+                        <> "/v1/audio/transcriptions")
+                    []
+                    produce
+                    onTranscript
+            result `shouldBe` Just (Right "First sentence. Second sentence.")
+        readIORef callbacks `shouldReturn`
+            ["First sentence.", "First sentence. Second sentence."]
+
     it "distinguishes local capture failures from unavailable gateway streams" do
         sessionStarted <- newEmptyMVar
         let server pending = do

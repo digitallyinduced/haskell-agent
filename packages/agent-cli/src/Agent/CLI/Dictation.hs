@@ -123,7 +123,7 @@ data DictationBackend
 -- distinct prevents a gateway session from falling back to local credentials.
 data DictationTarget
     = DirectDictation !Provider
-    | GatewayDictation !GatewayModelAccess
+    | GatewayDictation !Provider !GatewayModelAccess
 
 -- | Select the only dictation transport allowed by the current session
 -- boundary. A connected gateway is authoritative regardless of the model's
@@ -133,7 +133,7 @@ dictationTargetForSession
     -> Maybe GatewayModelAccess
     -> DictationTarget
 dictationTargetForSession provider =
-    maybe (DirectDictation provider) GatewayDictation
+    maybe (DirectDictation provider) (GatewayDictation provider)
 
 -- | Select the dictation backends allowed for the active model provider, in
 -- preference order. Providers with their own speech-to-text integration only
@@ -347,10 +347,11 @@ dictateWithTarget target control =
                                 Right (backend, loaded) ->
                                     capture (sampleRate backend)
                                         (runBackend backend loaded)
-            GatewayDictation gateway ->
-                capture openAITranscriptionSampleRate \produceAudio ->
+            GatewayDictation provider gateway ->
+                capture (if provider == XAIProvider then 16000 else openAITranscriptionSampleRate) \produceAudio ->
                     transcribeGatewayPcm
                         gateway
+                        provider
                         produceAudio
                         control.dictationOnTranscript >>= \case
                             Left err -> pure (DictationFailed err)

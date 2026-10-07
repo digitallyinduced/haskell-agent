@@ -592,11 +592,11 @@ spec = describe "fullscreen composer" do
         case dictationTargetForSession XAIProvider Nothing of
             DirectDictation provider ->
                 provider `shouldBe` XAIProvider
-            GatewayDictation _ ->
+            GatewayDictation _ _ ->
                 expectationFailure "expected direct dictation"
         gateway <- newGatewayModelAccessWith (pure (Right []))
         case dictationTargetForSession XAIProvider (Just gateway) of
-            GatewayDictation _ -> pure ()
+            GatewayDictation provider _ -> provider `shouldBe` XAIProvider
             DirectDictation _ ->
                 expectationFailure "expected gateway dictation"
 

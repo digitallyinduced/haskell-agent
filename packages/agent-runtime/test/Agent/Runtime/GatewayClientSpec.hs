@@ -2,6 +2,7 @@ module Agent.Runtime.GatewayClientSpec (spec) where
 
 import Agent.Runtime.GatewayClient
 import Agent.Runtime.Gateway.Dictation (retryGatewayTranscriptionWithin)
+import Agent.Provider (Provider(..))
 import Agent.Audio.Transcription (TranscriptionFailure(..))
 import Agent.Runtime.Config
     ( HarnessConfig(..), McpServerConfig(..), defaultHarnessConfig
@@ -336,7 +337,8 @@ spec = describe "gateway device authorization" do
                         "company-model"
                         GatewayResponsesProtocol
                         GatewayOpenAIProvider]))
-                (\produceAudio onTranscript -> do
+                (\provider produceAudio onTranscript -> do
+                    provider `shouldBe` XAIProvider
                     produceAudio \chunk ->
                         atomicModifyIORef' events \current ->
                             (current <> ["audio:" <> Text.pack (show chunk)], ())
@@ -345,6 +347,7 @@ spec = describe "gateway device authorization" do
         result <-
             transcribeGatewayPcm
                 access
+                XAIProvider
                 (\send -> send "pcm")
                 (\transcript ->
                     atomicModifyIORef' events \current ->
@@ -356,12 +359,18 @@ spec = describe "gateway device authorization" do
                 , "text:gateway transcript"
                 ]
 
-    it "resends the same buffered dictation after a gateway 502" $
+    it "keeps streaming and upload recovery on the selected provider after a gateway 502" $
+      forM_ [(OpenAIProvider, "/v1/audio/transcriptions", BS.pack [192, 93, 0, 0]),
+             (XAIProvider, "/v1/audio/transcriptions/xai", BS.pack [128, 62, 0, 0])] \(provider, expectedPath, rateBytes) ->
         withTempHome \home ->
             withHomeEnvironment home do
                 requests <- newIORef ([] :: [BS.ByteString])
+                paths <- newIORef ([] :: [BS.ByteString])
                 captures <- newIORef (0 :: Int)
-                let application request respond
+                let application request respond = do
+                        modifyIORef' paths (<> [Wai.rawPathInfo request])
+                        respondToRequest request respond
+                    respondToRequest request respond
                         | Wai.requestMethod request == "POST" = do
                             body <- LBS.toStrict <$> Wai.strictRequestBody request
                             previous <- atomicModifyIORef' requests \bodies ->
@@ -382,7 +391,7 @@ spec = describe "gateway device authorization" do
                     saveGatewayCredentialAt home credential `shouldReturn` Right ()
                     access <- newGatewayModelAccess credential
                     transcripts <- newIORef ([] :: [Text.Text])
-                    result <- transcribeGatewayPcm access
+                    result <- transcribeGatewayPcm access provider
                         (\send -> do
                             modifyIORef' captures (+ 1)
                             send (BS.replicate 128 1))
@@ -390,9 +399,13 @@ spec = describe "gateway device authorization" do
                     result `shouldBe` Right "recovered transcript"
                     readIORef captures `shouldReturn` 1
                     readIORef transcripts `shouldReturn` ["recovered transcript"]
+                    readIORef paths `shouldReturn` replicate 3 expectedPath
                     bodies <- readIORef requests
                     case bodies of
-                        [first, second] -> first `shouldBe` second
+                        [first, second] -> do
+                            first `shouldBe` second
+                            let (_, wav) = BS.breakSubstring "RIFF" first
+                            BS.take 4 (BS.drop 24 wav) `shouldBe` rateBytes
                         _ -> expectationFailure "expected two HTTP dictation requests"
 
     it "limits all gateway dictation retries to one deadline" do

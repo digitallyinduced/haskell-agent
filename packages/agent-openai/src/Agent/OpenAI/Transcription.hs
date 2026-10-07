@@ -604,6 +604,12 @@ streamChatGPTDictation
         Right outcome ->
             pure outcome
 
+-- | Allow the gateway's ten-second upstream completion deadline plus transit
+-- time. This budget starts only after captured audio and session.close are sent,
+-- never while the user is still speaking.
+chatGPTCompletionTimeoutMicros :: Int
+chatGPTCompletionTimeoutMicros = 15 * 1_000_000
+
 chatGPTStreamSession
     :: Chan (Maybe BS.ByteString)
     -> (Text -> IO ())
@@ -643,7 +649,7 @@ chatGPTStreamSession
             connection
             chatGPTSessionCloseMessage
         Timeout.timeout
-            (8 * 1_000_000)
+            chatGPTCompletionTimeoutMicros
             (takeMVar finished) >>= \case
                 Nothing ->
                     pure $ ChatGPTStreamUnavailable

@@ -1,8 +1,9 @@
 { mkDerivation, aeson, agent-core, agent-json, agent-responses
 , agent-responses-types, async, base, base64-bytestring, bytestring
 , case-insensitive, containers, hspec, http-client, http-client-tls
-, http-conduit, http-types, lib, network, process, retry
-, safe-exceptions, text, time, vector, wai, warp, websockets, wuss
+, http-conduit, http-types, lib, network, network-uri, process
+, retry, safe-exceptions, text, time, vector, wai, warp, websockets
+, wuss
 }:
 mkDerivation {
   pname = "agent-xai";
@@ -11,8 +12,8 @@ mkDerivation {
   libraryHaskellDepends = [
     aeson agent-core agent-json agent-responses agent-responses-types
     async base bytestring containers http-client http-client-tls
-    http-conduit process retry safe-exceptions text time vector
-    websockets wuss
+    http-conduit network-uri process retry safe-exceptions text time
+    vector websockets wuss
   ];
   testHaskellDepends = [
     aeson agent-core agent-json agent-responses agent-responses-types
