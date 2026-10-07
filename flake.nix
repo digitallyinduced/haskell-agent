@@ -29,10 +29,12 @@
             skylighting,
             ...
         }:
-        flake-utils.lib.eachDefaultSystem (
-            system:
+        let
+            # One definition for our builds and consumers using their own GHC
+            # package set. Keep source filters and non-Haskell resources shared.
+            packageConfiguration = pkgs:
             let
-                pkgs = import nixpkgs { inherit system; };
+                system = pkgs.stdenv.hostPlatform.system;
                 agentBuildCommit =
                     if self ? shortRev then self.shortRev
                     else if self ? dirtyShortRev then self.dirtyShortRev
@@ -529,8 +531,8 @@
                 skylightingSyntaxDirectory =
                     "${skylightingSyntaxes}/share/skylighting/xml";
 
-                mkHaskellPackages = foreignPackages: baseHaskellPackages: packageMode:
-                    baseHaskellPackages.extend (
+                haskellPackageOverrides = foreignPackages: packageMode:
+                    assert builtins.elem packageMode [ "development" "check" "production" ];
                     final: previous:
                     let
                         # Checks exercise unoptimised static libraries.
@@ -962,8 +964,27 @@
                                             then agentServerCheckSource
                                             else agentServerProductionSource;
                                 });
-                    }
-                );
+                    };
+            in {
+                inherit haskellPackageOverrides bun_1_4 codexModelsJson codexPromptMd
+                    agentWebRTCSource agentCoreSource agentToolsSource
+                    agentCliProductionSource agentNativeBridgeCheckSource
+                    agentRuntimeProductionSource agentTelegramCheckSource
+                    agentServerCheckSource skylightingSyntaxes skylightingSyntaxDirectory;
+            };
+        in
+        flake-utils.lib.eachDefaultSystem (
+            system:
+            let
+                pkgs = import nixpkgs { inherit system; };
+                inherit (packageConfiguration pkgs)
+                    haskellPackageOverrides bun_1_4 codexModelsJson codexPromptMd
+                    agentWebRTCSource agentCoreSource agentToolsSource
+                    agentCliProductionSource agentNativeBridgeCheckSource
+                    agentRuntimeProductionSource agentTelegramCheckSource
+                    agentServerCheckSource skylightingSyntaxes skylightingSyntaxDirectory;
+                mkHaskellPackages = foreignPackages: baseHaskellPackages: packageMode:
+                    baseHaskellPackages.extend (haskellPackageOverrides foreignPackages packageMode);
 
                 haskellPackages =
                     mkHaskellPackages pkgs pkgs.haskellPackages "check";
@@ -1713,6 +1734,9 @@
                 };
 
                 checks = {
+                    haskell-package-overrides = import ./nix/tests/haskell-package-overrides.nix {
+                        inherit pkgs self system;
+                    };
                     docs = self.packages.${system}.docs;
                     pdf-inspector = import ./nix/tests/pdf-inspector.nix { inherit pkgs; };
                     # The package check does not exercise the wrapped
@@ -1810,6 +1834,10 @@
             }
         )
         // {
+            # Extend the consumer's GHC package set, not our prebuilt package set.
+            lib.haskellPackageOverrides =
+                { pkgs, foreignPackages ? pkgs, packageMode ? "development" }:
+                (packageConfiguration pkgs).haskellPackageOverrides foreignPackages packageMode;
             nixosModules.agent-server = import ./nix/modules/agent-server.nix {
                 inherit self;
             };
