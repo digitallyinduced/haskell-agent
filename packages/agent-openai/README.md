@@ -13,6 +13,35 @@ The library is IHP-agnostic — it has no dependency on IHP, a database, or any
 specific persistence layer. You bring your own persistence (if any) and pass it
 in as a plain `AuthState -> IO (Either ApiError AuthState)` callback.
 
+## Application-owned storage with library-owned compaction
+
+`Agent.OpenAI.Compaction.Manager.prepareCompaction` owns threshold evaluation,
+source loading, compression, validation, checkpoint installation, and provider
+continuation reset. Select a `CompactionStrategy`; do not implement another
+compaction lifecycle in the application.
+
+For Responses-compatible native types, configure
+`Agent.OpenAI.Compaction.Native.openAIRemoteCompactionStrategy` with a
+`NativeRequestAdapter` (model accessor, input accessor, input replacement).
+This adapter only describes the request representation. The default strategy
+retains unknown provider payloads, builds the remote compaction request, and
+validates the replacement against the context budget.
+`Agent.OpenAI.Compaction.Transport.sendNativeCompaction` owns the HTTP/SSE
+transport, deadlines, envelope normalization, and provider errors.
+
+Supply a `CompactionSource` loader whose `history` contains only observed
+inputs. Its `install` callback must atomically save the complete replacement
+against the frozen source boundary and invalidate the durable continuation.
+Pass unobserved inputs separately as `pending`; the manager excludes them from
+compression and appends them unchanged to the next request. Installation does
+not acknowledge those inputs or mark application delivery complete.
+
+Custom strategies can replace compression and result validation while reusing
+the same lifecycle and final context-window checks. Credential selection,
+usage accounting, tenant authorization, and storage transactions remain host
+responsibilities. Serialize operations for each session; the manager does not
+acquire an application-specific session lock.
+
 ## Quick start
 
 ```haskell

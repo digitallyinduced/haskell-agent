@@ -25,6 +25,31 @@ See [documentation development and hosting](docs/README.md) for details.
 nix run --accept-flake-config "github:digitallyinduced/haskell-agent"
 ```
 
+## Using the Haskell libraries with Nix
+
+Use `lib.haskellPackageOverrides` to build the libraries with your application's
+GHC package set rather than mixing in this flake's prebuilt packages:
+
+```nix
+let
+  agentOverrides = inputs.haskell-agent.lib.haskellPackageOverrides { inherit pkgs; };
+  haskellPackages = pkgs.haskellPackages.extend agentOverrides;
+in
+haskellPackages.ghcWithPackages (p: [ p.agent-core p.agent-openai p.agent-server-client ])
+```
+
+The extension includes the agent packages, shared dependency overrides, filtered
+sources, pinned resources, and test tools. It uses the same definitions as this
+flake's own builds. Apply application-specific overrides afterwards with
+`pkgs.lib.composeExtensions agentOverrides applicationOverrides`.
+
+`packageMode` defaults to `"development"` (normal Cabal/Nix settings). `"check"`
+disables optimization, shared libraries, profiling and Haddock; `"production"`
+keeps optimization but disables tests, shared libraries, profiling and Haddock.
+`foreignPackages` defaults to `pkgs`; the internal static build passes
+`pkgs.pkgsStatic` together with its matching Haskell package set. The selected
+GHC/dependency versions must still satisfy the packages' Cabal bounds.
+
 ## Steering and queued prompts
 
 While a fullscreen terminal turn is running, a plain text prompt normally steers

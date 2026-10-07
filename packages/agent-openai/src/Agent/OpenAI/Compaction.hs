@@ -13,6 +13,7 @@ module Agent.OpenAI.Compaction
     , buildRemoteCompactedHistory
     , estimateTokens
     , estimateItemsTokens
+    , estimateEncodedValue
     , estimateResponseCreateParamsTokens
     , estimateRequestTokensWithItems
     , resizedImageBytesEstimate
