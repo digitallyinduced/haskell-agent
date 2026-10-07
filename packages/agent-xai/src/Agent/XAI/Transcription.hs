@@ -46,7 +46,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Network.WebSockets as WS
-import Network.URI qualified as URI
+import qualified Network.URI as URI
 import Text.Read (readMaybe)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode(..))
