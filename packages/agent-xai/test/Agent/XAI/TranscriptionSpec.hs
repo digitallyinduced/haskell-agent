@@ -7,10 +7,11 @@ import Control.Concurrent
     , tryReadMVar, writeChan )
 import Control.Concurrent.Async (cancel, wait, withAsync)
 import Control.Exception (MaskingState(Unmasked), getMaskingState)
-import Control.Exception.Safe (bracket, finally, throwString)
+import Control.Exception.Safe (bracket, finally, throwString, tryAny)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
+import qualified Data.Text as Text
 import qualified Network.Socket as Socket
 import qualified Network.WebSockets as WS
 import qualified Network.WebSockets.Stream as WSStream
@@ -20,6 +21,74 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "xAI transcription events" do
+    it "connects to a bracketed IPv6 endpoint" do
+        withEndpointServerOn "::1" "[::1]"
+            (\pending -> do
+                connection <- WS.acceptRequest pending
+                WS.sendTextData connection ("{\"type\":\"transcript.created\"}" :: Text)
+                (WS.receiveData connection :: IO Text) `shouldReturn` "{\"type\":\"audio.done\"}"
+                WS.sendTextData connection ("{\"type\":\"transcript.done\",\"text\":\"IPv6 works\"}" :: Text))
+            (\url -> transcribePcmWithXAIAt url [] (const (pure ())) (const (pure ())))
+            `shouldReturn` Right "IPv6 works"
+
+    it "streams native binary audio and live partials through a supplied endpoint" do
+        partial <- newEmptyMVar
+        withEndpointServer
+            (\pending -> do
+                let request = WS.pendingRequest pending
+                WS.requestPath request `shouldBe` "/v1/audio/transcriptions/xai?test=1"
+                lookup "Authorization" (WS.requestHeaders request) `shouldBe` Just "Bearer gateway-test"
+                connection <- WS.acceptRequest pending
+                WS.sendTextData connection ("{\"type\":\"transcript.created\"}" :: Text)
+                WS.receiveDataMessage connection `shouldReturn` WS.Binary "pcm"
+                WS.sendTextData connection ("{\"type\":\"transcript.partial\",\"text\":\"live\"}" :: Text)
+                (WS.receiveData connection :: IO Text) `shouldReturn` "{\"type\":\"audio.done\"}"
+                WS.sendTextData connection ("{\"type\":\"transcript.done\",\"text\":\"complete\"}" :: Text))
+            (\url ->
+                transcribePcmWithXAIAt (url <> "/v1/audio/transcriptions/xai?test=1")
+                    [("Authorization", "Bearer gateway-test")]
+                    (\send -> send "pcm" >> takeMVar partial)
+                    (\text -> if text == "live" then putMVar partial () else pure ()))
+            `shouldReturn` Right "complete"
+
+    it "finishes capture after the endpoint rejects streaming" do
+        rejected <- newEmptyMVar
+        captured <- newIORef []
+        withEndpointServer
+            (\pending -> WS.rejectRequest pending "unsupported" >> putMVar rejected ())
+            (\url -> transcribePcmWithXAIAt url []
+                (\send -> do
+                    send "first"
+                    takeMVar rejected
+                    modifyIORef' captured (<> ["last" :: Text])
+                    send "last")
+                (const (pure ())))
+            >>= (`shouldSatisfy` \case
+                Left XAIDictationStreamUnavailable{} -> True
+                _ -> False)
+        readIORef captured `shouldReturn` ["last"]
+
+    it "distinguishes capture failure from stream failure" do
+        withEndpointServer
+            (\pending -> do
+                connection <- WS.acceptRequest pending
+                WS.sendTextData connection ("{\"type\":\"transcript.created\"}" :: Text))
+            (\url -> transcribePcmWithXAIAt url []
+                (const (throwString "microphone failed")) (const (pure ())))
+            >>= (`shouldSatisfy` \case
+                Left XAIDictationCaptureFailed{} -> True
+                _ -> False)
+
+    it "rejects userinfo, fragments, unsupported schemes and invalid ports" do
+        mapM_ (\url ->
+            transcribePcmWithXAIAt url [] (const (fail "must not capture"))
+                (const (pure ()))
+                >>= (`shouldSatisfy` \case
+                    Left XAIDictationStreamUnavailable{} -> True
+                    _ -> False))
+            ["ws://user:secret@localhost/", "ws://localhost/#fragment",
+             "https://localhost/", "ws://localhost:70000/"]
+
     mapM_ (\cancelParent ->
         it (if cancelParent
             then "bounds a blocked transcription close during cancellation"
@@ -232,3 +301,33 @@ withRawTranscriptServer serve action =
             case result of
                 Nothing -> expectationFailure "transcription timed out" >> fail "timeout"
                 Just value -> pure value
+
+withEndpointServer :: WS.ServerApp -> (Text -> IO a) -> IO a
+withEndpointServer = withEndpointServerOn "127.0.0.1" "127.0.0.1"
+
+withEndpointServerOn :: String -> Text -> WS.ServerApp -> (Text -> IO a) -> IO a
+withEndpointServerOn host urlHost serve action =
+    requireLoopbackListener >>
+    bracket listen Socket.close \listener -> do
+        address <- Socket.getSocketName listener
+        port <- case address of
+            Socket.SockAddrInet value _ -> pure value
+            Socket.SockAddrInet6 value _ _ _ -> pure value
+            _ -> fail "unexpected loopback address"
+        withAsync (do
+            (socket, _) <- Socket.accept listener
+            flip finally (Socket.close socket) $
+                WS.makePendingConnection socket WS.defaultConnectionOptions >>= serve)
+            \worker -> do
+                result <- Timeout.timeout 5_000_000 do
+                    value <- action ("ws://" <> urlHost <> ":" <> Text.pack (show port))
+                    cancel worker
+                    pure value
+                maybe (expectationFailure "endpoint transcription timed out" >> fail "timeout") pure result
+  where
+    listen
+        | host == "::1" =
+            tryAny (WS.makeListenSocket host 0) >>= \case
+                Right listener -> pure listener
+                Left _ -> pendingWith "IPv6 loopback listener unavailable" >> fail "unreachable"
+        | otherwise = WS.makeListenSocket host 0

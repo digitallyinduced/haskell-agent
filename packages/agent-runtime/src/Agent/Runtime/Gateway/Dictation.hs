@@ -12,6 +12,8 @@ import Agent.Accounts.Gateway.Credentials
 import Agent.Runtime.Gateway.Http (gatewayMaxResponseBytes)
 import Agent.Audio.Transcription qualified as Audio
 import Agent.ClientIdentity (gatewayUserAgent)
+import Agent.Provider (Provider(..))
+import Agent.XAI.Transcription qualified as XAI
 import Agent.OpenAI.Transcription
     ( ChatGPTDictationStreamFailure(..)
     , encodePcm16Wav
@@ -24,6 +26,7 @@ import Control.Exception.Safe (throwString, tryAny)
 import Control.Monad (unless, when)
 import Data.Aeson ((.:))
 import Data.Aeson qualified as Aeson
+import Data.Bifunctor (first)
 import Data.ByteString qualified as BS
 import Data.ByteString.Base64.URL qualified as Base64Url
 import Data.ByteString.Lazy qualified as LBS
@@ -46,15 +49,16 @@ import System.Timeout (timeout)
 
 transcribeGatewayPcmWith
     :: GatewayCredential
+    -> Provider
     -> ((BS.ByteString -> IO ()) -> IO ())
     -> (Text -> IO ())
     -> IO (Either Text Text)
-transcribeGatewayPcmWith admitted produceAudio onTranscript =
+transcribeGatewayPcmWith admitted provider produceAudio onTranscript =
     withGatewayCredentialTurnLease do
         loadGatewayCredential >>= \case
             Right (Just current)
                 | current == admitted ->
-                    case gatewayDictationWebSocketUrl current of
+                    case gatewayDictationWebSocketUrl provider current of
                         Left err -> pure (Left err)
                         Right websocketUrl -> do
                             userAgent <- gatewayUserAgent
@@ -73,7 +77,7 @@ transcribeGatewayPcmWith admitted produceAudio onTranscript =
                                             writeIORef capturedBytes total
                                             modifyIORef' chunks (chunk :)
                                             sendAudio chunk
-                            transcribePcmWithChatGPTStreamAt
+                            transcribeStream
                                 websocketUrl
                                 [ ( "Authorization"
                                   , "Bearer "
@@ -84,11 +88,11 @@ transcribeGatewayPcmWith admitted produceAudio onTranscript =
                                 ]
                                 captureAndBuffer
                                 onTranscript >>= \case
-                                    Left ChatGPTDictationCaptureFailed{} ->
+                                    Left GatewayCaptureFailed ->
                                         pure $
                                             Left
                                                 "Gateway dictation audio capture failed."
-                                    Left ChatGPTDictationStreamUnavailable{} -> do
+                                    Left GatewayStreamUnavailable -> do
                                         pcm <-
                                             BS.concat . reverse
                                                 <$> readIORef chunks
@@ -96,11 +100,12 @@ transcribeGatewayPcmWith admitted produceAudio onTranscript =
                                             if BS.null pcm
                                                 then
                                                     captureGatewayWav
+                                                        sampleRate
                                                         produceAudio
                                                 else
                                                     pure $
                                                         case encodePcm16Wav
-                                                            openAITranscriptionSampleRate
+                                                            sampleRate
                                                             pcm of
                                                                 Left _ ->
                                                                     Left
@@ -115,6 +120,7 @@ transcribeGatewayPcmWith admitted produceAudio onTranscript =
                                                         | latest == current ->
                                                             postGatewayTranscription
                                                                 latest
+                                                                provider
                                                                 wav >>= \case
                                                                     Left err ->
                                                                         pure
@@ -136,11 +142,31 @@ transcribeGatewayPcmWith admitted produceAudio onTranscript =
                 pure $
                     Left
                         "The organization gateway changed before dictation started."
+  where
+    sampleRate = if provider == XAIProvider then 16000 else openAITranscriptionSampleRate
+    transcribeStream url headers audio callback
+        | provider == XAIProvider =
+            first (\case
+                XAI.XAIDictationCaptureFailed{} -> GatewayCaptureFailed
+                XAI.XAIDictationStreamUnavailable{} -> GatewayStreamUnavailable)
+                <$> XAI.transcribePcmWithXAIAt url headers audio callback
+        | otherwise =
+            first (\case
+                ChatGPTDictationCaptureFailed{} -> GatewayCaptureFailed
+                ChatGPTDictationStreamUnavailable{} -> GatewayStreamUnavailable)
+                <$> transcribePcmWithChatGPTStreamAt url headers audio callback
+
+data GatewayDictationStreamFailure = GatewayCaptureFailed | GatewayStreamUnavailable
+
+gatewayDictationPath :: Provider -> Text
+gatewayDictationPath XAIProvider = "/v1/audio/transcriptions/xai"
+gatewayDictationPath _ = "/v1/audio/transcriptions"
 
 gatewayDictationWebSocketUrl
-    :: GatewayCredential
+    :: Provider
+    -> GatewayCredential
     -> Either Text Text
-gatewayDictationWebSocketUrl credential = do
+gatewayDictationWebSocketUrl provider credential = do
     uri <-
         maybe
             (Left "Gateway WebSocket URL is invalid.")
@@ -150,15 +176,16 @@ gatewayDictationWebSocketUrl credential = do
         Text.pack $
             show
                 uri
-                    { URI.uriPath = "/v1/audio/transcriptions"
+                    { URI.uriPath = Text.unpack (gatewayDictationPath provider)
                     , URI.uriQuery = ""
                     , URI.uriFragment = ""
                     }
 
 captureGatewayWav
-    :: ((BS.ByteString -> IO ()) -> IO ())
+    :: Int
+    -> ((BS.ByteString -> IO ()) -> IO ())
     -> IO (Either Text LBS.ByteString)
-captureGatewayWav produceAudio =
+captureGatewayWav sampleRate produceAudio =
     tryAny capture >>= \case
         Left _ ->
             pure (Left "Gateway dictation audio capture failed.")
@@ -177,7 +204,7 @@ captureGatewayWav produceAudio =
                 modifyIORef' chunks (chunk :)
         pcm <- BS.concat . reverse <$> readIORef chunks
         pure $
-            case encodePcm16Wav openAITranscriptionSampleRate pcm of
+            case encodePcm16Wav sampleRate pcm of
                 Left _ ->
                     Left "Gateway dictation captured invalid audio."
                 Right wav -> Right wav
@@ -187,9 +214,10 @@ gatewayMaxPcmBytes = 4 * 1024 * 1024 - 4096
 
 postGatewayTranscription
     :: GatewayCredential
+    -> Provider
     -> LBS.ByteString
     -> IO (Either Text Text)
-postGatewayTranscription credential wav =
+postGatewayTranscription credential provider wav =
     case validateGatewayCredential credential of
         Left _ -> pure (Left "Gateway credential is invalid.")
         Right () -> do
@@ -197,7 +225,7 @@ postGatewayTranscription credential wav =
             let endpoint =
                     Text.dropWhileEnd (== '/')
                         (Text.strip credential.gatewayBaseUrl)
-                        <> "/v1/audio/transcriptions"
+                        <> gatewayDictationPath provider
             prepared <- tryAny do
                 userAgent <- gatewayUserAgent
                 manager <- newTlsManager

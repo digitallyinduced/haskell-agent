@@ -5,6 +5,8 @@ module Agent.XAI.Transcription
     , transcribeOnConnection
     , transcribeAudioWithXAI
     , transcribePcmWithXAI
+    , XAIDictationStreamFailure(..)
+    , transcribePcmWithXAIAt
     ) where
 
 import Agent.Error (ApiError(..))
@@ -21,8 +23,8 @@ import Agent.Provider
     , TokenProvider
     , runWithTokenProvider
     )
-import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (cancel, wait, withAsync, withAsyncWithUnmask)
+import Control.Concurrent (newChan, readChan, writeChan, threadDelay)
+import Control.Concurrent.Async (cancel, wait, waitCatch, waitEitherCatch, withAsync, withAsyncWithUnmask)
 import Control.Concurrent.MVar
     ( MVar
     , newEmptyMVar
@@ -44,6 +46,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Network.WebSockets as WS
+import qualified Network.URI as URI
+import Text.Read (readMaybe)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode(..))
 import System.IO (hClose)
@@ -150,6 +154,85 @@ transcribePcmWithXAI provider produceAudio onTranscript =
                             throwIO err
                     Right transcript ->
                         pure (Right transcript)
+
+data XAIDictationStreamFailure
+    = XAIDictationStreamUnavailable !Text
+    | XAIDictationCaptureFailed !Text
+    deriving (Eq, Show)
+
+-- | Native xAI protocol over an explicitly supplied transport. No provider
+-- credentials are looked up or sent to a different endpoint. Capture remains
+-- alive after a stream failure so the caller can retain the complete recording.
+transcribePcmWithXAIAt
+    :: Text
+    -> WS.Headers
+    -> ((BS.ByteString -> IO ()) -> IO ())
+    -> (Text -> IO ())
+    -> IO (Either XAIDictationStreamFailure Text)
+transcribePcmWithXAIAt url headers produceAudio onTranscript =
+    case streamEndpoint url of
+        Left problem -> pure (Left (XAIDictationStreamUnavailable problem))
+        Right (secure, host, port, path) -> do
+            audio <- newChan
+            let capture =
+                    produceAudio (writeChan audio . Just)
+                        `finally` writeChan audio Nothing
+                consume send =
+                    readChan audio >>= \case
+                        Nothing -> pure ()
+                        Just bytes -> send bytes >> consume send
+                session connection =
+                    transcribeOnConnection connection consume onTranscript
+                connect
+                    | secure = Wuss.runSecureClientWith host (fromIntegral port)
+                        path WS.defaultConnectionOptions headers session
+                    | otherwise = WS.runClientWith host port
+                        path WS.defaultConnectionOptions headers session
+            withAsync capture \captureWorker ->
+                withAsync connect \streamWorker ->
+                    waitEitherCatch captureWorker streamWorker >>= \case
+                        Left (Left err) -> do
+                            cancel streamWorker
+                            failure XAIDictationCaptureFailed err
+                        Left (Right ()) ->
+                            waitCatch streamWorker >>= resolve
+                        Right result ->
+                            waitCatch captureWorker >>= \case
+                                Left err ->
+                                    failure XAIDictationCaptureFailed err
+                                Right () -> resolve result
+  where
+    exceptionText = Text.pack . displayException
+    failure constructor err
+        | isSyncException err = pure (Left (constructor (exceptionText err)))
+        | otherwise = throwIO err
+    resolve = either (failure XAIDictationStreamUnavailable) (pure . Right)
+
+streamEndpoint :: Text -> Either Text (Bool, String, Int, String)
+streamEndpoint url = do
+    uri <- maybe (Left "Invalid xAI dictation WebSocket URL") Right
+        (URI.parseURI (Text.unpack url))
+    authority <- maybe (Left "Missing dictation WebSocket authority") Right
+        uri.uriAuthority
+    unless (null authority.uriUserInfo && null uri.uriFragment) $
+        Left "Dictation WebSocket URL must not contain userinfo or a fragment"
+    unless (not (null authority.uriRegName)) $
+        Left "Missing dictation WebSocket host"
+    secure <- case uri.uriScheme of
+        "ws:" -> Right False
+        "wss:" -> Right True
+        _ -> Left "Dictation WebSocket URL must use WS or WSS"
+    port <- case authority.uriPort of
+        "" -> Right (if secure then 443 else 80)
+        ':' : digits | Just value <- readMaybe digits
+            , value > 0 && value <= 65_535 -> Right value
+        _ -> Left "Invalid dictation WebSocket port"
+    let path = if null uri.uriPath then "/" else uri.uriPath
+        -- URI syntax brackets IPv6 literals; socket resolution expects the
+        -- address itself, without those authority delimiters.
+        host = Text.unpack $
+            Text.dropAround (`elem` ['[', ']']) (Text.pack authority.uriRegName)
+    pure (secure, host, port, path <> uri.uriQuery)
 
 transcriptionException :: SomeException -> ApiError
 transcriptionException err =
