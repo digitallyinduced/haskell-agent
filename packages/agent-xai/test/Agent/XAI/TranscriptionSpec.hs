@@ -11,7 +11,7 @@ import Control.Exception.Safe (bracket, finally, throwString, tryAny)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
-import Data.Text qualified as Text
+import qualified Data.Text as Text
 import qualified Network.Socket as Socket
 import qualified Network.WebSockets as WS
 import qualified Network.WebSockets.Stream as WSStream
