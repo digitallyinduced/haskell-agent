@@ -52,7 +52,7 @@ import Data.Aeson.Types (Parser, parseEither)
 import qualified Data.ByteString as BS
 import Data.Char (isAlphaNum)
 import Data.Containers.ListUtils (nubOrdOn)
-import Data.List (sort, sortOn)
+import Data.List (partition, sort, sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -852,6 +852,11 @@ availableSuffix invocations =
         [] -> " (no user-invocable skills are available)"
         names -> " (available: " <> Text.intercalate ", " names <> ")"
 
+-- | The skill catalog for the model context. Always-active skills come only
+-- from trusted built-in or operator roots and are required instructions, not
+-- a listing: they are included in full and never cut or dropped. @maxChars@
+-- bounds the header and the on-demand listing, and the count reports the
+-- on-demand skills that did not fit.
 formatSkillCatalogContext :: Int -> SkillCatalog -> (Maybe Text, Int)
 formatSkillCatalogContext maxChars catalog
     | maxChars <= 0 || null skills = (Nothing, 0)
@@ -870,11 +875,15 @@ formatSkillCatalogContext maxChars catalog
                 , "### Available skills"
                 ]
             room = max 0 (maxChars - Text.length header)
-            (kept, omitted) = fitSkillLines room skills
-            text = Text.take maxChars (header <> Text.unlines kept)
+            (kept, omitted) = fitSkillLines room onDemandSkills
+            text =
+                Text.take maxChars header
+                    <> Text.unlines (map renderSkillLine alwaysSkills <> kept)
         in (Just text, omitted)
   where
     skills = contextSkills catalog
+    (alwaysSkills, onDemandSkills) =
+        partition ((== SkillContextAlways) . (.skillContextMode)) skills
 
 renderSkillLine :: Skill -> Text
 renderSkillLine skill =

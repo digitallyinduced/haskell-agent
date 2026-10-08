@@ -63,8 +63,11 @@ does not depend on the model deciding to load it. On-demand skills appear in
 the skill catalog and load with `view_skill`. The server canonicalizes every
 root at startup and requires the same trusted ancestry as the sandbox
 runner. A root must not lie in or contain a tenant workspace, tenant
-home, or the tenant state root. Always-active skills count against the
-skill catalog's context budget.
+home, or the tenant state root. Always-active skills are included in full,
+even beyond the skill catalog's context budget, which bounds only the
+on-demand listing. They are refreshed after compaction, so a deployment can
+move its standing instructions there instead of repeating them in every
+turn's input.
 
 Sandbox execution tools are auto-approved by default: workspace edits, shell
 commands, builds and tests do not create human approval requests. This applies

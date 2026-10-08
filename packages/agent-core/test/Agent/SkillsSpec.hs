@@ -253,19 +253,26 @@ spec = describe "Agent.Skills" do
                 expectationFailure "expected a rendered skill catalog"
         omitted `shouldBe` 0
 
-    it "omits an oversized always-active skill instead of truncating it" do
+    it "keeps an oversized always-active skill whole and bounds only the listing" do
         let alwaysSkill =
                 withSkillBody (Text.replicate 2000 "x")
                     (fakeSkill "always" "always" BuiltinSkill AgentSkills)
                     { skillContextMode = SkillContextAlways
                     }
             visible = fakeSkill "visible" "visible" UserSkill AgentSkills
+            listed name =
+                fakeSkill name (Text.replicate 400 "y") UserSkill AgentSkills
             (rendered, omitted) =
                 formatSkillCatalogContext 1000
-                    (SkillCatalog [alwaysSkill, visible] [])
-        omitted `shouldBe` 2
+                    (SkillCatalog
+                        [alwaysSkill, visible, listed "first", listed "second"]
+                        [])
         rendered `shouldSatisfy`
-            maybe False (not . Text.isInfixOf "Always-active skill: always")
+            maybe False (Text.isInfixOf "Always-active skill: always")
+        rendered `shouldSatisfy`
+            maybe False (Text.isInfixOf (Text.replicate 2000 "x"))
+        rendered `shouldSatisfy` maybe False (Text.isInfixOf "$visible")
+        omitted `shouldSatisfy` (> 0)
 
     it "deduplicates dollar mentions in first-occurrence order" do
         let deploy = fakeSkill "deploy" "deploy" UserSkill AgentSkills
