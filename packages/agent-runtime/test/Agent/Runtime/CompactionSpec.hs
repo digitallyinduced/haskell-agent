@@ -1693,6 +1693,101 @@ spec = do
                     Left (ConnectionError
                         "automatic compaction failed: configured threshold fired")
 
+        it "continues once after receiving an opaque checkpoint above the estimated context limit" do
+            let params = defaultResponseCreateParams
+                contextWindow = codexEffectiveContextWindowFor params.model
+                history = [userTextItem "old"]
+                threshold = 2_000
+                checkpointResponse = responseWithOutput
+                    [ Aeson.object
+                        [ "type" Aeson..= ("compaction" :: Text.Text)
+                        , "encrypted_content" Aeson..= Text.replicate (contextWindow * 4 + 10_000) "x"
+                        ]
+                    ]
+            contextState <- newIORef (Just (reportedOccupancy threshold (length history)))
+            compactCalls <- newIORef (0 :: Int)
+            seenHistory <- newIORef []
+            let sender _request = do
+                    modifyIORef' compactCalls (+ 1)
+                    pure (Right checkpointResponse)
+                base = Backend \state _ _ _ -> do
+                    modifyIORef' seenHistory (<> [state.backendItems])
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
+                        , providerTelemetry = Nothing
+                        , completion = TurnCompleted
+                        }
+                backend = autoCompactOpenAiBackendWithSender
+                    (Just threshold) sender (const (pure ())) (pure params) contextState base
+            result <- backend.submitTurn (initialBackendSnapshot history) Nothing
+                [UserMessage "new"] (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef compactCalls `shouldReturn` 1
+            readIORef seenHistory `shouldReturn` [checkpointResponse.output]
+
+        it "compacts resumed opaque checkpoints with pending tool output without truncating it" do
+            let params = defaultResponseCreateParams
+                contextWindow = codexEffectiveContextWindowFor params.model
+                checkpointResponse = responseWithOutput
+                    [ Aeson.object
+                        [ "type" Aeson..= ("compaction" :: Text.Text)
+                        , "encrypted_content" Aeson..= Text.replicate (contextWindow * 4 + 10_000) "x"
+                        ]
+                    ]
+                danglingCall = FunctionCallItem FunctionCall
+                    { itemId = Nothing
+                    , callId = "call-resumed"
+                    , name = "shell_command"
+                    , namespace = Nothing
+                    , provider = Nothing
+                    , arguments = "{}"
+                    , encryptedFunctionArgs = Nothing
+                    , status = Nothing
+                    , async = Nothing
+                    }
+                history = checkpointResponse.output <> [danglingCall]
+                toolResult = ToolCallResult
+                    { callId = "call-resumed"
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
+                    , output = "preserve this completed tool output"
+                    , callKind = FunctionCallKind
+                    }
+                inputs = [CompletedTool toolResult]
+            contextState <- newIORef Nothing
+            requests <- newIORef []
+            submissions <- newIORef []
+            let sender request = do
+                    modifyIORef' requests (<> [requestItems request])
+                    pure (Right remoteCompactionResponse)
+                base = Backend \state _ submitted _ -> do
+                    modifyIORef' submissions (<> [(state.backendItems, submitted)])
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
+                        , providerTelemetry = Nothing
+                        , completion = TurnCompleted
+                        }
+                backend = autoCompactOpenAiBackendWithSender
+                    Nothing sender (const (pure ())) (pure params) contextState base
+            result <- backend.submitTurn (initialBackendSnapshot history) Nothing
+                inputs (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef requests `shouldReturn`
+                [history <> turnInputsToItems inputs <> [compactionTriggerItem]]
+            seen <- readIORef submissions
+            length seen `shouldBe` 1
+            map snd seen `shouldBe` [[]]
+            map fst seen `shouldSatisfy` all hasCompactionCheckpoint
+
         it "caps configured thresholds at the effective context window" do
             let params = defaultResponseCreateParams
                 contextWindow =
