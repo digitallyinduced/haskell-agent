@@ -264,6 +264,7 @@ newClientRecord hooks eraHint config transport = do
     eventHandler <- newIORef (const (pure ()))
     pure McpClient
         { clientConfig = config
+        , clientCallContext = Nothing
         , clientHooks = hooks
         , clientTransport = transport
         , clientRequestRegistry = requestRegistry

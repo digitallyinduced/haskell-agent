@@ -115,11 +115,12 @@ import Control.Concurrent
     , threadDelay
     , tryPutMVar
     )
-import Control.Concurrent.Async (async, cancel, poll, wait, waitCatch, withAsync)
+import Control.Concurrent.Async (async, cancel, concurrently, poll, wait, waitCatch, withAsync)
 import Control.Monad (forM, forM_, void)
 import Data.Maybe (isNothing)
 import Data.Aeson (object, (.=))
 import qualified Data.Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
@@ -1391,6 +1392,47 @@ spec = describe "Agent.MCP" do
                 `shouldBe` ProbeFailure "boom"
 
     describe "Streamable HTTP headers" do
+        forM_ [McpProtocolModern, McpProtocolLegacy] \protocol ->
+            it ("keeps immutable turn context on shared fleet calls: " <> show protocol) $
+                withContextHttpServer \config captured ->
+                    bracket (startMcpFleet [config { mcpServerProtocol = protocol }])
+                        closeMcpFleet \shared -> do
+                            shared.mcpFleetWarnings `shouldBe` []
+                            let first = withMcpFleetCallContext
+                                    (Just (McpCallContext "turn-first" "session-first")) shared
+                                second = withMcpFleetCallContext
+                                    (Just (McpCallContext "turn-second" "session-second")) shared
+                                spoof = "{\"runtime_turn_id\":\"wrong\",\"X-Agent-Server-Turn-Id\":\"wrong\"}"
+                            (one, two) <- concurrently
+                                (callFleetTool first "context__echo" spoof)
+                                (callFleetTool second "context__echo" "{}")
+                            one.output `shouldBe` "turn-first/session-first"
+                            two.output `shouldBe` "turn-second/session-second"
+                            meta <- dispatchApprovedTool (mcpFleetMetaTools first)
+                                (functionToolCall "meta" "mcp_call"
+                                    "{\"name\":\"context__echo\",\"arguments\":{}}")
+                            meta.output `shouldBe` "turn-first/session-first"
+                            discovery <- newMcpToolDiscovery
+                            initial <- mcpFleetCodexToolsForArtifactDirectory Nothing second discovery
+                            _ <- dispatchApprovedTool initial
+                                (functionToolCall "search" "tool_search" "{\"query\":\"echo\",\"limit\":1}")
+                            exposed <- mcpFleetCodexToolsForArtifactDirectory Nothing second discovery
+                            direct <- dispatchApprovedTool exposed
+                                (functionToolCall "direct" "context__echo" "{}")
+                            direct.output `shouldBe` "turn-second/session-second"
+                            registrations <- mcpFleetCurrentRegistrations first
+                            refreshed <- callFleetTools (map (.mcpRegistrationTool) registrations)
+                                "context__echo" "{}"
+                            refreshed.output `shouldBe` "turn-first/session-first"
+                            unbound <- callFleetTool shared "context__echo" "{}"
+                            unbound.output `shouldBe` "/"
+                            shared.mcpFleetCallContext `shouldBe` Nothing
+                            clients <- readTVarIO shared.mcpFleetClients
+                            map (.clientCallContext) (Map.elems clients) `shouldBe` [Nothing]
+                            requests <- readIORef captured
+                            let initialization = filter (\(method, _, _) -> method /= "tools/call") requests
+                            initialization `shouldSatisfy` all (\(_, turn, session) -> turn == Nothing && session == Nothing)
+
         it "encodes header values per the value-encoding rules" do
             encodeHeaderValue "us-west1" `shouldBe` "us-west1"
             encodeHeaderValue "Hello, 世界"
@@ -2255,6 +2297,65 @@ spec = describe "Agent.MCP" do
 raw :: BS8.ByteString -> RawJson
 raw bytes =
     either (error . show) id (Json.decodeEither rawJsonDecoder bytes)
+
+-- A bounded-lifetime HTTP fixture that echoes transport identity, not arguments.
+withContextHttpServer action =
+    Socket.withSocketsDo $
+        bracket (Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol)
+            Socket.close \listener -> do
+                Socket.bind listener
+                    (Socket.SockAddrInet 0 (Socket.tupleToHostAddress (127, 0, 0, 1)))
+                Socket.listen listener 8
+                Socket.SockAddrInet port _ <- Socket.getSocketName listener
+                captured <- newIORef []
+                let config = workerClientConfig
+                        { mcpServerName = "context"
+                        , mcpServerUrl = Just ("http://127.0.0.1:" <> Text.pack (show port) <> "/mcp")
+                        }
+                    readHeaders handle = do
+                        line <- BS8.hGetLine handle
+                        if line == "\r" then pure [] else (line :) <$> readHeaders handle
+                    serve = do
+                        bracket
+                            (Socket.accept listener >>= \(connection, _) ->
+                                Socket.socketToHandle connection ReadWriteMode)
+                            hClose \handle -> do
+                                headers <- readHeaders handle
+                                bytes <- case find (BS8.isPrefixOf "Content-Length: ") headers of
+                                    Just header | Just (size, _) <- BS8.readInt (BS8.drop 16 header) ->
+                                        BS.hGet handle size
+                                    _ -> fail "expected Content-Length"
+                                fields <- case Data.Aeson.eitherDecodeStrict' bytes of
+                                    Right (Data.Aeson.Object value) -> pure value
+                                    _ -> fail "expected JSON-RPC object"
+                                let method = KeyMap.lookup "method" fields
+                                    headerValue prefix =
+                                        BS8.unpack . BS8.takeWhile (/= '\r') . BS8.drop (BS.length prefix)
+                                            <$> find (BS8.isPrefixOf prefix) headers
+                                    turn = headerValue "X-Agent-Server-Turn-Id: "
+                                    session = headerValue "X-Agent-Server-Session-Id: "
+                                    result = case method of
+                                        Just (Data.Aeson.String "server/discover") ->
+                                            object ["supportedVersions" .= [modernProtocolVersion], "capabilities" .= object ["tools" .= object []]]
+                                        Just (Data.Aeson.String "initialize") ->
+                                            object ["protocolVersion" .= ("2025-11-25" :: Text.Text), "capabilities" .= object ["tools" .= object []], "serverInfo" .= object ["name" .= ("fixture" :: Text.Text), "version" .= ("1" :: Text.Text)]]
+                                        Just (Data.Aeson.String "tools/list") ->
+                                            object ["tools" .= [object ["name" .= ("echo" :: Text.Text), "inputSchema" .= object ["type" .= ("object" :: Text.Text)], "annotations" .= object ["readOnlyHint" .= True]]]]
+                                        _ ->
+                                            object ["content" .= [object ["type" .= ("text" :: Text.Text), "text" .= (maybe "" id turn <> "/" <> maybe "" id session)]]]
+                                    body = LBS.toStrict $ Data.Aeson.encode $
+                                        object ["jsonrpc" .= ("2.0" :: Text.Text), "id" .= KeyMap.lookup "id" fields, "result" .= result]
+                                case method of
+                                    Just (Data.Aeson.String name) ->
+                                        modifyIORef' captured (<> [(name, turn, session)])
+                                    _ -> pure ()
+                                BS8.hPutStr handle $
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                                        <> BS8.pack (show (BS.length body))
+                                        <> "\r\nConnection: close\r\n\r\n" <> body
+                                hFlush handle
+                        serve
+                withAsync serve \_ -> action config captured
 
 schemaTool :: [Data.Aeson.Types.Pair] -> McpTool
 schemaTool properties = McpTool

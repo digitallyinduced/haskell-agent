@@ -19,7 +19,7 @@ import Agent.CLI.Runtime.Orchestration.Tools.Collaboration
 import Agent.CLI.Runtime.Orchestration.Tools.Model
 import Agent.CLI.Runtime.Orchestration.Tools.Request
 import Agent.CLI.Runtime.Orchestration.Tools.Scratch
-import Agent.CLI.Runtime.Orchestration.Types (AgentProcessRuntime(..), NativeRunCapabilities(..))
+import Agent.CLI.Runtime.Orchestration.Types (AgentProcessRuntime(..), NativeRunCapabilities(..), NativeRunHooks(..))
 import Agent.CLI.Session.Runtime.Types (StartupRuntime(..))
 import Agent.CLI.Startup.Auth (setStartupNotice, startupDie)
 import Agent.CLI.TUI.App (emitUiEvent)
@@ -163,7 +163,10 @@ acquireMcpRuntime request@AgentToolsRequest
                 atomicModifyIORef' mcpStatusPhaseRef \previous ->
                     (Just isConnecting, previous == Just True && not isConnecting)
             when settled (enqueueMcpSnapshot statuses)
-        finishRuntime runtimeMcpFleet runtimeCloseMcp = do
+        finishRuntime sharedFleet runtimeCloseMcp = do
+            let runtimeMcpFleet = MCP.withMcpFleetCallContext
+                    (startup.startupNativeHooks >>= (.nativeMcpCallContext))
+                    sharedFleet
             writeIORef mcpFleetRef (Just runtimeMcpFleet)
             when runtimeProgressiveMcp $
                 MCP.mcpFleetStatuses runtimeMcpFleet >>= enqueueMcpSnapshot

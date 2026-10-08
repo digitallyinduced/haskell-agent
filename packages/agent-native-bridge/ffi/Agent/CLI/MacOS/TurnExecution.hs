@@ -102,6 +102,7 @@ runNativeTurn
                         forM_ (nativeLoopEvent control.turnControlId event)
                             (sendEvent callback context)
             , nativeInitialTurnInputs = Nothing
+            , nativeMcpCallContext = Nothing
             , nativeVoiceCall = fmap (\audio ->
                 ( runNativeVoiceAudio audio
                 , \message -> forM_ (encodeNativeLoopEventWithChartCalls Set.empty control.turnControlId (ActivityUpdated message))

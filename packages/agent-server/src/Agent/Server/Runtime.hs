@@ -19,6 +19,7 @@ import Agent.Runtime.GatewayBoundary
     , withGatewayTurnBoundaryAt
     )
 import Agent.Tools.Types (appToolsFromGroups)
+import Agent.Runtime.Host (McpCallContext(..))
 import Agent.CLI.GatewayModels
     ( loadGatewayModelOptionsWithCredentialAt )
 import Agent.Runtime.ModelConfig
@@ -1548,6 +1549,10 @@ nativeHooks environment control sessionId cwd dialect = NativeRunHooks
         let (eventType, value) = projectLoopEvent event
         in control.turnControlEmit eventType value
     , nativeInitialTurnInputs = Nothing
+    , nativeMcpCallContext = Just McpCallContext
+        { mcpCallTurnId = control.turnControlId.unTurnId
+        , mcpCallSessionId = sessionId
+        }
     , nativeVoiceCall = Nothing
     , nativeOnSessionId = \_ -> pure ()
     , nativeRegisterCancel = control.turnControlRegisterCancel

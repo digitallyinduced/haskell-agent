@@ -142,7 +142,8 @@ data SubmitError
     deriving (Eq, Show)
 
 data TurnControl = TurnControl
-    { turnControlEmit :: !(Text -> Value -> IO ())
+    { turnControlId :: !TurnId
+    , turnControlEmit :: !(Text -> Value -> IO ())
     , turnControlRequestInput
         :: !(HumanRequestSpec -> IO (Either Text HumanResponse))
     , turnControlRegisterCancel :: !(IO () -> IO ())
@@ -1388,7 +1389,8 @@ executeTurn supervisor turnId spec =
     finally guardedRun finish
   where
     control = TurnControl
-        { turnControlEmit = \eventType value ->
+        { turnControlId = turnId
+        , turnControlEmit = \eventType value ->
             publishTurnEvent
                 supervisor
                 spec.turnSpecBoundary
