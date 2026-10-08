@@ -190,6 +190,11 @@ data NativeRunHooks = NativeRunHooks
     , nativeCapabilities :: !NativeRunCapabilities
     -- | Startup permissions owned by the embedding, not an options callback.
     , nativeStartupPolicy :: !NativeStartupPolicy
+    -- | Skill directories the embedding's operator controls. Their skills
+    -- are trusted built-in skills, so @activation: always@ is permitted, and
+    -- they load even when startup accepts supplied context only. They must
+    -- never be writable by a workspace or tenant.
+    , nativeOperatorSkillRoots :: ![OsPath]
     }
 
 -- | The tool composition shared by every agent of one run. Delegated agents

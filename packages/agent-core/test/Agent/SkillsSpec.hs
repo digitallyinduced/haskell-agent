@@ -158,6 +158,21 @@ spec = describe "Agent.Skills" do
                 `shouldBe`
                     ["activation `always` is reserved for trusted built-in skills"]
 
+    it "discovers only supplied built-in roots, where always activation is allowed" do
+        withTempDir \dir -> do
+            let operatorRoot = dir </> "operator-skills"
+            writeSkill (operatorRoot </> "house-rules")
+                "house-rules" "Rules for every turn" ["activation: always"]
+            writeSkill (dir </> ".agents" </> "skills" </> "workspace")
+                "workspace" "Skill outside the supplied root" []
+            catalog <- discoverBuiltinSkills 6
+                [(AgentSkills, fromFilePath operatorRoot)]
+            catalog.catalogWarnings `shouldBe` []
+            map
+                (\skill -> (skill.skillName, skill.skillContextMode))
+                catalog.catalogSkills
+                `shouldBe` [("house-rules", SkillContextAlways)]
+
     it "warns for invalid frontmatter without failing discovery" do
         withTempDir \dir -> do
             let home = dir </> "home"

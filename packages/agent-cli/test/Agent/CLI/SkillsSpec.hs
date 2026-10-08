@@ -17,6 +17,9 @@ import Data.Aeson qualified as Aeson
 import Data.Either (isLeft, isRight)
 import Data.IORef (newIORef, readIORef)
 import qualified Data.Text as Text
+import System.Directory (createDirectoryIfMissing)
+import qualified System.FilePath as FilePath
+import System.IO.Temp (withSystemTempDirectory)
 import System.OsPath (OsPath, takeDirectory, unsafeEncodeUtf, (</>))
 import Test.Hspec
 
@@ -188,6 +191,28 @@ spec = describe "Agent.CLI.Skills" do
                 context `shouldSatisfy`
                     Text.isInfixOf "Before the final response"
             other -> expectationFailure ("unexpected skill context: " <> show other)
+
+    it "loads operator skill roots as trusted built-in skills" do
+        withSystemTempDirectory "operator-skills" \root -> do
+            let skillDirectory = root FilePath.</> "house-rules"
+            createDirectoryIfMissing True skillDirectory
+            writeFile (skillDirectory FilePath.</> "SKILL.md") $
+                unlines
+                    [ "---"
+                    , "name: house-rules"
+                    , "description: Rules for every turn"
+                    , "activation: always"
+                    , "---"
+                    , "Ask before booking."
+                    ]
+            catalog <- loadOperatorSkillsCatalog [fromFilePath root]
+            catalog.catalogWarnings `shouldBe` []
+            map skillScopeOf catalog.catalogSkills `shouldBe` [BuiltinSkill]
+            case formatSkillCatalogContext 8000 catalog of
+                (Just context, 0) ->
+                    context `shouldSatisfy` Text.isInfixOf "Ask before booking."
+                other ->
+                    expectationFailure ("unexpected skill context: " <> show other)
 
     it "queues skill metadata after existing startup context" do
         context <- newIORef (Just "agents")

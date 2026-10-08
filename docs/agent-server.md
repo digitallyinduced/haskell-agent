@@ -54,6 +54,18 @@ guest. Host-side project instructions, filesystem skills, Git status, and
 project settings are disabled in this mode so tenant-controlled workspace
 symlinks cannot turn startup discovery into a host read or write.
 
+An operator can still supply skills that every session needs, such as a
+deployment's product workflows. Each `--skill-root PATH` (NixOS:
+`skillRoots`) is a directory of `SKILL.md` skills that every session loads
+as trusted built-in skills, in multi-tenant mode too. `activation: always` is
+therefore permitted: such a skill is part of the context of every turn and
+does not depend on the model deciding to load it. On-demand skills appear in
+the skill catalog and load with `view_skill`. The server canonicalizes every
+root at startup and requires the same trusted ancestry as the sandbox
+runner. A root must not lie in or contain a tenant workspace, tenant
+home, or the tenant state root. Always-active skills count against the
+skill catalog's context budget.
+
 Sandbox execution tools are auto-approved by default: workspace edits, shell
 commands, builds and tests do not create human approval requests. This applies
 to existing sessions on their next turn as well as new sessions. It is scoped

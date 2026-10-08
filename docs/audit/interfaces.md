@@ -126,6 +126,7 @@ The parser exposes **20 explicit options**, excluding standard generated help. D
 | IF-SERVER-18 | `--event-replay-limit` | `packages/agent-server/src/Agent/Server/Config.hs:282` | Covered | `Server.hs#options`, `#authentication`, `#events`, `#recovery`: every remaining explicit flag/default, quota constraints, approval risk, CORS and queue/replay behavior. Historical audit context: Retention unit, cursor expiry and recovery. |
 | IF-SERVER-19 | `--maximum-request-bytes` | `packages/agent-server/src/Agent/Server/Config.hs:287` | Covered | `Server.hs#options`, `#authentication`, `#events`, `#recovery`: every remaining explicit flag/default, quota constraints, approval risk, CORS and queue/replay behavior. Historical audit context: Body limit, failure response, attachment sizing guidance. |
 | IF-SERVER-20 | `--gateway-integrations` | `packages/agent-server/src/Agent/Server/Config.hs:246` | Covered | `Server.hs#options`: opts every session in to the organization gateway's integrations and distributed skills; off by default. |
+| IF-SERVER-21 | `--skill-root` | `packages/agent-server/src/Agent/Server/Config.hs:265` | Covered | `Server.hs#options`, `#tenants`, docs/agent-server.md: repeatable trusted operator skill directories loaded as built-in skills in every session, including multi-tenant mode; `activation: always` permitted; roots must stay outside tenant-writable roots. |
 
 ## Runtime daemon and embedding
 

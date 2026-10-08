@@ -12,6 +12,7 @@ module Agent.Skills
     , SkillWarning(..)
     , defaultSkillCatalogMaxChars
     , discoverSkills
+    , discoverBuiltinSkills
     , loadSkillFile
     , loadMcpSkillMetadata
     , loadMcpSkillDocument
@@ -275,8 +276,23 @@ defaultSkillCatalogMaxChars :: Int
 defaultSkillCatalogMaxChars = 8000
 
 discoverSkills :: SkillDiscoverOptions -> IO SkillCatalog
-discoverSkills options = do
-    roots <- skillRoots options
+discoverSkills options =
+    discoverSkillRoots options.skillsMaxDepth =<< skillRoots options
+
+-- | Discover only built-in roots that a trusted host supplies, without the
+-- user and repository trees. Their skills may use @activation: always@.
+discoverBuiltinSkills :: Int -> [(SkillOrigin, OsPath)] -> IO SkillCatalog
+discoverBuiltinSkills maxDepth roots =
+    discoverSkillRoots maxDepth
+        [ (BuiltinSkill, origin, unsafeToFilePath root)
+        | (origin, root) <- roots
+        ]
+
+discoverSkillRoots
+    :: Int
+    -> [(SkillScope, SkillOrigin, FilePath)]
+    -> IO SkillCatalog
+discoverSkillRoots maxDepth roots = do
     discovered <-
         mapConcurrentlyBounded skillRootConcurrency
             discoverRoot
@@ -294,7 +310,7 @@ discoverSkills options = do
             then pure ([], [])
             else do
                 (files, walkWarnings) <-
-                    findSkillFiles options.skillsMaxDepth root
+                    findSkillFiles maxDepth root
                 loaded <-
                     mapConcurrentlyBounded skillFileConcurrency
                         (loadSkillFile scope origin)

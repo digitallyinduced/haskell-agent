@@ -104,6 +104,9 @@ data ServerConfig = ServerConfig
     , serverGatewayIntegrations :: !Bool
     , serverCorsOrigins :: ![String]
     , serverWorkspaceRoots :: ![FilePath]
+    -- | Operator-controlled skill directories loaded into every session as
+    -- trusted built-in skills, also in multi-tenant mode.
+    , serverSkillRoots :: ![FilePath]
     , serverMaxConcurrentTurns :: !Int
     , serverMaxConcurrentTurnsPerTenant :: !Int
     , serverMaxQueuedTurns :: !Int
@@ -138,6 +141,8 @@ data ResolvedServerConfig = ResolvedServerConfig
     , resolvedServerMode :: !ResolvedServerMode
     , resolvedYolo :: !Bool
     , resolvedGatewayIntegrations :: !Bool
+    -- | Canonical, trusted directories outside every tenant-writable root.
+    , resolvedSkillRoots :: ![FilePath]
     , resolvedMaxConcurrentTurns :: !Int
     , resolvedMaxConcurrentTurnsPerTenant :: !Int
     , resolvedMaxQueuedTurns :: !Int
@@ -162,6 +167,7 @@ defaultServerConfig = ServerConfig
     , serverGatewayIntegrations = False
     , serverCorsOrigins = []
     , serverWorkspaceRoots = []
+    , serverSkillRoots = []
     , serverMaxConcurrentTurns = 3
     , serverMaxConcurrentTurnsPerTenant = 2
     , serverMaxQueuedTurns = 100
@@ -255,6 +261,10 @@ serverConfigParser =
             "workspace-root"
             "PATH"
             "Allow a canonical workspace root in local mode (repeatable)"
+        <*> manyStringOption
+            "skill-root"
+            "PATH"
+            "Load skills from a trusted operator directory in every session, also in multi-tenant mode (repeatable)"
         <*> positiveOption
             "max-concurrent-turns"
             "N"
@@ -384,8 +394,12 @@ resolveServerConfigWithTrustPolicy trustPolicy config
                         home
                         environmentToken
                         registryPath
+        resolvedSkills <-
+            resolveSkillRoots trustPolicy config.serverSkillRoots
         pure do
             (auth, roots, mode) <- resolvedMode
+            skillRoots <- resolvedSkills
+            requireSkillRootsOutsideTenants mode skillRoots
             Right ResolvedServerConfig
                 { resolvedHost = config.serverHost
                 , resolvedPort = config.serverPort
@@ -397,6 +411,7 @@ resolveServerConfigWithTrustPolicy trustPolicy config
                 , resolvedServerMode = mode
                 , resolvedYolo = config.serverYolo
                 , resolvedGatewayIntegrations = config.serverGatewayIntegrations
+                , resolvedSkillRoots = skillRoots
                 , resolvedMaxConcurrentTurns =
                     config.serverMaxConcurrentTurns
                 , resolvedMaxConcurrentTurnsPerTenant =
@@ -556,6 +571,69 @@ runnerOverlapsTenant runner =
             , tenant.resolvedTenantStateDirectory
             , tenant.resolvedTenantHome
             ]
+
+-- | Operator skill roots supply trusted built-in skills, including
+-- always-active instructions. Canonicalize them and require the same trusted
+-- ancestry as the sandbox runner, so no tenant or other local user can add or
+-- replace them.
+resolveSkillRoots
+    :: TrustedPathPolicy
+    -> [FilePath]
+    -> IO (Either Text [FilePath])
+resolveSkillRoots trustPolicy = fmap sequence . traverse resolve
+  where
+    resolve raw = do
+        resolved <- tryIO (canonicalizePath =<< makeAbsolute raw)
+        case resolved of
+            Left _ ->
+                pure (Left ("the skill root is unavailable: " <> Text.pack raw))
+            Right root -> do
+                isDirectory <- doesDirectoryExist root
+                if not isDirectory
+                    then
+                        pure
+                            (Left
+                                ("the skill root is not a directory: "
+                                    <> Text.pack raw))
+                    else
+                        validateTrustedPathWithPolicy trustPolicy root
+                            >>= \case
+                                Left err ->
+                                    pure
+                                        (Left
+                                            ("the skill root is not trusted: "
+                                                <> err))
+                                Right () -> pure (Right root)
+
+-- | Skill discovery walks below a root, so a skill root must neither lie in a
+-- tenant-writable directory nor contain one.
+requireSkillRootsOutsideTenants
+    :: ResolvedServerMode
+    -> [FilePath]
+    -> Either Text ()
+requireSkillRootsOutsideTenants mode skillRoots =
+    case mode of
+        LocalSingleUserMode -> Right ()
+        MultiTenantMode multiTenant
+            | any (overlapsAny (tenantWritableRoots multiTenant)) skillRoots ->
+                Left "skill roots must be outside tenant-writable roots"
+            | otherwise -> Right ()
+  where
+    tenantWritableRoots multiTenant =
+        multiTenant.multiTenantStateRoot
+            : concat
+                [ [ tenant.resolvedTenantWorkspaceRoot
+                  , tenant.resolvedTenantStateDirectory
+                  , tenant.resolvedTenantHome
+                  ]
+                | tenant <- tenantRegistryTenants multiTenant.multiTenantRegistry
+                ]
+    overlapsAny roots skillRoot =
+        any
+            (\root ->
+                root `containsPath` skillRoot
+                    || skillRoot `containsPath` root)
+            roots
 
 resolveLocalAuth
     :: ServerConfig

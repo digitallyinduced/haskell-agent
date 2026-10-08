@@ -19,8 +19,10 @@ import Data.Aeson
 import Data.ByteString.Char8 qualified as ByteString
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Text qualified as Text
+import Control.Monad (forM_)
 import System.Directory
-    ( createDirectory
+    ( canonicalizePath
+    , createDirectory
     , getTemporaryDirectory
     , removeFile
     )
@@ -217,6 +219,77 @@ spec = describe "server configuration" do
                     Right _ ->
                         expectationFailure
                             "resolved a sandboxed tenant without a runner"
+
+    it "resolves repeated --skill-root options to canonical trusted directories" do
+        withTokenEnvironmentUnset $
+            withSystemTempDirectory "agent-server-skills" \root -> do
+                createDirectory (root </> "product")
+                createDirectory (root </> "shared")
+                config <-
+                    withArgs
+                        [ "--skill-root", root </> "product"
+                        , "--skill-root", root </> "shared" </> ".." </> "shared"
+                        ]
+                        parseServerConfig
+                trustPolicy <-
+                    trustedPathPolicyWithin root
+                        >>= either (fail . Text.unpack) pure
+                expected <-
+                    traverse canonicalizePath
+                        [root </> "product", root </> "shared"]
+                resolved <- resolveServerConfigWithTrustPolicy trustPolicy config
+                case resolved of
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right resolvedConfig ->
+                        resolvedConfig.resolvedSkillRoots `shouldBe` expected
+
+    it "rejects a skill root that is not a directory" do
+        withTokenEnvironmentUnset $
+            withSystemTempDirectory "agent-server-skills" \root -> do
+                writeFile (root </> "SKILL.md") "not a directory"
+                trustPolicy <-
+                    trustedPathPolicyWithin root
+                        >>= either (fail . Text.unpack) pure
+                resolved <-
+                    resolveServerConfigWithTrustPolicy
+                        trustPolicy
+                        defaultServerConfig
+                            { serverSkillRoots = [root </> "SKILL.md"] }
+                case resolved of
+                    Left err ->
+                        err `shouldSatisfy` Text.isInfixOf "not a directory"
+                    Right _ ->
+                        expectationFailure "accepted a file as a skill root"
+
+    it "keeps skill roots apart from tenant-writable roots" do
+        withTokenEnvironmentUnset $
+            withSingleTenantRegistry (Just "none") \root registryPath -> do
+                createDirectory (root </> "workspace" </> "skills")
+                createDirectory (root </> "product-skills")
+                trustPolicy <-
+                    trustedPathPolicyWithin root
+                        >>= either (fail . Text.unpack) pure
+                let resolveWith skillRoots =
+                        resolveServerConfigWithTrustPolicy
+                            trustPolicy
+                            defaultServerConfig
+                                { serverTenantRegistry = Just registryPath
+                                , serverTenantStateRoot = Just (root </> "state")
+                                , serverSkillRoots = skillRoots
+                                }
+                -- Inside a tenant workspace, and containing one.
+                forM_ [root </> "workspace" </> "skills", root] \skillRoot ->
+                    resolveWith [skillRoot] >>= \case
+                        Left err ->
+                            err `shouldBe`
+                                "skill roots must be outside tenant-writable roots"
+                        Right _ ->
+                            expectationFailure
+                                ("accepted a tenant-writable skill root: " <> skillRoot)
+                resolveWith [root </> "product-skills"] >>= \case
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right resolvedConfig ->
+                        length resolvedConfig.resolvedSkillRoots `shouldBe` 1
 
     it "confines an explicit build trust policy to its declared root" do
         withSystemTempDirectory "agent-server-trust" \outer -> do

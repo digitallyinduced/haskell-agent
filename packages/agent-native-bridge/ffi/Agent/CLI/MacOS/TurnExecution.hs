@@ -154,6 +154,7 @@ runNativeTurn
             , nativeWorkspaceDiscovery = DiscoverHostWorkspace
             , nativeCapabilities = fullNativeRunCapabilities
             , nativeStartupPolicy = hostNativeStartupPolicy
+            , nativeOperatorSkillRoots = []
             }
         args = nativeTurnArguments start
             { turnStartComputerUse = start.turnStartComputerUse

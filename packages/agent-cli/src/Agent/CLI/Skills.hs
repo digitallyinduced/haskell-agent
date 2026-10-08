@@ -5,6 +5,7 @@ module Agent.CLI.Skills
     , installSkillCatalogWithOmissions
     , installSkillToolRoots
     , loadMcpSkillsCatalog
+    , loadOperatorSkillsCatalog
     , loadSkillsCatalog
     , loadSkillsCatalogQuiet
     , mergeSkillCatalogs
@@ -124,10 +125,22 @@ loadSkillsCatalogQuiet options home projectRoot cwd
             { skillsHome = home
             , skillsProjectRoot = projectRoot
             , skillsCwd = cwd
-            , skillsMaxDepth = 6
+            , skillsMaxDepth = skillDiscoveryDepth
             , skillsBuiltinRoots =
                 [(AgentSkills, unsafeEncodeUtf builtinRoot)]
             }
+
+-- | Skills from directories that the embedding's operator controls, such as
+-- a deployment's product skills. They are trusted built-in skills and load
+-- independently of workspace discovery and of 'optSkills', which governs
+-- only workspace, user and MCP skills.
+loadOperatorSkillsCatalog :: [OsPath] -> IO SkillCatalog
+loadOperatorSkillsCatalog roots =
+    discoverBuiltinSkills skillDiscoveryDepth
+        [ (AgentSkills, root) | root <- roots ]
+
+skillDiscoveryDepth :: Int
+skillDiscoveryDepth = 6
 
 -- | Convert the untrusted metadata advertised by Skills-over-MCP servers into
 -- lightweight catalog entries. Invalid entries are omitted and surfaced using
