@@ -9,7 +9,8 @@ import Agent.Json
 import Agent.MCP.Types
     ( CapturedStderr(..),
       McpClientLifecycle(ClientClosed, ClientInitializing, ClientReady),
-      McpClient(clientHooks, clientEventHandler, clientClosed,
+      McpCallContext(..),
+      McpClient(clientHooks, clientCallContext, clientEventHandler, clientClosed,
                 clientRequestRegistry, clientFailure, clientLifecycle,
                 clientWorkers, clientTransport, clientServerInfo, clientConfig,
                 clientToolsRevision, clientReadyToolsRevision,
@@ -1368,6 +1369,18 @@ httpExchange client transport era request pending message = do
                 <> protocolHeader
                 <> modernHeaders
                 <> sessionHeader
+                <> invocationHeaders
+        -- Only host-built tool invocations carry these headers. MCP argument
+        -- header annotations use the disjoint Mcp-Param-* namespace.
+        invocationHeaders =
+            [ (name, TextEncoding.encodeUtf8 (encodeHeaderValue value))
+            | request.requestMethod == "tools/call"
+            , Just context <- [client.clientCallContext]
+            , (name, value) <-
+                [ ("X-Agent-Server-Turn-Id", context.mcpCallTurnId)
+                , ("X-Agent-Server-Session-Id", context.mcpCallSessionId)
+                ]
+            ]
         slice = request.requestTimeoutMicros
         perform token = do
             let httpRequest = baseRequest

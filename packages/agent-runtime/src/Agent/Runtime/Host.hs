@@ -9,6 +9,7 @@ module Agent.Runtime.Host
     , NativeRunCapabilities(..)
     , NativeShellMode(..)
     , NativeRunHooks(..)
+    , McpCallContext(..)
     , fullNativeRunCapabilities
     , nativeLoadsHostWorkspaceContext
     , nativePreparedDiscovery
@@ -44,6 +45,7 @@ import System.IO ( Handle, stderr, stdout )
 import System.OsPath ( OsPath )
 
 import qualified Agent.MCP as MCP
+import Agent.MCP (McpCallContext(..))
 import Agent.Tools.ResourceArbiter (ToolResourceArbiter)
 
 data ActiveHttpAuth = ActiveHttpAuth
@@ -147,6 +149,9 @@ fullNativeRunCapabilities = NativeRunCapabilities
 data NativeRunHooks = NativeRunHooks
     { nativeOnLoopEvent :: !(LoopEvent -> IO ())
     , nativeInitialTurnInputs :: !(Maybe [TurnInput])
+    -- | Immutable embedding identity inherited by the whole agent tree.
+    -- It is attached to HTTP MCP tool calls, never exposed as a tool argument.
+    , nativeMcpCallContext :: !(Maybe MCP.McpCallContext)
     -- | Explicitly admitted voice call, replacing the initial text turn.
     , nativeVoiceCall :: !(Maybe (Agent.OpenAI.Live.Call.LiveCall -> IO (), Text -> IO ()))
     , nativeOnSessionId :: !(Text -> IO ())

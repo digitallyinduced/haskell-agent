@@ -109,12 +109,27 @@ sameServerConfigs left right =
 mcpFleetTools :: McpFleet -> [AppTool]
 mcpFleetTools = map (.mcpRegistrationTool) . (.mcpFleetRegistrations)
 
+-- | Borrow the same connections/catalog with immutable invocation identity.
+-- Neither the supervisor's retained fleet nor its clients are mutated.
+withMcpFleetCallContext :: Maybe McpCallContext -> McpFleet -> McpFleet
+withMcpFleetCallContext context fleet = fleet
+    { mcpFleetCallContext = context
+    , mcpFleetRegistrations =
+        [ registration.mcpRegistrationWithCallContext context
+        | registration <- fleet.mcpFleetRegistrations
+        ]
+    }
+
+invocationClient :: McpFleet -> McpClient -> McpClient
+invocationClient fleet client =
+    client { clientCallContext = fleet.mcpFleetCallContext }
+
 -- | Read the current catalog, including tools discovered after progressive
 -- startup. Unlike 'mcpFleetRegistrations', this is not a startup snapshot.
 mcpFleetCurrentRegistrations :: McpFleet -> IO [McpToolRegistration]
 mcpFleetCurrentRegistrations fleet = do
     entries <- Map.elems <$> readTVarIO fleet.mcpFleetCatalog
-    pure [registrationFor entry.catalogClient entry.catalogTool | entry <- entries]
+    pure [registrationFor (invocationClient fleet entry.catalogClient) entry.catalogTool | entry <- entries]
 
 registrationFor :: McpClient -> McpTool -> McpToolRegistration
 registrationFor client tool = McpToolRegistration
@@ -122,6 +137,8 @@ registrationFor client tool = McpToolRegistration
     , mcpRegistrationTool = appToolFor client tool
     , mcpRegistrationToolForArtifactDirectory =
         \directory -> appToolForArtifactDirectory directory client tool
+    , mcpRegistrationWithCallContext = \context ->
+        registrationFor (client { clientCallContext = context }) tool
     }
 
 mcpFleetToolsForArtifactDirectory
@@ -374,6 +391,7 @@ startMcpFleetWithInMemory hooks reportActive external inMemory = mask \restore -
     let
         fleet = McpFleet
             { mcpFleetRegistrations = registrations
+            , mcpFleetCallContext = Nothing
             , mcpFleetSkills = skillsVar
             , mcpFleetWarnings = warnings
             , mcpFleetClients = clientsVar
@@ -588,6 +606,7 @@ startMcpFleetProgressiveWithInMemoryHooks
             ]
         fleet = McpFleet
             { mcpFleetRegistrations = []
+            , mcpFleetCallContext = Nothing
             , mcpFleetSkills = skillsVar
             , mcpFleetWarnings = warnings
             , mcpFleetClients = clientsVar
@@ -1289,7 +1308,7 @@ callCatalogEntryWithReconnectUsing invoke artifactDirectory fleet qualifiedName 
         True ->
             invoke
                 artifactDirectory
-                entry.catalogClient
+                (invocationClient fleet entry.catalogClient)
                 entry.catalogTool
                 arguments
                 Nothing
@@ -1333,7 +1352,7 @@ callCatalogEntryWithReconnectUsing invoke artifactDirectory fleet qualifiedName 
                                                     else
                                                         invoke
                                                             artifactDirectory
-                                                            replacement.catalogClient
+                                                            (invocationClient fleet replacement.catalogClient)
                                                             replacement.catalogTool
                                                             arguments
                                                             Nothing

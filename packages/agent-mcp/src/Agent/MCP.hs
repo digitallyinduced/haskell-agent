@@ -56,6 +56,8 @@ module Agent.MCP
     , McpError(..)
     , renderMcpError
     , McpFleet(..)
+    , McpCallContext(..)
+    , withMcpFleetCallContext
     , McpSupervisor
     , McpFleetLease(..)
     , newMcpSupervisor
@@ -138,6 +140,7 @@ import Agent.MCP.InProcess
     )
 import Agent.MCP.Fleet
     ( McpToolDiscovery
+    , withMcpFleetCallContext
     , mcpFleetCurrentRegistrations
     , mcpFleetCurrentWarnings
     , newMcpToolDiscovery
@@ -184,6 +187,7 @@ import Agent.MCP.Supervisor
     )
 import Agent.MCP.Types
     ( McpToolServer(..)
+    , McpCallContext(..)
     , McpCredentialProvider(..)
     , McpTool(..)
     , emptyServerCapabilities

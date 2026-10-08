@@ -334,7 +334,17 @@ data McpToolRegistration = McpToolRegistration
     , mcpRegistrationTool :: !AppTool
     , mcpRegistrationToolForArtifactDirectory
         :: !(Maybe FilePath -> AppTool)
+    , mcpRegistrationWithCallContext
+        :: !(Maybe McpCallContext -> McpToolRegistration)
     }
+
+-- | Host-owned invocation identity, never read from model arguments or server
+-- schemas. This is routing context, not a replacement for MCP authentication.
+data McpCallContext = McpCallContext
+    { mcpCallTurnId :: !Text
+    , mcpCallSessionId :: !Text
+    }
+    deriving (Eq, Show)
 
 data McpCatalogEntry = McpCatalogEntry
     { catalogClient :: !McpClient
@@ -652,6 +662,7 @@ mcpResourceContentDecoder = Json.object do
 
 data McpFleet = McpFleet
     { mcpFleetRegistrations :: ![McpToolRegistration]
+    , mcpFleetCallContext :: !(Maybe McpCallContext)
     , mcpFleetSkills :: !(TVar [McpSkillRegistration])
     , mcpFleetWarnings :: ![Text]
     -- ^ Historical startup snapshot. Use mcpFleetCurrentWarnings for live
@@ -779,6 +790,8 @@ data McpCallToolResult = McpCallToolResult
 -- | One connection to an MCP server over stdio or Streamable HTTP.
 data McpClient = McpClient
     { clientConfig :: !McpServerConfig
+    -- | Immutable view used by one invocation; retained connections have None.
+    , clientCallContext :: !(Maybe McpCallContext)
     , clientHooks :: !McpHostHooks
     , clientTransport :: !McpClientTransport
     , clientRequestRegistry :: !(TVar RequestRegistry)

@@ -61,6 +61,15 @@ spec = describe "turn supervisor" do
         takeRotatingPendingBatch 4 pending cursor
             `shouldReturn` [4, 5, 1, 2]
 
+    it "supplies the authoritative admitted turn id to the runtime" do
+        admitted <- newEmptyMVar
+        let runner control _ = do
+                putMVar admitted control.turnControlId
+                pure (Right testOutput)
+        withSupervisor runner \supervisor -> do
+            turn <- submitTurn supervisor (turnSpec "session-a") >>= expectRight
+            takeWithin admitted `shouldReturn` turn.turnRecordId
+
     it "enforces one active turn per session" do
         release <- newEmptyMVar
         let runner _ _ = takeMVar release >> pure (Right testOutput)
