@@ -109,17 +109,19 @@ trimRemoteCompactionHistoryToFit contextWindow instructionText history =
         sanitizeRemoteCompactionHistory
         contextWindow
         requestTokens
-        (estimateItemsTokens . pure)
+        estimateRemoteCompactionItemTokens
         history
   where
     requestTokens items =
         maybe 0 estimateTokens instructionText
-            + estimateItemsTokens (items <> [compactionTriggerItem])
+            + estimateItemsTokens (filter (not . isCompactionCheckpoint) items <> [compactionTriggerItem])
 
--- | Trim a compaction request using the complete serialized request size.
+-- | Trim a compaction request using its visible serialized content.
 -- Unlike the legacy helper above, this accounts for tools, instructions,
 -- trigger overhead, and all other request fields preserved by the remote
--- compaction request.
+-- compaction request. Opaque checkpoints are excluded from this trimming
+-- budget: their wire size does not measure model occupancy and must not cause
+-- newer history to be discarded. The provider enforces the actual limit.
 trimRemoteCompactionRequestToFit
     :: Int
     -> ResponseCreateParams
@@ -130,10 +132,15 @@ trimRemoteCompactionRequestToFit contextWindow params =
         sanitizeRemoteCompactionHistory
         contextWindow
         requestTokens
-        (estimateItemsTokens . pure)
+        estimateRemoteCompactionItemTokens
   where
     requestTokens history =
-        estimateEncodedValue (buildRemoteCompactionRequest params history)
+        estimateEncodedValue (buildRemoteCompactionRequest params (filter (not . isCompactionCheckpoint) history))
+
+estimateRemoteCompactionItemTokens :: ResponseItem -> Int
+estimateRemoteCompactionItemTokens item
+    | isCompactionCheckpoint item = 0
+    | otherwise = estimateItemsTokens [item]
 
 -- | Trim history for a normal Responses request with fixed trailing items.
 -- Local summarization uses this to bound the transcript before appending its

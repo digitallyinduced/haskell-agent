@@ -19,11 +19,18 @@ spec = describe "Compaction manager" do
             (pure source) (const (pure ["summary"]))
             `shouldReturn` (["summary", "pending"], Nothing)
         readIORef installed `shouldReturn` ["summary"]
-    it "checks request overhead on the continuation fast path" do
+    it "trusts measured occupancy over a larger continuation estimate" do
         let overheadStrategy = strategy { estimateRequest = const 101 }
         prepareCompaction overheadStrategy 100 (Just 1) (Just "previous") ["p"] ["p"]
             (fail "unexpected load") (const (fail "unexpected send"))
-            `shouldThrow` anyIOException
+            `shouldReturn` (["p"], Just "previous")
+    it "uses measured occupancy for full replay without recounting history" do
+        let history = [Text.replicate 200 "x"]
+            fullRequest = history <> ["p"]
+        prepareCompaction strategy 50 (Just 10) Nothing fullRequest ["p"]
+            (pure (CompactionSource history (const (fail "unexpected install"))))
+            (const (fail "unexpected send"))
+            `shouldReturn` (fullRequest, Nothing)
     it "isolates pending inputs and installs before returning a new request" do
         installed <- newIORef []
         let source = CompactionSource ["observed"] (writeIORef installed)
@@ -44,13 +51,19 @@ spec = describe "Compaction manager" do
             (pure source) (const (fail "provider failure"))
             `shouldThrow` anyIOException
         readIORef installed `shouldReturn` False
-    it "rejects an oversized custom strategy result before installation" do
+    it "rejects an empty replacement before installation" do
+        installed <- newIORef False
+        let source = CompactionSource ["observed"] (const (writeIORef installed True))
+        prepareCompaction strategy 5 Nothing Nothing ["pending"] ["pending"]
+            (pure source) (const (pure [])) `shouldThrow` anyIOException
+        readIORef installed `shouldReturn` False
+    it "installs a validated result even when its estimate exceeds the window" do
         installed <- newIORef False
         let source = CompactionSource ["observed"] (const (writeIORef installed True))
         prepareCompaction strategy 5 Nothing Nothing ["pending"] ["pending"]
             (pure source) (const (pure [Text.replicate 200 "x"]))
-            `shouldThrow` anyIOException
-        readIORef installed `shouldReturn` False
+            `shouldReturn` ([Text.replicate 200 "x", "pending"], Nothing)
+        readIORef installed `shouldReturn` True
     it "propagates installation failure instead of returning a usable continuation" do
         let source = CompactionSource ["observed"] (const (fail "storage failure"))
         prepareCompaction strategy 5 Nothing (Just "previous") ["pending"] ["pending"]
@@ -63,10 +76,11 @@ spec = describe "Compaction manager" do
             (pure source) (const (pure ["summary"]))
             `shouldReturn` (["summary", "p"], Nothing)
         readIORef installed `shouldReturn` ["summary"]
-    it "rejects oversized pending input when there is no history to compact" do
+    it "leaves enforcement to the provider when there is no history to compact" do
         prepareCompaction strategy 50 Nothing Nothing [Text.replicate 200 "x"]
             [Text.replicate 200 "x"] (pure (CompactionSource [] (const (pure ()))))
-            (const (fail "unexpected send")) `shouldThrow` anyIOException
+            (const (fail "unexpected send"))
+            `shouldReturn` ([Text.replicate 200 "x"], Nothing)
 
 strategy :: CompactionStrategy [Text] Text [Text]
 strategy = CompactionStrategy

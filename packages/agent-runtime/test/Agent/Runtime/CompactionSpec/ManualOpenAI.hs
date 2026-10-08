@@ -89,7 +89,7 @@ spec = do
             map (.parallelToolCalls) <$> readIORef requests
                 `shouldReturn` [Just False]
 
-        it "rejects remote checkpoints that cannot fit the installed snapshot" do
+        it "accepts opaque remote checkpoints larger than the estimated context window" do
             let provider = tokenProvider SubscriptionBilled \_ ->
                     error "remote compaction unexpectedly requested credentials"
                 contextWindow =
@@ -112,11 +112,51 @@ spec = do
                     history
                     100
                     Nothing
-            result `shouldSatisfy` \case
-                Left message ->
-                    "remote compacted snapshot request cannot fit"
-                        `Text.isInfixOf` message
-                Right _ -> False
+            case result of
+                Left message -> expectationFailure (Text.unpack message)
+                Right outcome ->
+                    outcome.compactHistory `shouldBe` oversizedResponse.output
+
+        it "preserves newer history when an opaque checkpoint alone exceeds the estimated context window" do
+            requests <- newIORef []
+            let provider = tokenProvider SubscriptionBilled \_ ->
+                    error "remote compaction unexpectedly requested credentials"
+                contextWindow =
+                    codexEffectiveContextWindowFor defaultResponseCreateParams.model
+                checkpointResponse = responseWithOutput
+                    [ Aeson.object
+                        [ "type" .= ("compaction" :: Text)
+                        , "encrypted_content" .=
+                            Text.replicate (contextWindow * 4 + 10_000) "x"
+                        ]
+                    ]
+                toolResponse = responseWithOutput
+                    [ Aeson.object
+                        [ "type" .= ("function_call" :: Text)
+                        , "call_id" .= ("call_after_checkpoint" :: Text)
+                        , "name" .= ("read_file" :: Text)
+                        , "arguments" .= ("{\"path\":\"README.md\"}" :: Text)
+                        ]
+                    , Aeson.object
+                        [ "type" .= ("function_call_output" :: Text)
+                        , "call_id" .= ("call_after_checkpoint" :: Text)
+                        , "output" .= ("new tool context after checkpoint" :: Text)
+                        ]
+                    ]
+                history = checkpointResponse.output
+                    <> [userTextItem "new context after checkpoint"]
+                    <> toolResponse.output
+                send _ request = do
+                    modifyIORef' requests (<> [request])
+                    pure (Right remoteCompactionResponse)
+            result <- runExceptT $
+                compactOpenAIWith send (Just provider) defaultResponseCreateParams history 100 Nothing
+            case result of
+                Left message -> expectationFailure (Text.unpack message)
+                Right outcome ->
+                    outcome.compactHistory `shouldSatisfy` hasCompactionCheckpoint
+            map requestItems <$> readIORef requests
+                `shouldReturn` [history <> [compactionTriggerItem]]
 
         it "keeps focused manual compaction on local summarization" do
             requests <- newIORef []

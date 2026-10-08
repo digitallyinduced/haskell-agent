@@ -81,14 +81,14 @@ buildCompactionRequest adapter request history = do
     let nativeRequest = adapter.withRequestInput request (history <> trigger)
     if estimateRequestTokens nativeRequest <= nativeContextWindow adapter request
         then Right nativeRequest
-        else do
-            represented <- traverse losslessLibraryItem history
-            trimmed <- traverse nativeItem $
-                Shared.trimRemoteCompactionRequestToFit (nativeContextWindow adapter request) params represented
-            let trimmedRequest = adapter.withRequestInput request (trimmed <> trigger)
-            if estimateRequestTokens trimmedRequest <= nativeContextWindow adapter request
-                then Right trimmedRequest
-                else Left "Compaction: compaction request exceeds the model context window"
+        else case traverse losslessLibraryItem history of
+            -- Trimming is best effort. Preserve opaque native fields when the
+            -- library cannot represent them, and let the provider enforce limits.
+            Left _ -> Right nativeRequest
+            Right represented -> do
+                trimmed <- traverse nativeItem $
+                    Shared.trimRemoteCompactionRequestToFit (nativeContextWindow adapter request) params represented
+                Right (adapter.withRequestInput request (trimmed <> trigger))
 
 compactedHistory
     :: (Aeson.ToJSON request, Aeson.ToJSON item, Aeson.FromJSON item, Aeson.ToJSON response)
@@ -108,13 +108,9 @@ compactedHistory adapter threshold request pending history response = do
             ]
     replacement <- traverse nativeItem $
         Shared.buildRemoteCompactedHistory retainedBudget retained checkpoint
-    let replacementRequest = adapter.withRequestInput request (replacement <> pending)
-        checkpointRequest = adapter.withRequestInput request [checkpointNative]
-    if estimateRequestTokens replacementRequest > nativeContextWindow adapter request
-        then Left "Compaction: checkpoint and current input exceed the model context window"
-        else if estimateRequestTokens checkpointRequest >= threshold
-            then Left "Compaction: checkpoint did not free enough context"
-            else Right replacement
+    -- Ciphertext length does not establish the checkpoint's context occupancy.
+    -- Accept the provider's checkpoint even when its local estimate is large.
+    Right replacement
 
 data ItemRole = ItemRole Text (Maybe Text)
 instance Aeson.FromJSON ItemRole where

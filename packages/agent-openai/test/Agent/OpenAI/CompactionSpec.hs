@@ -215,6 +215,21 @@ spec = do
             trimmed `shouldSatisfy` elem (checkpoint "compaction")
             trimmed `shouldSatisfy` elem typedContextCheckpoint
 
+        it "preserves newer facts when opaque checkpoints exceed the wire-size budget" do
+            let opaque = Text.replicate 100_000 "x"
+                checkpoints =
+                    [ CompactionItemValue CompactionItem
+                        { itemId = Nothing, encryptedContent = Just opaque }
+                    , ContextCompactionItemValue ContextCompactionItem
+                        { itemId = Nothing, encryptedContent = Just opaque }
+                    ]
+            mapM_ (\saved -> do
+                let history = [saved, user "New facts since the checkpoint"]
+                trimRemoteCompactionRequestToFit 2_000 defaultResponseCreateParams history
+                    `shouldBe` history
+                trimRemoteCompactionHistoryToFit 2_000 Nothing history
+                    `shouldBe` history) checkpoints
+
         it "keeps checkpoint provenance adjacent while trimming" do
             let params = defaultResponseCreateParams
                 opaqueCheckpoint =

@@ -84,7 +84,6 @@ import Agent.OpenAI.Compaction
     ( buildLocalCompactedHistoryToFit
     , buildRemoteCompactedHistory
     , buildRemoteCompactionRequest
-    , compactTranscriptAtLastCheckpoint
     , extractRemoteCompactionItem
     , estimateItemsTokens
     , estimateRequestTokensWithItems
@@ -954,54 +953,42 @@ compactRemoteV2AttemptWithRetainedBudget
                     params
                     sourceHistory
             request = buildRemoteCompactionRequest params requestHistory
-        if estimateResponseCreateParamsTokens request > contextWindow
-            then pure $ CompactAttempt emptyTokenUsage $
-                Left (requestTooLargeError "remote compaction")
-            else
-                send request >>= \case
-                    Left err ->
-                        pure (CompactAttempt emptyTokenUsage (Left err))
-                    Right response ->
-                        pure CompactAttempt
-                            { compactAttemptUsage = responseTokenUsage response
-                            , compactAttemptResult = do
-                                checkpoint <-
-                                    either
-                                        (Left . protocolError)
-                                        Right
-                                        (extractRemoteCompactionItem response)
-                                let items =
-                                        buildRemoteCompactedHistory
-                                            ( min
-                                                (max 0
-                                                    (retainedBudgetFor checkpoint))
-                                                ( max 0
-                                                    ( contextWindow
-                                                        - estimateRequestTokensWithItems
-                                                            params
-                                                            [checkpoint]
-                                                    )
-                                                )
+        -- Trimming is best effort. Encrypted checkpoints are opaque: their
+        -- serialized size cannot establish whether the provider context fits.
+        -- Always let the provider attempt compaction, as Codex does.
+        send request >>= \case
+            Left err ->
+                pure (CompactAttempt emptyTokenUsage (Left err))
+            Right response ->
+                pure CompactAttempt
+                    { compactAttemptUsage = responseTokenUsage response
+                    , compactAttemptResult = do
+                        checkpoint <-
+                            either
+                                (Left . protocolError)
+                                Right
+                                (extractRemoteCompactionItem response)
+                        let items =
+                                buildRemoteCompactedHistory
+                                    ( min
+                                        (max 0 (retainedBudgetFor checkpoint))
+                                        ( max 0
+                                            ( contextWindow
+                                                - estimateRequestTokensWithItems
+                                                    params
+                                                    [checkpoint]
                                             )
-                                            sourceHistory
-                                            checkpoint
-                                if
-                                    estimateRequestTokensWithItems params items
-                                        > contextWindow
-                                    then
-                                        Left
-                                            (requestTooLargeError
-                                                "remote compacted snapshot")
-                                    else
-                                        Right CompactOutcome
-                                            { compactBeforeTokens = before
-                                            , compactAfterTokens =
-                                                estimateItemsTokens items
-                                            , compactHistory = items
-                                            , compactSummary =
-                                                "Context compacted remotely."
-                                            }
+                                        )
+                                    )
+                                    sourceHistory
+                                    checkpoint
+                        Right CompactOutcome
+                            { compactBeforeTokens = before
+                            , compactAfterTokens = estimateItemsTokens items
+                            , compactHistory = items
+                            , compactSummary = "Context compacted remotely."
                             }
+                    }
   where
     sourceHistory = stripTaskPlanContextItems history
     protocolError message =
@@ -1267,10 +1254,7 @@ autoCompactOpenAiBackendWithSenderHookAndDecorator
         configuredThreshold send recordUsage getParams decorateOutcome
         onCompacted contextTokensRef backend =
     rejectOversizedInitialRequest getParams $
-        boundCompletedToolContinuations
-            (codexEffectiveContextWindowFor . (.model))
-            getParams
-            contextTokensRef $
+        boundRemoteToolContinuations $
             autoCompactOpenAiBackendWithLimit
                 getLimit
                 True
@@ -1281,6 +1265,23 @@ autoCompactOpenAiBackendWithSenderHookAndDecorator
                 contextTokensRef
                 backend
   where
+    -- A resumed checkpoint has no locally knowable token cost. Let remote
+    -- compaction absorb completed calls instead of truncating their output or
+    -- rejecting the replay based on the encrypted checkpoint's wire size.
+    -- Live response chains and histories without checkpoints retain the normal
+    -- continuation bounds.
+    boundRemoteToolContinuations inner =
+        let bounded = boundCompletedToolContinuations
+                (codexEffectiveContextWindowFor . (.model))
+                getParams
+                contextTokensRef
+                inner
+        in backendWithCallbacks \snapshot previous inputs callbacks ->
+            case (snapshot.backendContinuation, previous) of
+                (Nothing, Nothing)
+                    | any isServerCompactionCheckpoint snapshot.backendItems ->
+                        inner.submitTurnWithCallbacks snapshot previous inputs callbacks
+                _ -> bounded.submitTurnWithCallbacks snapshot previous inputs callbacks
     getLimit = do
         params <- getParams
         let configuredLimit =
@@ -1297,8 +1298,6 @@ autoCompactOpenAiBackendWithSenderHookAndDecorator
         let fixedRequestTokens =
                 estimateRequestTokensWithItems params []
             pendingItems = turnInputsToItems inputs
-            contextWindow =
-                codexEffectiveContextWindowFor params.model
             continuationBaseTokens checkpoint =
                 estimateRequestTokensWithItems
                     params
@@ -1338,59 +1337,9 @@ autoCompactOpenAiBackendWithSenderHookAndDecorator
                             decorated <- decorateOutcome outcome
                             pure rawAttempt
                                 { compactAttemptResult = Right decorated }
-                pure $
-                    case attempt.compactAttemptResult of
-                        Right outcome ->
-                            let continuationTokens =
-                                    estimateRequestTokensWithItems
-                                        params
-                                        (outcome.compactHistory <> pendingItems)
-                                compactedBase =
-                                    compactTranscriptAtLastCheckpoint
-                                        outcome.compactHistory
-                                (baseTokens, baseWithPendingTokens) =
-                                    case compactedBase of
-                                        [] ->
-                                            ( fixedRequestTokens
-                                            , estimateRequestTokensWithItems
-                                                params
-                                                pendingItems
-                                            )
-                                        fixedItems ->
-                                            ( estimateRequestTokensWithItems
-                                                params
-                                                fixedItems
-                                            , estimateRequestTokensWithItems
-                                                params
-                                                (fixedItems <> pendingItems)
-                                            )
-                            in if continuationTokens > contextWindow
-                                then
-                                    attempt
-                                        { compactAttemptResult =
-                                            Left
-                                                (requestTooLargeError
-                                                    "automatic compacted continuation")
-                                        }
-                                else if baseTokens >= tokenLimit
-                                    then
-                                        attempt
-                                            { compactAttemptResult =
-                                                Left
-                                                    (thresholdError baseTokens)
-                                            }
-                                    else if
-                                        baseWithPendingTokens < tokenLimit
-                                            && continuationTokens >= tokenLimit
-                                        then
-                                            attempt
-                                                { compactAttemptResult =
-                                                    Left
-                                                        (thresholdError
-                                                            continuationTokens)
-                                                }
-                                        else attempt
-                        _ -> attempt
+                -- A successful remote checkpoint must not be rejected using
+                -- an estimate derived from its encrypted wire representation.
+                pure attempt
     estimateProjectedRequest occupancy history inputs = do
         params <- getParams
         pure (projectRequestTokens (Just params) occupancy history inputs)
@@ -1577,7 +1526,8 @@ autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
                 Left err ->
                     pure (Left (automaticCompactionError err))
                 Right outcome
-                    | outcome.compactAfterTokens >= tokenLimit ->
+                    | outcome.compactAfterTokens >= tokenLimit
+                        && not (any isServerCompactionCheckpoint outcome.compactHistory) ->
                         pure $
                             Left $
                                 automaticCompactionError $

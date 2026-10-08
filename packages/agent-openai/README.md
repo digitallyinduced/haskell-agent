@@ -24,8 +24,9 @@ For Responses-compatible native types, configure
 `Agent.OpenAI.Compaction.Native.openAIRemoteCompactionStrategy` with a
 `NativeRequestAdapter` (model accessor, input accessor, input replacement).
 This adapter only describes the request representation. The default strategy
-retains unknown provider payloads, builds the remote compaction request, and
-validates the replacement against the context budget.
+retains unknown provider payloads, trims the remote compaction request on a
+best-effort basis, and validates the returned checkpoint. Local size estimates
+are advisory: the provider enforces context limits for opaque checkpoints.
 `Agent.OpenAI.Compaction.Transport.sendNativeCompaction` owns the HTTP/SSE
 transport, deadlines, envelope normalization, and provider errors.
 
@@ -36,8 +37,13 @@ Pass unobserved inputs separately as `pending`; the manager excludes them from
 compression and appends them unchanged to the next request. Installation does
 not acknowledge those inputs or mark application delivery complete.
 
+When available, supply provider-reported occupancy for the source history under
+the current model and request configuration, excluding pending inputs. It takes
+precedence over serialized-size estimates, including when replaying full history.
+Pass no occupancy when that measurement is unavailable or no longer applicable.
+
 Custom strategies can replace compression and result validation while reusing
-the same lifecycle and final context-window checks. Credential selection,
+the same lifecycle. Credential selection,
 usage accounting, tenant authorization, and storage transactions remain host
 responsibilities. Serialize operations for each session; the manager does not
 acquire an application-specific session lock.

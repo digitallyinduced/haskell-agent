@@ -5,7 +5,7 @@ module Agent.OpenAI.Compaction.Manager
     , prepareCompaction
     ) where
 
-import Control.Monad (unless, when)
+import Control.Monad (when)
 import Data.Text (Text)
 
 -- | Loading freezes a source boundary. Installation must atomically publish
@@ -31,6 +31,10 @@ data CompactionStrategy request item response = CompactionStrategy
 -- | Prepare one submission, installing a validated checkpoint before returning
 -- a request that uses it. Exceptions leave pending-input acknowledgement to
 -- the caller's normal submission lifecycle; compaction never acknowledges it.
+-- Occupancy, when supplied, must describe the current source history under the
+-- current model and request configuration. Pending items are not included.
+-- Token estimates schedule compaction; only the provider can enforce context
+-- limits for opaque encrypted checkpoints.
 prepareCompaction
     :: CompactionStrategy request item response
     -> Int -> Maybe Int -> Maybe Text -> request -> [item]
@@ -40,28 +44,22 @@ prepareCompaction
 prepareCompaction strategy threshold occupancy previous request pending loadSource send = do
     when (threshold <= 0) $ fail "Compaction: threshold must be positive"
     case (previous, projectedTokens) of
-        (Just _, Just tokens) | tokens < effectiveThreshold -> requireFits request >> pure (request, previous)
+        (Just _, Just tokens) | tokens < effectiveThreshold -> pure (request, previous)
         _ -> do
             source <- loadSource
             let fullRequest = strategy.replaceItems request (source.history <> pending)
                 fullTokens = strategy.estimateRequest fullRequest
-                required = maybe fullTokens (max fullTokens) projectedTokens >= effectiveThreshold
+                required = maybe fullTokens id projectedTokens >= effectiveThreshold
             if not required || null source.history
-                then requireFits fullRequest >> pure (request, previous)
+                then pure (request, previous)
                 else do
                     response <- strategy.compressHistory
                         (strategy.replaceItems request []) source.history send
                     replacement <- strategy.replacementHistory effectiveThreshold request pending source.history response
                     when (null replacement) $ fail "Compaction: empty replacement context"
                     let nextRequest = strategy.replaceItems request (replacement <> pending)
-                    requireFits nextRequest
                     source.install replacement
                     pure (nextRequest, Nothing)
   where
     effectiveThreshold = min threshold (strategy.contextWindow request)
-    projectedTokens = case previous of
-        Nothing -> Just (strategy.estimateRequest request)
-        Just _ -> (+ sum (map strategy.estimateItem (strategy.requestItems request))) <$> occupancy
-    requireFits candidate =
-        unless (strategy.estimateRequest candidate <= strategy.contextWindow candidate) $
-            fail "Compaction: current input exceeds the model context window"
+    projectedTokens = (+ sum (map strategy.estimateItem pending)) <$> occupancy
