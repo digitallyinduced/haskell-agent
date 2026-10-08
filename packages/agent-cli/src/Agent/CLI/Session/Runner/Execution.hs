@@ -832,8 +832,15 @@ buildSkillContextRuntime
     initializeSkills = do
         markStartupStage startup "Loading skills…"
         skills <- readIORef skillsRef
+        queueCatalog <-
+            if queueInitialContext
+                then pure True
+                else
+                    skillCatalogContextMissing skills
+                        <$> readIORef startupContext
+                        <*> readLiveTranscript conversationRef
         (omitted, _) <- installSkills startupContext
-            queueInitialContext
+            queueCatalog
             skills
         reportSkillCatalog (isNothing fullscreen) skills omitted
         learnedSkills <-

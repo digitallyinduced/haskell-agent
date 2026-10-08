@@ -4,6 +4,7 @@ import Agent.CLI.Command (SkillCommand(..))
 import Agent.CLI.Options (CliOptions(..), defaultCliOptions)
 import Agent.CLI.Skills
 import Agent.Json (rawJsonFromEncoding)
+import Agent.OpenAI.Compaction (userTextItem)
 import Agent.MCP.Types
     ( McpResourceContent(..)
     , McpSkillEntry(..)
@@ -213,6 +214,43 @@ spec = describe "Agent.CLI.Skills" do
                     context `shouldSatisfy` Text.isInfixOf "Ask before booking."
                 other ->
                     expectationFailure ("unexpected skill context: " <> show other)
+
+    it "requeues the catalog for a resumed session whose transcript lacks it" do
+        withSystemTempDirectory "operator-skills" \root -> do
+            let skillDirectory = root FilePath.</> "house-rules"
+                writeRules rule =
+                    writeFile (skillDirectory FilePath.</> "SKILL.md") $
+                        unlines
+                            [ "---"
+                            , "name: house-rules"
+                            , "description: Rules for every turn"
+                            , "activation: always"
+                            , "---"
+                            , rule
+                            ]
+            createDirectoryIfMissing True skillDirectory
+            writeRules "Ask before booking."
+            catalog <- loadOperatorSkillsCatalog [fromFilePath root]
+            case formatSkillCatalogContext defaultSkillCatalogMaxChars catalog of
+                (Just context, _) -> do
+                    -- Persisted context may carry an appended message timestamp.
+                    let transcript =
+                            [userTextItem (Text.stripEnd context <> " [12:00]")]
+                    skillCatalogContextMissing catalog Nothing []
+                        `shouldBe` True
+                    skillCatalogContextMissing catalog Nothing transcript
+                        `shouldBe` False
+                    skillCatalogContextMissing catalog
+                        (Just ("environment\n\n" <> context)) []
+                        `shouldBe` False
+                    writeRules "Ask twice before booking."
+                    changed <- loadOperatorSkillsCatalog [fromFilePath root]
+                    skillCatalogContextMissing changed Nothing transcript
+                        `shouldBe` True
+                other ->
+                    expectationFailure ("unexpected skill context: " <> show other)
+            skillCatalogContextMissing (SkillCatalog [] []) Nothing []
+                `shouldBe` False
 
     it "queues skill metadata after existing startup context" do
         context <- newIORef (Just "agents")

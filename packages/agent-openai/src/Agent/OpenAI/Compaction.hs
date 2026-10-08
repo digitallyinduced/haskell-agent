@@ -26,6 +26,7 @@ module Agent.OpenAI.Compaction
     , compactTranscriptAtLastCheckpoint
     , hasCompactionCheckpoint
     , hasReloadedGeneratedContextItems
+    , hasUserTextContaining
     , assistantSummaryItem
     , userTextItem
     , isCompactSessionTurn
@@ -792,6 +793,16 @@ hasReloadedGeneratedContextItems = any \case
         | message.role == RoleUser ->
             maybe False isReloadedGeneratedContextUserText
                 (messageText message)
+    _ -> False
+
+-- | Whether a user message in the transcript contains @needle@. Generated
+-- context is persisted as user messages, possibly with a message timestamp
+-- appended, so a resumed session finds context it already received this way.
+hasUserTextContaining :: Text -> [ResponseItem] -> Bool
+hasUserTextContaining needle = any \case
+    MessageItem message
+        | message.role == RoleUser ->
+            maybe False (Text.isInfixOf needle) (messageText message)
     _ -> False
 
 isRemoteRetainedItem :: ResponseItem -> Bool

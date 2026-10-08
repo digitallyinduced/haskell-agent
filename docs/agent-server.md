@@ -65,8 +65,11 @@ root at startup and requires the same trusted ancestry as the sandbox
 runner. A root must not lie in or contain a tenant workspace, tenant
 home, or the tenant state root. Always-active skills are included in full,
 even beyond the skill catalog's context budget, which bounds only the
-on-demand listing. They are refreshed after compaction, so a deployment can
-move its standing instructions there instead of repeating them in every
+on-demand listing. A session receives the catalog when it starts, after
+compaction, and whenever a resumed session's transcript does not carry the
+current rendering, so a new or changed skill reaches existing conversations
+on their next turn. An unchanged catalog is not sent again, so a deployment
+can move its standing instructions there instead of repeating them in every
 turn's input.
 
 Sandbox execution tools are auto-approved by default: workspace edits, shell
