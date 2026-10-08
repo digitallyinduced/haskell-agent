@@ -91,7 +91,8 @@ import Agent.CLI.Runtime.Orchestration.Types
       AgentProcessRuntime(processMcpSupervisor),
       AgentRunMode,
       NativeDiscoveryContext(..),
-      NativeRunHooks(nativeDatabaseScopeNamespace, nativeWorkspaceDiscovery),
+      NativeRunHooks(nativeDatabaseScopeNamespace, nativeOperatorSkillRoots,
+                     nativeWorkspaceDiscovery),
       nativePreparedDiscovery )
 import Agent.CLI.Runtime.Types ( DevResult, RunResult )
 import Agent.Runtime.Session
@@ -107,7 +108,8 @@ import Agent.CLI.Session.Runtime.Types
                      startupDatabaseStore, startupNativeHooks,
                      startupStartedAt, startupTimings) )
 import Agent.Runtime.SessionLock ( releaseSessionLock, SessionLock )
-import Agent.CLI.Skills ( loadSkillsCatalogQuiet )
+import Agent.CLI.Skills
+    ( loadOperatorSkillsCatalog, loadSkillsCatalogQuiet, mergeSkillCatalogs )
 import Agent.CLI.Startup.Auth
     ( loadStartupAuth, loadStartupAuthFromResult, markStartupStage,
       recordStartupTiming, startupDie )
@@ -387,12 +389,18 @@ prepareInitializedWorkspace request = do
             request.initializedOptions.optSkills
                 && isNothing preparedDiscovery
     ((projectSettings, (catalogResult, branch)),
-        initializedSkills) <-
+        workspaceSkills) <-
         if shouldPreloadSkills
             then concurrently loadWorkspaceMetadata loadInitialSkills
             else do
                 metadata <- loadWorkspaceMetadata
                 pure (metadata, SkillCatalog [] [])
+    -- The embedding supplies operator skills, so they load even when
+    -- workspace skills are not preloaded.
+    operatorSkills <-
+        loadOperatorSkillsCatalog
+            (maybe [] (.nativeOperatorSkillRoots) startup.startupNativeHooks)
+    let initializedSkills = mergeSkillCatalogs workspaceSkills operatorSkills
     checkpoint "workspace metadata and skills ready"
     catalog <- either
         (startupDie startup)

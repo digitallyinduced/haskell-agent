@@ -324,6 +324,11 @@ page = Page
         dangerous-command restrictions still apply. Network access means a shell command
         can have external effects even inside a sandbox: do not provision unintended production
         credentials there. Failed sandbox admission never falls back to host execution.</p>
+        <p>Tenants do not discover workspace instruction files or skills. An operator can
+        supply skills with <code>--skill-root</code>: every session loads the
+        <code>SKILL.md</code> files below that trusted directory as built-in skills, so
+        <code>activation: always</code> keeps central rules in every turn's context. Each root
+        must lie outside every tenant workspace and the tenant state root.</p>
         <p>A tenant with <code>toolExecution</code> set to <code>none</code> receives no shell,
         filesystem or process tools and never starts a sandbox. It keeps MCP, plans,
         memory, learned skills and delegated agents, and uploaded images and PDFs reach the
@@ -494,6 +499,7 @@ options =
     , ("--gateway-integrations", "false", "Connect sessions to the organization gateway's integrations and distributed skills; otherwise sessions have only their configured MCP servers.")
     , ("--cors-origin", "none", "Repeat for each explicitly allowed browser origin.")
     , ("--workspace-root", "current directory", "Repeatable canonical local workspace root; registry controls tenant workspaces.")
+    , ("--skill-root", "none", "Repeatable trusted operator directory whose skills every session loads as built-in skills, in multi-tenant mode too; they may use activation: always.")
     , ("--max-concurrent-turns", "3", "Global running-turn capacity.")
     , ("--max-concurrent-turns-per-tenant", "2", "Per-tenant running capacity.")
     , ("--max-queued-turns", "100", "Global queue capacity.")

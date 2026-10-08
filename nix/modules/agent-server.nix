@@ -89,7 +89,11 @@ let
   ++ concatMap (origin: [
     "--cors-origin"
     origin
-  ]) cfg.corsOrigins;
+  ]) cfg.corsOrigins
+  ++ concatMap (root: [
+    "--skill-root"
+    root
+  ]) cfg.skillRoots;
 in
 {
   options.services.haskell-agent.server = {
@@ -201,6 +205,19 @@ in
       description = "Browser origins explicitly allowed by agent-server.";
     };
 
+    skillRoots = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "/nix/store/...-deployment-skills" ];
+      description = ''
+        Operator-controlled skill directories, such as a Nix store path with a
+        deployment's product skills. Every session loads their SKILL.md files
+        as trusted built-in skills, so `activation: always` is permitted.
+        Each must be a canonical absolute non-root path outside every tenant
+        workspace and the server state directory.
+      '';
+    };
+
     environment = mkOption {
       type = types.attrsOf types.str;
       default = { };
@@ -289,6 +306,10 @@ in
       {
         assertion = builtins.length cfg.workspaceRoots == builtins.length (unique cfg.workspaceRoots);
         message = "services.haskell-agent.server.workspaceRoots must not contain duplicates";
+      }
+      {
+        assertion = builtins.all isCanonicalAbsoluteNonRootPath cfg.skillRoots;
+        message = "services.haskell-agent.server.skillRoots must contain only canonical absolute non-root paths without systemd specifiers";
       }
       {
         assertion = isCanonicalAbsoluteNonRootPath cfg.tenantRegistryFile;

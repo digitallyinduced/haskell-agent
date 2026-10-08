@@ -158,6 +158,21 @@ spec = describe "Agent.Skills" do
                 `shouldBe`
                     ["activation `always` is reserved for trusted built-in skills"]
 
+    it "discovers only supplied built-in roots, where always activation is allowed" do
+        withTempDir \dir -> do
+            let operatorRoot = dir </> "operator-skills"
+            writeSkill (operatorRoot </> "house-rules")
+                "house-rules" "Rules for every turn" ["activation: always"]
+            writeSkill (dir </> ".agents" </> "skills" </> "workspace")
+                "workspace" "Skill outside the supplied root" []
+            catalog <- discoverBuiltinSkills 6
+                [(AgentSkills, fromFilePath operatorRoot)]
+            catalog.catalogWarnings `shouldBe` []
+            map
+                (\skill -> (skill.skillName, skill.skillContextMode))
+                catalog.catalogSkills
+                `shouldBe` [("house-rules", SkillContextAlways)]
+
     it "warns for invalid frontmatter without failing discovery" do
         withTempDir \dir -> do
             let home = dir </> "home"
@@ -238,19 +253,26 @@ spec = describe "Agent.Skills" do
                 expectationFailure "expected a rendered skill catalog"
         omitted `shouldBe` 0
 
-    it "omits an oversized always-active skill instead of truncating it" do
+    it "keeps an oversized always-active skill whole and bounds only the listing" do
         let alwaysSkill =
                 withSkillBody (Text.replicate 2000 "x")
                     (fakeSkill "always" "always" BuiltinSkill AgentSkills)
                     { skillContextMode = SkillContextAlways
                     }
             visible = fakeSkill "visible" "visible" UserSkill AgentSkills
+            listed name =
+                fakeSkill name (Text.replicate 400 "y") UserSkill AgentSkills
             (rendered, omitted) =
                 formatSkillCatalogContext 1000
-                    (SkillCatalog [alwaysSkill, visible] [])
-        omitted `shouldBe` 2
+                    (SkillCatalog
+                        [alwaysSkill, visible, listed "first", listed "second"]
+                        [])
         rendered `shouldSatisfy`
-            maybe False (not . Text.isInfixOf "Always-active skill: always")
+            maybe False (Text.isInfixOf "Always-active skill: always")
+        rendered `shouldSatisfy`
+            maybe False (Text.isInfixOf (Text.replicate 2000 "x"))
+        rendered `shouldSatisfy` maybe False (Text.isInfixOf "$visible")
+        omitted `shouldSatisfy` (> 0)
 
     it "deduplicates dollar mentions in first-occurrence order" do
         let deploy = fakeSkill "deploy" "deploy" UserSkill AgentSkills

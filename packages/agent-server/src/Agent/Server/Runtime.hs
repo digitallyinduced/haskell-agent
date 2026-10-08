@@ -1632,6 +1632,9 @@ nativeHooks environment control sessionId cwd dialect = NativeRunHooks
         if restricted
             then restrictedNativeStartupPolicy
             else hostNativeStartupPolicy
+    -- Validated at startup to lie outside every tenant-writable root.
+    , nativeOperatorSkillRoots =
+        map unsafeEncodeUtf environment.environmentConfig.resolvedSkillRoots
     }
   where
     restricted = isRestrictedEnvironment environment

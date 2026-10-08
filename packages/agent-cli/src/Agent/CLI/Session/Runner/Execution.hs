@@ -214,6 +214,7 @@ data SessionHostRuntime = SessionHostRuntime
     , hostInboxRuntime :: !SessionInboxRuntime
     , hostNativeCapabilities :: !NativeRunCapabilities
     , hostLoadsWorkspaceContext :: !Bool
+    , hostOperatorSkillRoots :: ![OsPath]
     , hostPreparedWorkspaceEnvironment
         :: !(Maybe PreparedWorkspaceEnvironment)
     , hostTerminal :: !TerminalCapabilities
@@ -397,6 +398,8 @@ newSessionHostRuntime SessionRequest{..} = do
         , hostInboxRuntime = inboxRuntime
         , hostNativeCapabilities = nativeCapabilities
         , hostLoadsWorkspaceContext = loadsHostWorkspaceContext
+        , hostOperatorSkillRoots =
+            maybe [] (.nativeOperatorSkillRoots) startup.startupNativeHooks
         , hostPreparedWorkspaceEnvironment = preparedWorkspaceEnvironment
         , hostTerminal = terminal
         , hostStdoutHandle = stdoutHandle
@@ -750,11 +753,14 @@ buildSkillContextRuntime
             when queueContext $
                 reportSkillCatalog True refreshed omitted
     loadAvailableSkills = do
-        local <-
+        workspaceSkills <-
             if loadsHostWorkspaceContext
                 then loadSkillsCatalogQuiet
                     options workspace.home workspace.projectRoot workspace.cwd
                 else pure (SkillCatalog [] [])
+        operatorSkills <-
+            loadOperatorSkillsCatalog host.hostOperatorSkillRoots
+        let local = mergeSkillCatalogs workspaceSkills operatorSkills
         remote <-
             if options.optSkills
                 then maybe
@@ -826,8 +832,15 @@ buildSkillContextRuntime
     initializeSkills = do
         markStartupStage startup "Loading skills…"
         skills <- readIORef skillsRef
+        queueCatalog <-
+            if queueInitialContext
+                then pure True
+                else
+                    skillCatalogContextMissing skills
+                        <$> readIORef startupContext
+                        <*> readLiveTranscript conversationRef
         (omitted, _) <- installSkills startupContext
-            queueInitialContext
+            queueCatalog
             skills
         reportSkillCatalog (isNothing fullscreen) skills omitted
         learnedSkills <-

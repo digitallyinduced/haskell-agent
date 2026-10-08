@@ -5,6 +5,7 @@ module Agent.CLI.Skills
     , installSkillCatalogWithOmissions
     , installSkillToolRoots
     , loadMcpSkillsCatalog
+    , loadOperatorSkillsCatalog
     , loadSkillsCatalog
     , loadSkillsCatalogQuiet
     , mergeSkillCatalogs
@@ -14,6 +15,7 @@ module Agent.CLI.Skills
     , resolvePromptSkillMentions
     , resolvePromptSkillMentionsWithWarnings
     , resolveSkillContent
+    , skillCatalogContextMissing
     , skillInvocationCommand
     , verifyMcpSkillContent
     ) where
@@ -44,6 +46,8 @@ import Agent.MCP.Types
     , McpSkillResources(..)
     )
 import Agent.OsPath (toText, unsafeToFilePath)
+import Agent.OpenAI.Compaction (hasUserTextContaining)
+import Agent.Responses.Types (ResponseItem)
 import Agent.Skills
 import Agent.Runtime.Startup.Context (mergeSkillCatalogs)
 import Agent.Tools.Types (ToolEnv, setToolSkillRoots)
@@ -124,10 +128,22 @@ loadSkillsCatalogQuiet options home projectRoot cwd
             { skillsHome = home
             , skillsProjectRoot = projectRoot
             , skillsCwd = cwd
-            , skillsMaxDepth = 6
+            , skillsMaxDepth = skillDiscoveryDepth
             , skillsBuiltinRoots =
                 [(AgentSkills, unsafeEncodeUtf builtinRoot)]
             }
+
+-- | Skills from directories that the embedding's operator controls, such as
+-- a deployment's product skills. They are trusted built-in skills and load
+-- independently of workspace discovery and of 'optSkills', which governs
+-- only workspace, user and MCP skills.
+loadOperatorSkillsCatalog :: [OsPath] -> IO SkillCatalog
+loadOperatorSkillsCatalog roots =
+    discoverBuiltinSkills skillDiscoveryDepth
+        [ (AgentSkills, root) | root <- roots ]
+
+skillDiscoveryDepth :: Int
+skillDiscoveryDepth = 6
 
 -- | Convert the untrusted metadata advertised by Skills-over-MCP servers into
 -- lightweight catalog entries. Invalid entries are omitted and surfaced using
@@ -332,6 +348,25 @@ reportSkillWarning color warning = do
                 <> toText warning.skillWarningPath
                 <> ": "
                 <> warning.skillWarningMessage)
+
+-- | Whether a resumed session lacks the current skill catalog context:
+-- neither the pending startup context nor a user message in the transcript
+-- carries its rendering. That is the case for a session that predates the
+-- catalog and after a skill changed, so such a session receives the catalog
+-- once more instead of running without its always-active skills.
+skillCatalogContextMissing
+    :: SkillCatalog
+    -> Maybe Text
+    -> [ResponseItem]
+    -> Bool
+skillCatalogContextMissing catalog pending transcript =
+    case fst (formatSkillCatalogContext defaultSkillCatalogMaxChars catalog) of
+        Nothing -> False
+        Just context ->
+            let carried = Text.strip context
+            in not
+                (maybe False (Text.isInfixOf carried) pending
+                    || hasUserTextContaining carried transcript)
 
 queueSkillCatalogContext :: IORef (Maybe Text) -> SkillCatalog -> IO ()
 queueSkillCatalogContext contextRef catalog = do

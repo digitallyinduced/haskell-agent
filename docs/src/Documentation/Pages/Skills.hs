@@ -105,7 +105,7 @@ page = Page
                 <tr><td><code>argument-hint</code></td><td>Optional string</td><td>Explain the input expected after the invocation</td></tr>
                 <tr><td><code>user-invocable</code></td><td>Boolean / true</td><td>Whether the skill is offered for explicit user invocation</td></tr>
                 <tr><td><code>disable-model-invocation</code></td><td>Boolean / false</td><td>Exclude it from the model's automatic skill selection</td></tr>
-                <tr><td><code>activation</code></td><td>String / on-demand</td><td>Filesystem skills use on-demand; always is reserved for trusted built-ins</td></tr>
+                <tr><td><code>activation</code></td><td>String / on-demand</td><td>Filesystem skills use on-demand; always is reserved for trusted built-ins and agent-server <code>--skill-root</code> directories, whose always-active skills appear in full in every session's context</td></tr>
                 <tr><td><code>allowed-tools</code></td><td>String or string array / empty</td><td>Declared tool metadata; does not grant new runtime permissions</td></tr>
                 <tr><td><code>model</code>, <code>effort</code></td><td>Optional strings</td><td>Model and effort override metadata; do not assume a provider supports arbitrary values</td></tr>
                 <tr><td><code>license</code>, <code>compatibility</code></td><td>Optional strings</td><td>Licensing and environment requirements</td></tr>
