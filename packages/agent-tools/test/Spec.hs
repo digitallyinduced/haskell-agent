@@ -23,6 +23,7 @@ import qualified Agent.Tools.PlanModeSpec as PlanModeSpec
 import qualified Agent.Tools.TaskPlanSpec as TaskPlanSpec
 import qualified Agent.Tools.SecretSpec as SecretSpec
 import qualified Agent.Tools.ShowImageSpec as ShowImageSpec
+import qualified Agent.Tools.SubagentLoopSpec as SubagentLoopSpec
 import qualified Agent.Tools.ViewImageSpec as ViewImageSpec
 import qualified Agent.Tools.RenderChartSpec as RenderChartSpec
 import Test.Hspec (hspec)
@@ -44,6 +45,7 @@ main = hspec do
     TaskPlanSpec.spec
     SecretSpec.spec
     ShowImageSpec.spec
+    SubagentLoopSpec.spec
     ViewImageSpec.spec
     RenderChartSpec.spec
     CodeModeHostSpec.spec
