@@ -42,6 +42,7 @@ module Agent.TUI.Presentation
     , toolOutputCodeLanguage
     , toolPathArgument
     , toolVerb
+    , toolCallVerb
     , workspaceRelativeDisplayPath
     ) where
 
@@ -83,7 +84,7 @@ summarizeToolCallRelative workspace call =
     let verb = case canonicalToolName call.name of
             "mcp_call" -> mcpCallDisplayName call.arguments
             "use_tool" -> mcpCallDisplayName call.arguments
-            _ -> toolVerb call.name
+            _ -> toolCallVerb call
         detail = case toolPathArgument call of
             Just path -> workspaceRelativeDisplayPath workspace path
             Nothing -> toolDetail call
@@ -990,6 +991,19 @@ isInspectionTool rawName =
             , "ListAgents"
             ]
 
+-- | Some tools either poll immediately or wait, depending on their arguments.
+toolCallVerb :: ToolCall -> Text
+toolCallVerb call
+    | canonicalToolName call.name == "get_task_output"
+    , Just timeout <- decodeMaybe timeoutDecoder call.arguments >>= id
+    , timeout > 0 = "Wait for task output"
+    | otherwise = toolVerb call.name
+  where
+    timeoutDecoder = Hermes.object do
+        canonical <- Hermes.atKeyOptional "timeout_ms" Hermes.int
+        legacy <- Hermes.atKeyOptional "timeout" Hermes.int
+        pure (canonical <|> legacy)
+
 toolVerb :: Text -> Text
 toolVerb name = case canonicalToolName name of
     "computer" -> "Control computer"
@@ -1002,7 +1016,7 @@ toolVerb name = case canonicalToolName name of
     "shell_command" -> "$"
     "write_stdin" -> "Continued"
     "run_ghci" -> "$"
-    "get_task_output" -> "Read"
+    "get_task_output" -> "Read task output"
     "wait_tasks" -> "Waited"
     "kill_task" -> "Killed"
     "task" -> "Ran"
@@ -1145,7 +1159,7 @@ toolDetail call = case canonicalToolName call.name of
     "skill_rollback" -> skillIdentity call.arguments
     "conversation_search" ->
         firstLine (partialField "query")
-    "get_task_output" -> partialField "task_id"
+    "get_task_output" -> taskOutputDetail call.arguments
     "kill_task" -> partialField "task_id"
     "Write" -> partialField "file_path"
     "Glob" -> partialField "pattern"
@@ -1226,6 +1240,20 @@ nonEmptyPartialJsonText key input =
 jsonTextFieldPartialDefault :: Text -> Text -> Text
 jsonTextFieldPartialDefault key input =
     fromMaybe "" (jsonTextFieldPartial key input)
+
+taskOutputDetail :: Text -> Text
+taskOutputDetail input =
+    maybe (jsonTextFieldPartialDefault "task_id" input)
+        (Text.intercalate ", ")
+        (decodeMaybe decoder input >>= id)
+  where
+    decoder = Hermes.object do
+        canonical <- Hermes.atKeyOptional "task_ids" textList
+        legacy <- Hermes.atKeyOptional "task_id" textList
+        pure (canonical <|> legacy)
+    textList = Hermes.getType >>= \case
+        Hermes.VString -> (: []) <$> Hermes.text
+        _ -> Hermes.list Hermes.text
 
 jsonIntField :: Text -> Text -> Maybe Text
 jsonIntField key input =

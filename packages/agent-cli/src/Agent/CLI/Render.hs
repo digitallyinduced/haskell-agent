@@ -141,7 +141,7 @@ import Agent.TUI.Presentation
     , parseSearchReplaceDiff
     , toolCallDiffs
     , toolDetail
-    , toolVerb
+    , toolCallVerb
     , workspaceRelativeDisplayPath
     )
 import qualified Agent.TUI.Presentation as Presentation
@@ -1045,7 +1045,7 @@ formatToolStartedRelative color workspace call =
             | otherwise = glyphTool
         arrow = roleToolArrow color marker
         detail = toolDetail call
-    in case toolChrome call.name of
+    in case toolChrome call of
         ToolChromeShell ->
             let prompt = roleMuted color "$ "
                 command =
@@ -1085,8 +1085,8 @@ data ToolDetailKind
     | ToolDetailPath
     | ToolDetailCommand
 
-toolChrome :: Text -> ToolChrome
-toolChrome name = case canonicalToolName name of
+toolChrome :: ToolCall -> ToolChrome
+toolChrome call = case canonicalToolName call.name of
     "read_file" -> ToolChrome "Read" ToolDetailPath
     "list_dir" -> ToolChrome "Listed" ToolDetailPath
     "grep" -> ToolChrome "Searched" ToolDetailMuted
@@ -1097,7 +1097,6 @@ toolChrome name = case canonicalToolName name of
     "write_stdin" -> ToolChrome "Continued" ToolDetailMuted
     "run_ghci" -> ToolChromeShell
     "exec" -> ToolChrome "Code execution" ToolDetailNone
-    "get_task_output" -> ToolChrome "Read" ToolDetailMuted
     "wait_tasks" -> ToolChrome "Waited" ToolDetailMuted
     "kill_task" -> ToolChrome "Killed" ToolDetailMuted
     "task" -> ToolChrome "Ran" ToolDetailMuted
@@ -1132,7 +1131,7 @@ toolChrome name = case canonicalToolName name of
     "ExitWorktree" -> ToolChrome "Exited worktree" ToolDetailMuted
     "SendMessage" -> ToolChrome "Sent message to" ToolDetailMuted
     "ListAgents" -> ToolChrome "Listed agents" ToolDetailMuted
-    _ -> ToolChrome (toolVerb name) ToolDetailMuted
+    _ -> ToolChrome (toolCallVerb call) ToolDetailMuted
 
 isTodoTool :: Text -> Bool
 isTodoTool name =
