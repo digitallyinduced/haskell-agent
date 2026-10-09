@@ -11,6 +11,28 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "tool presentation" do
+    it "identifies blocking task output calls and their task IDs" do
+        let call = functionToolCall "output" "get_command_or_subagent_output"
+                "{\"task_ids\":[\"command-1\",\"agent-2\"],\"timeout_ms\":600000}"
+        toolCallTitle call
+            `shouldBe` "Wait for task output command-1, agent-2"
+
+    it "identifies immediate task output reads, including an explicit zero timeout" do
+        let call arguments = functionToolCall "output" "get_task_output" arguments
+        map (toolCallTitle . call)
+            [ "{\"task_ids\":[\"command-1\"]}"
+            , "{\"task_ids\":[\"command-1\"],\"task_id\":\"old\",\"timeout_ms\":0,\"timeout\":600000}"
+            ]
+            `shouldBe` replicate 2 "Read task output command-1"
+
+    it "supports legacy task output IDs and timeouts" do
+        let call arguments = functionToolCall "output" "get_task_output" arguments
+        map (toolCallTitle . call)
+            [ "{\"task_id\":\"command-1\",\"timeout\":1000}"
+            , "{\"task_id\":[\"command-1\"],\"timeout\":1000}"
+            ]
+            `shouldBe` replicate 2 "Wait for task output command-1"
+
     it "summarizes chart results without leaking the document or terminal controls" do
         let call = functionToolCall "chart" "render_chart" "{}"
             input = "{\"version\":1,\"kind\":\"line\",\"title\":\"Revenue\\u001b[2J\",\"x_axis\":{\"type\":\"number\"},\"y_axis\":{},\"series\":[{\"name\":\"Sales\",\"points\":[{\"x\":1,\"y\":2}]}]}"
