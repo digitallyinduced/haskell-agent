@@ -419,9 +419,11 @@ joinFileLines :: Text -> [SourceLine] -> Text -> Text
 joinFileLines preferredEnding newLines original = Text.concat (render newLines)
   where
     terminated = Text.null original || Text.isSuffixOf "\n" original || Text.isSuffixOf "\r" original
+    ending :: SourceLine -> Text
     ending line
         | Text.null line.sourceEnding = preferredEnding
         | otherwise = line.sourceEnding
+    render :: [SourceLine] -> [Text]
     render [] = []
     render [line] = [line.sourceText, if terminated then ending line else ""]
     render (line : rest) = line.sourceText : ending line : render rest
