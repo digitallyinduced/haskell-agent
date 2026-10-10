@@ -54,6 +54,10 @@ data Backend = Backend
             )
     , backendGetSession
         :: !(AccessBoundary -> Text -> IO (Either ApiError Value))
+    , backendGetSessionReadState
+        :: !(AccessBoundary -> Text -> IO (Either ApiError Value))
+    , backendUpdateSessionReadState
+        :: !(AccessBoundary -> Text -> UpdateSessionReadStateRequest -> IO (Either ApiError Value))
     , backendPatchSession
         :: !( AccessBoundary
             -> Text

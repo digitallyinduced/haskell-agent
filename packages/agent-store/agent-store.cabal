@@ -59,6 +59,7 @@ library
                     , Agent.Store.Postgres.Custom.Types
                     , Agent.Store.Postgres.Skill.Types
                     , Agent.Store.Postgres.Session.Read
+                    , Agent.Store.Postgres.Session.ReadState
                     , Agent.Store.Postgres.Session.Schema
                     , Agent.Store.Postgres.Session.TaskPlan
                     , Agent.Store.Postgres.Session.Types

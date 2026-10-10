@@ -71,6 +71,24 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "agent-server WAI application" do
+    it "reads durable session attention and requires a revision for edits" do
+        withApplication immediateRunner \application -> do
+            response <- perform application methodGet
+                ["v1", "sessions", "session-1", "read-state"] validHeaders ""
+            response.simpleStatus `shouldBe` status200
+            update <- perform application methodPatch
+                ["v1", "sessions", "session-1", "read-state"] validHeaders
+                "{\"expected_revision\":\"revision-1\",\"unread\":false}"
+            update.simpleStatus `shouldBe` status200
+            missingRevision <- perform application methodPatch
+                ["v1", "sessions", "session-1", "read-state"] validHeaders
+                "{\"unread\":false}"
+            missingRevision.simpleStatus `shouldBe` status400
+            unknownField <- perform application methodPatch
+                ["v1", "sessions", "session-1", "read-state"] validHeaders
+                "{\"expected_revision\":\"revision-1\",\"unread\":false,\"force\":true}"
+            unknownField.simpleStatus `shouldBe` status400
+
     it "flushes an idle event stream before the first heartbeat" do
         withApplication immediateRunner \application ->
             Warp.testWithApplication (pure application) \port ->
@@ -1375,6 +1393,8 @@ fakeBackend =
                 pure (Right (object ["sessions" .= ([] :: [Int])]))
         , backendCreateSession =
             \_ _ -> pure (Right sessionValue)
+        , backendGetSessionReadState = \_ _ -> pure (Right (object ["revision" .= ("revision-1" :: Text), "unread" .= True]))
+        , backendUpdateSessionReadState = \_ _ _ -> pure (Right (object ["revision" .= ("revision-2" :: Text), "unread" .= False]))
         , backendGetSession =
             \_ _ -> pure (Right sessionValue)
         , backendPatchSession =

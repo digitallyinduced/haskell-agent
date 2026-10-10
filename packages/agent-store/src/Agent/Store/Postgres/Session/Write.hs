@@ -24,6 +24,8 @@ module Agent.Store.Postgres.Session.Write
     , withSessionAdvisoryLock
     ) where
 
+import Agent.Store.Postgres.Session.ReadState (publishSessionReadStateTransaction)
+
 import Control.Monad (forM_, unless, when)
 import Data.Functor.Contravariant ((>$<))
 import Data.Int (Int32, Int64)
@@ -320,6 +322,8 @@ appendSessionTurnIndexedInternal resetPrompt clearTaskPlan pool turn metadata =
                         ( turn.sessionTurnItems
                             <> turn.sessionTurnDisplayItems
                         )
+                    when (turn.sessionTurnEffect == TranscriptAppend) $
+                        publishSessionReadStateTransaction metadata.sessionMetadataKey
                     when resetPrompt do
                         _ <- Transaction.statement
                             ( metadata.sessionMetadataKey
@@ -386,7 +390,10 @@ appendSessionTurnsWithTaskPlanClear clearTaskPlan pool turns metadata =
     appendAll (turn : rest) = do
         appended <- appendTurnTransaction turn metadata
         if appended
-            then appendAll rest
+            then do
+                when (turn.sessionTurnEffect == TranscriptAppend) $
+                    publishSessionReadStateTransaction metadata.sessionMetadataKey
+                appendAll rest
             else Transaction.condemn >> pure False
 
 clearTaskPlanStatement :: Statement Text ()

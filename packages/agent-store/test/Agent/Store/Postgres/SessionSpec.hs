@@ -3,6 +3,7 @@
 module Agent.Store.Postgres.SessionSpec (spec) where
 
 import Control.Exception.Safe (finally)
+import Control.Concurrent.Async (concurrently)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString.Char8
 import Data.Foldable (toList)
@@ -38,6 +39,67 @@ sessionTestPostgresConfig stateDirectory =
 
 spec :: Spec
 spec = describe "PostgreSQL session schema" do
+    it "persists unread positions and rejects acknowledgements of older results" $
+        withSystemTempDirectory "ha" \stateDirectory -> do
+            let config = sessionTestPostgresConfig stateDirectory
+                cleanup = stopManagedPostgres config >> pure ()
+            (openStore config >>= \case
+                Left err -> expectationFailure (show err)
+                Right store -> finally
+                    (do
+                        let pool = trustedPool store
+                            now = read "2026-08-23 12:00:00 UTC"
+                            metadata = testMetadata now
+                            turn = (testTurn now) { sessionTurnEffect = TranscriptAppend }
+                            key = metadata.sessionMetadataKey
+                            readState = loadSessionReadState pool key >>= \case
+                                Right (Just value) -> pure value
+                                other -> expectationFailure (show other) >> fail "missing state"
+                        createSession pool metadata `shouldReturn` Right True
+                        initial <- readState
+                        initial.readStateUnread `shouldBe` False
+                        appendSessionTurnIndexed pool turn metadata `shouldReturn` Right (Just 0)
+                        firstResult <- readState
+                        firstResult.readStateFirstUnreadTurn `shouldBe` Just 0
+                        appendSessionTurns pool [turn] metadata `shouldReturn` Right True
+                        secondResult <- readState
+                        secondResult.readStateFirstUnreadTurn `shouldBe` Just 0
+                        secondResult.readStateRevision `shouldNotBe` firstResult.readStateRevision
+                        updateSessionReadState pool key firstResult.readStateRevision False
+                            `shouldReturn` Right Nothing
+                        updateSessionReadState pool key secondResult.readStateRevision False >>= \case
+                            Right (Just acknowledged) -> do
+                                acknowledged.readStateUnread `shouldBe` False
+                                acknowledged.readStateFirstUnreadTurn `shouldBe` Nothing
+                                replaceSessionMetadata pool "session.updated" metadata `shouldReturn` Right True
+                                readState `shouldReturn` acknowledged
+                                appendSessionTurns pool [testTurn now] metadata `shouldReturn` Right True
+                                readState `shouldReturn` acknowledged
+                                openStore config >>= \case
+                                    Left err -> expectationFailure (show err)
+                                    Right reopened -> finally
+                                        (loadSessionReadState (trustedPool reopened) key
+                                            `shouldReturn` Right (Just acknowledged))
+                                        (closeStore reopened)
+                                updateSessionReadState pool key acknowledged.readStateRevision True >>= \case
+                                    Right (Just manuallyUnread) -> do
+                                        manuallyUnread.readStateUnread `shouldBe` True
+                                        manuallyUnread.readStateFirstUnreadTurn `shouldBe` Nothing
+                                        (left, right) <- concurrently
+                                            (updateSessionReadState pool key manuallyUnread.readStateRevision False)
+                                            (updateSessionReadState pool key manuallyUnread.readStateRevision False)
+                                        length [() | Right (Just _) <- [left, right]] `shouldBe` 1
+                                        length [() | Right Nothing <- [left, right]] `shouldBe` 1
+                                    other -> expectationFailure (show other)
+                            other -> expectationFailure (show other)
+                        deleteSession pool key now `shouldReturn` Right True
+                        loadSessionReadState pool key `shouldReturn` Right Nothing
+                        updateSessionReadState pool key secondResult.readStateRevision False
+                            `shouldReturn` Right Nothing
+                    )
+                    (closeStore store)
+                ) `finally` cleanup
+
     it "normalizes timestamps to PostgreSQL microsecond precision" do
         let timestamp = UTCTime
                 (fromGregorian 2026 8 24)
