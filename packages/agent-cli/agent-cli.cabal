@@ -20,6 +20,7 @@ extra-source-files: benchmark/MemoryUsage.md
                   , benchmark/CommandCompletionResults.csv
 data-files:         data/CHANGELOG.md
                   , skills/add-model/SKILL.md
+                  , skills/integrations-sh/SKILL.md
                   , skills/learn-about-user/SKILL.md
                   , skills/post-task-learning-review/SKILL.md
                   , skills/resume-claude/SKILL.md
