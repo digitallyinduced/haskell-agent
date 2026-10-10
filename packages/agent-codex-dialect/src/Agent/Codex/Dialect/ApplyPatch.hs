@@ -71,13 +71,14 @@ data UpdateChunk = UpdateChunk
     { chunkContext :: !(Maybe Text)
     , chunkOld :: ![Text]
     , chunkNew :: ![Text]
+    , chunkContextIndices :: ![(Int, Int)]
     , chunkEof :: !Bool
     } deriving (Eq, Show)
 
 parsePatch :: Text -> Either Text [Hunk]
 parsePatch raw = do
     let trimmed = Text.strip raw
-        ls = Text.lines trimmed
+        ls = map (\line -> fromMaybe line (Text.stripSuffix "\r" line)) (Text.lines trimmed)
     case ls of
         [] -> Left "Invalid patch: empty"
         first : rest
@@ -178,8 +179,16 @@ buildChunk header body eof = Right UpdateChunk
     { chunkContext = header
     , chunkOld = [Text.drop 1 line | line <- body, startsWithOneOf line ['-', ' ']]
     , chunkNew = [Text.drop 1 line | line <- body, startsWithOneOf line ['+', ' ']]
+    , chunkContextIndices = contextIndices 0 0 body
     , chunkEof = eof
     }
+  where
+    contextIndices _ _ [] = []
+    contextIndices oldIndex newIndex (line : rest) = case Text.uncons line of
+        Just (' ', _) -> (newIndex, oldIndex) : contextIndices (oldIndex + 1) (newIndex + 1) rest
+        Just ('-', _) -> contextIndices (oldIndex + 1) newIndex rest
+        Just ('+', _) -> contextIndices oldIndex (newIndex + 1) rest
+        _ -> contextIndices oldIndex newIndex rest
 
 startsWithOneOf :: Text -> [Char] -> Bool
 startsWithOneOf line chars = case Text.uncons line of
@@ -258,7 +267,11 @@ prepareHunks env hunks = go hunks Map.empty [] [] [] []
         UpdateFile path moveTo chunks -> do
             resolved <- resolvePath env path
             original <- virtualFileContents path resolved files
-            newLines <- case applyChunks chunks (Text.lines original) of
+            let sourceLines = splitFileLines original
+                preferredEnding = case sourceLines of
+                    SourceLine _ ending : _ | not (Text.null ending) -> ending
+                    _ -> "\n"
+            newLines <- case applyChunks preferredEnding chunks sourceLines of
                 Left err ->
                     throwE $
                         "Failed to update file '"
@@ -266,7 +279,7 @@ prepareHunks env hunks = go hunks Map.empty [] [] [] []
                             <> "': "
                             <> err
                 Right lines_ -> pure (toList lines_)
-            let newContents = joinFileLines newLines original
+            let newContents = joinFileLines preferredEnding newLines original
             case moveTo of
                 Nothing ->
                     go
@@ -322,22 +335,49 @@ resolvePath :: ToolEnv -> FilePath -> ExceptT Text IO OsPath
 resolvePath env path =
     ExceptT (resolveUnderCwd env (unsafeEncodeUtf path))
 
-applyChunks :: [UpdateChunk] -> [Text] -> Either Text (Seq Text)
-applyChunks chunks start =
-    foldM (flip applyChunk) (Seq.fromList start) chunks
+-- Keep terminators separate from text so context matching is independent of
+-- the file's line endings and unchanged lines retain even mixed styles.
+data SourceLine = SourceLine
+    { sourceText :: !Text
+    , sourceEnding :: !Text
+    }
 
-applyChunk :: UpdateChunk -> Seq Text -> Either Text (Seq Text)
-applyChunk chunk fileLines =
-    let afterContext = case chunk.chunkContext of
+splitFileLines :: Text -> [SourceLine]
+splitFileLines contents
+    | Text.null contents = []
+    | otherwise =
+        let (body, suffix) = Text.break (\c -> c == '\r' || c == '\n') contents
+        in case Text.uncons suffix of
+            Nothing -> [SourceLine body ""]
+            Just ('\r', rest) | Just remaining <- Text.stripPrefix "\n" rest ->
+                SourceLine body "\r\n" : splitFileLines remaining
+            Just (ending, rest) -> SourceLine body (Text.singleton ending) : splitFileLines rest
+
+applyChunks :: Text -> [UpdateChunk] -> [SourceLine] -> Either Text (Seq SourceLine)
+applyChunks preferredEnding chunks start =
+    foldM (flip (applyChunk preferredEnding)) (Seq.fromList start) chunks
+
+applyChunk :: Text -> UpdateChunk -> Seq SourceLine -> Either Text (Seq SourceLine)
+applyChunk preferredEnding chunk fileLines =
+    let lineTexts = fmap (.sourceText) fileLines
+        afterContext = case chunk.chunkContext of
             Nothing -> 0
             Just ctx ->
                 fromMaybe (Seq.length fileLines)
-                    (Seq.elemIndexL ctx fileLines)
+                    (Seq.elemIndexL ctx lineTexts)
         searchFrom = case chunk.chunkContext of
             Nothing -> 0
             Just _ -> afterContext + 1
         oldLines = Seq.fromList chunk.chunkOld
-        newLines = Seq.fromList chunk.chunkNew
+        newLines = Seq.fromList (map (\body -> SourceLine body preferredEnding) chunk.chunkNew)
+        replace idx =
+            let contextIndices = Map.fromList chunk.chunkContextIndices
+                retainedLines = Seq.mapWithIndex
+                    (\newIndex line -> case Map.lookup newIndex contextIndices of
+                        Just oldIndex -> fromMaybe line (Seq.lookup (idx + oldIndex) fileLines)
+                        Nothing -> line)
+                    newLines
+            in replaceAt idx (Seq.length oldLines) retainedLines fileLines
     in if Seq.null oldLines
         then
             let insertAt
@@ -345,15 +385,15 @@ applyChunk chunk fileLines =
                         Seq.length fileLines
                     | otherwise = searchFrom
             in Right (insertAtPos insertAt newLines fileLines)
-        else case findSequence oldLines fileLines searchFrom of
+        else case findSequence oldLines lineTexts searchFrom of
             Nothing ->
                 -- Retry from the start when the @@ context did not pin a unique site.
-                case findSequence oldLines fileLines 0 of
+                case findSequence oldLines lineTexts 0 of
                     Nothing -> Left "Failed to find expected lines in the file to update"
                     Just idx ->
-                        Right (replaceAt idx (Seq.length oldLines) newLines fileLines)
+                        Right (replace idx)
             Just idx ->
-                Right (replaceAt idx (Seq.length oldLines) newLines fileLines)
+                Right (replace idx)
 
 findSequence :: Seq Text -> Seq Text -> Int -> Maybe Int
 findSequence needle haystack from
@@ -367,20 +407,26 @@ findSequence needle haystack from
         | Seq.take needleLength (Seq.drop i haystack) == needle = Just i
         | otherwise = go (i + 1)
 
-replaceAt :: Int -> Int -> Seq Text -> Seq Text -> Seq Text
+replaceAt :: Int -> Int -> Seq a -> Seq a -> Seq a
 replaceAt idx count newLines fileLines =
     Seq.take idx fileLines <> newLines <> Seq.drop (idx + count) fileLines
 
-insertAtPos :: Int -> Seq Text -> Seq Text -> Seq Text
+insertAtPos :: Int -> Seq a -> Seq a -> Seq a
 insertAtPos idx newLines fileLines =
     Seq.take idx fileLines <> newLines <> Seq.drop idx fileLines
 
-joinFileLines :: [Text] -> Text -> Text
-joinFileLines newLines original
-    | Text.isSuffixOf "\n" original || Text.null original =
-        Text.unlines newLines
-    | otherwise =
-        Text.intercalate "\n" newLines
+joinFileLines :: Text -> [SourceLine] -> Text -> Text
+joinFileLines preferredEnding newLines original = Text.concat (render newLines)
+  where
+    terminated = Text.null original || Text.isSuffixOf "\n" original || Text.isSuffixOf "\r" original
+    ending :: SourceLine -> Text
+    ending line
+        | Text.null line.sourceEnding = preferredEnding
+        | otherwise = line.sourceEnding
+    render :: [SourceLine] -> [Text]
+    render [] = []
+    render [line] = [line.sourceText, if terminated then ending line else ""]
+    render (line : rest) = line.sourceText : ending line : render rest
 
 summary :: OsPath -> [FilePath] -> [FilePath] -> [FilePath] -> Text
 summary workspace added modified deleted =
