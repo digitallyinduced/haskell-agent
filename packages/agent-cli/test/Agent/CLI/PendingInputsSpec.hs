@@ -1,6 +1,6 @@
 module Agent.CLI.PendingInputsSpec (spec) where
 
-import Agent.CLI.InputBudget
+import Agent.Loop.InputBudget
     ( logicalTextBytes
     , logicalTurnInputBytes
     )
@@ -16,7 +16,7 @@ import Agent.CLI.PendingInputs
     , pendingInputCountLimit
     , withPendingInputs
     )
-import Agent.CLI.SteeringInputs
+import Agent.Loop.SteeringInputs
     ( awaitSteeringInput
     , awaitSteeringInputReady
     , awaitUserSteering

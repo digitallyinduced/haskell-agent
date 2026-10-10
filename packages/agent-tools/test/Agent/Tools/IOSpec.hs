@@ -1,6 +1,7 @@
 module Agent.Tools.IOSpec (spec) where
 
 import Agent.Cancel (requestCancel)
+import Agent.Subagents (ChildBackgroundTasks(..))
 import Agent.Tools.Background
     ( BackgroundTaskStatus(..)
     , consumeCompletion
@@ -11,6 +12,7 @@ import Agent.Tools.Background
     , removeBackgroundTask
     , suppressCompletion
     , systemReminder
+    , toolEnvBackgroundTasks
     )
 import Agent.FileRetry
     ( appendLazyFileRetryingOpen
@@ -51,6 +53,7 @@ import Agent.Tools.Types
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Concurrent.MVar (readMVar, tryPutMVar)
 import Control.Concurrent.Async (poll, waitCatch, withAsync)
+import Control.Concurrent.STM (atomically)
 import Control.Exception.Safe (bracket, finally, tryIO)
 import qualified Control.Exception as Exception
 import Control.Monad (replicateM, void)
@@ -111,6 +114,17 @@ spec = describe "Agent.Tools.IO" do
             removeBackgroundTask env "shell:1"
             removeBackgroundTask env "cell:1"
             readBackgroundTasks env `shouldReturn` []
+
+        it "keeps a child agent waiting only for commands that resume it" do
+            env <- defaultToolEnv (fromFilePath ".")
+            let awaiting = atomically (toolEnvBackgroundTasks env).awaitingBackgroundResume
+            awaiting `shouldReturn` False
+            registerBackgroundTask env "cell:1" "script" False
+            awaiting `shouldReturn` False
+            registerBackgroundTask env "shell:1" "build" True
+            awaiting `shouldReturn` True
+            removeBackgroundTask env "shell:1"
+            awaiting `shouldReturn` False
 
     describe "background completion delivery" do
         it "publishes once and lets one explicit result dismiss it" do

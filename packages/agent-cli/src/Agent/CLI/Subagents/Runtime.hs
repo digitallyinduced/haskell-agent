@@ -10,13 +10,12 @@ module Agent.CLI.Subagents.Runtime
     , runHttpSubagent, runXaiParentSubagent, runGatewaySubagent
     , runXaiSubagent, resolveGatewaySubagentTarget, grokSpawnedChildIdentity
     , usesOpenAiChildTransport, validatePersistedSubagentTarget
-    , runChildWithBackgroundTasks, childToolGroups
+    , childToolGroups
     ) where
 import Agent.Runtime.Session.Request
     ( readSessionRequestParams
     )
 import Agent.CLI.Approval (childApprove)
-import Agent.CLI.Btw (trimDanglingToolSuffix)
 import Agent.Runtime.Compaction.Provider
     ( CompactionInstall(CompactionNotInstalled)
     , autoCompactBackendWith
@@ -39,7 +38,6 @@ import Agent.CLI.SubagentStore
     ( SubagentDiskFields(..)
     , SubagentDiskMeta(..)
     , SubagentTarget(..)
-    , forkSubagentTranscript
     , loadSubagentState
     , subagentDiskFields
     )
@@ -60,16 +58,6 @@ import Agent.CLI.Subagents.Runtime.Target
      validatePersistedSubagentTarget)
 import Agent.Runtime.Provider.OpenAI.Fresh
     (freshOpenAiBackend, freshOpenAiBackendWithTurnState)
-import Agent.CLI.SteeringInputs
-    ( SteeringInputs
-    , awaitSteeringInput
-    , awaitSteeringInputReady
-    , commitSteeringInputs
-    , dismissBackgroundCompletion
-    , enqueueBackgroundCompletion
-    , newSteeringInputs
-    , readSteeringInputs
-    )
 import Agent.Runtime.ModelConfig
     (connectionSupportsDialect, organizationGatewayConnectionId)
 import Agent.CLI.Tools
@@ -89,16 +77,13 @@ import Agent.Dialect
 import Agent.InterAgentMessage (InterAgentMessage, interAgentMessagePayload)
 import Agent.Loop
     (Backend(..), BackendMiddleware, BackendSnapshot(..),
-     BackendStateStore(..), LoopConfig(..), LoopError(..), LoopEvent(..),
-     LoopResult(..), TurnInput(..), advanceBackendSnapshot,
-     addTokenUsage, emptyTokenUsage,
+     LoopConfig(..), LoopError(..), LoopEvent(..),
+     LoopResult(..), TurnInput(..),
      defaultLoopDispatch, emptyBackendSnapshot, initialBackendSnapshot,
      runLoop, runLoopInputs)
 import Agent.ToolDispatch (ToolDispatchConfig(..))
-import Agent.Cancel (waitCancel)
+import Agent.Tools.Background (toolEnvBackgroundTasks)
 import Agent.Tools.OutputArtifact (finalizeToolOutput)
-import Agent.Tools.Background
-    (BackgroundTaskStatus(..), readBackgroundTasksSTM, setBackgroundTaskHooks)
 import qualified Agent.OpenAI.Client as OpenAI
 import Agent.OpenAI.LoopBackend
     ( openAiBackendWithTransportFallback
@@ -117,11 +102,11 @@ import Agent.Responses.LoopBackend
 import Agent.Responses.Types
     (ReasoningConfig(..), ResponseCreateParams(..), ResponseItem)
 import Agent.Subagents
-    (RunSubagent, SubagentId(..), SubagentIdentity(..), SubagentRegistry,
-     SubagentSpawnEnv(..), SubagentStatus(..), getStatus,
-     getSubagentIdentity, getTaskPath, restoreSubagent, restoreSubagentAtStatus,
-     restoreSubagentAtWithCwdStatus, restoreSubagentWithCwd,
-     setPreviousResponseId)
+    (ChildTurn(..), RunSubagent, SubagentId(..), SubagentIdentity(..),
+     SubagentRegistry, SubagentSpawnEnv(..), SubagentStatus(..),
+     forkSubagentTranscript, getStatus, getSubagentIdentity, getTaskPath,
+     restoreSubagent, restoreSubagentAtStatus, restoreSubagentAtWithCwdStatus,
+     restoreSubagentWithCwd, runChildTurn)
 import Agent.Subagents.TaskPath (parseTaskPath, taskPathRoot)
 import Agent.GrokBuild.Dialect.Prompt
     (codingGrokPromptTools, grokSubagentSystemPrompt)
@@ -143,16 +128,12 @@ import Agent.Tools.MultiAgents
 import Agent.Tools.Types
     ( AppTool(..)
     , AppToolGroup(..)
-    , BackgroundTaskHooks(..)
-    , BackgroundTaskNotice(..)
     , ToolEnv(..)
     , ToolRegistry
     , defaultToolEnv
     )
 import Control.Concurrent.MVar
     (modifyMVar, modifyMVar_, newMVar)
-import Control.Concurrent.Async (race)
-import Control.Concurrent.STM (atomically, check, orElse)
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (finally, throwIO)
 import Control.Monad (unless)
@@ -1406,127 +1387,29 @@ runPreparedChild
     -> (LoopConfig -> IO (Either LoopError LoopResult))
     -> IO (Either LoopError LoopResult)
 runPreparedChild runtime env session toolEnv toolRegistry backend onEvent runChild = do
-    steering <- newSteeringInputs
-    setBackgroundTaskHooks toolEnv BackgroundTaskHooks
-        { backgroundTaskCompleted = \notice ->
-            enqueueBackgroundCompletion
-                steering
-                notice.noticeKey
-                (UserMessage notice.noticeBody)
-                >>= \case
-                    -- Do not report synchronously from the process
-                    -- supervisor: loop event delivery may backpressure.
-                    Left _ -> pure False
-                    Right inserted -> pure inserted
-        , backgroundTaskDismissed =
-            dismissBackgroundCompletion steering
-        }
-    let config = LoopConfig
-            { loopBackend = backend
-            , loopBackendState = BackendStateStore
-                { readBackendState = readIORef session.subSessionTranscript
-                , commitBackendState = \snapshot -> do
-                    atomicModifyIORef'
-                        session.subSessionTranscript
-                        \current ->
-                            let committed =
-                                    advanceBackendSnapshot
-                                        current
-                                        snapshot.backendItems
-                                        snapshot.backendContinuation
-                            in (committed, committed)
+    result <- runChildTurn runtime.subagentRegistry env ChildTurn
+        { childBackend = backend
+        , childTools = toolRegistry
+        , childDispatch =
+            defaultLoopDispatch
+                { toolDispatchFinalizeOutput =
+                    finalizeToolOutput toolEnv
                 }
-            , loopTools = toolRegistry
-            , loopReadTools = Nothing
-            , loopDispatch =
-                defaultLoopDispatch
-                    { toolDispatchFinalizeOutput =
-                        finalizeToolOutput toolEnv
-                    }
-            , loopMaxTurns = runtime.subagentOptions.optMaxTurns
-            , loopOnEvent = onEvent
-            , loopApprove =
-                \call -> do
-                    policy <- readIORef runtime.subagentPolicy
-                    childApprove policy toolRegistry call
-            , loopReadSteering = readSteeringInputs steering
-            , loopCommitSteering = commitSteeringInputs steering
-            , loopCloseSteering = pure []
-            , loopInterrupt = pure ()
-            , loopCancel = env.subCancel
-            }
-    result <- runChildWithBackgroundTasks toolEnv steering config runChild
-    case result of
-        Right loopResult ->
-            setPreviousResponseId
-                runtime.subagentRegistry
-                env.subId
-                loopResult.finalResponseId
-        Left _ ->
-            modifyIORef' session.subSessionTranscript \snapshot ->
-                advanceBackendSnapshot snapshot
-                    (trimDanglingToolSuffix snapshot.backendItems)
-                    Nothing
+        , childApproval =
+            \call -> do
+                policy <- readIORef runtime.subagentPolicy
+                childApprove policy toolRegistry call
+        , childMaxTurns = runtime.subagentOptions.optMaxTurns
+        , childOnEvent = onEvent
+        , childTranscript = session.subSessionTranscript
+        , childBackgroundTasks = Just (toolEnvBackgroundTasks toolEnv)
+        }
+        runChild
     status <- getStatus runtime.subagentRegistry env.subId
     persistSubagentSnapshotWithStatus
         runtime.subagentStoreRoot runtime.subagentRegistry
         runtime.subagentTypes env.subId status session
     pure result
-
--- | A final response only suspends a child while it still owns automatically
--- resumed commands. Keep its coding resource scope alive and submit the next
--- model turn only after completion, not on a polling timer.
-runChildWithBackgroundTasks
-    :: ToolEnv
-    -> SteeringInputs
-    -> LoopConfig
-    -> (LoopConfig -> IO (Either LoopError LoopResult))
-    -> IO (Either LoopError LoopResult)
-runChildWithBackgroundTasks toolEnv steering config runFirst = do
-    lastOutput <- newIORef Nothing
-    let trackedConfig = config
-            { loopOnEvent = \event -> do
-                case event of
-                    TurnFinished output -> writeIORef lastOutput (Just output)
-                    _ -> pure ()
-                config.loopOnEvent event
-            }
-        pendingWork =
-            (True <$ awaitSteeringInputReady steering)
-                `orElse`
-                    (any (.taskAutoResume) <$> readBackgroundTasksSTM toolEnv)
-        nextCompletion =
-            (True <$ awaitSteeringInput steering)
-                `orElse` do
-                    tasks <- readBackgroundTasksSTM toolEnv
-                    check (not (any (.taskAutoResume) tasks))
-                    pure False
-        continue accumulatedTurns accumulatedUsage result = case result of
-            Left err -> pure (Left err)
-            Right finished -> do
-                let totalTurns = accumulatedTurns + finished.turnsUsed
-                    totalUsage = addTokenUsage accumulatedUsage finished.tokenUsage
-                    aggregate = finished
-                        { turnsUsed = totalTurns, tokenUsage = totalUsage }
-                    remainingTurns = config.loopMaxTurns - totalTurns
-                pending <- atomically pendingWork
-                if not pending
-                    then pure (Right aggregate)
-                    else if remainingTurns <= 0
-                        then readIORef lastOutput >>= \case
-                            Just output -> pure (Left (LoopMaxTurns output))
-                            Nothing -> pure (Left LoopNoResponseId)
-                        else race (waitCancel config.loopCancel)
-                                (atomically nextCompletion) >>= \case
-                            Left () -> pure (Left (LoopCancelled []))
-                            Right False -> pure (Right aggregate)
-                            Right True -> do
-                                resumed <- runLoopInputs
-                                    trackedConfig { loopMaxTurns = remainingTurns }
-                                    (Just finished.finalResponseId)
-                                    []
-                                continue totalTurns totalUsage resumed
-    runFirst trackedConfig >>= continue 0 emptyTokenUsage
 
 genericSubagentSuffix :: Text -> SubagentId -> Text
 genericSubagentSuffix agentType agentId =

@@ -1,5 +1,5 @@
 -- | Bounded steering delivery with retained background completion overflow.
-module Agent.CLI.SteeringInputs
+module Agent.Loop.SteeringInputs
     ( SteeringInputs
     , awaitSteeringInput
     , awaitSteeringInputReady
@@ -22,11 +22,11 @@ module Agent.CLI.SteeringInputs
     , suppressUserSteeringWake
     ) where
 
-import Agent.CLI.InputBudget
+import Agent.Loop.Input (TurnInput(..))
+import Agent.Loop.InputBudget
     ( logicalTurnInputBytes
     , saturatingAdd
     )
-import Agent.Loop (TurnInput(..))
 import Data.Foldable (toList)
 import Control.Concurrent.STM
     ( STM
@@ -216,6 +216,7 @@ readSteeringTurn :: SteeringInputs -> IO (Text, [TurnInput])
 readSteeringTurn (SteeringInputs ref) = do
     state <- readTVarIO ref
     let entries = toList state.steeringQueue
+        userText :: SteeringEntry -> [Text]
         userText entry =
             case (entry.steeringBackgroundKey, entry.steeringInput) of
                 (Nothing, UserMessage text) -> [text]

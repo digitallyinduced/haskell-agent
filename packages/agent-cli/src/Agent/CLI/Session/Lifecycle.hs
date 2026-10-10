@@ -46,7 +46,7 @@ import Agent.CLI.Session.Retry
     )
 import Agent.CLI.SessionEnv (SessionEnv(..))
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
-import Agent.CLI.SteeringInputs
+import Agent.Loop.SteeringInputs
     ( hasSteeringInputWake, suppressUserSteeringWake )
 import Agent.CLI.Render
     ( RenderConfig(..)

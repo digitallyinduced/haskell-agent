@@ -57,7 +57,9 @@ library
                     , Agent.Provider.Options
                     , Agent.ReasoningEffort
                     , Agent.Loop
+                    , Agent.Loop.InputBudget
                     , Agent.Loop.InputItems
+                    , Agent.Loop.SteeringInputs
                     , Agent.JsonText
                     , Agent.OsPath
                     , Agent.Http.Header
@@ -67,7 +69,9 @@ library
                     , Agent.Retry
                     , Agent.Skills
                     , Agent.Subagents
+                    , Agent.Subagents.Child
                     , Agent.Subagents.Format
+                    , Agent.Subagents.History
                     , Agent.Subagents.Registry
                     , Agent.Subagents.TaskPath
                     , Agent.Subagents.Types
@@ -261,7 +265,10 @@ test-suite agent-core-test
                     , Agent.RetrySpec
                     , Agent.SkillsSpec
                     , Agent.SubagentsSpec
+                    , Agent.Subagents.ChildSpec
+                    , Agent.Subagents.HistorySpec
                     , Agent.Subagents.TaskPathSpec
+                    , Agent.Subagents.TestItems
                     , Agent.TextBufferSpec
                     , Agent.Transcription.ReceiveSpec
                     , Agent.TelemetrySpec

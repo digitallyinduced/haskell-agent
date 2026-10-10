@@ -13,9 +13,9 @@ module Agent.CLI.TUI.Composer.Buffer
     ) where
 
 import Agent.CLI.Input (ReplLine(..))
-import Agent.CLI.InputBudget
-    ( logicalReplLineBytes
-    , logicalTextBytes
+import Agent.CLI.InputBudget (logicalReplLineBytes)
+import Agent.Loop.InputBudget
+    ( logicalTextBytes
     , saturatingAdd
     )
 import Agent.CLI.TUI.Types
