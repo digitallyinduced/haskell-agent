@@ -999,6 +999,9 @@ recoverTools runtime scope execution = do
         CustomToolCallItem call
             | call.status /= Just ItemIncomplete -> [call.callId]
         ComputerCallItem call -> [call.computerCallId]
+        ToolSearchCallItem call
+            | Just callId <- call.callId
+            , call.execution == Just "client" -> [callId]
         _ -> []
 
 -- This is host-attributed evidence, not a replay of an incomplete provider
