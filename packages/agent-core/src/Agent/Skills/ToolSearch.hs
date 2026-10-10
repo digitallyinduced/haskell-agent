@@ -36,6 +36,7 @@ import Agent.ToolDispatch
     ( ToolHandlerResult(..)
     , decodeToolArguments
     , passthroughTool
+    , withToolHandlerStructuredResult
     )
 import Agent.Tools.Types
     ( AppTool
@@ -160,7 +161,10 @@ toolSkillSearchTool skills =
         (passthroughTool toolSearchToolName \_emit call -> pure do
             loaded <- resolveToolSkillSearch skills call.arguments
             let output = Aeson.toJSON (map toolSkillNamespace loaded)
-            Right (ToolHandlerResult (Text.decodeUtf8 (LBS.toStrict (Aeson.encode output))) []))
+            -- Text finalization may replace large output with an artifact
+            -- notice. Keep provider definitions independently of that text.
+            Right (withToolHandlerStructuredResult output
+                (ToolHandlerResult (Text.decodeUtf8 (LBS.toStrict (Aeson.encode output))) [])))
 
 -- | The catalog skills a tool search call requests, in request order and
 -- without repetitions.

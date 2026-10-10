@@ -34,6 +34,7 @@ import Agent.ToolDispatch
     , toolCallResultImages
     , toolCallResultFiles
     , toolCallResultMode
+    , toolCallResultStructured
     )
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -187,7 +188,11 @@ toolResultToItem result = case result.callKind of
             , callId = Just result.callId
             , status = Just "completed"
             , execution = Just "client"
-            , tools = map (rawJsonFromEncoding . Aeson.toEncoding) (toolSearchOutputTools result.output)
+            , tools = map (rawJsonFromEncoding . Aeson.toEncoding) $
+                case toolCallResultStructured result of
+                    Just (Aeson.Array definitions) -> foldr (:) [] definitions
+                    Just _ -> []
+                    Nothing -> toolSearchOutputTools result.output
             }
 
 toolResultOutput :: ToolCallResult -> RawJson

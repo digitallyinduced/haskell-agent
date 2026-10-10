@@ -9,6 +9,8 @@ import Agent.ToolDispatch
     , ToolCallMode(..)
     , ToolCallResult(..)
     , ToolCall(..)
+    , ToolDispatchConfig(..)
+    , toolCallResultStructured
     , toolSearchToolCall
     )
 import Agent.Tools.Types (dispatchRegisteredToolCall, mkToolRegistry)
@@ -67,6 +69,33 @@ spec = describe "Agent.Skills.ToolSearch" do
                 output.callId `shouldBe` Just "call-1"
                 output.execution `shouldBe` Just "client"
                 map Aeson.toJSON output.tools `shouldBe` [toolSkillNamespace meals]
+            other -> expectationFailure ("unexpected item: " <> show other)
+
+    it "preserves large tool definitions when text formatting and finalization replace the output" do
+        let largeSkill = meals
+                { toolSkillInstructions = Text.replicate 100000 "Instruction. "
+                , toolSkillTools =
+                    [object
+                        [ "type" .= ("function" :: Text.Text)
+                        , "name" .= ("create_meal_receipt" :: Text.Text)
+                        , "description" .= Text.replicate 100000 "Schema documentation. "
+                        , "parameters" .= object []
+                        ]]
+                }
+            dispatch = defaultLoopDispatch
+                { toolDispatchFormatResult = either id ("Formatted output: " <>)
+                , toolDispatchFinalizeOutput = \_ text -> do
+                    Text.length text `shouldSatisfy` (> 1000000)
+                    pure "Full output retained as an artifact."
+                }
+        registry <- either (fail . Text.unpack) pure (mkToolRegistry [toolSkillSearchTool [largeSkill]])
+        result <- dispatchRegisteredToolCall dispatch registry
+            (toolSearchToolCall "large-search" "{\"skills\":[\"meals\"]}")
+        result.output `shouldBe` "Full output retained as an artifact."
+        toolCallResultStructured result `shouldBe` Just (Aeson.toJSON [toolSkillNamespace largeSkill])
+        case toolResultToItem result of
+            ToolSearchOutputItem output ->
+                map Aeson.toJSON output.tools `shouldBe` [toolSkillNamespace largeSkill]
             other -> expectationFailure ("unexpected item: " <> show other)
 
     it "loads nothing when a tool search fails" do

@@ -5,7 +5,7 @@ import qualified Agent.Json.Decode as Json
 import Agent.Cancel (newCancelFlag, requestCancel)
 import Agent.Error (ApiError(..))
 import Agent.Loop
-import Agent.Loop.InputItems (turnInputsToItems)
+import Agent.Loop.InputItems (turnInputsToItems, toolResultToItem)
 import Agent.Loop.Fixtures
 import qualified Agent.Loop.EventDeliverySpec as EventDelivery
 import qualified Agent.Loop.FailedDisplaySpec as FailedDisplay
@@ -18,6 +18,7 @@ import Agent.Responses.Types
     , ResponseItem(..)
     , ResponseMessage(..)
     , ResponseRole(..)
+    , ToolSearchOutput(..)
     )
 import Agent.Responses.Types.Items (responseItemDecoder)
 import Agent.Skills.ToolSearch
@@ -2925,7 +2926,15 @@ spec = describe "runLoop" do
                         (state.backendItems <> turnInputsToItems inputs <> callItems) Nothing
                     }
         config0 <- testConfig backend
-        let config = config0 { loopTools = registryFromTools tools }
+        let config = config0
+                { loopTools = registryFromTools tools
+                , loopDispatch = config0.loopDispatch
+                    { toolDispatchFinalizeOutput = \call output ->
+                        pure if call.callKind == ToolSearchCallKind
+                            then "Full output retained as an artifact."
+                            else output
+                    }
+                }
         withAsync (runLoopInputsDetailed config Nothing [UserMessage "record the lunch"]) \running -> do
             timeout concurrencyProbeMicros (takeMVar blocked) `shouldReturn` Just ()
             requestCancel config.loopCancel
@@ -2936,7 +2945,11 @@ spec = describe "runLoop" do
                 [CompletedTool result] -> do
                     result.callId `shouldBe` "searched"
                     result.callKind `shouldBe` ToolSearchCallKind
-                    toolSearchOutputTools result.output `shouldBe` [toolSkillNamespace meals]
+                    result.output `shouldBe` "Full output retained as an artifact."
+                    case toolResultToItem result of
+                        ToolSearchOutputItem output ->
+                            map Aeson.toJSON output.tools `shouldBe` [toolSkillNamespace meals]
+                        other -> expectationFailure ("unexpected search output: " <> show other)
                 other -> expectationFailure ("unexpected pending inputs: " <> show other)
             tryReadMVar joined `shouldReturn` Just ()
 
