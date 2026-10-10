@@ -198,4 +198,5 @@ testMetadata now =
         , sessionMetadataLastTurnSummary = Nothing
         , sessionMetadataLastRecapMainTurns = 0
         , sessionMetadataHeadless = False
+        , sessionMetadataProviderState = Nothing
         }

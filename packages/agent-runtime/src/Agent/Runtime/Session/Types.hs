@@ -2,6 +2,8 @@
 module Agent.Runtime.Session.Types
     ( SessionMeta(..)
     , sessionMetaDecoder
+    , backendProviderStateDecoder
+    , backendProviderStateJson
     , SessionPromptSnapshot(..)
     , sessionPromptSnapshotDecoder
     , SessionTransfer(..)
@@ -34,7 +36,8 @@ import Agent.Dialect
     )
 import Agent.Json.Decode (optionalKey)
 import qualified Agent.Json.Decode as Hermes
-import Agent.Loop (TokenUsage, tokenUsageDecoder)
+import Agent.Loop (BackendProviderState(..), TokenUsage, tokenUsageDecoder)
+import Agent.Json (rawJsonDecoder)
 import Agent.Telemetry
     ( TurnTelemetry
     , turnTelemetryListDecoder
@@ -98,6 +101,7 @@ data SessionMeta = SessionMeta
     , metaTitleRefreshIndex :: !Int
     , metaTitleUserTurns :: !Int
     , metaLastResponseId :: !(Maybe Text)
+    , metaProviderState :: !(Maybe BackendProviderState)
     , metaInputTokens :: !Int
     , metaOutputTokens :: !Int
     , metaCachedTokens :: !Int
@@ -316,6 +320,7 @@ instance ToJSON SessionMeta where
         , "titleRefreshIndex" .= meta.metaTitleRefreshIndex
         , "titleUserTurns" .= meta.metaTitleUserTurns
         , "lastResponseId" .= meta.metaLastResponseId
+        , "providerState" .= fmap backendProviderStateJson meta.metaProviderState
         , "inputTokens" .= meta.metaInputTokens
         , "outputTokens" .= meta.metaOutputTokens
         , "cachedTokens" .= meta.metaCachedTokens
@@ -369,6 +374,7 @@ sessionMetaDecoder = Hermes.object do
             <*> Hermes.defaultKey 2 "titleRefreshIndex" Hermes.int
             <*> Hermes.defaultKey 6 "titleUserTurns" Hermes.int
             <*> optionalKey "lastResponseId" Hermes.text
+            <*> optionalKey "providerState" backendProviderStateDecoder
             <*> Hermes.defaultKey 0 "inputTokens" Hermes.int
             <*> Hermes.defaultKey 0 "outputTokens" Hermes.int
             <*> Hermes.defaultKey 0 "cachedTokens" Hermes.int
@@ -377,6 +383,18 @@ sessionMetaDecoder = Hermes.object do
             <*> Hermes.defaultKey 0 "lastRecapMainTurns" Hermes.int
             <*> optionalKey "promptSnapshot" sessionPromptSnapshotDecoder
             <*> Hermes.defaultKey False "headless" Hermes.bool
+
+backendProviderStateJson :: BackendProviderState -> Aeson.Value
+backendProviderStateJson state = object
+    [ "namespace" .= state.providerStateNamespace
+    , "payload" .= state.providerStatePayload
+    ]
+
+backendProviderStateDecoder :: Hermes.Decoder BackendProviderState
+backendProviderStateDecoder = Hermes.object $
+    BackendProviderState
+        <$> Hermes.atKey "namespace" Hermes.text
+        <*> Hermes.atKey "payload" rawJsonDecoder
 
 data SessionTurn = SessionTurn
     { turnAt :: !UTCTime

@@ -80,6 +80,7 @@ import Agent.CLI.SessionEnv
     )
 import Agent.Runtime.Session.History
     ( durableTranscriptCheckpoint
+    , withLiveBackendState
     )
 import Agent.CLI.SessionTitle
     ( SessionTitleResult(..)
@@ -118,7 +119,8 @@ import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.Dialect (DialectId(..), dialectId)
 import Agent.Error (ApiError)
 import Agent.Loop
-    ( LoopConfig(..)
+    ( BackendSnapshot(..)
+    , LoopConfig(..)
     , LoopExecution(..)
     , LoopError(..)
     , LoopResult(..)
@@ -977,9 +979,15 @@ persistSuccessfulTurn
                         executed.executedLoop.executionProviderTelemetry
                     }
             titleTurns <- (+ 1) <$> readIORef env.sessionTitleTurnCount
+            providerState <- withLiveBackendState
+                (RuntimeState.borrowConversationRef env.sessionState)
+                (pure . (.backendProviderState))
             (countedHandle, turnIndex) <-
                 appendTurnWithMetaUpdateIndexed handle turn \meta ->
-                    meta { metaTitleUserTurns = titleTurns }
+                    meta
+                        { metaTitleUserTurns = titleTurns
+                        , metaProviderState = providerState
+                        }
             writeIORef env.sessionTitleTurnCount titleTurns
             let countedMeta = countedHandle.sessionMeta
             writeIORef slotRef (PersistenceActive countedHandle)

@@ -68,6 +68,7 @@ newConversationStore previousResponseId transcript attachments =
         { stateGeneration = TranscriptGeneration 0
         , stateTranscript = ResidentTranscript transcript CommittedResident
         , stateContinuation = openAiContinuation previousResponseId
+        , stateProviderState = Nothing
         , stateAttachments = attachments
         }
 
@@ -81,6 +82,7 @@ newColdConversationStore previousResponseId checkpoint attachments =
         { stateGeneration = TranscriptGeneration 0
         , stateTranscript = ColdTranscript checkpoint
         , stateContinuation = openAiContinuation previousResponseId
+        , stateProviderState = Nothing
         , stateAttachments = attachments
         }
 

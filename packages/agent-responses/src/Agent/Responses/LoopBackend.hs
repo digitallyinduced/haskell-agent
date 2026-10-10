@@ -43,6 +43,7 @@ import Agent.Loop
     , LoopEvent(WarningRaised)
     , advanceBackendSnapshot
     , backendWithCallbacks
+    , isModelContextItem
     )
 import Agent.Provider
     ( Credential
@@ -144,7 +145,7 @@ statelessResponsesBackendWithMode
         baseParams <- getParams
         projectEvent <- newStreamEventToLoopEvents showRawReasoning
         let newItems = turnInputsToItems inputs
-            requestItems = snapshot.backendItems <> newItems
+            requestItems = filter (not . isModelContextItem) snapshot.backendItems <> newItems
             request = withRequestInput baseParams requestItems
             notice = callbacks.onLoopEvent . WarningRaised
         result <- send request (\event -> do
@@ -174,9 +175,9 @@ statelessResponsesBackendWithMode
                 pure $ Right BackendResult
                     { backendOutput = responseToTurnOutput response
                     , backendState =
-                        advanceBackendSnapshot snapshot
+                        (advanceBackendSnapshot snapshot
                             completedItems
-                            Nothing
+                            Nothing) { backendProviderState = Nothing }
                     }
 
 -- Server compaction checkpoints replace everything that preceded them. Keep

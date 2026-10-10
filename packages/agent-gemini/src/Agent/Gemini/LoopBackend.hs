@@ -13,6 +13,7 @@ import Agent.Loop
     , BackendSnapshot(..)
     , LoopEvent(..)
     , advanceBackendSnapshot
+    , isModelContextItem
     )
 import Agent.Provider
     ( Credential
@@ -43,7 +44,7 @@ statelessGeminiBackend send getParams =
     Backend \snapshot _previousResponseId inputs onEvent -> do
         baseParams <- getParams
         let newItems = turnInputsToItems inputs
-            requestItems = snapshot.backendItems <> newItems
+            requestItems = filter (not . isModelContextItem) snapshot.backendItems <> newItems
             request = withRequestInput baseParams requestItems
         result <- send request \event ->
             maybe (pure ()) onEvent (geminiStreamEventToLoopEvent event)
@@ -53,9 +54,10 @@ statelessGeminiBackend send getParams =
                 pure $ Right BackendResult
                     { backendOutput = responseToTurnOutput response
                     , backendState =
-                        advanceBackendSnapshot snapshot
+                        (advanceBackendSnapshot snapshot
                             (requestItems <> response.output)
-                            Nothing
+                            Nothing)
+                            { backendProviderState = Nothing }
                     }
 
 tokenProviderStatelessGeminiBackend

@@ -9,7 +9,8 @@ import Agent.Runtime.Session.Types (restoreLegacyLocalCompactionMarker)
 import Agent.Runtime.ModelConfig (organizationGatewayConnectionId)
 import Agent.Dialect (DialectId(..))
 import Agent.Json.Decode qualified as Hermes
-import Agent.Loop (TokenUsage(..))
+import Agent.Loop (BackendProviderState(..), TokenUsage(..))
+import Agent.Json (rawJsonFromEncoding)
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
@@ -21,6 +22,19 @@ import Test.Hspec
 spec :: Spec
 spec = do
     describe "json codec" do
+        it "round-trips provider checkpoints and accepts metadata written before catalogs" do
+            let state = BackendProviderState "openai.responses.catalog.v1"
+                    (rawJsonFromEncoding (Aeson.toEncoding (Aeson.object [])))
+                meta = (testMeta "catalog") { metaProviderState = Just state }
+            Hermes.decodeEither sessionMetaDecoder (LBS.toStrict (Aeson.encode meta))
+                `shouldBe` Right meta
+            fromStoredMetadata (toStoredMetadata meta) `shouldBe` Right meta
+            let legacy = case Aeson.toJSON meta of
+                    Aeson.Object object -> Aeson.Object (KeyMap.delete "providerState" object)
+                    value -> value
+            Hermes.decodeEither sessionMetaDecoder (LBS.toStrict (Aeson.encode legacy))
+                `shouldBe` Right meta { metaProviderState = Nothing }
+
         it "round-trips headless classification and accepts unclassified legacy metadata" do
             let meta = (testMeta "headless") { metaHeadless = True }
             Hermes.decodeEither sessionMetaDecoder (LBS.toStrict (Aeson.encode meta))

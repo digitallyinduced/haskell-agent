@@ -9,6 +9,7 @@ module Agent.OpenAI.Compaction.Request
     ) where
 
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
+import Agent.OpenAI.ToolCatalog.Request (isCatalogContextItem)
 import Agent.Responses.LoopBackend (withRequestInput)
 import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
@@ -26,7 +27,9 @@ buildRemoteCompactionRequest
     -> [ResponseItem]
     -> ResponseCreateParams
 buildRemoteCompactionRequest params history =
-    case withRequestInput params (history <> [compactionTriggerItem]) of
+    -- Compaction starts a new context window: rebase onto the current complete
+    -- template instead of replaying obsolete catalog declarations.
+    case withRequestInput params (filter (not . isCatalogContextItem) history <> [compactionTriggerItem]) of
         ResponseCreateParams{..} ->
             ResponseCreateParams
                 { parallelToolCalls =

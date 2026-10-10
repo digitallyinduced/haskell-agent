@@ -1,17 +1,34 @@
+{-# LANGUAGE NoFlexibleContexts #-}
 module Agent.Gemini.LoopBackendSpec (spec) where
 
 import Agent.Error (ApiError(..))
-import Agent.Gemini.LoopBackend (tokenProviderStatelessGeminiBackend)
+import Agent.Gemini.LoopBackend (statelessGeminiBackend, tokenProviderStatelessGeminiBackend)
 import Agent.Gemini.Response (GeminiStreamEvent(..))
-import Agent.Loop (Backend(..), TurnInput(..), emptyBackendSnapshot)
+import Agent.Loop (Backend(..), TurnInput(..), emptyBackendSnapshot, initialBackendSnapshot, isModelContextItem)
 import Agent.Provider
 import Agent.Responses.Types (FunctionCall(..), defaultResponseCreateParams)
+import qualified Agent.Responses.Types as Responses
 import Control.Monad (forM_)
 import Data.IORef
 import Test.Hspec
 
 spec :: Spec
 spec = describe "Gemini account replay boundary" do
+    it "omits Responses Lite model context when replaying a switched transcript" do
+        let catalog = Responses.AdditionalToolsItemValue
+                (Responses.AdditionalToolsItem Nothing "developer" [])
+            send (request :: Responses.ResponseCreateParams) _ = do
+                case request.input of
+                    Just (Responses.ResponseInputItems items) -> do
+                        filter isModelContextItem items `shouldBe` []
+                        length items `shouldBe` 1
+                    _ -> expectationFailure "Expected user input"
+                pure (Left (ConnectionError "stop"))
+            backend = statelessGeminiBackend send (pure defaultResponseCreateParams)
+        result <- backend.submitTurn (initialBackendSnapshot [catalog]) Nothing
+            [UserMessage "hello"] (const (pure ()))
+        result `shouldBe` Left (ConnectionError "stop")
+
     it "retains account failover before output" do
         attempts <- newIORef (0 :: Int)
         let send _ _ _ = do
