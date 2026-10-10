@@ -7,7 +7,7 @@ module Agent.OpenAI.ToolCatalog.Request
     ) where
 
 import Agent.Json (RawJson, rawJsonFromEncoding)
-import Agent.Loop.Backend
+import Agent.Loop
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.OpenAI.ToolCatalog
 import Agent.Responses.LoopBackend (withRequestInput)
