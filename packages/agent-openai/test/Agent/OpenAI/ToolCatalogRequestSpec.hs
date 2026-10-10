@@ -4,7 +4,7 @@ import Agent.Json (rawJsonFromEncoding)
 import Agent.Error (ErrorType(..))
 import Agent.OpenAI.Error (mkOpenAIError)
 import Agent.Loop
-import Agent.OpenAI.Compaction.Request (buildRemoteCompactionRequest)
+import Agent.OpenAI.Compaction (buildRemoteCompactionRequest)
 import Agent.OpenAI.LoopBackend
 import Agent.OpenAI.LoopBackendSpec.Fixtures hiding (withModel)
 import Agent.OpenAI.ToolCatalog.Request
