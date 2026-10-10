@@ -14,13 +14,23 @@ import Test.Hspec
 spec :: Spec
 spec = do
     describe "bundled Codex model catalog" do
-        it "loads the current upstream catalog and selects Astra by priority" do
+        it "loads the current upstream catalog and selects GPT-6.1 Sol by priority" do
             catalog <- loadBundledModelsOrThrow
             length catalog.models `shouldBe` 11
             defaultModelForCatalog True catalog
-                `shouldBe` Just "gpt-6-astra"
+                `shouldBe` Just "gpt-6.1-sol"
             catalog.catalogGeneration `shouldBe` Nothing
             decodeModelsOrFail (Aeson.toJSON catalog) `shouldBe` catalog
+
+        it "resolves GPT-6.1 Sol with its original instructions without an online catalog" do
+            catalog <- loadBundledModelsOrThrow
+            let model = modelInfoForSlug "gpt-6.1-sol" catalog
+                instructions = renderModelInstructions ModelPersonalityDefault model
+            model.usedFallbackModelMetadata `shouldBe` False
+            instructions `shouldSatisfy` (not . Text.null . Text.strip)
+            instructions `shouldNotBe` fallbackModelInstructions
+            instructions `shouldSatisfy`
+                Text.isInfixOf "# Autonomy and persistence"
 
         it "serializes legacy base instructions for older Codex clients" do
             catalog <- loadBundledModelsOrThrow
@@ -41,12 +51,14 @@ spec = do
                 ]
             let pickerModels = map (.model) (pickerModelPresets True catalog)
             pickerModels `shouldBe`
-                [ "gpt-6-astra"
+                [ "gpt-6.1-sol"
+                , "gpt-6-astra"
+                , "gpt-6-sol"
+                , "gpt-6-luna"
                 , "gpt-5.6-sol"
                 , "gpt-5.6-terra"
                 , "gpt-5.6-luna"
                 , "gpt-5.5"
-                , "gpt-5.2"
                 ]
 
         it "exposes current frontier dialect selectors and reasoning defaults" do
@@ -117,11 +129,11 @@ spec = do
         it "projects upgrade metadata into picker semantics" do
             catalog <- loadBundledModelsOrThrow
             let preset = modelPresetFromInfo
-                    (modelInfoForSlug "gpt-5.4" catalog)
+                    (modelInfoForSlug "gpt-5.6-terra" catalog)
             preset.upgrade `shouldSatisfy` \case
                 Just upgrade ->
-                    upgrade.upgradeId == "gpt-5.6-terra"
-                        && upgrade.migrationConfigKey == "gpt-5.4"
+                    upgrade.upgradeId == "gpt-6-sol"
+                        && upgrade.migrationConfigKey == "gpt-5.6-terra"
                 Nothing -> False
 
     describe "known-field decoding" do
@@ -234,11 +246,33 @@ spec = do
 
     describe "model-owned instructions" do
         it "renders personality variables only when the template supports them" do
-            catalog <- loadBundledModelsOrThrow
-            let model = modelInfoForSlug "gpt-5.5" catalog
+            let model = decodeModelOrFail $ Aeson.object
+                    [ "slug" Aeson..= ("personality-model" :: Text.Text)
+                    , "model_messages" Aeson..= Aeson.object
+                        [ "instructions_template" Aeson..=
+                            ("Agent: {{ personality }}" :: Text.Text)
+                        , "instructions_variables" Aeson..= Aeson.object
+                            [ "personality_default" Aeson..= ("Default." :: Text.Text)
+                            , "personality_friendly" Aeson..= ("Friendly." :: Text.Text)
+                            , "personality_pragmatic" Aeson..= ("Pragmatic." :: Text.Text)
+                            ]
+                        ]
+                    ]
             modelSupportsPersonality model `shouldBe` True
             renderModelInstructions ModelPersonalityPragmatic model
-                `shouldSatisfy` Text.isInfixOf "You are a deeply pragmatic"
+                `shouldBe` "Agent: Pragmatic."
+
+        it "preserves the literal current catalog template for every personality" do
+            catalog <- loadBundledModelsOrThrow
+            let model = modelInfoForSlug "gpt-6.1-sol" catalog
+                instructions = renderModelInstructions ModelPersonalityDefault model
+            modelSupportsPersonality model `shouldBe` False
+            map (`renderModelInstructions` model)
+                [ ModelPersonalityFriendly
+                , ModelPersonalityPragmatic
+                , ModelPersonalityNone
+                ]
+                `shouldBe` replicate 3 instructions
 
 decodeModelsOrFail :: Aeson.Value -> ModelsResponse
 decodeModelsOrFail =
