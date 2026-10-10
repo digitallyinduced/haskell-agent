@@ -65,7 +65,7 @@ main = hspec do
 
         it "assigns authoritative revisions across backend commits, replacement and reset" do
             let candidate = BackendSnapshot items (BackendRevision 999)
-                    (Just (BackendContinuation "claude" "token"))
+                    (Just (BackendContinuation "claude" "token")) Nothing
                 (first, snapshot1) = commitBackendState candidate initial
                 (second, snapshot2) = commitBackendState
                     candidate { backendRevision = BackendRevision 0 } first
