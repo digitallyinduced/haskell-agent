@@ -12,6 +12,7 @@ module Agent.Subagents.Registry
     , setSubagentOnSettled
     , beginRootTurn
     , abortRootTurn
+    , activeSubagentsForTurnSTM
     , closeSubagentRegistry
     , interruptActiveSubagents
     , resetSubagentRegistry

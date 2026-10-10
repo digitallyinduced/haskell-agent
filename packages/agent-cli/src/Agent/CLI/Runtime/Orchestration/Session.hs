@@ -167,7 +167,7 @@ import Agent.CLI.Session.Runtime.Types
                      startupWindowTitle, automaticCompactionRef,
                      workspace, tokenProvider, openAiPool, startupContext,
                      automaticCompactionHookRef, skillsRef, skillInvocationsRef,
-                     stdinControl, interrupt, multiCtx, rootTurnRef, subagentSessions,
+                     stdinControl, interrupt, multiCtx, rootSubagents, subagentSessions,
                      pendingNotices, storeRoot, agentTypes, legacyTarget, usageRef,
                      accountRef, accountLabel,
                      selectAccount, onPersisted, compactRunner, codeModeRuntime),
@@ -240,7 +240,8 @@ import Agent.Responses.Types
 import Agent.Skills (SkillCatalog, SkillInvocation)
 import Agent.Store.Postgres ( trustedPool )
 import Agent.Subagents (SubagentRegistry, setSubagentRunner)
-import Agent.Subagents.Types (RootTurnId, SubagentId)
+import Agent.Subagents (RootSubagents)
+import Agent.Subagents.Types (SubagentId)
 import Agent.TUI.Model (UiEvent(UiSystemMessage))
 import Agent.Tools.MultiAgents
     (CollaborationModelTarget(..), MultiAgentContext(..), SubagentWorktree)
@@ -352,7 +353,7 @@ data AgentSessionRequest windowTitleResult = AgentSessionRequest
     , resumeTargetChanged :: Bool
     , resumed :: Maybe (SessionMeta, [SessionTurn])
     , root :: OsPath
-    , rootTurnRef :: IORef (Maybe RootTurnId)
+    , rootSubagents :: RootSubagents
     , selectHttpAccount :: Text -> IO (Either ApiError Text)
     , selectableTokenProvider :: TokenProvider
     , sessionTools :: [AppTool]
@@ -1100,7 +1101,7 @@ buildProviderSessionRequest
             , stdinControl = request.stdinControl
             , interrupt = request.interrupt
             , multiCtx = request.multiCtx
-            , rootTurnRef = request.rootTurnRef
+            , rootSubagents = request.rootSubagents
             , subagentSessions = request.subagentSessions
             , pendingNotices = request.pendingNotices
             , storeRoot = request.subagentStoreRoot

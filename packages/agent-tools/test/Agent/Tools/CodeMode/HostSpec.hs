@@ -1318,6 +1318,7 @@ assertPreparedImageResult result = do
             , loopCloseSteering = pure []
             , loopInterrupt = pure ()
             , loopCancel = cancel
+            , loopSubagents = Nothing
             }
     completed <- runLoopInputs config Nothing [CompletedTool result]
     completed `shouldSatisfy` either (const False) (const True)

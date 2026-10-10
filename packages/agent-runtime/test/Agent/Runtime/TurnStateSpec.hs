@@ -269,6 +269,7 @@ recoveryConfig backend tools items = do
         , loopCloseSteering = pure []
         , loopInterrupt = pure ()
         , loopCancel = cancel
+        , loopSubagents = Nothing
         }
 
 recoveryCallItems :: [ResponseItem]

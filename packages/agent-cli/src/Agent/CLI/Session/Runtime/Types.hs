@@ -82,7 +82,7 @@ import Agent.Skills
 import Agent.Store.Postgres (Store)
 import Agent.Store.Postgres.Skill (LearnedSkill)
 import Agent.Subagents
-    ( RootTurnId
+    ( RootSubagents
     , SubagentId
     )
 import Agent.Tools.MultiAgents (MultiAgentContext)
@@ -179,7 +179,7 @@ data SessionRequest = SessionRequest
     , stdinControl :: !StdinControl
     , interrupt :: !InterruptState
     , multiCtx :: !(Maybe MultiAgentContext)
-    , rootTurnRef :: !(IORef (Maybe RootTurnId))
+    , rootSubagents :: !RootSubagents
     , subagentSessions :: !(IORef (Map SubagentId SubagentSession))
     , pendingNotices :: !PendingInputs
     , storeRoot :: !SubagentStoreRoot

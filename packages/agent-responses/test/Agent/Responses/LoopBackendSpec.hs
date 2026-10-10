@@ -1361,6 +1361,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 , loopCloseSteering = pure []
                 , loopInterrupt = pure ()
                 , loopCancel = cancel
+                , loopSubagents = Nothing
                 }
         outcome <- timeout 5000000 $
             Loop.runLoopInputsDetailed config Nothing [UserMessage "write once"]

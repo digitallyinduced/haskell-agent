@@ -139,6 +139,7 @@ runChildTurn registry env child start = do
             , loopCloseSteering = pure []
             , loopInterrupt = pure ()
             , loopCancel = env.subCancel
+            , loopSubagents = Nothing
             }
     result <-
         runChildWithBackgroundTasks

@@ -85,6 +85,7 @@ testConfig backend = do
         , loopCloseSteering = pure []
         , loopInterrupt = pure ()
         , loopCancel = cancel
+        , loopSubagents = Nothing
         }
 
 -- | A non-consuming, prefix-aware guidance queue for interruption tests.

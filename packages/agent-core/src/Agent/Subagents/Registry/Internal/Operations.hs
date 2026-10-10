@@ -637,6 +637,21 @@ listAgents registry pathPrefix = atomically do
                 else [])
         (Map.elems agents)
 
+-- | Agents admitted for a root turn that still hold an active-turn slot
+-- (pending, running or being interrupted), including their descendants.
+activeSubagentsForTurnSTM :: SubagentRegistry -> RootTurnId -> STM [SubagentId]
+activeSubagentsForTurnSTM registry rootTurnId = do
+    agents <- readTVar registry.registryAgents
+    concatMapM
+        (\record -> do
+            phase <- readTVar record.recordPhase
+            pure
+                [ record.recordId
+                | phaseHoldsSlot phase
+                , phaseRootTurnId phase == Just rootTurnId
+                ])
+        (Map.elems agents)
+
 interruptSubagent
     :: SubagentRegistry
     -> SubagentId

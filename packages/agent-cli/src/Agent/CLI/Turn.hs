@@ -131,7 +131,6 @@ import Agent.Responses.Types
     ( ResponseItem
     )
 import Agent.Store.Postgres (normalizePostgresTimestamp)
-import Agent.Subagents (RootTurnId)
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
     , PlanCompletion(..)
@@ -347,7 +346,6 @@ data ExecutedBusyTurn = ExecutedBusyTurn
     , executedPreparation :: PreparedBusyTurn
     , executedStartedAt :: Maybe UTCTime
     , executedWallStarted :: UTCTime
-    , executedRootTurnId :: Maybe RootTurnId
     , executedLoop :: LoopExecution
     , executedAutomaticCompaction :: Maybe AutomaticCompactionBoundary
     , executedCommittedTurn :: PreparedTurn
@@ -542,7 +540,6 @@ executeBusyTurn request preparation = do
     wallStarted <- getCurrentTime
     when (isNothing fullscreen && terminal.terminalSemanticPrompts) $
         emitTerminalSequence terminal render.renderStdout osc133CommandStart
-    rootTurnId <- env.sessionBeginSubagentTurn
     executed <-
         Execution.executePreparedTurn
             Execution.PreparedExecution
@@ -552,7 +549,7 @@ executeBusyTurn request preparation = do
                 , executionPreparedTurn = prepared
                 }
             (RuntimeState.readAutomaticCompaction env.sessionState)
-            (rollbackExceptionalTurn request preparation rootTurnId)
+            (rollbackExceptionalTurn request preparation)
     let execution = executed.executedLoop
         automaticCompaction = executed.executedCompaction
     clearThinking render
@@ -574,7 +571,6 @@ executeBusyTurn request preparation = do
         , executedPreparation = preparation
         , executedStartedAt = startedAt
         , executedWallStarted = wallStarted
-        , executedRootTurnId = rootTurnId
         , executedLoop = execution
         , executedAutomaticCompaction = automaticCompaction
         , executedCommittedTurn = finalized.finalizedPrepared
@@ -585,10 +581,9 @@ executeBusyTurn request preparation = do
 rollbackExceptionalTurn
     :: BusyTurnRequest
     -> PreparedBusyTurn
-    -> Maybe RootTurnId
     -> Execution.ExceptionalTurn
     -> IO ()
-rollbackExceptionalTurn request preparation rootTurnId exceptional = do
+rollbackExceptionalTurn request preparation exceptional = do
     let env = request.busyEnv
     commitConversationPatch env exceptional.exceptionalPatch
     when (isNothing exceptional.exceptionalCompaction) $
@@ -598,7 +593,6 @@ rollbackExceptionalTurn request preparation rootTurnId exceptional = do
     restorePlanStateAfterIncomplete
         env.sessionPlanMode
         preparation.preparedInitialPlanState
-    env.sessionAbortSubagentTurn rootTurnId
 
 elapsedBusyTurn :: ExecutedBusyTurn -> Text -> Text
 elapsedBusyTurn executed extra =
@@ -671,13 +665,10 @@ finishBusyTurn executed =
         Engine.TurnRestarted level -> finishRestartedTurn executed level
         Engine.TurnCancelled cancelled ->
             finishCancelledTurn executed cancelled
-        Engine.TurnProviderUnavailable apiError -> do
-            let env = executed.executedRequest.busyEnv
-            env.sessionAbortSubagentTurn executed.executedRootTurnId
+        -- The loop already interrupted the children of a failed turn.
+        Engine.TurnProviderUnavailable apiError ->
             finishProviderUnavailableTurn executed apiError
-        Engine.TurnFailed err -> do
-            let env = executed.executedRequest.busyEnv
-            env.sessionAbortSubagentTurn executed.executedRootTurnId
+        Engine.TurnFailed err ->
             finishGeneralFailureTurn executed err
         Engine.TurnCompleted loopResult ->
             finishSuccessfulTurn executed loopResult
@@ -686,7 +677,8 @@ finishRestartedTurn :: ExecutedBusyTurn -> Text -> IO TurnResult
 finishRestartedTurn executed level = do
     let request = executed.executedRequest
         env = request.busyEnv
-    env.sessionAbortSubagentTurn executed.executedRootTurnId
+    -- The loop may have answered before the restart was requested.
+    env.sessionAbortSubagentTurn
     commitConversationPatch env
         executed.executedFinalization.finalizedPatch
     restoreTaskPlanAfterUncompactedTurn executed
@@ -734,7 +726,6 @@ finishCancelledTurn executed cancelled = do
         executed.executedFinishedAt
         130
         Nothing
-    env.sessionAbortSubagentTurn executed.executedRootTurnId
     -- The prepared inputs already contain any consumed startup context.
     -- Completed model steps stay with them; only an uncommitted sample drops.
     let retained =
@@ -891,7 +882,6 @@ finishSuccessfulTurn executed loopResult = do
         executed.executedFinishedAt
         0
         (Just "Agent finished")
-    env.sessionFinishSubagentTurn executed.executedRootTurnId
     let assistantText =
             fmap stripBracketedTimestamps loopResult.finalText
     commitConversationPatch env

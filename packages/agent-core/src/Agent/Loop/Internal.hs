@@ -6,6 +6,7 @@ module Agent.Loop.Internal
     , LoopExecution(..)
     , LoopProgress(..)
     , LoopResult(..)
+    , LoopSubagents(..)
     , runLoop
     , runLoopInputs
     , runLoopInputsDetailed
@@ -56,6 +57,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (IORef, atomicModifyIORef', atomicWriteIORef, modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
+import Data.Either (isRight)
 import Data.Maybe (catMaybes, fromMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -144,6 +146,26 @@ data LoopConfig = LoopConfig
     -- the turn to input/interrupt handlers. When set, the loop stops after
     -- the current tool batch instead of asking the model for another step.
     , loopCancel :: !CancelFlag
+    -- | Delegated child agents of this loop. 'Nothing' runs without them.
+    -- 'Agent.Subagents.subagentLoop' builds the hooks from a registry.
+    , loopSubagents :: !(Maybe LoopSubagents)
+    }
+
+-- | How a root loop runs with delegated child agents. The loop begins a root
+-- turn before its first request and ends it when it returns. Inputs from the
+-- children (completion notices, messages to the root) reach the model with
+-- the host's steering and are acknowledged with it.
+data LoopSubagents = LoopSubagents
+    { subagentsBeginTurn :: !(IO ())
+    , subagentsReadInputs :: !(IO [TurnInput])
+    , subagentsCommitInputs :: !(Int -> IO ())
+    -- | Called when the root would answer, before 'loopCloseSteering'.
+    -- Inputs returned here continue the loop instead, for example the
+    -- completion notices of children the root waited for.
+    , subagentsBeforeAnswer :: !(IO [TurnInput])
+    -- | End the root turn. 'True' when the loop answered, 'False' when it
+    -- failed, was cancelled or was interrupted by an exception.
+    , subagentsEndTurn :: !(Bool -> IO ())
     }
 
 data LoopResult = LoopResult
@@ -266,10 +288,49 @@ runLoopInputsDetailed
     -> Maybe Text
     -> [TurnInput]
     -> IO LoopExecution
-runLoopInputsDetailed config previousResponseId firstInputs = do
-    initialState <- config.loopBackendState.readBackendState
-    runLoopInputsUnsafe
-        config initialState previousResponseId firstInputs
+runLoopInputsDetailed config previousResponseId firstInputs =
+    case config.loopSubagents of
+        Nothing -> runRoot config
+        Just subagents -> mask \restore -> do
+            subagents.subagentsBeginTurn
+            execution <-
+                restore (withSubagentSteering subagents config >>= runRoot)
+                    `onException` subagents.subagentsEndTurn False
+            subagents.subagentsEndTurn (isRight execution.executionResult)
+            pure execution
+  where
+    runRoot current = do
+        initialState <- current.loopBackendState.readBackendState
+        runLoopInputsUnsafe
+            current initialState previousResponseId firstInputs
+
+-- | Deliver the children's inputs after the host's steering. The loop
+-- acknowledges each delivered batch with one count, which is split by the
+-- composition of the most recent batch.
+withSubagentSteering :: LoopSubagents -> LoopConfig -> IO LoopConfig
+withSubagentSteering subagents config = do
+    hostShare <- newIORef 0
+    pure config
+        { loopReadSteering = do
+            host <- config.loopReadSteering
+            children <- subagents.subagentsReadInputs
+            writeIORef hostShare (length host)
+            pure (host <> children)
+        , loopCommitSteering = \count -> do
+            fromHost <- min count <$> readIORef hostShare
+            config.loopCommitSteering fromHost
+            subagents.subagentsCommitInputs (count - fromHost)
+        , loopCloseSteering = do
+            children <- subagents.subagentsBeforeAnswer
+            if null children
+                then do
+                    late <- config.loopCloseSteering
+                    writeIORef hostShare (length late)
+                    pure late
+                else do
+                    writeIORef hostShare 0
+                    pure children
+        }
 
 exceptionSummary :: SomeException -> Text
 exceptionSummary =

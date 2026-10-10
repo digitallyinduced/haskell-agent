@@ -10,6 +10,7 @@ module Agent.Tools.MultiAgents
     , multiAgentTools
     , multiAgentNamespace
     , multiAgentToolNames
+    , rootMultiAgentContext
     , spawnSharedSubagent
     ) where
 
@@ -17,6 +18,9 @@ import Agent.Json.Decode (Decoder)
 import Agent.Subagents
     ( SubagentId(..)
     , SubagentRegistry
+    , RootSubagents
+    , currentRootTurn
+    , rootSubagentsRegistry
     , RootTurnId
     , SubagentStatus(..)
     , defaultWaitTimeoutMs
@@ -129,6 +133,27 @@ data MultiAgentContext = MultiAgentContext
       -- This lets hosts enforce organization catalog refreshes without
       -- rebuilding every tool definition in an active session.
     , multiChildModelAllowed :: !(Maybe (Text -> IO Bool))
+    }
+
+-- | The root agent's context for a loop that runs its children through a
+-- 'RootSubagents' ('Agent.Subagents.subagentLoop'). Optional host hooks
+-- are off; set them with a record update.
+rootMultiAgentContext :: RootSubagents -> OsPath -> MultiAgentContext
+rootMultiAgentContext session cwd = MultiAgentContext
+    { multiRegistry = rootSubagentsRegistry session
+    , multiCwd = cwd
+    , multiSelfId = Nothing
+    , multiDepth = 0
+    , multiTaskPath = taskPathRoot
+    , multiRootTurnId = currentRootTurn session
+    , multiResumeFromDisk = Nothing
+    , multiCreateWorktree = Nothing
+    , multiPrepareSpawn = Nothing
+    , multiSendToRoot = Nothing
+    , multiSpawnModelGuidance = Nothing
+    , multiAllowedChildModels = Nothing
+    , multiResolveChildModel = Nothing
+    , multiChildModelAllowed = Nothing
     }
 
 multiAgentNamespace :: Text

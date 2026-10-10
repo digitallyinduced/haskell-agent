@@ -89,6 +89,7 @@ loopConfig backend = do
         , loopCloseSteering = pure []
         , loopInterrupt = pure ()
         , loopCancel = cancel
+        , loopSubagents = Nothing
         }
 
 emptyRegistry :: ToolRegistry

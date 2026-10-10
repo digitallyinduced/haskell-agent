@@ -87,6 +87,7 @@ spec = describe "loop concrete command integration" do
                 , loopCloseSteering = pure []
                 , loopInterrupt = pure ()
                 , loopCancel = cancel
+                , loopSubagents = Nothing
                 }
         withAsync (runLoop config Nothing "go") \running ->
             (do

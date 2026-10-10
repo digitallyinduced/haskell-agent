@@ -252,6 +252,7 @@ configFor initial backend = do
         , loopCloseSteering = pure []
         , loopInterrupt = pure ()
         , loopCancel = cancelFlag
+        , loopSubagents = Nothing
         }, state)
 
 successBackend :: Backend

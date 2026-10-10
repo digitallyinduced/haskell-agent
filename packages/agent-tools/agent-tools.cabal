@@ -228,6 +228,7 @@ test-suite agent-tools-test
                     , Agent.Tools.IOSpec
                     , Agent.Tools.LoopIntegrationSpec
                     , Agent.Tools.MultiAgentsSpec
+                    , Agent.Tools.MultiAgentsLoopSpec
                     , Agent.Tools.OutputArtifactSpec
                     , Agent.Tools.OutputArtifactMemorySpec
                     , Agent.Tools.OutputArtifact.RetrievalSpec

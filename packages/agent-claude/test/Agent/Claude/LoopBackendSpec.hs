@@ -1536,6 +1536,7 @@ spec = do
                                             , Loop.loopCloseSteering = pure []
                                             , Loop.loopInterrupt = pure ()
                                             , Loop.loopCancel = cancel
+                                            , Loop.loopSubagents = Nothing
                                             }
                                     execution <- Loop.runLoopInputsDetailed config Nothing inputs
                                     execution.executionResult `shouldBe` Left (Loop.LoopCancelled [])
