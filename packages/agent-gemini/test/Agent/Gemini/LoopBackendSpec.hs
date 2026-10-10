@@ -1,3 +1,4 @@
+{-# LANGUAGE NoFlexibleContexts #-}
 module Agent.Gemini.LoopBackendSpec (spec) where
 
 import Agent.Error (ApiError(..))
@@ -16,7 +17,7 @@ spec = describe "Gemini account replay boundary" do
     it "omits Responses Lite model context when replaying a switched transcript" do
         let catalog = Responses.AdditionalToolsItemValue
                 (Responses.AdditionalToolsItem Nothing "developer" [])
-            send request _ = do
+            send (request :: Responses.ResponseCreateParams) _ = do
                 case request.input of
                     Just (Responses.ResponseInputItems items) -> do
                         filter isModelContextItem items `shouldBe` []
