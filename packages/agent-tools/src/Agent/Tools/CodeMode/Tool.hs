@@ -1081,6 +1081,8 @@ execDescriptionTemplate detailVisibility =
         , "- `clearTimeout(timeoutId?: number)`: cancels a timeout created by `setTimeout`."
         , "- `ALL_TOOLS`: metadata for the enabled nested tools as `{ name, description }` entries."
         , "- `yield_control()`: yields the accumulated output to the model immediately while the script keeps running."
+        , "- `as_settled(promises)`: returns an async iterator over an iterable of promises, thenables, or values in settlement order. Each result is `{ index, status: \"fulfilled\", value }` or `{ index, status: \"rejected\", reason }`; `index` is the zero-based input position, or the key for a `Map`. Rejections are results, not thrown errors."
+        , "- `stream_settled(promises, emit)`: awaits `emit(result)` for each settlement in order. Callback errors propagate. Both settlement helpers are scoped to the current script; stopping iteration does not cancel the underlying operations. To expose partial results while other calls continue: `await stream_settled(calls, result => { text(result); yield_control(); });`."
         ]
 
 imageHelperDescription :: ImageDetailVisibility -> Text
