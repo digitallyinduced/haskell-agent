@@ -638,6 +638,72 @@ spec = describe "Codex dialect" do
             schedulingPlansConflict first same `shouldBe` True
             coding.codexClose
 
+    describe "apply_patch line endings" do
+        let check original body expected = withTempDir \dir -> do
+                let path = dir </> "lines.txt"
+                Text.writeFile path original
+                env <- defaultToolEnv (unsafeEncodeUtf dir)
+                result <- applyPatch env $
+                    "*** Begin Patch\n*** Update File: lines.txt\n" <> body <> "\n*** End Patch"
+                result `shouldSatisfy` \case
+                    Right _ -> True
+                    Left _ -> False
+                Text.readFile path `shouldReturn` expected
+
+        it "matches LF patch context and preserves CRLF replacements" $
+            check "heading\r\nold\r\ntail\r\n"
+                "@@ heading\n-old\n+new\n tail"
+                "heading\r\nnew\r\ntail\r\n"
+
+        it "retains mixed endings on context lines and uses the first ending for new lines" $
+            check "first\r\ncontext\nold\r\nlast\r"
+                "@@\n first\n context\n-old\n+new\n last"
+                "first\r\ncontext\nnew\r\nlast\r"
+
+        it "preserves carriage-return-only files" $
+            check "first\rold\rlast\r" "@@\n first\n-old\n+new\n last" "first\rnew\rlast\r"
+
+        it "retains interior context endings across unequal insertions and deletions" $
+            check "first\r\nold\ncontext\rlast\n"
+                "@@\n first\n-old\n+one\n+two\n context\n-last\n+three"
+                "first\r\none\r\ntwo\r\ncontext\rthree\r\n"
+
+        it "preserves unterminated final lines when replacing them" $
+            check "first\r\nold" "@@\n-old\n+new" "first\r\nnew"
+
+        it "terminates a formerly final line when appending but keeps the new final line unterminated" $
+            check "first\r\nlast" "@@\n+added" "first\r\nlast\r\nadded"
+
+        it "preserves LF files and blank lines" $
+            check "first\n\nold\n\n" "@@\n-old\n+new" "first\n\nnew\n\n"
+
+        it "accepts CRLF-encoded patch syntax without introducing carriage returns into LF files" $
+            check "old\n" "@@\r\n-old\r\n+new\r" "new\n"
+
+        it "leaves an empty file when every line is removed" $
+            check "old\r\n" "@@\n-old" ""
+
+        it "defaults to LF when inserting into an empty file" $
+            check "" "@@\n+new" "new\n"
+
+        it "preserves CRLF through a move and subsequent staged update" $
+            withTempDir \dir -> do
+                Text.writeFile (dir </> "source.txt") "old\r\n"
+                env <- defaultToolEnv (unsafeEncodeUtf dir)
+                result <- applyPatch env $
+                    "*** Begin Patch\n\
+                    \*** Update File: source.txt\n\
+                    \*** Move to: destination.txt\n\
+                    \@@\n-old\n+middle\n\
+                    \*** Update File: destination.txt\n\
+                    \@@\n-middle\n+new\n\
+                    \*** End Patch"
+                result `shouldSatisfy` \case
+                    Right _ -> True
+                    Left _ -> False
+                doesFileExist (dir </> "source.txt") `shouldReturn` False
+                Text.readFile (dir </> "destination.txt") `shouldReturn` "new\r\n"
+
     it "does not partially apply a patch when a later hunk is stale" do
         withTempDir \dir -> do
             let firstPath = dir </> "first.txt"
