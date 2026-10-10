@@ -1,7 +1,8 @@
 module Agent.OpenAI.ToolCatalogSpec (spec) where
 
 import Agent.OpenAI.ToolCatalog
-import Data.Aeson (Value, object, (.=))
+import Data.Aeson (Value(..), object, (.=))
+import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Either (isLeft)
 import Data.Text (Text)
 import Test.Hspec
@@ -16,6 +17,39 @@ spec = describe "Responses Lite catalog transitions" do
     it "omits unchanged definitions" do
         current <- catalog [namespace "files" "" [tool "read" "Read"]]
         diffToolCatalog (Just current) current `shouldBe` ToolCatalogDelta [] [] [] False
+
+    it "declares initially empty namespaces" do
+        current <- catalog [namespace "files" "" []]
+        diffToolCatalog Nothing current `shouldBe`
+            ToolCatalogDelta [namespace "files" "" []] [] [] False
+
+    it "declares newly added empty namespaces" do
+        previous <- catalog []
+        current <- catalog [namespace "files" "" []]
+        diffToolCatalog (Just previous) current `shouldBe`
+            ToolCatalogDelta [namespace "files" "" []] [] [] True
+
+    it "replaces a function with an empty namespace of the same name" do
+        previous <- catalog [tool "files" "Old"]
+        current <- catalog [namespace "files" "" []]
+        diffToolCatalog (Just previous) current `shouldBe`
+            ToolCatalogDelta [namespace "files" "" []] [] [] True
+
+    it "replaces a namespace with a function and removes its members" do
+        previous <- catalog [namespace "files" "" [tool "read" "Read"]]
+        current <- catalog [tool "files" "New"]
+        diffToolCatalog (Just previous) current `shouldBe`
+            ToolCatalogDelta [tool "files" "New"] ["files.read"] [] False
+
+    it "sends a full declaration for structural namespace header changes" do
+        let original = namespace "files" "" [tool "read" "Read"]
+            extended = case original of
+                Object fields -> Object (KeyMap.insert "extension" (Bool True) fields)
+                _ -> original
+        previous <- catalog [original]
+        current <- catalog [extended]
+        diffToolCatalog (Just previous) current `shouldBe`
+            ToolCatalogDelta [extended] [] [] True
 
     it "ignores JSON object key order and catalog member order" do
         previous <- catalog [tool "read" "Read", tool "write" "Write"]

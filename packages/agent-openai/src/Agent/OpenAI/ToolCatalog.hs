@@ -105,7 +105,14 @@ diffToolCatalog previous current =
         Right name -> case KeyMap.lookup "tools" fields of
             Just (Array members) ->
                 let changedMembers = filter (memberChanged name) (toList members)
-                in if not (null changedMembers)
+                    structuralHeader = Object . KeyMap.delete "description" . KeyMap.delete "tools"
+                    headerChanged = case Map.lookup name old of
+                        Just (Object oldFields) ->
+                            structuralHeader oldFields /= structuralHeader fields
+                        _ -> True
+                in if headerChanged
+                    then Just (Left definition)
+                    else if not (null changedMembers)
                     then Just (Left (Object (KeyMap.insert "tools"
                         (Array (Vector.fromList changedMembers)) fields)))
                     else if changed name
