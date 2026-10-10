@@ -3,6 +3,7 @@ module Agent.Store.Postgres.Session
     ( SessionMetadata(..)
     , SessionReadState(..)
     , loadSessionReadState
+    , loadSessionReadStates
     , updateSessionReadState
     , SessionLegacyTarget(..)
     , SessionPromptSnapshot(..)

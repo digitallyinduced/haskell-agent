@@ -22,6 +22,16 @@ should acknowledge only a snapshot they actually displayed. The observation
 socket remains read-only. Native/CLI unread indicators are not added by this API
 change.
 
+`GET /v1/sessions` also includes a `read_states` object keyed by the IDs in that
+page, loaded in one batch query. Clients can discover unread sessions without
+issuing a separate request per row. A session deleted during page loading may
+have no receipt in this map.
+
+The Haskell `agent-server-client` exposes `getAgentServerSessionReadState` and
+`updateAgentServerSessionReadState` with typed receipt/request records. Pass the
+displayed receipt's revision to the update; HTTP 409 remains an explicit client
+error and is not retried.
+
 This follows the revision-checked receipt design in
 [Codex PR 52337](https://github.com/openai/codex/pull/52337), using existing
 session persistence and authorization rather than a separate SQLite table.

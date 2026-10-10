@@ -65,6 +65,9 @@ spec = describe "PostgreSQL session schema" do
                         secondResult <- readState
                         secondResult.readStateFirstUnreadTurn `shouldBe` Just 0
                         secondResult.readStateRevision `shouldNotBe` firstResult.readStateRevision
+                        loadSessionReadStates pool [key, "missing"]
+                            `shouldReturn` Right [(key, secondResult)]
+                        loadSessionReadStates pool [] `shouldReturn` Right []
                         updateSessionReadState pool key firstResult.readStateRevision False
                             `shouldReturn` Right Nothing
                         updateSessionReadState pool key secondResult.readStateRevision False >>= \case
@@ -94,6 +97,7 @@ spec = describe "PostgreSQL session schema" do
                             other -> expectationFailure (show other)
                         deleteSession pool key now `shouldReturn` Right True
                         loadSessionReadState pool key `shouldReturn` Right Nothing
+                        loadSessionReadStates pool [key] `shouldReturn` Right []
                         updateSessionReadState pool key secondResult.readStateRevision False
                             `shouldReturn` Right Nothing
                     )

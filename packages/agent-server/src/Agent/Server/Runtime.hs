@@ -1044,9 +1044,12 @@ listSessions environment boundary archiveFilter rawCursor limit =
                                         (internalApiError
                                             ("could not decode session metadata: "
                                                 <> err)))
-                            Right sessions ->
-                                pure $
-                                    Right $
+                            Right sessions -> do
+                                states <- StoreSession.loadSessionReadStates pool
+                                    (map (\(meta, _) -> meta.metaId) sessions)
+                                pure $ case states of
+                                  Left err -> Left (storeApiError err)
+                                  Right receipts -> Right $
                                         object
                                             [ "data" .=
                                                 map
@@ -1059,6 +1062,10 @@ listSessions environment boundary archiveFilter rawCursor limit =
                                             , "nextCursor"
                                                 .= fmap encodeCursor
                                                     page.sessionListPageNextCursor
+                                            , "read_states" .=
+                                                Map.fromList
+                                                    (map (\(key, state) ->
+                                                        (key, sessionReadStateValue state)) receipts)
                                             ]
   where
     pool = trustedPool environment.environmentStore

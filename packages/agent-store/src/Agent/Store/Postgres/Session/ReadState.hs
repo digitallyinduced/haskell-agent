@@ -4,6 +4,7 @@
 module Agent.Store.Postgres.Session.ReadState
     ( SessionReadState(..)
     , loadSessionReadState
+    , loadSessionReadStates
     , updateSessionReadState
     , publishSessionReadStateTransaction
     , sessionReadStateSchemaStatements
@@ -40,6 +41,17 @@ sessionReadStateSchemaStatements =
 
 loadSessionReadState :: StorePool -> Text -> IO (Either StoreError (Maybe SessionReadState))
 loadSessionReadState pool key = withSession pool (S.statement key loadStatement)
+
+-- | Batch lookup for already-authorized session list pages.
+loadSessionReadStates :: StorePool -> [Text] -> IO (Either StoreError [(Text, SessionReadState)])
+loadSessionReadStates pool keys = withSession pool (S.statement keys loadManyStatement)
+
+loadManyStatement :: Statement [Text] [(Text, SessionReadState)]
+loadManyStatement = mkStatement
+    "SELECT session_key, read_state_revision::text, unread, first_unread_turn\
+    \ FROM harness.sessions WHERE session_key = ANY($1::text[]) AND deleted_at IS NULL"
+    (E.param (E.nonNullable (E.foldableArray (E.nonNullable E.text))))
+    (D.rowList ((,) <$> D.column (D.nonNullable D.text) <*> stateDecoder)) True
 
 -- | Compare the revision actually displayed to the client. Nothing means a
 -- conflict or an unavailable session; callers must not retry with a newer token.
