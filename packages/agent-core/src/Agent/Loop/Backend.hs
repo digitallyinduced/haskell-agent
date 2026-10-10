@@ -8,6 +8,7 @@ module Agent.Loop.Backend
     , BackendResult(..)
     , BackendRevision(..)
     , BackendContinuation(..)
+    , BackendProviderState(..)
     , BackendSnapshot(..)
     , BackendStateStore(..)
     , backendWithCallbacks
@@ -16,14 +17,17 @@ module Agent.Loop.Backend
     , advanceBackendSnapshot
     , clearBackendContinuation
     , backendContinuationToken
+    , isModelContextItem
     ) where
 
 import Agent.Error (ApiError)
+import Agent.Json (RawJson)
 import Agent.Loop.Input (TurnInput)
 import Agent.Loop.Output (LoopEvent, TurnOutput)
-import Agent.Responses.Types (ResponseItem)
+import Agent.Responses.Types (ResponseItem(..), ResponseMessage(..), InternalChatMetadata(..))
 import Agent.ToolDispatch (ToolCall)
 import Data.Text (Text)
+import Data.List (isPrefixOf)
 import Data.Word (Word64)
 
 data BackendResult = BackendResult
@@ -31,6 +35,24 @@ data BackendResult = BackendResult
     -- | The provider candidate checkpoint. The state store assigns the
     -- authoritative revision when this response is committed.
     , backendState :: !BackendSnapshot
+    } deriving (Eq, Show)
+
+-- | Provider/model-specific declarations are not portable conversation content.
+-- Backends which do not implement their protocol must omit them on replay.
+isModelContextItem :: ResponseItem -> Bool
+isModelContextItem AdditionalToolsItemValue{} = True
+isModelContextItem (MessageItem message) =
+    maybe False
+        (maybe False (any (`elem` ["model.tool_catalog", "model.base_instructions"]))
+            . (.contentItemKinds))
+        message.passthrough
+isModelContextItem _ = False
+
+-- | Provider-owned context state, committed with the transcript. This is not a
+-- connection cache: retrying or discarding a request must not publish it.
+data BackendProviderState = BackendProviderState
+    { providerStateNamespace :: !Text
+    , providerStatePayload :: !RawJson
     } deriving (Eq, Show)
 
 newtype BackendRevision = BackendRevision Word64
@@ -48,6 +70,7 @@ data BackendSnapshot = BackendSnapshot
     { backendItems :: ![ResponseItem]
     , backendRevision :: !BackendRevision
     , backendContinuation :: !(Maybe BackendContinuation)
+    , backendProviderState :: !(Maybe BackendProviderState)
     } deriving (Eq, Show)
 
 emptyBackendSnapshot :: BackendSnapshot
@@ -58,6 +81,7 @@ initialBackendSnapshot items = BackendSnapshot
     { backendItems = items
     , backendRevision = BackendRevision 0
     , backendContinuation = Nothing
+    , backendProviderState = Nothing
     }
 
 -- | Build a provider result from the checkpoint it consumed. State stores
@@ -72,6 +96,10 @@ advanceBackendSnapshot snapshot items continuation = BackendSnapshot
     { backendItems = items
     , backendRevision = nextBackendRevision snapshot.backendRevision
     , backendContinuation = continuation
+    , backendProviderState =
+        if snapshot.backendItems `isPrefixOf` items
+            then snapshot.backendProviderState
+            else Nothing
     }
 
 clearBackendContinuation :: BackendSnapshot -> BackendSnapshot

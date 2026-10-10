@@ -20,6 +20,7 @@ import qualified Agent.OpenAI.CompactionNativeSpec as CompactionNativeSpec
 import qualified Agent.OpenAI.RequestIdentitySpec as RequestIdentitySpec
 import qualified Agent.OpenAI.ToolDSLSpec as ToolDSLSpec
 import qualified Agent.OpenAI.ToolCatalogSpec as ToolCatalogSpec
+import qualified Agent.OpenAI.ToolCatalogRequestSpec as ToolCatalogRequestSpec
 import qualified Agent.OpenAI.TranscriptionSpec as TranscriptionSpec
 import qualified Agent.OpenAI.TurnStateSpec as TurnStateSpec
 import qualified Agent.OpenAI.UsageSpec as UsageSpec
@@ -45,6 +46,7 @@ main = hspec do
     RequestIdentitySpec.spec
     ToolDSLSpec.spec
     ToolCatalogSpec.spec
+    ToolCatalogRequestSpec.spec
     TranscriptionSpec.spec
     TurnStateSpec.spec
     UsageSpec.spec

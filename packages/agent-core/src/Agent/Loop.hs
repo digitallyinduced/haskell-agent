@@ -9,6 +9,7 @@ module Agent.Loop
     , BackendCancellationMode(..)
     , BackendMiddleware
     , BackendContinuation(..)
+    , BackendProviderState(..)
     , BackendRevision(..)
     , BackendResult(..)
     , BackendSnapshot(..)
@@ -34,6 +35,7 @@ module Agent.Loop
     , backendContinuationToken
     , backendWithCallbacks
     , clearBackendContinuation
+    , isModelContextItem
     , defaultLoopMaxTurns
     , defaultLoopMaxEmptyContinuations
     , defaultLoopDispatch

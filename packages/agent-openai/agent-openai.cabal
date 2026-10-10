@@ -85,6 +85,7 @@ library
                     , Agent.OpenAI.Compaction.Transport
                     , Agent.OpenAI.ToolDSL
                     , Agent.OpenAI.ToolCatalog
+                    , Agent.OpenAI.ToolCatalog.Request
                     , Agent.OpenAI.ImageGeneration
     other-modules:    Agent.OpenAI.Compaction.Commands
                     , Agent.OpenAI.Models.Manager.State
@@ -166,6 +167,7 @@ test-suite agent-openai-test
                     , Agent.OpenAI.RequestIdentitySpec
                     , Agent.OpenAI.ToolDSLSpec
                     , Agent.OpenAI.ToolCatalogSpec
+                    , Agent.OpenAI.ToolCatalogRequestSpec
                     , Agent.OpenAI.TestSupport
                     , Agent.OpenAI.TranscriptionSpec
                     , Agent.OpenAI.TurnStateSpec
