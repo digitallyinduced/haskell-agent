@@ -4,7 +4,7 @@ version:            0.1.0.0
 synopsis:           Concrete local tools for the agent harness
 description:        Filesystem, shell, GHCi, code-mode, planning, artifact,
                     image, chart, and subagent tool implementations.
-license:            MIT
+license:            MIT AND Apache-2.0
 license-file:       LICENSE
 author:             digitally induced GmbH
 maintainer:         marc@digitallyinduced.com
