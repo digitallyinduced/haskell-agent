@@ -17,6 +17,7 @@ import qualified Agent.ProviderSpec as ProviderSpec
 import qualified Agent.ResourceScopeSpec as ResourceScopeSpec
 import qualified Agent.RetrySpec as RetrySpec
 import qualified Agent.SkillsSpec as SkillsSpec
+import qualified Agent.Skills.ToolSearchSpec as SkillsToolSearchSpec
 import qualified Agent.SubagentsSpec as SubagentsSpec
 import qualified Agent.Subagents.ChildSpec as SubagentChildSpec
 import qualified Agent.Subagents.HistorySpec as SubagentHistorySpec
@@ -53,6 +54,7 @@ main = hspec do
     ResourceScopeSpec.spec
     RetrySpec.spec
     SkillsSpec.spec
+    SkillsToolSearchSpec.spec
     SubagentsSpec.spec
     SubagentChildSpec.spec
     SubagentHistorySpec.spec

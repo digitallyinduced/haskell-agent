@@ -45,6 +45,7 @@ module Agent.ToolDispatch
     , noArgsTool
     , functionToolCall
     , customToolCall
+    , toolSearchToolCall
     , canonicalToolName
     , canonicalToolArguments
     , dispatchToolCall
@@ -88,6 +89,9 @@ data ToolCallKind
     -- and explicit approval rules; Responses continuations pair its text
     -- @function_call_output@ with a fresh user screenshot.
     | ComputerFunctionCallKind
+    -- | A client-executed tool search (@tool_search_call@). Its output lists
+    -- the tool definitions to load; adapters emit a @tool_search_output@.
+    | ToolSearchCallKind
     deriving (Eq, Show)
 
 -- | Whether the provider permits the application to complete this call after
@@ -390,6 +394,17 @@ customToolCall callId name arguments = ToolCall
     , name
     , arguments
     , callKind = CustomCallKind
+    , argumentsEncrypted = False
+    }
+
+-- | A client-executed tool search call. The arguments are the call's JSON
+-- arguments object.
+toolSearchToolCall :: Text -> Text -> ToolCall
+toolSearchToolCall callId arguments = ToolCall
+    { callId
+    , name = "tool_search"
+    , arguments
+    , callKind = ToolSearchCallKind
     , argumentsEncrypted = False
     }
 

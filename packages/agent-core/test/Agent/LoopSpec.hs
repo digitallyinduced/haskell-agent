@@ -5,7 +5,7 @@ import qualified Agent.Json.Decode as Json
 import Agent.Cancel (newCancelFlag, requestCancel)
 import Agent.Error (ApiError(..))
 import Agent.Loop
-import Agent.Loop.InputItems (turnInputsToItems)
+import Agent.Loop.InputItems (turnInputsToItems, toolResultToItem)
 import Agent.Loop.Fixtures
 import qualified Agent.Loop.EventDeliverySpec as EventDelivery
 import qualified Agent.Loop.FailedDisplaySpec as FailedDisplay
@@ -18,8 +18,10 @@ import Agent.Responses.Types
     , ResponseItem(..)
     , ResponseMessage(..)
     , ResponseRole(..)
+    , ToolSearchOutput(..)
     )
 import Agent.Responses.Types.Items (responseItemDecoder)
+import Agent.Skills.ToolSearch
 import Agent.ToolDispatch
 import Agent.Telemetry (TurnTelemetry(..))
 import Agent.Tools.Scheduling
@@ -2890,6 +2892,66 @@ spec = describe "runLoop" do
                 Left (LoopCancelled [functionResult "saved" "file saved exactly once"])
             tryReadMVar joined `shouldReturn` Just ()
         readIORef invocations `shouldReturn` 1
+
+    it "salvages a completed client tool search when cancellation interrupts the remaining batch" do
+        blocked <- newEmptyMVar
+        joined <- newEmptyMVar
+        let search = toolSearchToolCall "searched" "{\"skills\":[\"meals\"]}"
+            second = functionToolCall "blocked" "block" "{}"
+            meals = ToolSkill
+                { toolSkillName = "meals"
+                , toolSkillDescription = "Business meal receipts."
+                , toolSkillInstructions = "Ask for the attendees."
+                , toolSkillTools =
+                    [Aeson.object ["type" Aeson..= ("function" :: Text), "name" Aeson..= ("create_meal" :: Text)]]
+                }
+            -- Sharing the scheduling resource makes starting B proof that the
+            -- search's completion was recorded.
+            tools =
+                [ withToolResourceClaims
+                    (\_ -> pure (Right [ToolResourceClaim ToolWrite (ToolNamedResource "recovery-test")]))
+                    (toolSkillSearchTool [meals])
+                , resourceTool "block" "recovery-test" $
+                    (putMVar blocked () >> threadDelay maxBound
+                        >> pure (Right "must not finish"))
+                        `Exception.finally` putMVar joined ()
+                ]
+            callItems = either (error . show) id $
+                Json.decodeEither (Json.list responseItemDecoder)
+                    "[{\"type\":\"tool_search_call\",\"call_id\":\"searched\",\"execution\":\"client\",\"arguments\":{\"skills\":[\"meals\"]}},{\"type\":\"function_call\",\"call_id\":\"blocked\",\"name\":\"block\",\"arguments\":\"{}\"}]"
+            backend = Backend \state _ inputs _ ->
+                pure $ Right BackendResult
+                    { backendOutput = emptyTurnOutput "committed-search" [search, second] Nothing
+                    , backendState = advanceBackendSnapshot state
+                        (state.backendItems <> turnInputsToItems inputs <> callItems) Nothing
+                    }
+        config0 <- testConfig backend
+        let config = config0
+                { loopTools = registryFromTools tools
+                , loopDispatch = config0.loopDispatch
+                    { toolDispatchFinalizeOutput = \call output ->
+                        pure if call.callKind == ToolSearchCallKind
+                            then "Full output retained as an artifact."
+                            else output
+                    }
+                }
+        withAsync (runLoopInputsDetailed config Nothing [UserMessage "record the lunch"]) \running -> do
+            timeout concurrencyProbeMicros (takeMVar blocked) `shouldReturn` Just ()
+            requestCancel config.loopCancel
+            execution <- timeout concurrencyProbeMicros (wait running)
+                >>= maybe (fail "cancel did not join tool workers") pure
+            execution.executionProgress `shouldBe` ResponseCommitted
+            case execution.executionPendingInputs of
+                [CompletedTool result] -> do
+                    result.callId `shouldBe` "searched"
+                    result.callKind `shouldBe` ToolSearchCallKind
+                    result.output `shouldBe` "Full output retained as an artifact."
+                    case toolResultToItem result of
+                        ToolSearchOutputItem output ->
+                            map Aeson.toJSON output.tools `shouldBe` [toolSkillNamespace meals]
+                        other -> expectationFailure ("unexpected search output: " <> show other)
+                other -> expectationFailure ("unexpected pending inputs: " <> show other)
+            tryReadMVar joined `shouldReturn` Just ()
 
     it "recovers attributed precommit tool work without replaying failed provider output" do
         blocked <- newEmptyMVar
