@@ -56,6 +56,35 @@ spec = describe "frontend-neutral turn policy" do
         interruptedTurnItems prepared execution (TurnAbortedByFailure "offline")
             `shouldBe` committed <> [toolResultToItem result]
 
+    it "retains completed work after rebasing provider-only context" do
+        let catalog = AdditionalToolsItemValue AdditionalToolsItem
+                { itemId = Nothing
+                , role = "developer"
+                , tools = []
+                }
+            committed = inputOnlyTurnItems prepared
+                <> turnInputsToItems [UserMessage "completed step"]
+            execution = failedExecution
+                { executionState = [catalog] <> history <> committed
+                , executionProgress = ResponseCommitted
+                }
+            retained = interruptedTurnItems prepared execution (TurnAbortedByFailure "offline")
+        retained `shouldBe` committed
+        let resumed = applyConversationPatch
+                (finishConversation prepared (ConversationFailed retained))
+                runningState
+        resumed.conversationTranscript `shouldBe` history <> committed
+        resumed.conversationPreviousResponseId `shouldBe` Nothing
+
+    it "does not confuse changed portable history with a catalog rebase" do
+        let execution = failedExecution
+                { executionState = turnInputsToItems [UserMessage "compacted history"]
+                    <> inputOnlyTurnItems prepared
+                , executionProgress = ResponseCommitted
+                }
+        interruptedTurnItems prepared execution (TurnAbortedByFailure "offline")
+            `shouldBe` inputOnlyTurnItems prepared
+
     it "retains explicit interrupted-work context without promoting display activity" do
         let recovery = turnInputsToItems
                 [UserMessage "<turn_aborted>\n<interrupted_work>\nAssistant reported: PR #86 opened.\n</interrupted_work>\n</turn_aborted>"]

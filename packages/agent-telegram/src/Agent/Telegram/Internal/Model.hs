@@ -152,6 +152,7 @@ retargetTelegramSession handle target gatewayIdentity = do
             , metaDialect = target.targetDialect
             , metaLegacySubagentTarget = Just (sessionLegacySubagentTarget meta)
             , metaLastResponseId = if changed then Nothing else meta.metaLastResponseId
+            , metaProviderState = if changed then Nothing else meta.metaProviderState
             , metaPromptSnapshot = if changed then Nothing else meta.metaPromptSnapshot
             }
     writeSessionMeta handle.sessionPool handle.sessionMetaPath next

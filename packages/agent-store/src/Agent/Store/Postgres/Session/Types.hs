@@ -214,6 +214,7 @@ data SessionMetadata = SessionMetadata
     , sessionMetadataLastTurnSummary :: !(Maybe Text)
     , sessionMetadataLastRecapMainTurns :: !Int64
     , sessionMetadataHeadless :: !Bool
+    , sessionMetadataProviderState :: !(Maybe Text)
     }
     deriving (Eq, Show)
 

@@ -26,7 +26,7 @@ import Agent.OpenAI.LoopBackendSpec.Fixtures
 spec :: Spec
 spec = do
     describe "Responses Lite request prefixes" do
-        it "preserves developer instructions on fresh, delta and full replay requests while stripping local markers" do
+        it "rebases legacy snapshots and preserves instructions without empty catalog items" do
             requests <- newIORef []
             let additional = AdditionalToolsItemValue
                     (AdditionalToolsItem Nothing "developer" [])
@@ -60,13 +60,13 @@ spec = do
                     (Just (BackendContinuation "openai.responses" "previous"))
                 fullSnapshot = advanceBackendSnapshot emptyBackendSnapshot history Nothing
                 inputs = [UserMessage "repair"]
-                prefix = [additional, developer Nothing]
+                prefix = [developer Nothing]
             _ <- backend.submitTurn emptyBackendSnapshot Nothing inputs (const (pure ()))
             _ <- backend.submitTurn snapshot Nothing inputs (const (pure ()))
             _ <- backend.submitTurn fullSnapshot Nothing inputs (const (pure ()))
             readIORef requests `shouldReturn`
                 [ (prefix <> turnInputsToItems inputs, Nothing)
-                , (prefix <> turnInputsToItems inputs, Just "previous")
+                , (prefix <> history <> turnInputsToItems inputs, Nothing)
                 , (prefix <> history <> turnInputsToItems inputs, Nothing)
                 ]
 

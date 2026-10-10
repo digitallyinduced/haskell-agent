@@ -61,6 +61,7 @@ import Agent.Loop
     , advanceBackendSnapshot
     , backendContinuationToken
     , backendWithCallbacks
+    , isModelContextItem
     , turnInputFiles
     , turnInputImages
     )
@@ -292,11 +293,11 @@ attachBackendState _ (Left err) =
 attachBackendState snapshot (Right (output, items)) = do
     pure $ Right BackendResult
         { backendOutput = output
-        , backendState = advanceBackendSnapshot snapshot items
+        , backendState = (advanceBackendSnapshot snapshot items
             (Just BackendContinuation
                 { continuationProvider = claudeProviderNamespace
                 , continuationToken = output.responseId
-                })
+                })) { backendProviderState = Nothing }
         }
 
 submitClaudeCodeTurn
@@ -383,7 +384,7 @@ submitClaudeCodeTurn
                                 && selectionsAgree
                                 && isJust previousSession
                                )
-                    history = snapshot.backendItems
+                    history = filter (not . isModelContextItem) snapshot.backendItems
                 result <- withClaudeSDKTurn
                     session
                     (pure processMatchesHost)

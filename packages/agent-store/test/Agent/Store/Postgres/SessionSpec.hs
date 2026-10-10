@@ -116,7 +116,10 @@ spec = describe "PostgreSQL session schema" do
                             let
                                 pool = trustedPool store
                                 now = read "2026-08-23 12:00:00 UTC"
-                                metadata = testMetadata now
+                                metadata = (testMetadata now)
+                                    { sessionMetadataProviderState =
+                                        Just "{\"namespace\":\"openai.responses.catalog.v1\",\"payload\":{\"tools\":[]}}"
+                                    }
                                 turn =
                                     (testTurn now)
                                         { sessionTurnDisplayItems =
@@ -1336,6 +1339,7 @@ testMetadata now = SessionMetadata
     , sessionMetadataLastTurnSummary = Nothing
     , sessionMetadataLastRecapMainTurns = 0
     , sessionMetadataHeadless = False
+    , sessionMetadataProviderState = Nothing
     }
 
 testPromptSnapshot :: UTCTime -> SessionPromptSnapshot

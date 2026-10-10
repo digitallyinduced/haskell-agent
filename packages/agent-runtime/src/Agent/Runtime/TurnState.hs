@@ -34,6 +34,7 @@ import Agent.Loop
     , TurnOutput(..)
     , addTokenUsage
     , emptyTokenUsage
+    , isModelContextItem
     )
 import Agent.Runtime.Compaction
     ( AutomaticCompactionBoundary(..)
@@ -430,7 +431,9 @@ inputOnlyTurnItems = turnInputsToItems . (.preparedTurnInputs)
 --
 -- While nothing committed — or when the committed state no longer extends
 -- the prepared history, as after a mid-turn automatic compaction — only the
--- prepared inputs are retained, so a retry resubmits exactly them.
+-- prepared inputs are retained, so a retry resubmits exactly them. Replacing
+-- only provider-owned model context is not a compaction: retain the portable
+-- committed suffix in that case, and let the next request rebuild its context.
 interruptedTurnItems
     :: PreparedTurn
     -> LoopExecution
@@ -439,14 +442,11 @@ interruptedTurnItems
 interruptedTurnItems prepared execution abort =
     case execution.executionProgress of
         ResponseCommitted
-            | prepared.preparedBeforeItems
-                `isPrefixOf` execution.executionState ->
+            | Just committedItems <- committedSuffix ->
                 let committed =
                         dropTruncatedCalls
                             execution.executionResult
-                            (drop
-                                (length prepared.preparedBeforeItems)
-                                execution.executionState)
+                            committedItems
                     pendingResults =
                         [ toolResultToItem result
                         | CompletedTool result <- execution.executionPendingInputs
@@ -458,6 +458,16 @@ interruptedTurnItems prepared execution abort =
                                 (danglingToolCalls retained)
                 in closed <> abortNote abort retained
         _ -> inputOnlyTurnItems prepared
+  where
+    committedSuffix
+        | before `isPrefixOf` after = Just (drop (length before) after)
+        | portableBefore `isPrefixOf` portableAfter =
+            Just (drop (length portableBefore) portableAfter)
+        | otherwise = Nothing
+    before = prepared.preparedBeforeItems
+    after = execution.executionState
+    portableBefore = filter (not . isModelContextItem) before
+    portableAfter = filter (not . isModelContextItem) after
 
 -- | An incomplete final response can end inside a tool call. Grok Build's
 -- length policy keeps only calls whose arguments are complete; a call cut off

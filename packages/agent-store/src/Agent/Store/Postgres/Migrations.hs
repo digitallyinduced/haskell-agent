@@ -558,6 +558,12 @@ coreMigrations =
               \ ON harness.server_human_request_resolutions TO ha_runtime"
             ]
         }
+    , Migration
+        { migrationVersion = 122
+        , migrationName = "session provider checkpoint state"
+        , migrationStatements =
+            [ "ALTER TABLE harness.sessions ADD COLUMN provider_state text" ]
+        }
     ]
 
 -- | Specialize all runtime grants for a validated cluster-global role.
