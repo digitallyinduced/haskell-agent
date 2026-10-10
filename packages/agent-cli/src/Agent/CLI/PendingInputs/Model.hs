@@ -21,7 +21,7 @@ module Agent.CLI.PendingInputs.Model
     , pendingInputByteLimit
     ) where
 
-import Agent.CLI.InputBudget (logicalTurnInputBytes, saturatingAdd)
+import Agent.Loop.InputBudget (logicalTurnInputBytes, saturatingAdd)
 import Agent.Loop (TurnInput)
 import Data.Foldable (toList)
 import qualified Data.Sequence as Seq

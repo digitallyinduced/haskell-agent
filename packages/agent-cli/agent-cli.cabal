@@ -245,7 +245,6 @@ library
                     , Agent.CLI.Skills
                     , Agent.CLI.Status
                     , Agent.CLI.StartupContext
-                    , Agent.CLI.SteeringInputs
                     , Agent.CLI.SubagentStore
                     , Agent.CLI.Subagents.Runtime
                     , Agent.CLI.Style

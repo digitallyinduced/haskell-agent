@@ -35,7 +35,7 @@ import Agent.CLI.Input
     )
 import Agent.OpenAI.Models.Types (ModelInfo(..), modelServiceTierForRequest)
 import Agent.Runtime.Models ( catalogModelIds )
-import Agent.CLI.SteeringInputs
+import Agent.Loop.SteeringInputs
     ( awaitSteeringInput
     , awaitSteeringInputReady
     , readSteeringTurn
