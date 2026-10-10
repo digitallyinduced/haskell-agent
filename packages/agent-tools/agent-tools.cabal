@@ -69,6 +69,7 @@ library
                     , Agent.Tools.TaskPlan
                     , Agent.Tools.Secret
                     , Agent.Tools.ShowImage
+                    , Agent.Tools.SubagentLoop
                     , Agent.Tools.ShellReadOnly
                     , Agent.Tools.ShellPermission
                     , Agent.Tools.ViewImage
@@ -236,6 +237,7 @@ test-suite agent-tools-test
                     , Agent.Tools.TaskPlanSpec
                     , Agent.Tools.SecretSpec
                     , Agent.Tools.ShowImageSpec
+                    , Agent.Tools.SubagentLoopSpec
                     , Agent.Tools.ViewImageSpec
                     , Agent.Tools.RenderChartSpec
     build-depends:    base >= 4.14 && < 5
