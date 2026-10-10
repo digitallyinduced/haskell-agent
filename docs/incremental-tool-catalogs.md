@@ -31,6 +31,10 @@ attribution is stripped from wire requests.
 - Other backends omit Lite-only model context and clear its provider state.
   User messages, completed tool calls, and results remain portable.
 - Session metadata is optional for compatibility with older persisted data.
+- Interrupted turns retain completed portable steps even when the request
+  rebased provider-only context. Persisted failures and child restores without
+  a catalog checkpoint conservatively rebuild the full catalog; they do not
+  reuse an unverified continuation.
 
 Regression tests cover catalog diffs, unchanged continuations, append-only
 updates, failed submission, native interruption, reconnect replay, legacy
