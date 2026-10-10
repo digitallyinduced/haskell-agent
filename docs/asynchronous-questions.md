@@ -19,7 +19,9 @@ replaces approval for a protected action.
 Interactive CLI sessions display the questions in the transcript and send the
 existing attention notification. Native hosts receive assistant text through
 their loop-event callback. Questions and suggested answers also remain in the
-persisted tool-call arguments. Unattended/background and one-shot terminal
+persisted tool-call arguments. Transcript replay reconstructs readable question
+titles and suggestions from those arguments; the immediate display notice is
+not a separate synthetic provider message. Unattended/background and one-shot terminal
 hosts return an unavailable error rather than silently accepting a question
 that cannot be answered there. Embeddings constructing tools directly can
 install a nonblocking delivery callback with `setAsyncQuestionDelivery`.
