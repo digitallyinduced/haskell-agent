@@ -728,6 +728,12 @@ multiTenantBackend instanceId manager = Backend
     , backendGetSession = \boundary sessionId ->
         withBoundaryBackend instanceId manager boundary \backend ->
             backend.backendGetSession boundary sessionId
+    , backendGetSessionReadState = \boundary sessionId ->
+        withBoundaryBackend instanceId manager boundary \backend ->
+            backend.backendGetSessionReadState boundary sessionId
+    , backendUpdateSessionReadState = \boundary sessionId request ->
+        withBoundaryBackend instanceId manager boundary \backend ->
+            backend.backendUpdateSessionReadState boundary sessionId request
     , backendPatchSession = \boundary sessionId request ->
         withBoundaryBackend instanceId manager boundary \backend ->
             backend.backendPatchSession boundary sessionId request
@@ -850,6 +856,8 @@ productionBackend _instanceId environment = Backend
     , backendListSessions = listSessions environment
     , backendCreateSession = createSessionForBoundary environment
     , backendGetSession = getSessionForBoundary environment
+    , backendGetSessionReadState = getSessionReadStateForBoundary environment
+    , backendUpdateSessionReadState = updateSessionReadStateForBoundary environment
     , backendPatchSession = patchSessionForBoundary environment
     , backendDeleteSession = deleteSessionForBoundary environment
     , backendSessionHistory = sessionHistoryForBoundary environment
@@ -1036,9 +1044,12 @@ listSessions environment boundary archiveFilter rawCursor limit =
                                         (internalApiError
                                             ("could not decode session metadata: "
                                                 <> err)))
-                            Right sessions ->
-                                pure $
-                                    Right $
+                            Right sessions -> do
+                                states <- StoreSession.loadSessionReadStates pool
+                                    (map (\(meta, _) -> meta.metaId) sessions)
+                                pure $ case states of
+                                  Left err -> Left (storeApiError err)
+                                  Right receipts -> Right $
                                         object
                                             [ "data" .=
                                                 map
@@ -1051,6 +1062,10 @@ listSessions environment boundary archiveFilter rawCursor limit =
                                             , "nextCursor"
                                                 .= fmap encodeCursor
                                                     page.sessionListPageNextCursor
+                                            , "read_states" .=
+                                                Map.fromList
+                                                    (map (\(key, state) ->
+                                                        (key, sessionReadStateValue state)) receipts)
                                             ]
   where
     pool = trustedPool environment.environmentStore
@@ -1236,6 +1251,44 @@ getSessionForBoundary environment boundary sessionId =
             (\(meta, archived) ->
                 sessionValue archived meta Nothing)) $
         loadAuthorizedSession environment boundary sessionId
+
+sessionReadStateValue :: StoreSession.SessionReadState -> Value
+sessionReadStateValue state = object
+    [ "revision" .= state.readStateRevision
+    , "unread" .= state.readStateUnread
+    , "first_unread_turn" .= state.readStateFirstUnreadTurn
+    ]
+
+getSessionReadStateForBoundary
+    :: RuntimeEnvironment -> AccessBoundary -> Text -> IO (Either ApiError Value)
+getSessionReadStateForBoundary environment boundary sessionId =
+    loadAuthorizedMeta environment boundary sessionId >>= \case
+        Left err -> pure (Left err)
+        Right _ -> do
+            result <- StoreSession.loadSessionReadState
+                (trustedPool environment.environmentStore) sessionId
+            pure $ case result of
+                Left err -> Left (storeApiError err)
+                Right Nothing -> Left (ApiError 404 "session_not_found" "session is unavailable" Nothing)
+                Right (Just state) -> Right (sessionReadStateValue state)
+
+updateSessionReadStateForBoundary
+    :: RuntimeEnvironment -> AccessBoundary -> Text -> UpdateSessionReadStateRequest
+    -> IO (Either ApiError Value)
+updateSessionReadStateForBoundary environment boundary sessionId request =
+    loadAuthorizedMeta environment boundary sessionId >>= \case
+        Left err -> pure (Left err)
+        Right _ -> do
+            result <- StoreSession.updateSessionReadState
+                (trustedPool environment.environmentStore) sessionId
+                request.expectedRevision request.unread
+            case result of
+                Left err -> pure (Left (storeApiError err))
+                Right (Just state) -> pure (Right (sessionReadStateValue state))
+                Right Nothing -> getSessionReadStateForBoundary environment boundary sessionId >>= \case
+                    Left err -> pure (Left err)
+                    Right current -> pure (Left (ApiError 409 "read_state_conflict"
+                        "read state changed; refresh before editing" (Just current)))
 
 patchSessionForBoundary
     :: RuntimeEnvironment

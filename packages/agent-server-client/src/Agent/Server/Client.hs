@@ -10,6 +10,8 @@ module Agent.Server.Client (
     AgentServerStreamResult (..),
     newAgentServerClient,
     createAgentServerSession,
+    getAgentServerSessionReadState,
+    updateAgentServerSessionReadState,
     createAgentServerTurn,
     getAgentServerTurn,
     getAgentServerTurnResult,
@@ -126,6 +128,22 @@ createAgentServerSession client =
     performJsonRequest client "POST" "/v1/sessions" [201]
         . Just
         . Aeson.encode
+
+getAgentServerSessionReadState ::
+    AgentServerClient -> Text ->
+    IO (Either AgentServerClientError AgentServerSessionReadState)
+getAgentServerSessionReadState client sessionId =
+    performJsonRequest client "GET"
+        ("/v1/sessions/" <> encodePathSegment sessionId <> "/read-state") [200] Nothing
+
+-- | A conflict is returned to the caller, never retried with a newer revision.
+updateAgentServerSessionReadState ::
+    AgentServerClient -> Text -> AgentServerUpdateReadState ->
+    IO (Either AgentServerClientError AgentServerSessionReadState)
+updateAgentServerSessionReadState client sessionId =
+    performJsonRequest client "PATCH"
+        ("/v1/sessions/" <> encodePathSegment sessionId <> "/read-state") [200]
+        . Just . Aeson.encode
 
 createAgentServerTurn ::
     AgentServerClient ->

@@ -21,6 +21,29 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "agent-server HTTP client" do
+    it "fetches and acknowledges read receipts without retrying conflicts" do
+        observed <- newEmptyMVar
+        let receipt = "{\"revision\":\"revision-1\",\"unread\":true,\"first_unread_turn\":0}"
+            application request respond = do
+                body <- strictRequestBody request
+                putMVar observed (request.requestMethod, rawPathInfo request, Aeson.decode body)
+                respond $ responseLBS
+                    (if request.requestMethod == "PATCH" then status409 else status200)
+                    [(hContentType, "application/json")]
+                    (if request.requestMethod == "PATCH"
+                        then "{\"error\":{\"code\":\"read_state_conflict\",\"message\":\"refresh first\",\"requestId\":\"request-1\"}}"
+                        else receipt)
+        withTestClient application \client -> do
+            getAgentServerSessionReadState client "session/a"
+                `shouldReturn` Right (AgentServerSessionReadState "revision-1" True (Just 0))
+            takeMVar observed `shouldReturn` ("GET", "/v1/sessions/session%2Fa/read-state", Nothing)
+            let update = AgentServerUpdateReadState "revision-1" False
+            updateAgentServerSessionReadState client "session/a" update >>= \case
+                Left (AgentServerHttpError 409 (Just "read_state_conflict") _) -> pure ()
+                other -> expectationFailure (show other)
+            takeMVar observed `shouldReturn`
+                ("PATCH", "/v1/sessions/session%2Fa/read-state", Just (Aeson.toJSON update))
+
     it "authenticates requests and encodes query values" do
         observed <- newEmptyMVar
         let application request respond = do

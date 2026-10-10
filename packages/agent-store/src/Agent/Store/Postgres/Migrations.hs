@@ -14,6 +14,8 @@ module Agent.Store.Postgres.Migrations
     , runCoreMigrationsForRuntimeRole
     ) where
 
+import Agent.Store.Postgres.Session.ReadState (sessionReadStateSchemaStatements)
+
 import Control.Monad (forM_)
 import Data.ByteString (ByteString)
 import Data.Functor.Contravariant ((>$<))
@@ -557,6 +559,11 @@ coreMigrations =
             , "GRANT SELECT, INSERT, DELETE\
               \ ON harness.server_human_request_resolutions TO ha_runtime"
             ]
+        }
+    , Migration
+        { migrationVersion = 121
+        , migrationName = "durable session read state"
+        , migrationStatements = sessionReadStateSchemaStatements
         }
     ]
 
