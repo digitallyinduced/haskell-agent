@@ -134,7 +134,7 @@ import Agent.Runtime.Session
       PersistenceState(PersistenceActive, PersistencePending),
       LegacySubagentTarget,
       SessionHandle(sessionDir, sessionMeta),
-      SessionMeta(metaId, metaPromptSnapshot, metaTitle),
+      SessionMeta(metaId, metaPromptSnapshot, metaProviderState, metaTitle),
       SessionTurn,
       SessionPromptSnapshot(..) )
 import Agent.Runtime.Session.History
