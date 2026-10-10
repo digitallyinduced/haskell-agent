@@ -7,7 +7,7 @@ import Agent.Runtime.ManagedTurn (managedTurnRequestFromText)
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.Runtime.Session
 import Agent.Runtime.SessionLock
-import Agent.CLI.SteeringInputs
+import Agent.Loop.SteeringInputs
     ( awaitSteeringInput, clearSteeringInputs, commitSteeringInputs
     , hasSteeringInputWake, newSteeringInputs
     , prepareBackgroundCompletion, readSteeringInputs )

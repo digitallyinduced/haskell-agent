@@ -13,6 +13,17 @@ Provider-neutral infrastructure shared by the harness transports:
   (`Agent.XAI.LoopBackend`), `agent-openrouter`
   (`Agent.OpenRouter.LoopBackend`), and `agent-gemini`
   (`Agent.Gemini.LoopBackend`).
+- `Agent.Loop.SteeringInputs` is a bounded queue that a host can use for the
+  loop's steering callbacks. When the queue is full, it holds background
+  completion notices back instead of dropping them. `Agent.Loop.InputBudget`
+  measures the size of retained inputs.
+- `Agent.Subagents` holds delegated child agents: the registry with its
+  admission limits and task paths, and `runChildTurn`, which runs one turn of
+  a child around the backend, tools and approval policy that the host
+  supplies. It keeps the child's backend state across turns, resumes the child
+  when a background command it owns completes, and drops tool calls a failed
+  turn left without output. The model-facing collaboration tools live in
+  `agent-tools` (`Agent.Tools.MultiAgents`).
 - `Agent.ToolArgs` parses model-supplied JSON tool arguments.
 - `Agent.ToolDSL` owns JSON Schema fragments for function-tool parameters.
 - `Agent.ToolDispatch` decodes and runs provider-neutral application tools.

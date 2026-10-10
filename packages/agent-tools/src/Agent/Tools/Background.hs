@@ -19,8 +19,10 @@ module Agent.Tools.Background
     , setBackgroundTaskHooks
     , suppressCompletion
     , systemReminder
+    , toolEnvBackgroundTasks
     ) where
 
+import Agent.Subagents (ChildBackgroundTasks(..))
 import Agent.Tools.Types
     ( BackgroundTaskHooks(..)
     , BackgroundTaskNotice
@@ -65,6 +67,14 @@ removeBackgroundTask env key =
 
 setBackgroundTaskHooks :: ToolEnv -> BackgroundTaskHooks -> IO ()
 setBackgroundTaskHooks env = writeIORef env.toolBackgroundTaskHooks
+
+-- | A child agent's background commands, managed by its tool environment.
+toolEnvBackgroundTasks :: ToolEnv -> ChildBackgroundTasks
+toolEnvBackgroundTasks env = ChildBackgroundTasks
+    { installBackgroundTaskHooks = setBackgroundTaskHooks env
+    , awaitingBackgroundResume =
+        any (.taskAutoResume) <$> readBackgroundTasksSTM env
+    }
 
 publishBackgroundTaskNotice
     :: ToolEnv

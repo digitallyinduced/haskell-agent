@@ -67,7 +67,7 @@ import Agent.CLI.LearnedSkills
 import Agent.CLI.LearnedSkills.Store
 import Agent.CLI.Options
 import Agent.CLI.PendingInputs
-import Agent.CLI.SteeringInputs
+import Agent.Loop.SteeringInputs
 import Agent.CLI.Runtime.Types
 import Agent.CLI.Runtime.Orchestration.Types
     ( NativeDiscoveryContext(..)

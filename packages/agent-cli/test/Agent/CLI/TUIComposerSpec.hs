@@ -25,7 +25,7 @@ import Agent.CLI.Input
     )
 import Agent.CLI.TUI.Composer
 import Agent.CLI.TUI.Types
-import Agent.CLI.SteeringInputs
+import Agent.Loop.SteeringInputs
     ( awaitSteeringInput
     , commitSteeringInputs
     , enqueueSteeringInputs

@@ -15,12 +15,10 @@ module Agent.CLI.SubagentStore
     , subagentDiskFields
     , isValidSubagentStoreId
     , subagentStoreDir
-    , forkSubagentTranscript
     , saveSubagentState
     , loadSubagentState
     ) where
 
-import Agent.CLI.Btw (trimDanglingToolSuffix)
 import Agent.Dialect
     ( DialectId
     , dialectSlug
@@ -36,7 +34,6 @@ import Agent.Responses.Types
 import Agent.Responses.Types.Items (responseItemDecoder)
 import Agent.Subagents (SubagentId(..), SubagentIdentity(..), SubagentStatus(..))
 import Agent.Subagents.TaskPath (taskPathText)
-import Agent.ToolArgs (readExactInt)
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (tryAny)
 import Data.Aeson (ToJSON(..), object, (.=))
@@ -245,29 +242,6 @@ subagentStoreDir sessionDir agentId
                 </> unsafeEncodeUtf "agents"
                 </> unsafeEncodeUtf (Text.unpack agentId.unSubagentId)
             )
-
-forkSubagentTranscript :: Maybe Text -> [ResponseItem] -> [ResponseItem]
-forkSubagentTranscript forkTurns items =
-    let completeItems = trimDanglingToolSuffix items
-        normalized = Text.toLower . Text.strip <$> forkTurns
-    in case normalized of
-        Just "none" -> []
-        Just turns
-            | Just count <- readExactInt turns
-            , count > 0 -> takeRecentTurns count completeItems
-        _ -> completeItems
-
-takeRecentTurns :: Int -> [ResponseItem] -> [ResponseItem]
-takeRecentTurns count items =
-    case drop (max 0 (length starts - count)) starts of
-        start : _ -> drop start items
-        [] -> items
-  where
-    starts =
-        [ index
-        | (index, MessageItem message) <- zip [0 :: Int ..] items
-        , message.role == RoleUser
-        ]
 
 saveSubagentState
     :: OsPath
