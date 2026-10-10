@@ -36,7 +36,7 @@ import Agent.Tools.Types
     )
 import Control.Concurrent (threadDelay)
 import Control.Exception (evaluate)
-import Control.Monad (forM, replicateM_)
+import Control.Monad (forM, forever, replicateM_)
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
@@ -211,6 +211,7 @@ runWorkload workload eventCount sinkDelayMicros = do
             , loopOnEvent = sink
             , loopApprove = \_ -> pure ToolApprovalGranted
             , loopReadSteering = pure []
+            , loopWaitSteering = \_ -> forever (threadDelay maxBound)
             , loopCommitSteering = \_ -> pure ()
             , loopCloseSteering = pure []
             , loopInterrupt = pure ()

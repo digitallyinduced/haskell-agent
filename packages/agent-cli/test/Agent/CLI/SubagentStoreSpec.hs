@@ -1,6 +1,8 @@
 module Agent.CLI.SubagentStoreSpec (spec) where
 
 import Agent.Runtime.Compaction.Provider (estimatedOccupancy)
+import Control.Concurrent.STM qualified as STM
+import Agent.CLI.SteeringInputs qualified as Steering
 import Agent.Runtime.ModelConfig (organizationGatewayConnectionId)
 import Agent.CLI.SubagentStore
 import Agent.Runtime.Session (LegacySubagentTarget(..))
@@ -101,7 +103,8 @@ backgroundChildConfig steering requests = do
         , loopMaxTurns = 5
         , loopOnEvent = const (pure ())
         , loopApprove = const (fail "unexpected tool request")
-        , loopReadSteering = readSteeringInputs steering
+        , loopReadSteering = Steering.reserveSteeringInputs steering
+        , loopWaitSteering = STM.atomically . Steering.awaitUserSteeringAfter steering
         , loopCommitSteering = commitSteeringInputs steering
         , loopCloseSteering = pure []
         , loopInterrupt = pure ()

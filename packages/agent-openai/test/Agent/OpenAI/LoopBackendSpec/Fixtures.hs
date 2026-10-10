@@ -28,6 +28,8 @@ module Agent.OpenAI.LoopBackendSpec.Fixtures
     ) where
 
 import Agent.Cancel (newCancelFlag)
+import Control.Concurrent qualified as Concurrent
+import Control.Monad qualified as Monad
 import Agent.Error (ApiError(..))
 import qualified Agent.Responses.Codec as ResponsesCodec
 import Agent.Loop
@@ -82,6 +84,7 @@ loopConfig backend = do
         , loopOnEvent = const (pure ())
         , loopApprove = const (pure ToolApprovalGranted)
         , loopReadSteering = pure []
+        , loopWaitSteering = \_ -> Monad.forever (Concurrent.threadDelay maxBound)
         , loopCommitSteering = const (pure ())
         , loopCloseSteering = pure []
         , loopInterrupt = pure ()

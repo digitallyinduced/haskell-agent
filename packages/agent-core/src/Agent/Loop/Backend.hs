@@ -132,6 +132,10 @@ data BackendCallbacks = BackendCallbacks
     -- A callback keeps this policy intact through backend middleware and
     -- dynamic provider switching. The default is InterruptThenCancel.
     , onCancellationMode :: !(BackendCancellationMode -> IO ())
+    -- | Register a request-scoped in-band steering interrupt. True means the
+    -- request accepted the interrupt and can be drained normally. Clear the
+    -- registration when the request closes; retained actions must return False.
+    , onSteeringInterrupt :: !(Maybe (IO Bool) -> IO ())
     }
 
 data Backend = BackendInternal
@@ -163,6 +167,7 @@ backendWithCallbacks callbackSubmit =
             , onRecoveryCheckpoint = const (pure ())
             , onCompletedResponseItem = \_ _ -> pure ()
             , onCancellationMode = const (pure ())
+            , onSteeringInterrupt = const (pure ())
             }
 
 data BackendStateStore = BackendStateStore

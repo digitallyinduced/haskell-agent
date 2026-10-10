@@ -56,6 +56,7 @@ import Codec.Picture.Types (convertImage)
 import qualified Codec.Compression.Zlib as Zlib
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (cancel, wait, withAsync)
+import Control.Concurrent.STM (atomically, retry)
 import Control.Concurrent.MVar
     ( newEmptyMVar
     , putMVar
@@ -90,6 +91,346 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "runLoop" do
+    describe "instant steering" do
+        mapM_ (\partial ->
+            it ("preempts an unfinished submission with partial output " <> show partial) do
+                ready <- newEmptyMVar
+                joined <- newIORef False
+                requests <- newIORef []
+                let backend = backendWithCallbacks \state previous inputs callbacks -> do
+                        callbacks.onCancellationMode CancelSubmission
+                        count <- atomicModifyIORef' requests \seen ->
+                            (seen <> [(previous, inputs)], length seen)
+                        if count == 0
+                            then (do
+                                when partial $
+                                    callbacks.onLoopEvent (TextDelta "unfinished")
+                                putMVar ready ()
+                                atomically retry)
+                                `Exception.finally` writeIORef joined True
+                            else do
+                                readIORef joined `shouldReturn` True
+                                state.backendItems `shouldBe` []
+                                pure $ Right BackendResult
+                                    { backendOutput = emptyTurnOutput "replacement" [] (Just "revised")
+                                    , backendState = advanceBackendSnapshot state
+                                        (turnInputsToItems inputs) Nothing
+                                    }
+                config0 <- testConfig backend
+                (config, enqueue) <- testSteeringConfig config0
+                execution <- timeout 2000000 $
+                    withAsync (runLoopInputsDetailed config Nothing [UserMessage "original"]) \running -> do
+                        takeMVar ready
+                        enqueue [UserMessage "new guidance"]
+                        wait running
+                fmap (.executionResult) execution `shouldBe` Just (Right LoopResult
+                    { finalResponseId = "replacement"
+                    , finalText = Just "revised"
+                    , turnsUsed = 1
+                    , tokenUsage = emptyTokenUsage
+                    })
+                readIORef requests `shouldReturn`
+                    [ (Nothing, [UserMessage "original"])
+                    , (Nothing, [UserMessage "original", UserMessage "new guidance"])
+                    ]
+                config.loopReadSteering `shouldReturn` [])
+            [False, True]
+
+        it "incorporates repeated steering exactly once without preempting on submitted inputs" do
+            ready <- newEmptyMVar
+            requests <- newIORef []
+            let backend = backendWithCallbacks \state _ inputs callbacks -> do
+                    callbacks.onCancellationMode CancelSubmission
+                    count <- atomicModifyIORef' requests \seen ->
+                        (seen <> [inputs], length seen)
+                    if count < 2
+                        then putMVar ready () >> atomically retry
+                        else pure $ Right BackendResult
+                            { backendOutput = emptyTurnOutput "replacement" [] (Just "revised")
+                            , backendState = advanceBackendSnapshot state
+                                (turnInputsToItems inputs) Nothing
+                            }
+            config0 <- testConfig backend
+            (config, enqueue) <- testSteeringConfig config0
+            completed <- timeout 2000000 $
+                withAsync (runLoop config Nothing "original") \running -> do
+                    takeMVar ready
+                    enqueue [UserMessage "first guidance"]
+                    takeMVar ready
+                    enqueue [UserMessage "second guidance"]
+                    wait running
+            completed `shouldSatisfy` \case Just (Right _) -> True; _ -> False
+            readIORef requests `shouldReturn`
+                [ [UserMessage "original"]
+                , [UserMessage "original", UserMessage "first guidance"]
+                , [UserMessage "original", UserMessage "first guidance", UserMessage "second guidance"]
+                ]
+            config.loopReadSteering `shouldReturn` []
+
+        mapM_ (\asynchronous ->
+          it ("retains completed items and real tool results with async execution " <> show asynchronous) do
+            ready <- newEmptyMVar
+            toolReady <- newEmptyMVar
+            releaseTool <- newEmptyMVar
+            requests <- newIORef (0 :: Int)
+            executions <- newIORef (0 :: Int)
+            let call = (if asynchronous then asyncFunctionToolCall else functionToolCall)
+                    "saved" "save" "{}"
+                tool = (if asynchronous then asyncNoArgsTool else noArgsAppTool) "save" do
+                    modifyIORef' executions (+ 1)
+                    when asynchronous do
+                        putMVar toolReady ()
+                        takeMVar releaseTool
+                    pure (Right "saved result")
+                result = (functionResult "saved" "saved result")
+                    { toolResultMode = if asynchronous then AsyncToolCall else BlockingToolCall }
+            -- Decode a provider-native completed call, rather than synthesizing
+            -- an assistant message from streamed argument fragments.
+            let completedItem = Json.decodeEither responseItemDecoder
+                    "{\"type\":\"function_call\",\"call_id\":\"saved\",\"name\":\"save\",\"arguments\":\"{}\",\"status\":\"completed\"}"
+            case completedItem of
+                Left err -> expectationFailure (show err)
+                Right nativeCall -> do
+                    let backend = backendWithCallbacks \state _ inputs callbacks -> do
+                            callbacks.onCancellationMode CancelSubmission
+                            count <- atomicModifyIORef' requests \n -> (n + 1, n)
+                            if count == 0
+                                then do
+                                    callbacks.onCompletedResponseItem nativeCall (Just call)
+                                    when asynchronous (callbacks.onAsyncToolCall call)
+                                    putMVar ready ()
+                                    atomically retry
+                                else do
+                                    state.backendItems `shouldBe`
+                                        turnInputsToItems [UserMessage "original"] <> [nativeCall]
+                                    inputs `shouldBe`
+                                        [ CompletedTool result
+                                        , UserMessage "new guidance"
+                                        ]
+                                    pure $ Right BackendResult
+                                        { backendOutput = emptyTurnOutput "replacement" [] (Just "revised")
+                                        , backendState = advanceBackendSnapshot state
+                                            (state.backendItems <> turnInputsToItems inputs) Nothing
+                                        }
+                    config0 <- testConfig backend
+                    (config, enqueue) <- testSteeringConfig
+                        config0 { loopTools = registryFromTools [tool] }
+                    completed <- timeout 2000000 $
+                        withAsync (runLoop config Nothing "original") \running -> do
+                            takeMVar ready
+                            when asynchronous (takeMVar toolReady)
+                            enqueue [UserMessage "new guidance"]
+                            when asynchronous (putMVar releaseTool ())
+                            wait running
+                    completed `shouldSatisfy` \case Just (Right _) -> True; _ -> False
+                    readIORef executions `shouldReturn` 1)
+          [False, True]
+
+        mapM_ (\accepted ->
+          it ("retains terminal continuation and usage when native interrupt returns " <> show accepted) do
+            ready <- newEmptyMVar
+            interrupted <- newEmptyMVar
+            requests <- newIORef []
+            let usage = TokenUsage 20 7 4
+                backend = backendWithCallbacks \state previous inputs callbacks -> do
+                    callbacks.onCancellationMode CancelSubmission
+                    count <- atomicModifyIORef' requests \seen ->
+                        (seen <> [(previous, inputs)], length seen)
+                    if count == 0
+                        then do
+                            callbacks.onSteeringInterrupt $
+                                Just (accepted <$ putMVar interrupted ())
+                            putMVar ready ()
+                            takeMVar interrupted
+                            pure $ Right BackendResult
+                                { backendOutput = (emptyTurnOutput "interrupted" [] Nothing)
+                                    { tokenUsage = usage }
+                                , backendState = advanceBackendSnapshot state
+                                    (turnInputsToItems inputs <> [stateMarker])
+                                    (Just (BackendContinuation "test" "interrupted"))
+                                }
+                        else do
+                            state.backendItems `shouldBe`
+                                turnInputsToItems [UserMessage "original"] <> [stateMarker]
+                            state.backendContinuation `shouldBe`
+                                Just (BackendContinuation "test" "interrupted")
+                            pure $ Right BackendResult
+                                { backendOutput = emptyTurnOutput "replacement" [] (Just "revised")
+                                , backendState = advanceBackendSnapshot state
+                                    (state.backendItems <> turnInputsToItems inputs) Nothing
+                                }
+            config0 <- testConfig backend
+            (config, enqueue) <- testSteeringConfig config0
+            completed <- timeout 2000000 $
+                withAsync (runLoop config Nothing "original") \running -> do
+                    takeMVar ready
+                    enqueue [UserMessage "new guidance"]
+                    wait running
+            completed `shouldBe` Just (Right LoopResult
+                { finalResponseId = "replacement"
+                , finalText = Just "revised"
+                , turnsUsed = 2
+                , tokenUsage = usage
+                })
+            readIORef requests `shouldReturn`
+                [ (Nothing, [UserMessage "original"])
+                , (Just "interrupted", [UserMessage "new guidance"])
+                ]
+            config.loopReadSteering `shouldReturn` [])
+          [True, False]
+
+        it "uses a newer checkpoint when steering supersedes an unfinished response" do
+            ready <- newEmptyMVar
+            requests <- newIORef (0 :: Int)
+            let newer = advanceBackendSnapshot emptyBackendSnapshot [stateMarker] Nothing
+                backend = backendWithCallbacks \state _ inputs callbacks -> do
+                    callbacks.onCancellationMode CancelSubmission
+                    count <- atomicModifyIORef' requests \n -> (n + 1, n)
+                    if count == 0
+                        then do
+                            callbacks.onRecoveryCheckpoint "obsolete work"
+                            callbacks.onCompletedResponseItem stateMarker Nothing
+                            putMVar ready ()
+                            atomically retry
+                        else do
+                            state `shouldBe` newer
+                            inputs `shouldBe` [UserMessage "original", UserMessage "new guidance"]
+                            pure $ Right BackendResult
+                                { backendOutput = emptyTurnOutput "replacement" [] (Just "revised")
+                                , backendState = advanceBackendSnapshot state
+                                    (state.backendItems <> turnInputsToItems inputs) Nothing
+                                }
+            config0 <- testConfig backend
+            (config, enqueue) <- testSteeringConfig config0
+            completed <- timeout 2000000 $
+                withAsync (runLoop config Nothing "original") \running -> do
+                    takeMVar ready
+                    _ <- config.loopBackendState.commitBackendState newer
+                    enqueue [UserMessage "new guidance"]
+                    wait running
+            completed `shouldSatisfy` \case Just (Right _) -> True; _ -> False
+
+        it "cancels promptly while a native interrupt is draining its response" do
+            ready <- newEmptyMVar
+            interrupted <- newEmptyMVar
+            joined <- newIORef False
+            let backend = backendWithCallbacks \_ _ _ callbacks ->
+                    (do
+                        callbacks.onCancellationMode CancelSubmission
+                        callbacks.onSteeringInterrupt $
+                            Just (True <$ putMVar interrupted ())
+                        putMVar ready ()
+                        atomically retry)
+                    `Exception.finally` writeIORef joined True
+            config0 <- testConfig backend
+            (config, enqueue) <- testSteeringConfig config0
+            completed <- timeout 1000000 $
+                withAsync (runLoop config Nothing "original") \running -> do
+                    takeMVar ready
+                    enqueue [UserMessage "new guidance"]
+                    takeMVar interrupted
+                    requestCancel config.loopCancel
+                    wait running
+            completed `shouldBe` Just (Left (LoopCancelled []))
+            readIORef joined `shouldReturn` True
+            config.loopReadSteering `shouldReturn` [UserMessage "new guidance"]
+
+        it "still honors cancellation after a steering restart" do
+            ready <- newEmptyMVar
+            let backend = backendWithCallbacks \_ _ _ callbacks -> do
+                    callbacks.onCancellationMode CancelSubmission
+                    putMVar ready ()
+                    atomically retry
+            config0 <- testConfig backend
+            (config, enqueue) <- testSteeringConfig config0
+            completed <- timeout 2000000 $
+                withAsync (runLoop config Nothing "original") \running -> do
+                    takeMVar ready
+                    enqueue [UserMessage "new guidance"]
+                    takeMVar ready
+                    requestCancel config.loopCancel
+                    wait running
+            completed `shouldBe` Just (Left (LoopCancelled []))
+            config.loopReadSteering `shouldReturn` [UserMessage "new guidance"]
+
+        mapM_ (\accepted ->
+          it ("drains a native interrupt before replacement with acceptance " <> show accepted) do
+            ready <- newEmptyMVar
+            interruptObserved <- newEmptyMVar
+            releaseResponse <- newEmptyMVar
+            replacementStarted <- newEmptyMVar
+            requests <- newIORef []
+            cancelled <- newIORef False
+            let backend = backendWithCallbacks \state previous inputs callbacks -> do
+                    callbacks.onCancellationMode CancelSubmission
+                    count <- atomicModifyIORef' requests \seen ->
+                        (seen <> [(previous, inputs)], length seen)
+                    if count == 0
+                        then do
+                            -- The transport has closed its interrupt slot, but
+                            -- its authoritative result is not returned yet.
+                            callbacks.onSteeringInterrupt (Just do
+                                putMVar interruptObserved ()
+                                pure accepted)
+                            putMVar ready ()
+                            (takeMVar releaseResponse
+                                `Exception.onException` writeIORef cancelled True)
+                            pure $ Right BackendResult
+                                { backendOutput = emptyTurnOutput "drained" [] (Just "initial")
+                                , backendState = advanceBackendSnapshot state
+                                    (turnInputsToItems inputs) Nothing
+                                }
+                        else do
+                            putMVar replacementStarted ()
+                            pure $ Right BackendResult
+                                { backendOutput = emptyTurnOutput "replacement" [] (Just "revised")
+                                , backendState = advanceBackendSnapshot state
+                                    (state.backendItems <> turnInputsToItems inputs) Nothing
+                                }
+            config0 <- testConfig backend
+            (config, enqueue) <- testSteeringConfig config0
+            completed <- timeout 3000000 $
+                withAsync (runLoop config Nothing "original") \running -> do
+                    takeMVar ready
+                    enqueue [UserMessage "new guidance"]
+                    takeMVar interruptObserved
+                    -- A replacement must not race ahead of result delivery.
+                    timeout 100000 (readMVar replacementStarted) `shouldReturn` Nothing
+                    putMVar releaseResponse ()
+                    wait running
+            completed `shouldSatisfy` \case Just (Right _) -> True; _ -> False
+            readIORef cancelled `shouldReturn` False
+            readIORef requests `shouldReturn`
+                [ (Nothing, [UserMessage "original"])
+                , (Just "drained", [UserMessage "new guidance"])
+                ])
+          [False, True]
+
+        it "cancels promptly while a native steering interrupt is draining" do
+            ready <- newEmptyMVar
+            interruptObserved <- newEmptyMVar
+            joined <- newIORef False
+            let backend = backendWithCallbacks \_ _ _ callbacks ->
+                    (do
+                        callbacks.onCancellationMode CancelSubmission
+                        callbacks.onSteeringInterrupt (Just do
+                            putMVar interruptObserved ()
+                            pure True)
+                        putMVar ready ()
+                        atomically retry)
+                    `Exception.finally` writeIORef joined True
+            config0 <- testConfig backend
+            (config, enqueue) <- testSteeringConfig config0
+            completed <- timeout 1000000 $
+                withAsync (runLoop config Nothing "original") \running -> do
+                    takeMVar ready
+                    enqueue [UserMessage "new guidance"]
+                    takeMVar interruptObserved
+                    requestCancel config.loopCancel
+                    wait running
+            completed `shouldBe` Just (Left (LoopCancelled []))
+            readIORef joined `shouldReturn` True
+
     describe "request tool discovery" do
         it "exposes discovered handlers only on the following request" do
             discovered <- newIORef False

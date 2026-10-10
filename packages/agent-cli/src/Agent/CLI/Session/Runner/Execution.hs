@@ -1439,7 +1439,10 @@ buildSessionLoopConfig
                 Just reason -> pure (ToolApprovalDenied reason)
                 Nothing -> approvalRuntime.approvalApproveRegistered call
         , loopReadSteering =
-            readSteeringInputs controls.controlSteeringInputs
+            reserveSteeringInputs controls.controlSteeringInputs
+        , loopWaitSteering = \submittedCount ->
+            atomically $
+                awaitUserSteeringAfter controls.controlSteeringInputs submittedCount
         , loopCommitSteering = \count ->
             commitSteeringInputs controls.controlSteeringInputs count
         -- A native host that steers the turn needs every accepted input

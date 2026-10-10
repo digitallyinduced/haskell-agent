@@ -64,11 +64,12 @@ import Agent.CLI.SteeringInputs
     ( SteeringInputs
     , awaitSteeringInput
     , awaitSteeringInputReady
+    , awaitUserSteeringAfter
     , commitSteeringInputs
     , dismissBackgroundCompletion
     , enqueueBackgroundCompletion
     , newSteeringInputs
-    , readSteeringInputs
+    , reserveSteeringInputs
     )
 import Agent.Runtime.ModelConfig
     (connectionSupportsDialect, organizationGatewayConnectionId)
@@ -1449,7 +1450,8 @@ runPreparedChild runtime env session toolEnv toolRegistry backend onEvent runChi
                 \call -> do
                     policy <- readIORef runtime.subagentPolicy
                     childApprove policy toolRegistry call
-            , loopReadSteering = readSteeringInputs steering
+            , loopReadSteering = reserveSteeringInputs steering
+            , loopWaitSteering = atomically . awaitUserSteeringAfter steering
             , loopCommitSteering = commitSteeringInputs steering
             , loopCloseSteering = pure []
             , loopInterrupt = pure ()

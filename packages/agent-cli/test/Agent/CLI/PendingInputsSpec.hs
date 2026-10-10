@@ -20,6 +20,7 @@ import Agent.CLI.SteeringInputs
     ( awaitSteeringInput
     , awaitSteeringInputReady
     , awaitUserSteering
+    , awaitUserSteeringAfter
     , clearSteeringInputs
     , closeSteeringInputs
     , commitSteeringInputs
@@ -32,6 +33,7 @@ import Agent.CLI.SteeringInputs
     , prepareBackgroundCompletion
     , readSteeringInputs
     , readSteeringTurn
+    , reserveSteeringInputs
     , steeringInputCountLimit
     , steeringInputByteLimit
     , suppressUserSteeringWake
@@ -242,6 +244,7 @@ spec = do
                     ioError (userError "callback failed")
                 , onCompletedResponseItem = \_ _ -> pure ()
                 , onCancellationMode = const (pure ())
+                , onSteeringInterrupt = const (pure ())
                 }
         result <- tryAny $ backend.submitTurnWithCallbacks emptyBackendSnapshot Nothing
             [UserMessage "parent"] callbacks
@@ -652,6 +655,115 @@ spec = do
         ready `shouldReturn` True
         commitSteeringInputs steering 2
         ready `shouldReturn` False
+
+    it "interrupts only for user guidance beyond the submitted prefix" do
+        steering <- newSteeringInputs
+        let ready count = atomically $
+                (awaitUserSteeringAfter steering count >> pure True)
+                    `orElse` pure False
+            first = UserMessage "use the existing schema"
+            second = UserMessage "also add tests"
+            completion = UserMessage "build completed"
+        ready 0 `shouldReturn` False
+        enqueueSteeringInputs steering [first] `shouldReturn` Right ()
+        ready 0 `shouldReturn` True
+        ready 1 `shouldReturn` False
+        enqueueBackgroundCompletion steering "build" completion
+            `shouldReturn` Right True
+        ready 1 `shouldReturn` False
+        enqueueSteeringInputs steering [second] `shouldReturn` Right ()
+        ready 1 `shouldReturn` True
+        ready 2 `shouldReturn` True
+        ready 3 `shouldReturn` False
+        ready 1 `shouldReturn` True
+        readSteeringInputs steering `shouldReturn` [first, completion, second]
+        hasSteeringInputWake steering `shouldReturn` True
+        commitSteeringInputs steering 2
+        ready 0 `shouldReturn` True
+        ready 1 `shouldReturn` False
+
+    it "retains dismissed submitted notices without hiding or acknowledging new guidance" do
+        steering <- newSteeringInputs
+        let completion = UserMessage "build completed"
+            guidance = UserMessage "change the implementation"
+        enqueueBackgroundCompletion steering "build" completion
+            `shouldReturn` Right True
+        submitted <- reserveSteeringInputs steering
+        submitted `shouldBe` [completion]
+        dismissBackgroundCompletion steering "build"
+        enqueueSteeringInputs steering [guidance] `shouldReturn` Right ()
+        atomically
+            ((awaitUserSteeringAfter steering (length submitted) >> pure True)
+                `orElse` pure False)
+            `shouldReturn` True
+        readSteeringInputs steering `shouldReturn` [completion, guidance]
+        commitSteeringInputs steering (length submitted)
+        readSteeringInputs steering `shouldReturn` [guidance]
+        hasBackgroundCompletions steering `shouldReturn` False
+
+    it "allows dismissal beyond the reserved prefix and releases reservations on reset" do
+        steering <- newSteeringInputs
+        let completion = UserMessage "submitted completion"
+        enqueueBackgroundCompletion steering "submitted" completion
+            `shouldReturn` Right True
+        reserveSteeringInputs steering `shouldReturn` [completion]
+        enqueueBackgroundCompletion steering "unsubmitted" (UserMessage "later completion")
+            `shouldReturn` Right True
+        dismissBackgroundCompletion steering "unsubmitted"
+        readSteeringInputs steering `shouldReturn` [completion]
+        clearSteeringInputs steering
+        enqueueBackgroundCompletion steering "new-conversation" completion
+            `shouldReturn` Right True
+        dismissBackgroundCompletion steering "new-conversation"
+        readSteeringInputs steering `shouldReturn` []
+
+    it "reserves idle-turn and final-close snapshots against dismissal" do
+        steering <- newSteeringInputs
+        let completion = UserMessage "completed"
+        enqueueBackgroundCompletion steering "idle" completion
+            `shouldReturn` Right True
+        readSteeringTurn steering `shouldReturn` ("", [completion])
+        dismissBackgroundCompletion steering "idle"
+        readSteeringInputs steering `shouldReturn` [completion]
+        commitSteeringInputs steering 1
+        enqueueBackgroundCompletion steering "closing" completion
+            `shouldReturn` Right True
+        closeSteeringInputs steering `shouldReturn` [completion]
+        dismissBackgroundCompletion steering "closing"
+        readSteeringInputs steering `shouldReturn` [completion]
+        commitSteeringInputs steering 1
+        readSteeringInputs steering `shouldReturn` []
+
+    it "retains the remaining reservation after a partial acknowledgement" do
+        steering <- newSteeringInputs
+        let first = UserMessage "first completion"
+            second = UserMessage "second completion"
+            guidance = UserMessage "new guidance"
+        enqueueBackgroundCompletion steering "first" first
+            `shouldReturn` Right True
+        enqueueBackgroundCompletion steering "second" second
+            `shouldReturn` Right True
+        reserveSteeringInputs steering `shouldReturn` [first, second]
+        commitSteeringInputs steering 1
+        dismissBackgroundCompletion steering "second"
+        enqueueSteeringInputs steering [guidance] `shouldReturn` Right ()
+        commitSteeringInputs steering 1
+        readSteeringInputs steering `shouldReturn` [guidance]
+
+    it "broadcasts new guidance beyond a submitted prefix to concurrent waits" do
+        steering <- newSteeringInputs
+        enqueueSteeringInputs steering [UserMessage "already submitted"]
+            `shouldReturn` Right ()
+        let completed (Just (Right ())) = True
+            completed _ = False
+        withAsync (atomically (awaitUserSteeringAfter steering 1)) \first ->
+            withAsync (atomically (awaitUserSteeringAfter steering 1)) \second -> do
+                enqueueSteeringInputs steering [UserMessage "new instruction"]
+                    `shouldReturn` Right ()
+                timeout 1000000 (waitCatch first) >>= (`shouldSatisfy` completed)
+                timeout 1000000 (waitCatch second) >>= (`shouldSatisfy` completed)
+                readSteeringInputs steering `shouldReturn`
+                    [UserMessage "already submitted", UserMessage "new instruction"]
 
     it "broadcasts arriving guidance to concurrent passive waits" do
         steering <- newSteeringInputs

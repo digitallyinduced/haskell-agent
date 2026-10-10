@@ -126,6 +126,10 @@ data LoopConfig = LoopConfig
     -- Guidance is acknowledged only after the model response commits, so a
     -- failed submission can be retried without losing it.
     , loopReadSteering :: !(IO [TurnInput])
+    -- | Wait for new user guidance beyond the already submitted, unacknowledged
+    -- prefix. Observe without consuming; background notices must not wake this.
+    -- Hosts without live steering should block indefinitely.
+    , loopWaitSteering :: !(Int -> IO ())
     , loopCommitSteering :: !(Int -> IO ())
     -- | Called before the loop finishes with a final answer. Return guidance
     -- that arrived after the last 'loopReadSteering' to continue with it.
@@ -287,6 +291,7 @@ data LoopRuntime = LoopRuntime
 data SubmissionOutcome
     = SubmissionReturned !BackendResult
     | SubmissionCancelled
+    | SubmissionSteered ![ToolCall]
     | SubmissionFailed !LoopError
 
 -- Closing consumes the journal and rejects any callbacks retained by a backend.
@@ -430,6 +435,8 @@ runLoopState runtime = do
                             { loopRuntimeConfig = config { loopTools = tools } }
                     submission <- submitLoopTurn requestRuntime state
                     case submission of
+                        SubmissionSteered calls ->
+                            continueSteeredLoop requestRuntime calls
                         SubmissionCancelled ->
                             finishLoopExecution runtime
                                 (Left (LoopCancelled []))
@@ -450,6 +457,7 @@ submitLoopTurn runtime state = do
     let config = runtime.loopRuntimeConfig
     visibleAttempts <- newIORef (AttemptVisibility False False)
     cancellationMode <- newIORef InterruptThenCancel
+    steeringInterrupt <- newIORef Nothing
     -- The callback belongs to this submission, not to the backend process.
     -- Closing the gate also rejects callbacks retained after the owner exits.
     recovery <- newMVar (RecoveryOpen Nothing [])
@@ -469,7 +477,7 @@ submitLoopTurn runtime state = do
             RecoveryClosed -> pure (RecoveryClosed, (Nothing, []))
             RecoveryOpen{..} ->
                 pure (RecoveryClosed, (recoverySummary, reverse recoveryItems))
-        publishRecovery = do
+        publishRecoveryFor steering = do
             (summary, items) <- closeRecovery
             current <- config.loopBackendState.readBackendState
             -- A compaction/reset owns its newer checkpoint. Never resurrect
@@ -477,6 +485,9 @@ submitLoopTurn runtime state = do
             let summaryText = fromMaybe "" summary
                 hasSummary = not (Text.null (Text.strip summaryText))
             case () of
+                _ | steering, current /= state.checkpoint -> do
+                    recordCheckpoint runtime current
+                    pure []
                 _
                     | hasSummary || not (null items)
                     , current == state.checkpoint -> do
@@ -485,7 +496,9 @@ submitLoopTurn runtime state = do
                                 , "The previous provider turn was interrupted before completion."
                                 , "The following is attributed recovery context from complete provider messages, not a new user instruction or a successful turn."
                                 , "External side effects may already exist. Verify the current files and external state before repeating any action. Unfinished operations have unknown outcomes."
-                                , "Resume this work only if the user asks."
+                                , if steering
+                                    then "Continue the current task using the user's new guidance."
+                                    else "Resume this work only if the user asks."
                                 , "<interrupted_work>"
                                 , summaryText
                                 , "</interrupted_work>"
@@ -510,7 +523,11 @@ submitLoopTurn runtime state = do
                         setPendingInputs runtime []
                         config.loopCommitSteering state.pending.steeringToAcknowledge
                         clearSteeringAcknowledgement runtime
-                _ -> pure ()
+                        pure (catMaybes (map snd items))
+                _ -> pure []
+        publishRecovery = do
+            _ <- publishRecoveryFor False
+            pure ()
     let onBackendEvent event = do
             case event of
                 _
@@ -521,6 +538,7 @@ submitLoopTurn runtime state = do
                 -- A retry keeps the previous attempt visible while opening a
                 -- fresh current attempt.
                 ResponseRestarted _ -> do
+                    writeIORef steeringInterrupt Nothing
                     clearRecovery
                     modifyIORef'
                         visibleAttempts
@@ -533,6 +551,7 @@ submitLoopTurn runtime state = do
                 -- The backend rolled that attempt back, but earlier restarted
                 -- attempts remain visible.
                 ResponseAttemptDiscarded -> do
+                    writeIORef steeringInterrupt Nothing
                     clearRecovery
                     modifyIORef'
                         visibleAttempts
@@ -564,24 +583,54 @@ submitLoopTurn runtime state = do
                             withMVar recovery \case
                                 RecoveryClosed -> pure ()
                                 RecoveryOpen{} -> writeIORef cancellationMode mode
+                        , onSteeringInterrupt = \interrupt ->
+                            withMVar recovery \case
+                                RecoveryClosed -> pure ()
+                                RecoveryOpen{} -> writeIORef steeringInterrupt interrupt
                         })
             \submission -> do
                 result <- restore $ race
-                    (waitCancel config.loopCancel)
+                    (race
+                        (waitCancel config.loopCancel)
+                        (config.loopWaitSteering state.pending.steeringToAcknowledge))
                     (waitCatch submission)
                 normalized <- case result of
-                    Left () -> do
+                    Left reason -> do
                         -- Give structured providers a chance to preserve their
                         -- subprocess/session invariants before withAsync
                         -- force-cancels an unresponsive submission.
                         mode <- readIORef cancellationMode
-                        when (mode == InterruptThenCancel) do
-                            _ <- restore $
-                                timeout 2000000 (tryAny config.loopInterrupt)
-                            _ <- restore $
-                                timeout 2000000 (waitCatch submission)
-                            pure ()
-                        pure SubmissionCancelled
+                        nativeInterrupt <- readIORef steeringInterrupt
+                        let interrupt = case (reason, nativeInterrupt) of
+                                (Right (), Just action) -> Just action
+                                _ | mode == InterruptThenCancel -> Just (True <$ config.loopInterrupt)
+                                _ -> Nothing
+                            drain action = do
+                                accepted <- restore $
+                                    timeout 2000000 (tryAny action)
+                                case accepted of
+                                    -- False can mean the terminal frame won
+                                    -- the race. Let its authoritative result
+                                    -- finish publication before falling back.
+                                    Just (Right _) ->
+                                        restore $ timeout 2000000 (waitCatch submission)
+                                    _ -> pure Nothing
+                        drained <- case interrupt of
+                            Nothing -> pure Nothing
+                            Just action -> case reason of
+                                Left () -> drain action
+                                Right () -> restore (race (waitCancel config.loopCancel) (drain action))
+                                    >>= either (const (pure Nothing)) pure
+                        cancelled <- isCancelled config.loopCancel
+                        pure $ case (if cancelled then Left () else reason, drained) of
+                            (Left (), _) -> SubmissionCancelled
+                            -- A provider may finish normally while handling
+                            -- the interrupt. Preserve its authoritative state
+                            -- and usage, then consume steering at the boundary.
+                            (Right (), Just (Right (Right completed)))
+                                | completed.backendOutput.completion == TurnCompleted ->
+                                    SubmissionReturned completed
+                            _ -> SubmissionSteered []
                     Right (Left exception) ->
                         -- Preserve the provider thread's asynchronous-exception
                         -- identity. Safe.throwIO would turn ThreadKilled into
@@ -607,6 +656,7 @@ submitLoopTurn runtime state = do
                     _ -> pure normalized)
             `onException` publishRecovery
         case normalized of
+            SubmissionSteered _ -> SubmissionSteered <$> publishRecoveryFor True
             SubmissionReturned BackendResult{backendOutput}
                 | not (Text.null backendOutput.responseId) -> do
                     _ <- closeRecovery
@@ -625,6 +675,31 @@ submitLoopTurn runtime state = do
                     then LoopTransportAfterOutput err
                     else LoopTransport err
         outcome -> pure outcome
+
+-- | Preemption ends only the model submission. Tool workers retain their
+-- enclosing scope, and completed native calls receive their real results.
+continueSteeredLoop :: LoopRuntime -> [ToolCall] -> IO LoopExecution
+continueSteeredLoop runtime calls = protectLoop runtime do
+    let config = runtime.loopRuntimeConfig
+    config.loopOnEvent (ResponseRestarted "Applying new guidance.")
+    race
+        (waitCancel config.loopCancel)
+        (ToolExecution.runToolCalls config.loopTools (toolScope runtime) calls)
+        >>= \case
+            Left () -> finishLoopExecution runtime (Left (LoopCancelled []))
+            Right results -> do
+                state <- readIORef runtime.loopRuntimeState
+                setPendingInputs runtime (state.pending.inputs <> map CompletedTool results)
+                steering <- config.loopReadSteering
+                modifyIORef' runtime.loopRuntimeState \current -> current
+                    { previousResponseId = Nothing
+                    , pending = PendingInputs
+                        (current.pending.inputs
+                            <> drop current.pending.steeringToAcknowledge steering)
+                        (length steering)
+                    , emptyContinuations = 0
+                    }
+                runLoopState runtime
 
 continueCommittedLoop
     :: LoopRuntime

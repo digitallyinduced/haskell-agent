@@ -71,6 +71,37 @@ spec = do
                 ]
 
     describe "OpenAI interruption recovery" do
+        it "does not promote terminal partial items from a steered response into backend output or history" do
+            events <- newIORef []
+            let complete = assistantItem "completed commentary"
+                partial = functionCallItem "partial" "read_file" "{\"path\":"
+                terminal = (testResponse "interrupted-response" [complete, partial])
+                    { status = ResponseIncomplete
+                    , incompleteDetails = Just (IncompleteDetails "interrupted")
+                    }
+                -- Even an injected sender exposing the raw terminal cannot
+                -- override the independently completed item journal.
+                normalized = (testResponse "interrupted-response" [complete])
+                    { incompleteDetails = Just (IncompleteDetails "interrupted") }
+                send _ _ onEvent = do
+                    onEvent ResponseOutputItemDoneEvent
+                        { item = complete, outputIndex = Just 0, sequenceNumber = Nothing }
+                    onEvent ResponseIncompleteEvent
+                        { responseValue = terminal, sequenceNumber = Nothing }
+                    pure (Right normalized)
+                backend = openAiBackendWith send (pure baseParams)
+                inputs = [UserMessage "start"]
+            result <- backend.submitTurn emptyBackendSnapshot Nothing inputs
+                (\event -> modifyIORef' events (<> [event]))
+            case result of
+                Left err -> expectationFailure (show err)
+                Right value -> do
+                    value.backendOutput.completion `shouldBe` TurnCompleted
+                    value.backendOutput.toolCalls `shouldBe` []
+                    value.backendState.backendItems `shouldBe`
+                        turnInputsToItems inputs <> [complete]
+            readIORef events `shouldReturn` []
+
         it "replays completed items without a response ID after cancellation, not partial text" do
             ready <- newEmptyMVar
             release <- newEmptyMVar
@@ -917,6 +948,7 @@ spec = do
                             , onRecoveryCheckpoint = const (pure ())
                             , onCompletedResponseItem = \_ _ -> pure ()
                             , onCancellationMode = const (pure ())
+                            , onSteeringInterrupt = const (pure ())
                             , onAsyncToolCall =
                                 \call -> modifyIORef' admitted (call.callId :)
                             }
@@ -968,6 +1000,7 @@ spec = do
                     , onRecoveryCheckpoint = const (pure ())
                     , onCompletedResponseItem = \_ _ -> pure ()
                     , onCancellationMode = const (pure ())
+                    , onSteeringInterrupt = const (pure ())
                     , onAsyncToolCall =
                         \call -> modifyIORef' admitted (call.callId :)
                     }

@@ -8,6 +8,8 @@ import Agent.Responses.Types
 import qualified Agent.Responses.Codec as ResponsesCodec
 import Agent.OpenAI.RequestIdentity (CodexRequestKind(..))
 import Agent.OpenAI.WebSocketClient
+import Control.Concurrent.Async (withAsync, wait)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, readMVar)
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -18,9 +20,94 @@ import Data.Either (isLeft)
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
+import System.Timeout (timeout)
 
 spec :: Spec
 spec = do
+  describe "Responses Lite steering" do
+    it "waits for response.created before sending an early interrupt" do
+        registered <- newEmptyMVar
+        inbound <- newEmptyMVar
+        transmitted <- newEmptyMVar
+        let register (Just action) = putMVar registered action
+            register Nothing = pure ()
+            actions = WebSocketReceiveActions
+                { receiveFrame = Right <$> takeMVar inbound
+                , completeRequest = pure ()
+                , invalidateRequest = const (pure ())
+                }
+            send bytes = putMVar transmitted bytes >> pure (Right ())
+            terminal = lifecycleFrame "response.incomplete" (Aeson.object
+                [ "id" Aeson..= ("resp-early" :: Text)
+                , "incomplete_details" Aeson..= Aeson.object
+                    ["reason" Aeson..= ("interrupted" :: Text)]
+                ])
+        outcome <- timeout 2_000_000 $
+            withAsync (receiveWsResponseWithSteering register send Nothing actions (const (pure ()))) \receiver -> do
+                interrupt <- takeMVar registered
+                withAsync interrupt \request -> do
+                    timeout 10_000 (readMVar transmitted) `shouldReturn` Nothing
+                    putMVar inbound $ lifecycleFrame "response.created"
+                        (Aeson.object ["id" Aeson..= ("resp-early" :: Text)])
+                    _ <- takeMVar transmitted
+                    wait request `shouldReturn` True
+                    putMVar inbound terminal
+                    result <- wait receiver
+                    fmap (.status) result `shouldBe` Right ResponseCompleted
+        outcome `shouldBe` Just ()
+
+    it "interrupts once, drains an empty response, and rejects retained handles" do
+        result <- testSteeringResponse True "interrupted" []
+        case result of
+            Left err -> expectationFailure (show err)
+            Right response -> do
+                response.status `shouldBe` ResponseCompleted
+                response.responseId `shouldBe` "resp-test"
+                response.output `shouldBe` []
+                fmap (.totalTokens) response.usage `shouldBe` Just 12
+
+    it "preserves completed items but discards a partially streamed tool" do
+        let complete = Aeson.object
+                [ "type" Aeson..= ("message" :: Text)
+                , "id" Aeson..= ("message-1" :: Text)
+                , "role" Aeson..= ("assistant" :: Text)
+                , "status" Aeson..= ("completed" :: Text)
+                , "content" Aeson..= [Aeson.object
+                    [ "type" Aeson..= ("output_text" :: Text)
+                    , "text" Aeson..= ("Completed explanation" :: Text)
+                    , "annotations" Aeson..= ([] :: [Aeson.Value])
+                    ]]
+                ]
+            partial = Aeson.object
+                [ "type" Aeson..= ("function_call" :: Text)
+                , "id" Aeson..= ("tool-1" :: Text)
+                , "call_id" Aeson..= ("call-1" :: Text)
+                , "name" Aeson..= ("shell_command" :: Text)
+                , "arguments" Aeson..= ("{\"command\":" :: Text)
+                ]
+            itemFrame kind index item = Aeson.encode $ Aeson.object
+                [ "type" Aeson..= (kind :: Text)
+                , "output_index" Aeson..= (index :: Int)
+                , "item" Aeson..= item
+                ]
+        result <- testSteeringResponse True "interrupted"
+            [ itemFrame "response.output_item.done" 0 complete
+            , itemFrame "response.output_item.added" 1 partial
+            ]
+        case result of
+            Left err -> expectationFailure (show err)
+            Right response -> do
+                length response.output `shouldBe` 1
+                [() | FunctionCallItem{} <- response.output] `shouldBe` []
+
+    it "does not reinterpret unsolicited interruption as successful steering" do
+        result <- testSteeringResponse False "interrupted" []
+        result `shouldSatisfy` isLeft
+
+    it "does not reinterpret other incomplete reasons after steering" do
+        result <- testSteeringResponse True "content_filter" []
+        result `shouldSatisfy` isLeft
+
   describe "CodexTurnState" do
     it "keeps the first token through continuations and clears it at turn end" do
         turnState <- newCodexTurnState
@@ -836,6 +923,78 @@ withInputItems items ResponseCreateParams { input = _, .. } =
 withModel :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams
 withModel nextModel ResponseCreateParams { model = _, .. } =
     ResponseCreateParams { model = nextModel, .. }
+
+testSteeringResponse :: Bool -> Text -> [LBS.ByteString] -> IO (Either ApiError Response)
+testSteeringResponse steer reason intermediate = do
+    registered <- newIORef (Nothing :: Maybe (IO Bool))
+    retained <- newIORef (pure False)
+    sent <- newIORef ([] :: [Aeson.Value])
+    completed <- newIORef (0 :: Int)
+    observedOutput <- newIORef Nothing
+    frames <- newIORef $
+        [lifecycleFrame "response.created" (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])]
+        <> intermediate
+        <> [lifecycleFrame "response.incomplete" (Aeson.object
+            [ "id" Aeson..= ("resp-test" :: Text)
+            , "status" Aeson..= ("incomplete" :: Text)
+            , "incomplete_details" Aeson..= Aeson.object ["reason" Aeson..= reason]
+            , "output" Aeson..= [Aeson.object
+                [ "type" Aeson..= ("function_call" :: Text)
+                , "call_id" Aeson..= ("terminal-partial" :: Text)
+                , "name" Aeson..= ("shell_command" :: Text)
+                , "arguments" Aeson..= ("{\"command\":" :: Text)
+                , "status" Aeson..= ("in_progress" :: Text)
+                ] | steer && reason == "interrupted"]
+            , "usage" Aeson..= Aeson.object
+                [ "input_tokens" Aeson..= (10 :: Int)
+                , "output_tokens" Aeson..= (2 :: Int)
+                , "total_tokens" Aeson..= (12 :: Int)
+                ]
+            ])]
+    let register callback = do
+            writeIORef registered callback
+            case callback of
+                Just action -> writeIORef retained action
+                Nothing -> pure ()
+        send bytes = case Aeson.eitherDecode bytes of
+            Left err -> expectationFailure err >> pure (Left (ConnectionError "invalid JSON"))
+            Right value -> modifyIORef' sent (<> [value]) >> pure (Right ())
+        actions = WebSocketReceiveActions
+            { receiveFrame = atomicModifyIORef' frames \case
+                frame : rest -> (rest, Right frame)
+                [] -> error "unexpected receive after interrupted terminal"
+            , completeRequest = modifyIORef' completed (+ 1)
+            , invalidateRequest = const (pure ())
+            }
+        observe ResponseCreatedEvent{} | steer = do
+            callback <- readIORef registered
+            case callback of
+                Nothing -> expectationFailure "missing request interrupt"
+                Just interrupt -> do
+                    interrupt `shouldReturn` True
+                    interrupt `shouldReturn` True
+        observe ResponseIncompleteEvent { responseValue } = do
+            writeIORef observedOutput (Just responseValue.output)
+            (readIORef retained >>= id) `shouldReturn` False
+        observe _ = pure ()
+    result <- receiveWsResponseWithSteering register send (Just "gpt-6-sol") actions observe
+    (readIORef retained >>= id) `shouldReturn` False
+    callback <- readIORef registered
+    case callback of
+        Nothing -> pure ()
+        Just _ -> expectationFailure "interrupt registration survived response"
+    readIORef sent `shouldReturn`
+        [Aeson.object
+            [ "type" Aeson..= ("response.interrupt" :: Text)
+            , "response_id" Aeson..= ("resp-test" :: Text)
+            , "mode" Aeson..= ("discard_partial_items" :: Text)
+            ] | steer]
+    readIORef completed `shouldReturn` (if steer && reason == "interrupted" then 1 else 0)
+    case result of
+        Right response | steer && reason == "interrupted" ->
+            readIORef observedOutput `shouldReturn` Just response.output
+        _ -> pure ()
+    pure result
 
 responseWithOutput :: [ResponseItem] -> Response
 responseWithOutput output =
