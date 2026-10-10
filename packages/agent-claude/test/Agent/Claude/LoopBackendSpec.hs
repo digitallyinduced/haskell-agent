@@ -1,5 +1,7 @@
 module Agent.Claude.LoopBackendSpec (spec) where
 
+import qualified Control.Concurrent as Concurrent
+import qualified Control.Monad as Monad
 import Agent.Claude.LoopBackend
     ( appendHostTranscript
     , claudeCodeOneShotBackend
@@ -1457,6 +1459,7 @@ spec = do
                                         , Loop.onRecoveryCheckpoint = writeIORef recovery
                                         , Loop.onCompletedResponseItem = \_ _ -> pure ()
                                         , Loop.onCancellationMode = const (pure ())
+                                        , Loop.onSteeringInterrupt = const (pure ())
                                         }
                                 result <- timeout 5_000_000
                                     (backend.submitTurnWithCallbacks emptyBackendSnapshot Nothing
@@ -1528,6 +1531,7 @@ spec = do
                                             , Loop.loopOnEvent = \_ -> pure ()
                                             , Loop.loopApprove = \_ -> pure Loop.ToolApprovalGranted
                                             , Loop.loopReadSteering = pure []
+                                            , Loop.loopWaitSteering = \_ -> Monad.forever (Concurrent.threadDelay maxBound)
                                             , Loop.loopCommitSteering = \_ -> pure ()
                                             , Loop.loopCloseSteering = pure []
                                             , Loop.loopInterrupt = pure ()

@@ -20,10 +20,12 @@ import Agent.Loop
     )
 import Agent.Loop.SteeringInputs
     ( SteeringInputs
+    , awaitUserSteeringAfter
     , commitSteeringInputs
     , enqueueBackgroundCompletion
     , newSteeringInputs
     , readSteeringInputs
+    , reserveSteeringInputs
     )
 import Agent.Subagents
     ( ChildBackgroundTasks(..)
@@ -99,7 +101,8 @@ backgroundChildConfig steering requests = do
         , loopMaxTurns = 5
         , loopOnEvent = const (pure ())
         , loopApprove = const (fail "unexpected tool request")
-        , loopReadSteering = readSteeringInputs steering
+        , loopReadSteering = reserveSteeringInputs steering
+        , loopWaitSteering = atomically . awaitUserSteeringAfter steering
         , loopCommitSteering = commitSteeringInputs steering
         , loopCloseSteering = pure []
         , loopInterrupt = pure ()

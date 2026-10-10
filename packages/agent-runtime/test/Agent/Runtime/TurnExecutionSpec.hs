@@ -1,6 +1,8 @@
 module Agent.Runtime.TurnExecutionSpec (spec) where
 
 import Agent.Cancel (newCancelFlag, requestCancel)
+import qualified Control.Concurrent as Concurrent
+import qualified Control.Monad as Monad
 import Agent.Error (ApiError(..))
 import Agent.Loop
 import Agent.Responses.LoopBackend (turnInputsToItems)
@@ -245,6 +247,7 @@ configFor initial backend = do
         , loopOnEvent = const (pure ())
         , loopApprove = const (pure ToolApprovalRejected)
         , loopReadSteering = pure []
+        , loopWaitSteering = \_ -> Monad.forever (Concurrent.threadDelay maxBound)
         , loopCommitSteering = const (pure ())
         , loopCloseSteering = pure []
         , loopInterrupt = pure ()

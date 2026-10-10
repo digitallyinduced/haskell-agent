@@ -33,11 +33,12 @@ import Agent.Loop.SteeringInputs
     ( SteeringInputs
     , awaitSteeringInput
     , awaitSteeringInputReady
+    , awaitUserSteeringAfter
     , commitSteeringInputs
     , dismissBackgroundCompletion
     , enqueueBackgroundCompletion
     , newSteeringInputs
-    , readSteeringInputs
+    , reserveSteeringInputs
     )
 import Agent.Subagents.History (trimDanglingToolSuffix)
 import Agent.Subagents.Registry (SubagentRegistry, setPreviousResponseId)
@@ -132,7 +133,8 @@ runChildTurn registry env child start = do
             , loopMaxTurns = child.childMaxTurns
             , loopOnEvent = child.childOnEvent
             , loopApprove = child.childApproval
-            , loopReadSteering = readSteeringInputs steering
+            , loopReadSteering = reserveSteeringInputs steering
+            , loopWaitSteering = atomically . awaitUserSteeringAfter steering
             , loopCommitSteering = commitSteeringInputs steering
             , loopCloseSteering = pure []
             , loopInterrupt = pure ()

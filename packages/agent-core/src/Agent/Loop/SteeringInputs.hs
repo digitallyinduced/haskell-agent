@@ -4,6 +4,7 @@ module Agent.Loop.SteeringInputs
     , awaitSteeringInput
     , awaitSteeringInputReady
     , awaitUserSteering
+    , awaitUserSteeringAfter
     , clearSteeringInputs
     , closeSteeringInputs
     , commitSteeringInputs
@@ -17,6 +18,7 @@ module Agent.Loop.SteeringInputs
     , prepareBackgroundCompletion
     , readSteeringInputs
     , readSteeringTurn
+    , reserveSteeringInputs
     , steeringInputByteLimit
     , steeringInputCountLimit
     , suppressUserSteeringWake
@@ -65,13 +67,15 @@ data SteeringState = SteeringState
     , steeringEpoch :: !Word
     -- | Set by 'closeSteeringInputs' once the loop has finished answering.
     , steeringClosed :: !Bool
+    -- | A submitted snapshot's positions remain stable until acknowledgement.
+    , steeringReservedCount :: !Int
     }
 
 newtype SteeringInputs = SteeringInputs (TVar SteeringState)
 
 newSteeringInputs :: IO SteeringInputs
 newSteeringInputs =
-    SteeringInputs <$> newTVarIO (SteeringState Seq.empty Seq.empty 0 0 False)
+    SteeringInputs <$> newTVarIO (SteeringState Seq.empty Seq.empty 0 0 False 0)
 
 enqueueSteeringInputs
     :: SteeringInputs
@@ -194,13 +198,27 @@ readSteeringInputs (SteeringInputs ref) = do
     state <- readTVarIO ref
     pure [entry.steeringInput | entry <- toList state.steeringQueue]
 
+-- | Snapshot inputs for submission and protect their queue positions against
+-- background-notice dismissal. Reading for observation does not reserve.
+reserveSteeringInputs :: SteeringInputs -> IO [TurnInput]
+reserveSteeringInputs (SteeringInputs ref) = atomically do
+    state <- reserveSteeringState ref
+    pure [entry.steeringInput | entry <- toList state.steeringQueue]
+
+reserveSteeringState :: TVar SteeringState -> STM SteeringState
+reserveSteeringState ref = do
+    state <- readTVar ref
+    writeTVar ref state
+        { steeringReservedCount = Seq.length state.steeringQueue }
+    pure state
+
 -- | The loop's 'Agent.Loop.loopCloseSteering' for a host that answers all
 -- accepted guidance within one turn: hand back what arrived after the last
 -- read, or refuse all further guidance when nothing is pending.
 closeSteeringInputs :: SteeringInputs -> IO [TurnInput]
 closeSteeringInputs (SteeringInputs ref) =
     atomically do
-        state <- readTVar ref
+        state <- reserveSteeringState ref
         if Seq.null state.steeringQueue
             then do
                 writeTVar ref state { steeringClosed = True }
@@ -213,8 +231,8 @@ closeSteeringInputs (SteeringInputs ref) =
 -- for the enclosing turn, not another provider input. Background notices
 -- must not acquire the identity of a user submission.
 readSteeringTurn :: SteeringInputs -> IO (Text, [TurnInput])
-readSteeringTurn (SteeringInputs ref) = do
-    state <- readTVarIO ref
+readSteeringTurn (SteeringInputs ref) = atomically do
+    state <- reserveSteeringState ref
     let entries = toList state.steeringQueue
         userText :: SteeringEntry -> [Text]
         userText entry =
@@ -275,18 +293,28 @@ awaitSteeringInput (SteeringInputs ref) = do
 -- Every concurrent wait must observe the same pending input. Only provider
 -- acknowledgement removes it; background completions are not user guidance.
 awaitUserSteering :: SteeringInputs -> STM ()
-awaitUserSteering (SteeringInputs ref) = do
+awaitUserSteering inputs = awaitUserSteeringAfter inputs 0
+
+-- | Observe new user guidance beyond the unacknowledged prefix already
+-- submitted to the provider. Background completion notices never interrupt
+-- generation, and observing guidance does not consume it or its idle wake.
+awaitUserSteeringAfter :: SteeringInputs -> Int -> STM ()
+awaitUserSteeringAfter (SteeringInputs ref) submittedCount = do
     state <- readTVar ref
     check $ any (\entry -> entry.steeringBackgroundKey == Nothing)
-        state.steeringQueue
+        (Seq.drop (max 0 submittedCount) state.steeringQueue)
 
+-- | Remove notices not yet handed to a provider. Reserved notices must remain
+-- in place: both acknowledgement counts and steering waits refer to that prefix.
 dismissBackgroundCompletion :: SteeringInputs -> Text -> IO ()
 dismissBackgroundCompletion (SteeringInputs ref) key =
     atomically $ modifyTVar' ref \state ->
-        let kept =
-                Seq.filter
+        let (reserved, unreserved) =
+                Seq.splitAt state.steeringReservedCount state.steeringQueue
+            kept =
+                reserved Seq.>< Seq.filter
                     ((/= Just key) . (.steeringBackgroundKey))
-                    state.steeringQueue
+                    unreserved
             keptBytes =
                 foldr
                     (\entry total ->
@@ -327,9 +355,11 @@ commitSteeringInputs (SteeringInputs ref) count =
         in promoteDeferredCompletions state
             { steeringQueue = remaining
             , steeringBytes = max 0 (state.steeringBytes - removedBytes)
+            , steeringReservedCount =
+                max 0 (state.steeringReservedCount - max 0 count)
             }
 
 clearSteeringInputs :: SteeringInputs -> IO ()
 clearSteeringInputs (SteeringInputs ref) =
     atomically $ modifyTVar' ref \state ->
-        SteeringState Seq.empty Seq.empty 0 (state.steeringEpoch + 1) False
+        SteeringState Seq.empty Seq.empty 0 (state.steeringEpoch + 1) False 0

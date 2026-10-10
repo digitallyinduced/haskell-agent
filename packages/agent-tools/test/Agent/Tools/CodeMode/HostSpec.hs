@@ -1,6 +1,8 @@
 module Agent.Tools.CodeMode.HostSpec (spec) where
 
 import Agent.Cancel (newCancelFlag)
+import qualified Control.Concurrent as Concurrent
+import qualified Control.Monad as Monad
 import Agent.Loop
     ( Backend(Backend)
     , BackendResult(..)
@@ -1311,6 +1313,7 @@ assertPreparedImageResult result = do
             , loopOnEvent = \_ -> pure ()
             , loopApprove = \_ -> pure ToolApprovalGranted
             , loopReadSteering = pure []
+            , loopWaitSteering = \_ -> Monad.forever (Concurrent.threadDelay maxBound)
             , loopCommitSteering = \_ -> pure ()
             , loopCloseSteering = pure []
             , loopInterrupt = pure ()

@@ -288,7 +288,7 @@ spec = do
             readIORef fallbackCalls `shouldReturn` 0
 
     describe "withCodexTurnStateScope" do
-        it "resets on a new prompt and preserves tool continuations" do
+        it "resets on a new prompt and preserves tool and steering continuations" do
             turnState <- newCodexTurnState
             recordCodexTurnState turnState "stale"
             observed <- newIORef []
@@ -313,5 +313,9 @@ spec = do
                 [CompletedTool (functionResult "call-1" "done")]
                 (const (pure ()))
 
+            _ <- submitWithState transcript backend (Just "resp-state")
+                [UserMessage "use the new approach"] (const (pure ()))
+            _ <- submitWithState transcript backend Nothing
+                [UserMessage "next task"] (const (pure ()))
             readIORef observed
-                `shouldReturn` [Nothing, Just "current"]
+                `shouldReturn` [Nothing, Just "current", Just "current", Nothing]

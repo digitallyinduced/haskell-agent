@@ -10,6 +10,7 @@ module Agent.OpenAI.WebSocketClient
     , sendWsRequest
     , sendWsRequestWithOptions
     , sendWsRequestWithEvents
+    , sendWsRequestWithSteering
     , sendWsRequestWithEventsPreservingTurnState
     , sendWsRequestWithRawEvents
     , retryTransientWsResultWithPolicy
@@ -41,6 +42,8 @@ module Agent.OpenAI.WebSocketClient
     , RawStreamEventCallback
     , WebSocketReceiveActions(..)
     , receiveWsResponseWithActions
+    , receiveWsResponseWithSteering
+    , isCompletedOutputItem
     , CodexConn
     , codexConnUsesHttpFallback
     , shouldFallbackDirectCodexHandshakeToHttp
@@ -96,6 +99,11 @@ import Agent.Provider
     )
 import Agent.Responses.Types
 import Control.Applicative ((<|>))
+import Control.Concurrent.MVar (newMVar, withMVar)
+import Control.Concurrent.STM
+    ( atomically, newTVarIO, readTVar, writeTVar, retry )
+import qualified Control.Exception.Safe as Safe
+import Control.Monad (when)
 import Control.Retry
     ( RetryPolicyM
     , exponentialBackoff
@@ -108,6 +116,7 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
+import Data.IORef (newIORef, readIORef, modifyIORef')
 import Data.List (find)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -662,6 +671,18 @@ sendWsRequestWithEvents cc request previousResponseId onEvent =
         previousResponseId
         onEvent
 
+-- | Normal sampling with a request-owned Responses Lite interrupt.
+sendWsRequestWithSteering
+    :: (Maybe (IO Bool) -> IO ())
+    -> CodexConn
+    -> ResponseCreateParams
+    -> Maybe Text
+    -> StreamEventCallback
+    -> IO (Either ApiError Response)
+sendWsRequestWithSteering register =
+    sendWsRequestWithEventsAndSteering
+        register FinishNormalTurnState defaultCodexWsOptions
+
 -- | Send an auxiliary request that belongs to the current logical turn, such
 -- as inline remote compaction. Its response may mint the sticky-routing token
 -- needed by the immediately following model continuation, so do not clear the
@@ -725,6 +746,20 @@ sendWsRequestWithEventsAndOptions
     -> StreamEventCallback
     -> IO (Either ApiError Response)
 sendWsRequestWithEventsAndOptions completion options cc request previousResponseId
+        onEvent =
+    sendWsRequestWithEventsAndSteering (const (pure ()))
+        completion options cc request previousResponseId onEvent
+
+sendWsRequestWithEventsAndSteering
+    :: (Maybe (IO Bool) -> IO ())
+    -> TurnStateCompletion
+    -> CodexWsOptions
+    -> CodexConn
+    -> ResponseCreateParams
+    -> Maybe Text
+    -> StreamEventCallback
+    -> IO (Either ApiError Response)
+sendWsRequestWithEventsAndSteering register completion options cc request previousResponseId
         onEvent = case cc of
     CodexWsConn session turnState -> sendOverWs session turnState
     CodexHttpFallback{} ->
@@ -751,9 +786,15 @@ sendWsRequestWithEventsAndOptions completion options cc request previousResponse
             sendRes <- WebSocket.sendWebSocketText wsRequest encoded
             case sendRes of
                 Left apiError -> pure (Left apiError)
-                Right () ->
-                    receiveWsResponse options request.model wsRequest
-                        (captureTurnState turnState onEvent)
+                Right ()
+                    | maybe False isCodexResponsesLiteModel request.model ->
+                        receiveWsResponseWithSteering register
+                            (WebSocket.sendWebSocketText wsRequest)
+                            request.model (webSocketReceiveActions wsRequest)
+                            (captureTurnState turnState onEvent)
+                    | otherwise ->
+                        receiveWsResponse options request.model wsRequest
+                            (captureTurnState turnState onEvent)
         case (completion, result) of
             (FinishNormalTurnState, Right response) ->
                 finishCodexTurnStateResponse turnState response
@@ -772,7 +813,8 @@ captureTurnState turnState callback event = do
 
 responseKeepsTurnOpen :: Response -> Bool
 responseKeepsTurnOpen response =
-    any isToolCall response.output
+    maybe False ((== "interrupted") . (.reason)) response.incompleteDetails
+        || any isToolCall response.output
         || responseNeedsLoopContinuation response
   where
     isToolCall = \case
@@ -864,11 +906,77 @@ receiveWsResponse
     -> StreamEventCallback
     -> IO (Either ApiError Response)
 receiveWsResponse _options modelHint cc =
-    receiveWsResponseWithActions modelHint WebSocketReceiveActions
+    receiveWsResponseWithActions modelHint (webSocketReceiveActions cc)
+
+webSocketReceiveActions :: WebSocket.WebSocketRequest -> WebSocketReceiveActions
+webSocketReceiveActions cc = WebSocketReceiveActions
         { receiveFrame = WebSocket.receiveWebSocketData cc
         , completeRequest = WebSocket.completeWebSocketRequest cc
         , invalidateRequest = WebSocket.invalidateWebSocketRequest cc
         }
+
+-- | The transport has already sent response.create. The interrupt waits for
+-- response.created, is serialized against terminal completion, and cannot
+-- affect a subsequent request even if the caller retains its action.
+receiveWsResponseWithSteering
+    :: (Maybe (IO Bool) -> IO ())
+    -> (LBS.ByteString -> IO (Either ApiError ()))
+    -> Maybe Text
+    -> WebSocketReceiveActions
+    -> StreamEventCallback
+    -> IO (Either ApiError Response)
+receiveWsResponseWithSteering register send modelHint actions onEvent = do
+    responseIdentifier <- newTVarIO Nothing
+    active <- newTVarIO True
+    interrupted <- newTVarIO False
+    gate <- newMVar ()
+    let close = withMVar gate \() -> atomically (writeTVar active False)
+        interrupt = do
+            identifier <- atomically do
+                open <- readTVar active
+                current <- readTVar responseIdentifier
+                if not open then pure Nothing else
+                    maybe retry (pure . Just) current
+            case identifier of
+                Nothing -> pure False
+                Just responseId -> withMVar gate \() -> do
+                    (open, requested) <- atomically $
+                        (,) <$> readTVar active <*> readTVar interrupted
+                    if not open then pure False else
+                        if requested then pure True else do
+                            atomically (writeTVar interrupted True)
+                            sent <- send $ Aeson.encode $ Aeson.object
+                                [ "type" Aeson..= ("response.interrupt" :: Text)
+                                , "response_id" Aeson..= responseId
+                                , "mode" Aeson..= ("discard_partial_items" :: Text)
+                                ]
+                            case sent of
+                                Right () -> pure True
+                                Left _ -> do
+                                    actions.invalidateRequest "WebSocket interrupt failed"
+                                    pure False
+        observe event = do
+            case event of
+                ResponseCreatedEvent { responseValue } ->
+                    when (not (Text.null responseValue.responseId)) $
+                        atomically (writeTVar responseIdentifier (Just responseValue.responseId))
+                ResponseCompletedEvent{} -> close
+                ResponseDoneEvent{} -> close
+                ResponseIncompleteEvent{} -> close
+                ResponseFailedEvent{} -> close
+                ResponseErrorEvent{} -> close
+                ResponseNestedErrorEvent{} -> close
+                _ -> pure ()
+            onEvent event
+        guarded = actions
+            { completeRequest = close >> actions.completeRequest
+            , invalidateRequest = \reason -> close >> actions.invalidateRequest reason
+            }
+    Safe.finally
+        (register (Just interrupt) >>
+            receiveWsResponseWithInterruptState
+                (atomically (readTVar interrupted)) modelHint guarded observe)
+        (close >> register Nothing)
 
 -- | Injectable receive driver used by the production WebSocket path and by
 -- deterministic terminal-boundary regression tests.
@@ -878,10 +986,20 @@ receiveWsResponseWithActions
     -> StreamEventCallback
     -> IO (Either ApiError Response)
 receiveWsResponseWithActions modelHint actions onEvent =
+    receiveWsResponseWithInterruptState (pure False) modelHint actions onEvent
+
+receiveWsResponseWithInterruptState
+    :: IO Bool
+    -> Maybe Text
+    -> WebSocketReceiveActions
+    -> StreamEventCallback
+    -> IO (Either ApiError Response)
+receiveWsResponseWithInterruptState wasInterrupted modelHint actions onEvent = do
+    completedItems <- newIORef []
     ResponsesCodec.withResponseStreamEventDecoder \decodeEvent ->
-        loop decodeEvent emptyStreamAssemblyState 0 0
+        loop completedItems decodeEvent emptyStreamAssemblyState 0 0
   where
-    loop decodeEvent assembly frames bytes = do
+    loop completedItems decodeEvent assembly frames bytes = do
         msgResult <- actions.receiveFrame
         case msgResult of
             -- A socket that dies before the terminal event commits nothing on
@@ -904,9 +1022,30 @@ receiveWsResponseWithActions modelHint actions onEvent =
                         -- or tool-call frame can leave the loop in thinking.
                         logStreamStats "json_decode_error" frames' bytes'
                         onEvent (unparsedStreamEvent err msgBytes)
-                        loop decodeEvent assembly frames' bytes'
+                        loop completedItems decodeEvent assembly frames' bytes'
                     Right event -> do
-                        onEvent event
+                        case event of
+                            ResponseOutputItemDoneEvent { item }
+                                | isCompletedOutputItem item ->
+                                modifyIORef' completedItems (item :)
+                            _ -> pure ()
+                        -- Observers must see the same completed-item boundary
+                        -- as the returned response, never terminal partials.
+                        observedEvent <- case event of
+                            ResponseIncompleteEvent { responseValue, sequenceNumber }
+                                | maybe False ((== "interrupted") . (.reason))
+                                    responseValue.incompleteDetails -> do
+                                    requested <- wasInterrupted
+                                    if requested then do
+                                        completed <- reverse <$> readIORef completedItems
+                                        pure ResponseIncompleteEvent
+                                            { responseValue = (responseValue :: Response)
+                                                { output = completed }
+                                            , sequenceNumber
+                                            }
+                                    else pure event
+                            _ -> pure event
+                        onEvent observedEvent
                         let assembly' = applyStreamEvent assembly event
                         case event of
                             ResponseErrorEvent { streamError } -> do
@@ -928,7 +1067,7 @@ receiveWsResponseWithActions modelHint actions onEvent =
                                 finishTerminal "done" assembly' frames' bytes' event
 
                             ResponseIncompleteEvent{} ->
-                                finishIncomplete assembly' frames' bytes' event
+                                finishIncomplete completedItems assembly' frames' bytes' event
 
                             ResponseFailedEvent{} -> do
                                 logStreamStats "response_failed" frames' bytes'
@@ -940,25 +1079,36 @@ receiveWsResponseWithActions modelHint actions onEvent =
 
                             -- Ignore other event variants (added, content
                             -- deltas, and future event types).
-                            _ -> loop decodeEvent assembly' frames' bytes'
+                            _ -> loop completedItems decodeEvent assembly' frames' bytes'
 
     finishTerminal label assembly frames bytes event = do
         logStreamStats label frames bytes
         actions.completeRequest
         pure (finishStreamResponse modelHint assembly event)
 
-    finishIncomplete assembly frames bytes event =
+    finishIncomplete completedItems assembly frames bytes event =
         case finishStreamResponse modelHint assembly event of
-            Right response ->
-                case rejectFailedCodexResponse response of
-                    Right accepted -> do
-                        logStreamStats "incomplete" frames bytes
+            Right response -> do
+                requested <- wasInterrupted
+                if requested && maybe False ((== "interrupted") . (.reason)) response.incompleteDetails
+                    then do
+                        -- discard_partial_items excludes every item lacking
+                        -- output_item.done, including partially decoded tools.
+                        completed <- reverse <$> readIORef completedItems
                         actions.completeRequest
-                        pure (Right accepted)
-                    Left err -> do
-                        logStreamStats "incomplete" frames bytes
-                        actions.invalidateRequest "WebSocket response incomplete"
-                        pure (Left err)
+                        pure (Right (response :: Response)
+                            { status = ResponseCompleted
+                            , output = completed
+                            })
+                    else case rejectFailedCodexResponse response of
+                        Right accepted -> do
+                            logStreamStats "incomplete" frames bytes
+                            actions.completeRequest
+                            pure (Right accepted)
+                        Left err -> do
+                            logStreamStats "incomplete" frames bytes
+                            actions.invalidateRequest "WebSocket response incomplete"
+                            pure (Left err)
             Left err -> do
                 logStreamStats "incomplete" frames bytes
                 actions.invalidateRequest "WebSocket response incomplete"
@@ -979,6 +1129,26 @@ receiveWsResponseWithActions modelHint actions onEvent =
                     (failedStreamResponseMessage failure)
                     failure.failureErrorCode
                     Nothing
+
+-- | A done event may itself contain explicitly incomplete output. Such an
+-- item is neither interruption recovery context nor a runnable tool call.
+isCompletedOutputItem :: ResponseItem -> Bool
+isCompletedOutputItem = \case
+    MessageItem item -> complete item.status
+    FunctionCallItem item -> complete item.status
+    CustomToolCallItem item -> complete item.status
+    ComputerCallItem item -> complete item.computerCallStatus
+    ReasoningItemValue item -> complete item.status
+    LocalShellCallItem item -> complete item.status
+    ToolSearchCallItem item -> completeText item.status
+    ToolSearchOutputItem item -> completeText item.status
+    WebSearchCallItem item -> completeText item.status
+    ImageGenerationCallItem item -> completeText item.status
+    CompactionItemValue{} -> True
+    _ -> False
+  where
+    complete = maybe True (== ItemCompleted)
+    completeText = maybe True (== "completed")
 
 unparsedStreamEvent :: Text -> LBS.ByteString -> ResponseStreamEvent
 unparsedStreamEvent err bytes =

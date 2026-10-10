@@ -1,6 +1,8 @@
 module Agent.Responses.LoopBackendSpec (spec) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
+import qualified Control.Concurrent as Concurrent
+import qualified Control.Monad as Monad
 import Agent.Cancel (newCancelFlag)
 import qualified Agent.Loop as Loop
 import Agent.Loop
@@ -159,6 +161,7 @@ accountReplaySpec = describe "stateless Responses account replay boundary" $
                         , onRecoveryCheckpoint = const (pure ())
                         , onCompletedResponseItem = \_ _ -> pure ()
                         , onCancellationMode = const (pure ())
+                        , onSteeringInterrupt = const (pure ())
                         , onAsyncToolCall = \_ -> modifyIORef' admissions (+ 1)
                         }
                 result `shouldBe` Left rejected
@@ -1282,6 +1285,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 , onRecoveryCheckpoint = const (pure ())
                 , onCompletedResponseItem = \_ _ -> pure ()
                 , onCancellationMode = const (pure ())
+                , onSteeringInterrupt = const (pure ())
                 , onAsyncToolCall =
                     \call -> modifyIORef' announced (<> [call])
                 }
@@ -1352,6 +1356,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                     _ -> pure ()
                 , loopApprove = const (pure Loop.ToolApprovalGranted)
                 , loopReadSteering = pure []
+                , loopWaitSteering = \_ -> Monad.forever (Concurrent.threadDelay maxBound)
                 , loopCommitSteering = const (pure ())
                 , loopCloseSteering = pure []
                 , loopInterrupt = pure ()

@@ -64,6 +64,8 @@ import Agent.OpenAI.WebSocketClient
     , codexConnTurnState
     , copyCodexTurnState
     , sendWsRequestWithEvents
+    , sendWsRequestWithSteering
+    , isCompletedOutputItem
     , sendWsRequestWithEventsPreservingTurnState
     , resetCodexTurnState
     , withCodexWsRetrying
@@ -125,9 +127,8 @@ openAiBackend
     -> Backend
 openAiBackend conn getParams =
     withCodexTurnStateScope (pure (codexConnTurnState conn)) $
-        openAiBackendWith
-            (\request previousResponseId onEvent ->
-                sendWsRequestWithEvents conn request previousResponseId onEvent)
+        openAiBackendWithSteering False
+            (\callbacks -> sendWsRequestWithSteering callbacks.onSteeringInterrupt conn)
             getParams
 
 -- | OpenAI backend with explicit raw-reasoning visibility. Normal Codex
@@ -139,9 +140,8 @@ openAiBackendWithRawReasoning
     -> Backend
 openAiBackendWithRawReasoning showRawReasoning conn getParams =
     withCodexTurnStateScope (pure (codexConnTurnState conn)) $
-        openAiBackendWithReasoningVisibility showRawReasoning
-            (\request previousResponseId onEvent ->
-                sendWsRequestWithEvents conn request previousResponseId onEvent)
+        openAiBackendWithSteering showRawReasoning
+            (\callbacks -> sendWsRequestWithSteering callbacks.onSteeringInterrupt conn)
             getParams
 
 -- | Reuse the session WebSocket while it is healthy, reconnecting after it dies.
@@ -155,8 +155,11 @@ openAiBackendReconnecting
 openAiBackendReconnecting provider currentCredential connectionHealthy conn
         getParams =
     withCodexTurnStateScope (pure (codexConnTurnState conn)) $
-        openAiBackendWith
-            (openAiResponseSenderReconnecting
+        openAiBackendWithSteering False
+            (\callbacks -> openAiResponseSenderReconnectingWhen
+                (sendWsRequestWithSteering callbacks.onSteeringInterrupt)
+                streamOutputObserved
+                markLoopReplayUnsafe
                 provider
                 currentCredential
                 connectionHealthy
@@ -667,27 +670,6 @@ isOpenAiReplayUnsafeWebSocketTransportFailure = \case
         errorType == replayUnsafeWebSocketTransportType
     _ -> False
 
--- A done event can also finish an explicitly incomplete item. Only retain
--- supported, independently complete output; never replay truncated arguments
--- or an unfinished assistant message as if it had completed.
-isCompletedOutputItem :: ResponseItem -> Bool
-isCompletedOutputItem = \case
-    MessageItem item -> complete item.status
-    FunctionCallItem item -> complete item.status
-    CustomToolCallItem item -> complete item.status
-    ComputerCallItem item -> complete item.computerCallStatus
-    ReasoningItemValue item -> complete item.status
-    LocalShellCallItem item -> complete item.status
-    ToolSearchCallItem item -> completeText item.status
-    ToolSearchOutputItem item -> completeText item.status
-    WebSearchCallItem item -> completeText item.status
-    ImageGenerationCallItem item -> completeText item.status
-    CompactionItemValue{} -> True
-    _ -> False
-  where
-    complete = maybe True (== ItemCompleted)
-    completeText = maybe True (== "completed")
-
 -- | Reset Codex sticky-routing state when a backend submission starts a new
 -- logical turn, while preserving it for tool continuations in the same turn.
 --
@@ -697,7 +679,9 @@ isCompletedOutputItem = \case
 withCodexTurnStateScope :: IO CodexTurnState -> BackendMiddleware
 withCodexTurnStateScope getTurnState backend =
     backendWithCallbacks \state legacyPreviousResponseId inputs callbacks -> do
-        when (startsNewLogicalTurn inputs) $
+        -- A user-only continuation after a native interrupt still belongs to
+        -- the active logical turn and must retain its routing token.
+        when (legacyPreviousResponseId == Nothing && startsNewLogicalTurn inputs) $
             getTurnState >>= resetCodexTurnState
         backend.submitTurnWithCallbacks
             state legacyPreviousResponseId inputs callbacks
@@ -803,6 +787,29 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
     -> Backend
 openAiBackendWithRetryPoliciesAndReasoningVisibility
         showRawReasoning transientPolicy reconnectPolicy send getParams =
+    openAiBackendWithCallbackSender
+        showRawReasoning transientPolicy reconnectPolicy (const send) getParams
+
+openAiBackendWithSteering
+    :: Bool
+    -> (BackendCallbacks -> ResponseCreateParams -> Maybe Text
+        -> (ResponseStreamEvent -> IO ()) -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+openAiBackendWithSteering showRawReasoning =
+    openAiBackendWithCallbackSender showRawReasoning
+        transientStreamingResultPolicy connectionReplayPolicy
+
+openAiBackendWithCallbackSender
+    :: Bool
+    -> RetryPolicyM IO
+    -> RetryPolicyM IO
+    -> (BackendCallbacks -> ResponseCreateParams -> Maybe Text
+        -> (ResponseStreamEvent -> IO ()) -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+openAiBackendWithCallbackSender
+        showRawReasoning transientPolicy reconnectPolicy send getParams =
     backendWithCallbacks \snapshot legacyPreviousResponseId inputs callbacks -> do
         callbacks.onCancellationMode CancelSubmission
         -- Keep the local Responses Lite instruction-prefix marker until
@@ -865,7 +872,7 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
                 { attemptProjection = Responses.emptyStreamProjectionState
                 , attemptObservation = emptyAttemptObservation
                 }
-            result <- send request previousResponseId \event -> do
+            result <- send callbacks request previousResponseId \event -> do
                 -- Like Codex, retain independently completed items even when
                 -- the response itself never reaches response.completed. Text
                 -- deltas remain display-only; no continuation is checkpointed.

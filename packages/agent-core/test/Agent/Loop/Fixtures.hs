@@ -2,6 +2,7 @@
 module Agent.Loop.Fixtures
     ( emptyTestTelemetry
     , testConfig
+    , testSteeringConfig
     , registryFromHandlers
     , registryFromPolicies
     , registryFromTools
@@ -40,6 +41,9 @@ import Agent.Tools.Types
     , withToolResourceClaims
     )
 import Data.IORef
+import Control.Concurrent (threadDelay)
+import Control.Monad (forever)
+import Control.Concurrent.STM (atomically, check, modifyTVar', newTVarIO, readTVar, readTVarIO)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -76,11 +80,28 @@ testConfig backend = do
         , loopOnEvent = \_ -> pure ()
         , loopApprove = \_ -> pure ToolApprovalGranted
         , loopReadSteering = pure []
+        , loopWaitSteering = \_ -> forever (threadDelay maxBound)
         , loopCommitSteering = \_ -> pure ()
         , loopCloseSteering = pure []
         , loopInterrupt = pure ()
         , loopCancel = cancel
         }
+
+-- | A non-consuming, prefix-aware guidance queue for interruption tests.
+testSteeringConfig :: LoopConfig -> IO (LoopConfig, [TurnInput] -> IO ())
+testSteeringConfig config = do
+    pending <- newTVarIO []
+    pure
+        ( config
+            { loopReadSteering = readTVarIO pending
+            , loopWaitSteering = \submitted -> atomically do
+                inputs <- readTVar pending
+                check (length inputs > submitted)
+            , loopCommitSteering = \count ->
+                atomically (modifyTVar' pending (drop count))
+            }
+        , \inputs -> atomically (modifyTVar' pending (<> inputs))
+        )
 
 registryFromHandlers :: [ToolHandler] -> ToolRegistry
 registryFromHandlers =

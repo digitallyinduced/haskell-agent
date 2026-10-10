@@ -1,6 +1,8 @@
 module Agent.Tools.LoopIntegrationSpec (spec) where
 
 import Agent.Cancel (newCancelFlag, requestCancel)
+import qualified Control.Concurrent as Concurrent
+import qualified Control.Monad as Monad
 import Agent.Error (ApiError(..))
 import Agent.Loop
 import Agent.ToolDispatch
@@ -80,6 +82,7 @@ spec = describe "loop concrete command integration" do
                 , loopOnEvent = \_ -> pure ()
                 , loopApprove = \_ -> pure ToolApprovalGranted
                 , loopReadSteering = pure []
+                , loopWaitSteering = \_ -> Monad.forever (Concurrent.threadDelay maxBound)
                 , loopCommitSteering = \_ -> pure ()
                 , loopCloseSteering = pure []
                 , loopInterrupt = pure ()

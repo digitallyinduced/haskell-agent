@@ -1,6 +1,8 @@
 module Agent.Runtime.TurnEngineSpec (spec) where
 
 import Agent.Cancel (newCancelFlag)
+import qualified Control.Concurrent as Concurrent
+import qualified Control.Monad as Monad
 import Agent.Error (ApiError(..))
 import Agent.Loop hiding (TurnCompleted)
 import Agent.Responses.LoopBackend (turnInputsToItems)
@@ -169,6 +171,7 @@ safeConfig backend = do
         , loopOnEvent = const (pure ())
         , loopApprove = const (pure ToolApprovalRejected)
         , loopReadSteering = pure []
+        , loopWaitSteering = \_ -> Monad.forever (Concurrent.threadDelay maxBound)
         , loopCommitSteering = const (pure ())
         , loopCloseSteering = pure []
         , loopInterrupt = pure ()
