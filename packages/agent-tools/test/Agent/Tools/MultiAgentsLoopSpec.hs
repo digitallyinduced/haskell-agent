@@ -31,7 +31,9 @@ import Agent.Subagents
 import Agent.ToolDispatch (functionToolCall)
 import Agent.Tools.MultiAgents (multiAgentTools, rootMultiAgentContext)
 import Agent.Tools.Types (AppTool, ToolApproval(..), ToolRegistry, mkToolRegistry)
+import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (bracket)
+import Control.Monad (forever)
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -103,6 +105,7 @@ spec = describe "Agent.Tools.MultiAgents in a root loop" do
                         , loopOnEvent = const (pure ())
                         , loopApprove = const (pure ToolApprovalGranted)
                         , loopReadSteering = pure []
+                        , loopWaitSteering = \_ -> forever (threadDelay maxBound)
                         , loopCommitSteering = const (pure ())
                         , loopCloseSteering = pure []
                         , loopInterrupt = pure ()
