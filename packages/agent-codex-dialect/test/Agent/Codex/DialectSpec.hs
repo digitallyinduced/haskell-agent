@@ -96,6 +96,14 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Codex dialect" do
+    it "exposes nonblocking clarification alongside the blocking question tool" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket (newCodexCodingTools env Nothing Nothing) (.codexClose) \coding -> do
+                let names = map (.appToolName) coding.codexAppTools
+                names `shouldSatisfy` elem "request_user_input_async"
+                names `shouldSatisfy` elem "ask_user_question"
+
     it "requires approval for default shell commands regardless of resource classification" do
         withTempDir \dir -> do
             env <- defaultToolEnv (unsafeEncodeUtf dir)

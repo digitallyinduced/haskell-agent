@@ -296,6 +296,10 @@ spec = describe "tool presentation" do
         toolOutputCodeLanguage "42" `shouldBe` Nothing
 
     it "extracts tool details from function and custom calls" do
+        summarizeToolCall
+            (functionToolCall "async" "request_user_input_async"
+                "{\"questions\":[{\"title\":\"Choose color\",\"options\":[\"Blue\",\"Red\"]},{\"title\":\"Any constraints?\"}]}")
+            `shouldBe` "Asked asynchronously Choose color (Blue / Red); Any constraints?"
         toolDetail
             (functionToolCall "read" "read_file"
                 "{\"target_file\":\"src/Main.hs\"}")

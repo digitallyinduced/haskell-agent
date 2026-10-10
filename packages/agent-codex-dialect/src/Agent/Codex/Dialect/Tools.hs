@@ -58,6 +58,7 @@ import Agent.Tools.MultiAgents (MultiAgentContext, multiAgentTools)
 import Agent.Tools.PlanMode
     ( PlanModeEnv
     , askUserQuestionTool
+    , requestUserInputAsyncTool
     , enterCodexPlanModeTool
     , isPlanModeActive
     , writePlanTool
@@ -142,6 +143,7 @@ codexTools env shellSession ghci planMode taskPlan multi =
         , enterCodexPlanModeTool planMode
         , writePlanTool planMode
         , askUserQuestionTool planMode
+        , requestUserInputAsyncTool planMode
         ]
     executionSuffix =
         [ shellCommandTool env shellSession
