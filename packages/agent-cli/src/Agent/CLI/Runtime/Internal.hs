@@ -86,6 +86,7 @@ import Agent.CLI.Status
     )
 import Agent.CLI.Terminal ( resolveColor )
 import Agent.CLI.TerminalDiagnostics (getTerminalStderr, withInteractiveDiagnostics)
+import Agent.CLI.TerminalStatus (withTerminalStatus)
 import Agent.Runtime.Host (AgentRunMode(..))
 import Agent.CLI.Worktree ( isUnderWorktreeRoot, worktreeRoot )
 import Agent.ResourceScope (logSlowCleanup)
@@ -221,6 +222,7 @@ configureClientIdentity =
 -- persisted provider metadata only after the replacement backend succeeds.
 runAgentWithRestarts :: CliOptions -> IO DevResult
 runAgentWithRestarts options =
+    withTerminalStatus (not (isOneShot options)) $
     withInteractiveDiagnostics (not (isOneShot options)) $
     catchUserInterrupt
         (do

@@ -14,6 +14,7 @@ import Agent.Runtime.Session.Request
     ( withPersistentSessionRequest
     )
 import Agent.CLI.CancelWatch (withEscCancel)
+import Agent.CLI.TerminalStatus (withTerminalWorking)
 import Agent.Runtime.Compaction (AutomaticCompactionBoundary)
 import Agent.CLI.Interrupt (withTurnCancel, resetIdleTurnCancel)
 import Agent.CLI.Plan (extractProposedPlan, planDecisionFollowUp)
@@ -252,6 +253,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv{}
   resetIdleTurnCancel env.sessionInterrupt config.loopCancel
   writeIORef env.sessionRestartEffort Nothing
   withTurnCancel env.sessionInterrupt config.loopCancel $
+    (if env.sessionBackground then id else withTerminalWorking) $
     (if isJust fullscreen || env.sessionBackground
         then id
         else withEscCancel config.loopCancel env.sessionStdinControl) do

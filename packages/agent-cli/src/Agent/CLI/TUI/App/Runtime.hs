@@ -194,6 +194,7 @@ import System.Environment (lookupEnv)
 import System.Exit (ExitCode(..))
 import System.Info (os)
 import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
+import Agent.CLI.TerminalStatus (withTerminalStatusSuspended)
 import System.IO (stdout)
 import System.Posix.Process (getProcessID)
 import System.Process
@@ -1361,7 +1362,7 @@ requestFullscreenSecret runtime title body = do
     atomically (takeTMVar reply)
 
 withFullscreenSuspended :: FullscreenRuntime -> IO a -> IO a
-withFullscreenSuspended runtime action = do
+withFullscreenSuspended runtime action = withTerminalStatusSuspended do
     reply <- newEmptyTMVarIO
     started <- newTVarIO False
     let runAction = do

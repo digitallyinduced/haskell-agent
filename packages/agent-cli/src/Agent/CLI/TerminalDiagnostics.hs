@@ -12,6 +12,7 @@ module Agent.CLI.TerminalDiagnostics
     ) where
 
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
+import Agent.CLI.TerminalStatus (withTerminalStatusSuspended)
 import Control.Exception.Safe (bracket, bracket_, bracketOnError, finally, onException)
 import Control.Monad (void)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
@@ -106,7 +107,7 @@ withTerminalDiagnostics directory action =
 -- returning or throwing resumes diagnostic isolation. This is process-global
 -- and must not run concurrently with another handoff.
 withTerminalDiagnosticsSuspended :: IO a -> IO a
-withTerminalDiagnosticsSuspended action = do
+withTerminalDiagnosticsSuspended action = withTerminalStatusSuspended do
     current <- readIORef terminalStderrReference
     case current of
         Nothing -> action

@@ -15,6 +15,7 @@ module Agent.CLI.ExternalProgram
     ) where
 
 import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
+import Agent.CLI.TerminalStatus (withTerminalStatusSuspended)
 import Control.Exception.Safe
     ( bracket
     , catchAny
@@ -135,7 +136,7 @@ runExternalProgramOnFile
     :: ExternalProgram
     -> FilePath
     -> IO (Either Text ())
-runExternalProgramOnFile program path = do
+runExternalProgramOnFile program path = withTerminalStatusSuspended do
     result <- tryAny do
         terminalStderr <- getTerminalStderr
         -- Editors and pagers own the terminal while the REPL is suspended.
