@@ -345,6 +345,7 @@ testMetadata now = SessionMetadata
     , sessionMetadataLastTurnSummary = Nothing
     , sessionMetadataLastRecapMainTurns = 0
     , sessionMetadataHeadless = False
+    , sessionMetadataProviderState = Nothing
     }
 
 shouldContainBytes :: ByteString.ByteString -> ByteString.ByteString -> Expectation

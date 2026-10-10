@@ -760,6 +760,7 @@ createReservedSessionWithHandoff
                 , metaTitleRefreshIndex = 0
                 , metaTitleUserTurns = 0
                 , metaLastResponseId = Nothing
+                , metaProviderState = Nothing
                 , metaInputTokens = 0
                 , metaOutputTokens = 0
                 , metaCachedTokens = 0
@@ -1208,6 +1209,9 @@ appendTurnWithMetaTransitionIndexedUsing
         meta = meta0
             { metaUpdatedAt = now
             , metaLastResponseId = turn.turnResponseId <|> meta0.metaLastResponseId
+            -- A new response cannot inherit the preceding response's catalog.
+            -- Provider-aware callers install its matching state in transition.
+            , metaProviderState = Nothing
             }
         finalMeta = transition meta
     appendStoredTurn
@@ -1349,6 +1353,7 @@ rewindSession handle retained = do
         meta = meta0
             { metaUpdatedAt = now
             , metaLastResponseId = retainedLastResponseId retained
+            , metaProviderState = Nothing
             , metaTitleRefreshIndex =
                 min
                     meta0.metaTitleRefreshIndex

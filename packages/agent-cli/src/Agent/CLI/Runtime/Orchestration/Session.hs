@@ -139,6 +139,8 @@ import Agent.Runtime.Session
       SessionPromptSnapshot(..) )
 import Agent.Runtime.Session.History
     ( LiveConversation
+    , commitLiveBackendState
+    , withLiveBackendState
     , currentLiveTranscriptGeneration,
       durableTranscriptCheckpoint,
       evictLiveTranscript,
@@ -219,7 +221,8 @@ import Agent.Dialect (Dialect, DialectId (CodexDialect), dialectId, dialectForId
 import Agent.Error (ApiError)
 import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.Loop
-    ( ImageAttachment
+    ( BackendSnapshot(..)
+    , ImageAttachment
     , LoopError(LoopUnexpected)
     , TokenUsage
     , TurnInput
@@ -836,6 +839,14 @@ prepareSessionLiveRuntime request@AgentSessionRequest
             sessionConversationRef
             promptRuntime.sessionInitialPrevious
             promptRuntime.sessionInitialItems
+    -- The catalog checkpoint belongs to this exact resumed transcript. A
+    -- changed target or context replacement must start a fresh catalog.
+    -- Losing a server response ID alone does not invalidate replay metadata.
+    when (not promptRuntime.sessionResumeNeedsFreshContext) $
+        forM_ resumed \(meta, _) ->
+            withLiveBackendState sessionConversationRef \snapshot ->
+                void $ commitLiveBackendState sessionConversationRef
+                    snapshot { backendProviderState = meta.metaProviderState }
     sessionContextTokensRef <- newIORef Nothing
     writeIORef subagentForkSource
         (Just (readLiveTranscript sessionConversationRef))

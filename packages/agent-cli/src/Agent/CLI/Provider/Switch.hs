@@ -858,6 +858,7 @@ commitProviderTransition scope home projectRoot (Just transition) persist = do
                                 Just
                                     (sessionLegacySubagentTarget previousMeta)
                             , metaLastResponseId = Nothing
+                            , metaProviderState = Nothing
                             , metaUpdatedAt = now
                             }
                     writeSessionMeta

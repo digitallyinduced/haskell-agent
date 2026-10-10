@@ -86,6 +86,7 @@ spec = do
                             , sessionMetadataLastTurnSummary = Nothing
                             , sessionMetadataLastRecapMainTurns = 0
                             , sessionMetadataHeadless = False
+                            , sessionMetadataProviderState = Nothing
                             }
                     mapM_ (Directory.createDirectoryIfMissing True) [project, sibling, child]
                     Directory.createDirectoryLink project alias
@@ -606,6 +607,7 @@ sampleMeta sid title =
         , metaTitleRefreshIndex = 0
         , metaTitleUserTurns = 0
         , metaLastResponseId = Nothing
+        , metaProviderState = Nothing
         , metaInputTokens = 0
         , metaOutputTokens = 0
         , metaCachedTokens = 0

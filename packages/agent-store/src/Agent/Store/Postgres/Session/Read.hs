@@ -1012,7 +1012,7 @@ metadataSelectColumnsSql =
     \ legacy_target_effective_model, legacy_target_dialect,\
     \ cwd, effort, title, title_is_manual, title_refresh_index,\
     \ title_user_turns, last_response_id, input_tokens, output_tokens,\
-    \ cached_tokens, last_recap, last_turn_summary, last_recap_main_turns, headless"
+    \ cached_tokens, last_recap, last_turn_summary, last_recap_main_turns, headless, provider_state"
 
 sessionListEntryRow :: Decoders.Row SessionListEntry
 sessionListEntryRow =
@@ -1427,6 +1427,7 @@ metadataRow =
         <*> Decoders.column (Decoders.nullable Decoders.text)
         <*> Decoders.column (Decoders.nonNullable Decoders.int8)
         <*> Decoders.column (Decoders.nonNullable Decoders.bool)
+        <*> Decoders.column (Decoders.nullable Decoders.text)
 
 decodeLegacyTarget
     :: Maybe Text

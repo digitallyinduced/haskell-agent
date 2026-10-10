@@ -126,6 +126,7 @@ testMeta = SessionMeta
     , metaTitleRefreshIndex = 0
     , metaTitleUserTurns = 0
     , metaLastResponseId = Nothing
+    , metaProviderState = Nothing
     , metaInputTokens = 0
     , metaOutputTokens = 0
     , metaCachedTokens = 0

@@ -97,6 +97,7 @@ initial = ConversationState
     { stateGeneration = TranscriptGeneration 0
     , stateTranscript = ColdTranscript "original"
     , stateContinuation = openAiContinuation (Just "response")
+    , stateProviderState = Nothing
     , stateAttachments = [ImageAttachment "image/png" "image"]
     }
 

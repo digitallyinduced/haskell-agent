@@ -1,8 +1,11 @@
 module Agent.Runtime.ConversationStoreSpec (spec) where
 
 import Agent.Runtime.ConversationStore
+import Agent.Json (rawJsonFromEncoding)
+import qualified Data.Aeson as Aeson
 import Agent.Loop
     ( BackendContinuation(..)
+    , BackendProviderState(..)
     , BackendRevision(..)
     , BackendSnapshot(..)
     , ImageAttachment(..)
@@ -25,6 +28,25 @@ import System.Timeout (timeout)
 spec :: Spec
 spec = do
     describe "ConversationStore" do
+        it "retains provider state across eviction and clears it on replacement" do
+            let items = [messageItem "catalog checkpoint"]
+                providerState = Just (BackendProviderState "test.catalog"
+                    (rawJsonFromEncoding (Aeson.toEncoding (Aeson.object []))))
+                snapshot = (advanceBackendSnapshot emptyBackendSnapshot items Nothing)
+                    { backendProviderState = providerState }
+            store <- newConversationStore Nothing [] []
+            _ <- commitConversationBackendState store snapshot
+            generation <- currentTranscriptGeneration store
+            evictConversationTranscript store generation
+                (TranscriptCheckpoint "durable" (pure items))
+                `shouldReturn` True
+            withConversationBackendState store \restored -> do
+                restored.backendItems `shouldBe` items
+                restored.backendProviderState `shouldBe` providerState
+            _ <- replaceConversationTranscript store Nothing [messageItem "new"]
+            withConversationBackendState store \replaced ->
+                replaced.backendProviderState `shouldBe` Nothing
+
         it "restores the lock when an eviction decision throws before publication" do
             let items = [messageItem "unchanged"]
             store <- newConversationStore Nothing items []
@@ -51,7 +73,7 @@ spec = do
                     putMVar writerStarted ()
                     result <- commitConversationBackendState store
                         (BackendSnapshot newItems (BackendRevision 99)
-                            (Just (BackendContinuation "claude" "new-response")))
+                            (Just (BackendContinuation "claude" "new-response")) Nothing)
                     putMVar writerDone result) \writer -> do
                     takeMVar writerStarted
                     timeout 100000 (takeMVar writerDone) `shouldReturn` Nothing
