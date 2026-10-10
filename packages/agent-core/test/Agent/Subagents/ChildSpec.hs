@@ -104,6 +104,7 @@ backgroundChildConfig steering requests = do
         , loopCloseSteering = pure []
         , loopInterrupt = pure ()
         , loopCancel = cancel
+        , loopSubagents = Nothing
         }
 
 -- | A child whose provider records every request and answers it with @done@.

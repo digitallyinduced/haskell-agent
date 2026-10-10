@@ -1351,10 +1351,10 @@ buildSessionShellRuntime host controls SessionRequest{..} =
         restoreShellEnvironment toolEnv
         refreshCurrentSessionParams
 
+-- | The loop begins and ends root turns ('subagentLoop'). The CLI only
+-- interrupts the children of a turn it restarts after the loop answered.
 data SessionSubagentRuntime = SessionSubagentRuntime
-    { subagentBeginTurn :: !(IO (Maybe RootTurnId))
-    , subagentFinishTurn :: !(Maybe RootTurnId -> IO ())
-    , subagentAbortTurn :: !(Maybe RootTurnId -> IO ())
+    { subagentAbortTurn :: !(IO ())
     , subagentConcurrentLimit :: !(IO Int)
     , subagentSetConcurrentLimit :: !(Int -> IO Text.Text)
     }
@@ -1362,30 +1362,11 @@ data SessionSubagentRuntime = SessionSubagentRuntime
 buildSessionSubagentRuntime :: SessionRequest -> SessionSubagentRuntime
 buildSessionSubagentRuntime SessionRequest{..} =
     SessionSubagentRuntime
-        { subagentBeginTurn = beginSubagentTurn
-        , subagentFinishTurn = finishSubagentTurn
-        , subagentAbortTurn = abortSubagentTurn
+        { subagentAbortTurn = abortLastRootTurn rootSubagents
         , subagentConcurrentLimit = currentConcurrentLimit
         , subagentSetConcurrentLimit = setConcurrentLimit
         }
   where
-    beginSubagentTurn =
-        case multiCtx of
-            Nothing -> pure Nothing
-            Just ctx -> do
-                rootTurnId <- beginRootTurn ctx.multiRegistry
-                writeIORef rootTurnRef (Just rootTurnId)
-                pure (Just rootTurnId)
-    finishSubagentTurn rootTurnId =
-        atomicModifyIORef' rootTurnRef \current ->
-            (if current == rootTurnId then Nothing else current, ())
-    abortSubagentTurn rootTurnId = do
-        case rootTurnId of
-            Just owned -> case multiCtx of
-                Just ctx -> abortRootTurn ctx.multiRegistry owned
-                Nothing -> pure ()
-            Nothing -> pure ()
-        finishSubagentTurn rootTurnId
     currentConcurrentLimit = case multiCtx of
         Nothing ->
             pure defaultSubagentConfig.maxConcurrent
@@ -1451,6 +1432,10 @@ buildSessionLoopConfig
                 Nothing -> pure []
         , loopInterrupt = interruptBackend
         , loopCancel = toolEnv.toolCancel
+        -- Children keep running after the root answers; their notices reach
+        -- the root through the CLI's pending notices.
+        , loopSubagents =
+            subagentLoop KeepChildrenRunning rootSubagents <$ multiCtx
         }
 
 installSessionToolRuntimes
@@ -1799,10 +1784,6 @@ buildSessionEnv
         , sessionEndTurnActivity =
             persistenceRuntime.persistenceEndTurnActivity
         , sessionAgentViewport = Just controls.controlAgentViewport
-        , sessionBeginSubagentTurn =
-            loopRuntime.loopRuntimeSubagents.subagentBeginTurn
-        , sessionFinishSubagentTurn =
-            loopRuntime.loopRuntimeSubagents.subagentFinishTurn
         , sessionAbortSubagentTurn =
             loopRuntime.loopRuntimeSubagents.subagentAbortTurn
         , sessionConcurrentLimit =

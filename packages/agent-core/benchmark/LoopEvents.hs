@@ -215,6 +215,7 @@ runWorkload workload eventCount sinkDelayMicros = do
             , loopCloseSteering = pure []
             , loopInterrupt = pure ()
             , loopCancel = cancel
+            , loopSubagents = Nothing
             }
     displayChecksum <- case workload of
         StreamingFailureEvents -> do

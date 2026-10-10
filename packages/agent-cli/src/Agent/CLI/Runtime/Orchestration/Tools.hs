@@ -780,7 +780,7 @@ launchAgentToolsSession codeModeResourceScope AgentToolsRequest{..} ToolStartup
     , collaborationSubagentForkSource = subagentForkSource
     , collaborationPendingNotices = pendingNotices
     , collaborationRegistry = registry
-    , collaborationRootTurnRef = rootTurnRef
+    , collaborationRootSubagents = rootSubagents
     , collaborationAgentTypes = agentTypesRef
     , collaborationOpenAiChild = openaiChild
     , collaborationAllowedChildModels = allowedChildModels
@@ -894,7 +894,7 @@ launchAgentToolsSession codeModeResourceScope AgentToolsRequest{..} ToolStartup
         , resumeTargetChanged
         , resumed
         , root
-        , rootTurnRef
+        , rootSubagents
         , selectHttpAccount
         , selectableTokenProvider
         , sessionTools = agentSessionAppTools

@@ -171,6 +171,7 @@ runWorkload workload callCount delayMicros = do
             , loopCloseSteering = pure []
             , loopInterrupt = pure ()
             , loopCancel = cancel
+            , loopSubagents = Nothing
             }
     result <- runLoop config Nothing "benchmark"
     pure $ case result of

@@ -208,4 +208,5 @@ configFor state backend = do
         , loopCloseSteering = pure []
         , loopInterrupt = pure ()
         , loopCancel = cancel
+        , loopSubagents = Nothing
         }

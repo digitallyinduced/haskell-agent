@@ -20,6 +20,7 @@ import qualified Agent.SkillsSpec as SkillsSpec
 import qualified Agent.SubagentsSpec as SubagentsSpec
 import qualified Agent.Subagents.ChildSpec as SubagentChildSpec
 import qualified Agent.Subagents.HistorySpec as SubagentHistorySpec
+import qualified Agent.Subagents.LoopSpec as SubagentLoopSpec
 import qualified Agent.Subagents.TaskPathSpec as TaskPathSpec
 import qualified Agent.TextBufferSpec as TextBufferSpec
 import qualified Agent.Transcription.ReceiveSpec as TranscriptionReceiveSpec
@@ -55,6 +56,7 @@ main = hspec do
     SubagentsSpec.spec
     SubagentChildSpec.spec
     SubagentHistorySpec.spec
+    SubagentLoopSpec.spec
     TaskPathSpec.spec
     TextBufferSpec.spec
     TranscriptionReceiveSpec.spec

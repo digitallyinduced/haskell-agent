@@ -38,7 +38,8 @@ import Agent.Loop (TurnInput(..))
 import Agent.Provider (Provider(..), TokenProvider, tokenProviderBillingMode)
 import Agent.Responses.Types (ResponseItem)
 import Agent.Subagents
-    ( RootTurnId, SubagentId, SubagentRegistry
+    ( RootSubagents, SubagentId, SubagentNotices(..), SubagentRegistry
+    , currentRootTurn, newRootSubagents
     , formatCompletionNotice
     , setSubagentOnComplete, setSubagentOnSettled )
 import Agent.Subagents.TaskPath (taskPathRoot)
@@ -63,7 +64,7 @@ data CollaborationRuntime = CollaborationRuntime
         :: IORef (Maybe (IO [ResponseItem]))
     , collaborationPendingNotices :: PendingInputs
     , collaborationRegistry :: SubagentRegistry
-    , collaborationRootTurnRef :: IORef (Maybe RootTurnId)
+    , collaborationRootSubagents :: RootSubagents
     , collaborationAgentTypes :: GrokSubagentSpecs
     , collaborationOpenAiChild :: Maybe TokenProvider
     , collaborationAllowedChildModels :: Maybe [Text]
@@ -132,7 +133,10 @@ acquireCollaborationRuntime AgentToolsRequest
                 registry
                 collaborationSubagentSessions
                 collaborationAgentTypes)
-    collaborationRootTurnRef <- liftIO $ newIORef (Nothing :: Maybe RootTurnId)
+    -- Completion notices and child messages keep their CLI routing
+    -- (pending notices), so an idle root can start a turn for them.
+    collaborationRootSubagents <- liftIO $
+        newRootSubagents NoticesToHost collaborationRegistry
     collaborationOpenAiChild <- liftIO $
         if shouldLoadOpenAiChild nativeCapabilities.nativeCollaboration
             gatewayAllowedChildModels provider
@@ -182,7 +186,7 @@ acquireCollaborationRuntime AgentToolsRequest
                 , multiSelfId = Nothing
                 , multiDepth = 0
                 , multiTaskPath = taskPathRoot
-                , multiRootTurnId = readIORef collaborationRootTurnRef
+                , multiRootTurnId = currentRootTurn collaborationRootSubagents
                 , multiResumeFromDisk = Just
                     (restoreAgentFromDisk
                         provider

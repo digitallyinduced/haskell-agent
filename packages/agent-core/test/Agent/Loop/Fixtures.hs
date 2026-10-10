@@ -80,6 +80,7 @@ testConfig backend = do
         , loopCloseSteering = pure []
         , loopInterrupt = pure ()
         , loopCancel = cancel
+        , loopSubagents = Nothing
         }
 
 registryFromHandlers :: [ToolHandler] -> ToolRegistry

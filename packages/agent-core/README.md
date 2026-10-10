@@ -24,6 +24,13 @@ Provider-neutral infrastructure shared by the harness transports:
   when a background command it owns completes, and drops tool calls a failed
   turn left without output. The model-facing collaboration tools live in
   `agent-tools` (`Agent.Tools.MultiAgents`).
+- A loop runs with sub-agents when `loopSubagents` is set. `subagentLoop`
+  builds it from a `RootSubagents` (a conversation's registry) and a
+  `SubagentTurnEnd` policy. The loop then begins a root turn before its first
+  request and ends it when it returns, interrupting the children of a failed
+  turn. With `NoticesToLoop` it delivers completion notices and messages to the
+  root with its steering. When the root answers, its children keep running,
+  are awaited up to a deadline, or are interrupted.
 - `Agent.ToolArgs` parses model-supplied JSON tool arguments.
 - `Agent.ToolDSL` owns JSON Schema fragments for function-tool parameters.
 - `Agent.ToolDispatch` decodes and runs provider-neutral application tools.

@@ -16,6 +16,7 @@ module Agent.Loop
     , FileAttachment(..)
     , ImageAttachment(..)
     , LoopConfig(..)
+    , LoopSubagents(..)
     , LoopExecution(..)
     , LoopEvent(..)
     , NativeAgentStatus(..)
