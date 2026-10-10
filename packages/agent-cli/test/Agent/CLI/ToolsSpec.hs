@@ -365,7 +365,7 @@ spec = describe "schemasFromAppTools" do
         it ("keeps planning and user interaction tools direct-only in " <> show mode) do
             let controls =
                     [ "update_plan", "enter_plan_mode", "write_plan", "exit_plan_mode"
-                    , "ask_user_question", "ask_secret"
+                    , "ask_user_question", "request_user_input_async", "ask_secret"
                     ]
                 ordinary = ["read_file", "shell_command", "write_stdin"]
                 tools = map testTool (controls <> ordinary)
@@ -385,7 +385,7 @@ spec = describe "schemasFromAppTools" do
     it "keeps newly available planning controls direct-only after code-mode reprojection" do
         let controls =
                 [ "update_plan", "enter_plan_mode", "write_plan", "exit_plan_mode"
-                , "ask_user_question", "ask_secret"
+                , "ask_user_question", "request_user_input_async", "ask_secret"
                 ]
             tools = map testTool (["read_file", "imagegen"] <> controls)
             full = projectCodeModeToolsFor FullCodeModeProjection tools

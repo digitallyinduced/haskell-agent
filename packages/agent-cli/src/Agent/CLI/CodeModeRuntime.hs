@@ -364,7 +364,7 @@ projectCodeModeTools mode tools = case mode of
     isConversationControlTool tool =
         tool.appToolName `elem`
             [ "update_plan", "enter_plan_mode", "write_plan", "exit_plan_mode"
-            , "ask_user_question", "ask_secret"
+            , "ask_user_question", "request_user_input_async", "ask_secret"
             ]
     isDirectShellTool tool =
         tool.appToolName `elem` ["shell_command", "write_stdin", "set_environment"]

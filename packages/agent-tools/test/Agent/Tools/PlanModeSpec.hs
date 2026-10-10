@@ -30,6 +30,53 @@ fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = describe "Agent.Tools.PlanMode" do
+    describe "request_user_input_async" do
+        it "advertises Codex titles and optional string choices without generic approval" do
+            withTempPlan \env -> do
+                let tool = requestUserInputAsyncTool env
+                case tool.appToolApproval of
+                    AlwaysReadOnly -> pure ()
+                    _ -> expectationFailure "async clarification should not prompt for tool approval"
+                jsonToolParameters tool `shouldBe` Just
+                    [ PropertySchema "questions" (PropertyArray (PropertyObject
+                        [ PropertySchema "title" PropertyString True (Just "The question to ask.")
+                        , PropertySchema "options" (PropertyArray PropertyString) False
+                            (Just "Optional suggested answers. Omit for a free-text question.")
+                        ])) True (Just "One or more questions.")
+                    ]
+
+        it "publishes questions without entering the blocking input hooks" do
+            withTempPlanHooks (testHooks \_ _ -> fail "must not ask synchronously") \env -> do
+                setPlanModeInputWaitHooks env (fail "must not begin waiting") (fail "must not end waiting")
+                delivered <- newIORef ([] :: [Text])
+                setAsyncQuestionDelivery env \message ->
+                    modifyIORef' delivered (<> [message]) >> pure (Right ())
+                runAsyncTool env "{\"questions\":[{\"title\":\"Color?\",\"options\":[\"Blue\",\"Red\"]},{\"title\":\"Any details?\"}]}"
+                    `shouldReturn` "{\"accepted\":true}"
+                readIORef delivered `shouldReturn`
+                    ["Color?\n- Blue\n- Red\n\nAny details?\n\nReply in the chat; I can continue independent work meanwhile."]
+                isPlanModeActive env `shouldReturn` False
+
+        it "does not acknowledge delivery when the host cannot publish questions" do
+            withTempPlan \env -> do
+                runAsyncTool env "{\"questions\":[{\"title\":\"Color?\"}]}"
+                    `shouldReturn` "ERR Asynchronous questions are unavailable in this host."
+                setAsyncQuestionDelivery env \_ -> pure (Left "disconnected")
+                runAsyncTool env "{\"questions\":[{\"title\":\"Color?\"}]}"
+                    `shouldReturn` "ERR disconnected"
+
+        it "rejects invalid questions before delivery" do
+            withTempPlan \env -> do
+                setAsyncQuestionDelivery env \_ -> fail "must not publish invalid input"
+                mapM_ (\arguments -> runAsyncTool env arguments >>= (`shouldSatisfy` Text.isPrefixOf "ERR "))
+                    [ "{}"
+                    , "{\"questions\":[]}"
+                    , "{\"questions\":[{\"title\":\"   \"}]}"
+                    , "{\"questions\":[{\"title\":\"Color?\",\"options\":[]}]}"
+                    , "{\"questions\":[{\"title\":\"Color?\",\"options\":[\"\"]}]}"
+                    , "{\"questions\":[{\"title\":\"Color?\",\"options\":[3]}]}"
+                    ]
+
     it "uses its dedicated confirmation instead of generic tool approval" do
         withTempPlan \env ->
             case (enterPlanModeTool env).appToolApproval of
@@ -360,6 +407,13 @@ runAskTool env arguments = do
     result <- dispatchToolCall testDispatchConfig
         [(askUserQuestionTool env).appToolHandler]
         (functionToolCall "ask-1" "ask_user_question" arguments)
+    pure result.output
+
+runAsyncTool :: PlanModeEnv -> Text -> IO Text
+runAsyncTool env arguments = do
+    result <- dispatchToolCall testDispatchConfig
+        [(requestUserInputAsyncTool env).appToolHandler]
+        (functionToolCall "async-1" "request_user_input_async" arguments)
     pure result.output
 
 testDispatchConfig :: ToolDispatchConfig
