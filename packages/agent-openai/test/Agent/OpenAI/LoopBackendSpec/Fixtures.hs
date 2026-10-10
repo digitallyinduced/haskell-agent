@@ -28,8 +28,8 @@ module Agent.OpenAI.LoopBackendSpec.Fixtures
     ) where
 
 import Agent.Cancel (newCancelFlag)
-import Control.Concurrent qualified as Concurrent
-import Control.Monad qualified as Monad
+import qualified Control.Concurrent as Concurrent
+import qualified Control.Monad as Monad
 import Agent.Error (ApiError(..))
 import qualified Agent.Responses.Codec as ResponsesCodec
 import Agent.Loop

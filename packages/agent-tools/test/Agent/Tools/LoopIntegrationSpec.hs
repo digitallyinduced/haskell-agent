@@ -1,8 +1,8 @@
 module Agent.Tools.LoopIntegrationSpec (spec) where
 
 import Agent.Cancel (newCancelFlag, requestCancel)
-import Control.Concurrent qualified as Concurrent
-import Control.Monad qualified as Monad
+import qualified Control.Concurrent as Concurrent
+import qualified Control.Monad as Monad
 import Agent.Error (ApiError(..))
 import Agent.Loop
 import Agent.ToolDispatch

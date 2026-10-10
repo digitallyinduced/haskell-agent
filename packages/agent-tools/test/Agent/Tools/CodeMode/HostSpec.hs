@@ -1,8 +1,8 @@
 module Agent.Tools.CodeMode.HostSpec (spec) where
 
 import Agent.Cancel (newCancelFlag)
-import Control.Concurrent qualified as Concurrent
-import Control.Monad qualified as Monad
+import qualified Control.Concurrent as Concurrent
+import qualified Control.Monad as Monad
 import Agent.Loop
     ( Backend(Backend)
     , BackendResult(..)

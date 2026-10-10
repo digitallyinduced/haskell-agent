@@ -1,8 +1,8 @@
 module Agent.Runtime.TurnStateSpec (spec, managedRecoveryRoundTrip) where
 
 import Agent.Error (ApiError(..))
-import Control.Concurrent qualified as Concurrent
-import Control.Monad qualified as Monad
+import qualified Control.Concurrent as Concurrent
+import qualified Control.Monad as Monad
 import Agent.Cancel (newCancelFlag, requestCancel)
 import Agent.Json (rawJsonBytes)
 import qualified Agent.Json.Decode as Json

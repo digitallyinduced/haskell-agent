@@ -1,7 +1,7 @@
 module Agent.Claude.LoopBackendSpec (spec) where
 
-import Control.Concurrent qualified as Concurrent
-import Control.Monad qualified as Monad
+import qualified Control.Concurrent as Concurrent
+import qualified Control.Monad as Monad
 import Agent.Claude.LoopBackend
     ( appendHostTranscript
     , claudeCodeOneShotBackend

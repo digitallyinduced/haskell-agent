@@ -1,8 +1,8 @@
 module Agent.Responses.LoopBackendSpec (spec) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
-import Control.Concurrent qualified as Concurrent
-import Control.Monad qualified as Monad
+import qualified Control.Concurrent as Concurrent
+import qualified Control.Monad as Monad
 import Agent.Cancel (newCancelFlag)
 import qualified Agent.Loop as Loop
 import Agent.Loop
