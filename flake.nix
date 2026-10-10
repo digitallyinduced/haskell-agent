@@ -77,10 +77,10 @@
                 # vendored, mirroring how other third-party dependencies enter
                 # the closure. The runtime additionally refreshes the catalog
                 # from the ChatGPT /models endpoint when credentials permit.
-                codexUpstreamRev = "a97cf1b72eaad05aa49847bc81d09ceac9327754";
+                codexUpstreamRev = "de8fab6d7adfcef8b4ce6f02f3b5c8be4092015a";
                 codexModelsJson = pkgs.fetchurl {
                     url = "https://raw.githubusercontent.com/openai/codex/${codexUpstreamRev}/codex-rs/models-manager/models.json";
-                    hash = "sha256-1xNqQTz6wbWxaG2eDcxcgMoFvr7V6fw5ETdlYdDvbug=";
+                    hash = "sha256-lDyn/h0Z7QGQVBWDA/DbvYCzvvQ7OqQlpxqnyz+1LCs=";
                 };
                 codexPromptMd = pkgs.fetchurl {
                     url = "https://raw.githubusercontent.com/openai/codex/${codexUpstreamRev}/codex-rs/models-manager/prompt.md";

@@ -39,6 +39,7 @@ import Agent.CLI.CodeModeRuntime
     , codeModeRuntimePlan
     , filterStartupUnavailableTools
     , loadCodexCatalogModelInfo
+    , codexCatalogFallbackWarning
     )
 import Agent.Tools.CodeMode.Tool
     ( ToolMode(CodeOnlyToolMode, ConventionalToolMode)
@@ -491,6 +492,8 @@ prepareSessionCodeRuntime AgentSessionRequest
                 then Nothing
                 else Just selectableTokenProvider)
             model
+    forM_ (codexCatalogFallbackWarning provider dialect model sessionModelInfo) $
+        reportStartupWarning startup
     let nativeCapabilities =
             maybe
                 fullNativeRunCapabilities
