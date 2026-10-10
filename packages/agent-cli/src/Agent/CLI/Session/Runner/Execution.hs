@@ -107,6 +107,7 @@ import Agent.CLI.StartupContext
 import Agent.CLI.Startup.Auth
 import Agent.CLI.Subagents.Runtime
 import Agent.CLI.Style
+import Agent.CLI.TerminalStatus (beginTerminalInputWait, endTerminalInputWait)
 import Agent.CLI.Terminal
 import Agent.Runtime.ProviderRequest
 import Agent.CLI.Tools
@@ -331,12 +332,14 @@ newSessionHostRuntime SessionRequest{..} = do
         withIoLock
         writeWindowTitle
     let beginInputWait = do
+            beginTerminalInputWait
             windowTitle.windowTitleBeginInputWait
             modifyMVar_ observationInputWaitCount \count -> do
                 readIORef observationPublisher >>= mapM_
                     (\publisher -> Observation.setObservedWaiting publisher True)
                 pure (count + 1)
         endInputWait = do
+            endTerminalInputWait
             windowTitle.windowTitleEndInputWait
             modifyMVar_ observationInputWaitCount \count -> do
                 let remaining = max 0 (count - 1)

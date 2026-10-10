@@ -109,6 +109,7 @@ import qualified Agent.CLI.TranscriptExportSpec as TranscriptExportSpec
 import qualified Agent.CLI.TurnSpec as TurnSpec
 import qualified Agent.CLI.TerminalSpec as TerminalSpec
 import qualified Agent.CLI.TerminalDiagnosticsSpec as TerminalDiagnosticsSpec
+import qualified Agent.CLI.TerminalStatusSpec as TerminalStatusSpec
 import qualified Agent.CLI.TextLayoutSpec as TextLayoutSpec
 import qualified Agent.CLI.ToolsSpec as ToolsSpec
 import qualified Agent.CLI.TUIAppSpec as TUIAppSpec
@@ -250,6 +251,7 @@ specs = do
     TurnSpec.spec
     TerminalSpec.spec
     TerminalDiagnosticsSpec.spec
+    TerminalStatusSpec.spec
     TextLayoutSpec.spec
     SessionStateSpec.spec
     AppleFollowUpEvalSpec.spec
