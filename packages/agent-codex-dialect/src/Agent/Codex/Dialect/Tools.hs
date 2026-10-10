@@ -507,6 +507,7 @@ decodeApplyPatchArguments call = case call.callKind of
     ComputerCallKind -> Left "computer calls are not apply_patch calls"
     ComputerFunctionCallKind ->
         Left "computer calls are not apply_patch calls"
+    ToolSearchCallKind -> Left "tool search calls are not apply_patch calls"
 
 --------------------------------------------------------------------------------
 -- update_plan

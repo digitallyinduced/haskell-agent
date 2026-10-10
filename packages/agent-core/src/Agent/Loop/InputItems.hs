@@ -21,6 +21,7 @@ import Agent.ComputerUse.Protocol
     )
 import Agent.Json (RawJson, rawJsonFromEncoding)
 import Agent.Loop.Input
+import Agent.Skills.ToolSearch (toolSearchOutputTools)
 import Agent.Responses.Types
 import Agent.ToolDispatch
     ( toolCallResultOutcome
@@ -179,6 +180,14 @@ toolResultToItem result = case result.callKind of
             , output = computerFunctionToolResultOutput result
             , status = Nothing
             , async = Nothing
+            }
+    ToolSearchCallKind ->
+        ToolSearchOutputItem ToolSearchOutput
+            { itemId = Nothing
+            , callId = Just result.callId
+            , status = Just "completed"
+            , execution = Just "client"
+            , tools = map (rawJsonFromEncoding . Aeson.toEncoding) (toolSearchOutputTools result.output)
             }
 
 toolResultOutput :: ToolCallResult -> RawJson

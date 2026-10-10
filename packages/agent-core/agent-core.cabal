@@ -68,6 +68,7 @@ library
                     , Agent.ResourceScope
                     , Agent.Retry
                     , Agent.Skills
+                    , Agent.Skills.ToolSearch
                     , Agent.Subagents
                     , Agent.Subagents.Child
                     , Agent.Subagents.Format
@@ -265,6 +266,7 @@ test-suite agent-core-test
                     , Agent.ResourceScopeSpec
                     , Agent.RetrySpec
                     , Agent.SkillsSpec
+                    , Agent.Skills.ToolSearchSpec
                     , Agent.SubagentsSpec
                     , Agent.Subagents.ChildSpec
                     , Agent.Subagents.HistorySpec

@@ -955,3 +955,4 @@ callKindText = \case
     CustomCallKind -> "custom"
     ComputerCallKind -> "computer"
     ComputerFunctionCallKind -> "computer_function"
+    ToolSearchCallKind -> "tool_search"
