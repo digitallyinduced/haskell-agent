@@ -1209,8 +1209,11 @@ appendTurnWithMetaTransitionIndexedUsing
         meta = meta0
             { metaUpdatedAt = now
             , metaLastResponseId = turn.turnResponseId <|> meta0.metaLastResponseId
-            -- A new response cannot inherit the preceding response's catalog.
-            -- Provider-aware callers install its matching state in transition.
+            -- Neither a new response nor a transcript replacement can inherit
+            -- the preceding response's catalog. This also invalidates manual
+            -- and automatic compaction checkpoints in the append transaction,
+            -- even if the session closes before another successful turn.
+            -- Provider-aware callers install matching state in transition.
             , metaProviderState = Nothing
             }
         finalMeta = transition meta

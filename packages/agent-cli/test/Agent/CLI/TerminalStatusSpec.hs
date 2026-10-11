@@ -51,6 +51,24 @@ spec = describe "terminal lifecycle status" do
                     (\status -> Text.replace (terminalStatusSequence status) "")
                     actual [TerminalIdle, TerminalWorking, TerminalClear]
             withoutStatus `shouldBe` Text.replicate 100 "z"
+    it "ignores background input waits while foreground work is active" do
+        let (beginBackgroundWait, endBackgroundWait) = terminalInputWaitHooks True
+        actual <- captureTerminal $ withTerminalStatus True $ withTerminalWorking do
+            beginBackgroundWait
+            endBackgroundWait
+        actual `shouldBe` sequences
+            [TerminalIdle, TerminalWorking, TerminalIdle, TerminalClear]
+    it "does not let background completion clear a foreground input wait" do
+        let (beginBackgroundWait, endBackgroundWait) = terminalInputWaitHooks True
+            (beginForegroundWait, endForegroundWait) = terminalInputWaitHooks False
+        actual <- captureTerminal $ withTerminalStatus True $ withTerminalWorking do
+            beginForegroundWait
+            beginBackgroundWait
+            endBackgroundWait
+            withTerminalWorking (pure ())
+            endForegroundWait
+        actual `shouldBe` sequences
+            [TerminalIdle, TerminalWorking, TerminalBlocked, TerminalWorking, TerminalIdle, TerminalClear]
     it "clears during nested handoff and restores the current status" do
         actual <- captureTerminal $ withTerminalStatus True $ withTerminalWorking $
             withTerminalStatusSuspended $ withTerminalStatusSuspended (pure ())

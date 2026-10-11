@@ -1,9 +1,13 @@
 module Agent.Subagents.ChildSpec (spec) where
 
 import Agent.Cancel (newCancelFlag, requestCancel)
+import Agent.Json (rawJsonFromEncoding)
 import Agent.Loop
     ( Backend(..)
+    , BackendContinuation(..)
+    , BackendProviderState(..)
     , BackendResult(..)
+    , BackendRevision(..)
     , BackendSnapshot(..)
     , BackendStateStore(..)
     , LoopConfig(..)
@@ -18,6 +22,9 @@ import Agent.Loop
     , initialBackendSnapshot
     , runLoopInputs
     )
+import Agent.Loop.Fixtures (testConfig)
+import Agent.Loop.InputItems (turnInputsToItems)
+import Agent.ToolDispatch (functionToolCall)
 import Agent.Loop.SteeringInputs
     ( SteeringInputs
     , awaitUserSteeringAfter
@@ -53,6 +60,7 @@ import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryPutMVar)
 import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar)
 import Control.Exception.Safe (bracket)
 import Control.Monad (void)
+import qualified Data.Aeson as Aeson
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -156,6 +164,62 @@ withChild action =
 spec :: Spec
 spec = describe "Agent.Subagents.Child" do
     describe "runChildTurn" do
+        it "commits provider checkpoints across tool continuations and subsequent child turns" do
+            withChild \registry env -> do
+                requests <- newIORef []
+                snapshots <- newIORef []
+                transcript <- newIORef emptyBackendSnapshot
+                base <- answeringChild requests transcript
+                let catalog version = Just BackendProviderState
+                        { providerStateNamespace = "openai.responses.catalog.v1"
+                        , providerStatePayload = rawJsonFromEncoding (Aeson.toEncoding (version :: Int))
+                        }
+                    continuation = Just (BackendContinuation "openai" "response")
+                    backend = Backend \current _ inputs _ -> do
+                        index <- atomicModifyIORef' snapshots \seen ->
+                            (seen <> [current], length seen)
+                        let output = case index of
+                                0 -> emptyTurnOutput "tool-response"
+                                    [functionToolCall "echo-call" "echo" "{\"message\":\"hi\"}"]
+                                    Nothing
+                                _ -> emptyTurnOutput "answer" [] (Just "done")
+                        pure $ Right BackendResult
+                            { backendOutput = output
+                            , backendState = current
+                                { backendItems = current.backendItems <> turnInputsToItems inputs
+                                , backendRevision = BackendRevision 999
+                                , backendContinuation = continuation
+                                , backendProviderState = case index of
+                                    0 -> catalog 1
+                                    1 -> catalog 2
+                                    _ -> Nothing
+                                }
+                            }
+                fixture <- testConfig backend
+                let child = base
+                        { childBackend = backend
+                        , childTools = fixture.loopTools
+                        , childApproval = fixture.loopApprove
+                        }
+                first <- runChildTurn registry env child \config ->
+                    runLoopInputs config Nothing [UserMessage "task"]
+                fmap (.turnsUsed) first `shouldBe` Right 2
+                second <- runChildTurn registry env child \config ->
+                    runLoopInputs config (Just "answer") [UserMessage "follow-up"]
+                fmap (.turnsUsed) second `shouldBe` Right 1
+                seen <- readIORef snapshots
+                map (.backendProviderState) seen `shouldBe`
+                    [Nothing, catalog 1, catalog 2]
+                map (.backendRevision) seen `shouldBe`
+                    [BackendRevision 0, BackendRevision 1, BackendRevision 2]
+                map (.backendContinuation) seen `shouldBe`
+                    [Nothing, continuation, continuation]
+                committed <- readIORef transcript
+                committed.backendProviderState `shouldBe` Nothing
+                committed.backendRevision `shouldBe` BackendRevision 3
+                committed.backendContinuation `shouldBe` continuation
+                committed.backendItems `shouldSatisfy` (not . null)
+
         it "records the response id a follow-up continues from" do
             withChild \registry env -> do
                 requests <- newIORef []
