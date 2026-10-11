@@ -1,6 +1,7 @@
 module Main (main) where
 
 import qualified Agent.ToolDispatchSpec as ToolDispatchSpec
+import qualified Agent.Tools.AsyncQuestionsSpec as AsyncQuestionsSpec
 import qualified Agent.Tools.CodeMode.HostSpec as CodeModeHostSpec
 import qualified Agent.Tools.CodeMode.Haskell.BindingsSpec as HaskellBindingsSpec
 import qualified Agent.Tools.CodeMode.Haskell.HostSpec as HaskellHostSpec
@@ -32,6 +33,7 @@ import qualified Agent.Tools.CodeMode.IsolatedHostLimitsSpec as IsolatedHostLimi
 
 main :: IO ()
 main = hspec do
+    AsyncQuestionsSpec.spec
     IsolatedHostSpec.spec
     IsolatedHostLimitsSpec.spec
     ToolDispatchSpec.spec
