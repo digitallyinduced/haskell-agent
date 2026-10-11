@@ -7,6 +7,10 @@ import qualified Agent.ConcurrentSpec as ConcurrentSpec
 import qualified Agent.ComputerUse.ProtocolSpec as ComputerUseProtocolSpec
 import qualified Agent.DialectSpec as DialectSpec
 import qualified Agent.ErrorSpec as ErrorSpec
+import qualified Agent.HistorySpec as HistorySpec
+import qualified Agent.Loop.RecoverySpec as RecoverySpec
+import qualified Agent.Loop.NativeSpec as NativeSpec
+import qualified Agent.Tools.RegistrationSpec as RegistrationSpec
 import qualified Agent.Http.HeaderSpec as HttpHeaderSpec
 import qualified Agent.JsonTextSpec as JsonTextSpec
 import qualified Agent.LoopSpec as LoopSpec
@@ -44,6 +48,10 @@ main = hspec do
     ComputerUseProtocolSpec.spec
     DialectSpec.spec
     ErrorSpec.spec
+    HistorySpec.spec
+    RecoverySpec.spec
+    NativeSpec.spec
+    RegistrationSpec.spec
     HttpHeaderSpec.spec
     JsonTextSpec.spec
     LoopSpec.spec

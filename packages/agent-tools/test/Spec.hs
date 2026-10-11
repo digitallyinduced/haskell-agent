@@ -27,9 +27,13 @@ import qualified Agent.Tools.ShowImageSpec as ShowImageSpec
 import qualified Agent.Tools.ViewImageSpec as ViewImageSpec
 import qualified Agent.Tools.RenderChartSpec as RenderChartSpec
 import Test.Hspec (hspec)
+import qualified Agent.Tools.CodeMode.IsolatedHostSpec as IsolatedHostSpec
+import qualified Agent.Tools.CodeMode.IsolatedHostLimitsSpec as IsolatedHostLimitsSpec
 
 main :: IO ()
 main = hspec do
+    IsolatedHostSpec.spec
+    IsolatedHostLimitsSpec.spec
     ToolDispatchSpec.spec
     GrepSpec.spec
     ListDirSpec.spec
