@@ -111,6 +111,32 @@ spec = do
                     (\_ _ -> pure (Right (ConnectionFinished ())))
             result `shouldBe` Nothing
 
+        it "does not classify thread cancellation even with a broad classifier" do
+            replacements <- newIORef (0 :: Int)
+            let config = configuration
+                    { classifyException = const (Just "closed")
+                    , beforeReplacement = \_ _ -> modifyIORef' replacements (+ 1)
+                    }
+            result <- Exception.try @Exception.AsyncException $
+                runRecoveringConnections config
+                    (\_ -> Exception.throwIO Exception.ThreadKilled)
+                    (\_ _ -> pure (Right (ConnectionFinished ())))
+            result `shouldBe` Left Exception.ThreadKilled
+            readIORef replacements `shouldReturn` 0
+
+        it "preserves timeout cancellation even with a broad classifier" do
+            replacements <- newIORef (0 :: Int)
+            let config = configuration
+                    { classifyException = const (Just "closed")
+                    , beforeReplacement = \_ _ -> modifyIORef' replacements (+ 1)
+                    }
+            result <- timeout 10000 $
+                runRecoveringConnections config
+                    (\action -> threadDelay 1000000 >> action ())
+                    (\_ _ -> pure (Right (ConnectionFinished ())))
+            result `shouldBe` Nothing
+            readIORef replacements `shouldReturn` 0
+
 configuration :: ConnectionRecovery Text Text
 configuration = ConnectionRecovery
     { replacementLimit = 3

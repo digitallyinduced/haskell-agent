@@ -77,6 +77,53 @@ spec = describe "native host loop" do
                 readIORef inbox `shouldReturn` []
             _ -> expectationFailure "expected pending input at turn limit"
 
+    forM_ [False, True] \beforeAnswer ->
+      it ("acknowledges pending child inputs at the turn limit (before answer: " <> show beforeAnswer <> ")") do
+        inbox <- newIORef []
+        children <- newIORef []
+        acknowledgements <- newIORef []
+        submitted <- newIORef []
+        config <- fixtureConfig
+        let childHooks = Agent.LoopSubagents
+                { subagentsBeginTurn = pure ()
+                , subagentsReadInputs = if beforeAnswer then pure [] else readIORef children
+                , subagentsCommitInputs = \count -> do
+                    modifyIORef' acknowledgements (<> [count])
+                    modifyIORef' children (drop count)
+                , subagentsBeforeAnswer = readIORef children
+                , subagentsEndTurn = const (pure ())
+                }
+            configured = config
+                { maxTurns = 1
+                , submit = \_ _ _ -> do
+                    writeIORef inbox (if beforeAnswer then [] else [Opaque "host-input"])
+                    writeIORef children [Agent.UserMessage "child-message", Agent.UserMessage "child-complete"]
+                    pure (Response [Message "answer"] False)
+                , readSteering = readIORef inbox
+                , acknowledgeSteering = \count -> modifyIORef' inbox (drop count)
+                , subagents = Just childHooks
+                }
+        outcome <- runNativeLoop configured Nothing []
+        case outcome of
+            NativeLoopReachedLimit limit -> do
+                limit.pendingItems `shouldBe`
+                    (if beforeAnswer then [] else [Opaque "host-input"])
+                        <> [Message "child-message", Message "child-complete"]
+                readIORef children `shouldReturn`
+                    [Agent.UserMessage "child-message", Agent.UserMessage "child-complete"]
+                limit.acknowledgePendingInput
+                readIORef inbox `shouldReturn` []
+                readIORef children `shouldReturn` []
+                counts <- readIORef acknowledgements
+                last counts `shouldBe` 2
+            _ -> expectationFailure "expected child input at turn limit"
+        _ <- runNativeLoop (configured
+            { submit = \_ _ items -> do
+                modifyIORef' submitted (<> [items])
+                pure (Response [Message "done"] False)
+            }) (Just "response") []
+        readIORef submitted `shouldReturn` [[]]
+
     it "delivers text before the following call batch and after the preceding one" do
         events <- newIORef []
         let record text = modifyIORef' events (<> [text])

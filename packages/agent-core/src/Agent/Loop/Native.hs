@@ -119,6 +119,7 @@ runNativeLoop config initialResponseId initialItems = do
     checkpointRef <- newIORef Agent.emptyBackendSnapshot
     responseRef <- newIORef Nothing
     batchRef <- newIORef emptyInputBatch
+    pendingChildAcknowledgementRef <- newIORef (pure ())
     iterationRef <- newIORef 0
     failureRef <- newIORef Nothing
     outputQueueRef <- newIORef []
@@ -132,6 +133,19 @@ runNativeLoop config initialResponseId initialItems = do
         | tool <- Tools.toolRegistryTools config.tools
         ]
     let native = config.codec
+        trackSubagents children =
+            let readInputs action = do
+                    inputs <- action
+                    writeIORef pendingChildAcknowledgementRef
+                        (children.subagentsCommitInputs (length inputs))
+                    pure inputs
+            in children
+                { Agent.subagentsReadInputs = readInputs children.subagentsReadInputs
+                , Agent.subagentsBeforeAnswer = readInputs children.subagentsBeforeAnswer
+                , Agent.subagentsCommitInputs = \count -> do
+                    children.subagentsCommitInputs count
+                    writeIORef pendingChildAcknowledgementRef (pure ())
+                }
         completedToolItems inputs =
             [native.completedToolItem result | Agent.CompletedTool result <- inputs]
         requireResponse = readIORef responseRef >>= maybe
@@ -268,7 +282,7 @@ runNativeLoop config initialResponseId initialItems = do
         , loopCloseSteering = pure []
         , loopInterrupt = pure ()
         , loopCancel = cancel
-        , loopSubagents = config.subagents
+        , loopSubagents = trackSubagents <$> config.subagents
         } initialResponseId []
     -- agent-core returns synchronous exceptions as LoopUnexpected. Preserve
     -- the original typed provider/delivery exception for host recovery policy.
@@ -280,11 +294,14 @@ runNativeLoop config initialResponseId initialItems = do
         Left (Agent.LoopMaxTurns _) -> do
             batch <- readIORef batchRef
             checkpoint <- readIORef checkpointRef
+            acknowledgeChildren <- readIORef pendingChildAcknowledgementRef
             pure $ NativeLoopReachedLimit NativeLoopLimit
                 { previousResponseId = Agent.backendContinuationToken config.continuationNamespace checkpoint
                 , pendingItems = completedToolItems execution.executionPendingInputs <> batchItems batch
                     <> native.auxiliaryInputItems execution.executionPendingInputs
-                , acknowledgePendingInput = acknowledgeBatch (batchSize batch)
+                -- Preserve the host/child split from the last steering read,
+                -- including child-only inputs obtained before answering.
+                , acknowledgePendingInput = acknowledgeBatch (batchSize batch) >> acknowledgeChildren
                 }
         Left err -> fail ("NativeLoop: loop failed: " <> show err)
 

@@ -15,6 +15,7 @@ module Agent.Loop.Recovery
     ) where
 
 import qualified Control.Exception as Exception
+import qualified Control.Exception.Safe as Safe
 import Data.IORef
 
 -- | Single-owner state. Record the resume point before submitting a request,
@@ -70,9 +71,9 @@ data ConnectionRecovery reason error = ConnectionRecovery
 -- may make it select another account before returning. The replacement budget
 -- is shared across every such attempt and is never reset by progress.
 --
--- Unclassified exceptions are rethrown with their original identity, including
--- asynchronous timeout exceptions. Classification must recognize only known
--- transport failures, never asynchronous cancellation.
+-- Asynchronous cancellation bypasses classification and retains its original
+-- identity, including timeout exceptions. Only synchronous failures reach the
+-- classifier; unclassified failures are rethrown unchanged.
 runRecoveringConnections
     :: ConnectionRecovery reason error
     -> (forall a. (connection -> IO (Either error a)) -> IO (Either error a))
@@ -82,7 +83,7 @@ runRecoveringConnections config withConnection attempt = do
     remaining <- newIORef (max 0 config.replacementLimit)
     let available = (> 0) <$> readIORef remaining
         connect number = do
-            outcome <- Exception.try (withConnection (attempt available))
+            outcome <- Safe.try (withConnection (attempt available))
             case outcome of
                 Right (Right (ConnectionFinished result)) -> pure (Right result)
                 Right (Right (ReplaceConnection reason)) -> replace number reason

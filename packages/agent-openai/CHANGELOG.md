@@ -70,7 +70,7 @@
 
 ## 0.1.0.0 — 2026-04-23
 
-Initial release. Extracted from the belege.ai application:
+Initial release:
 
 - `Agent.OpenAI.Responses.Types` — request/response types, tool definitions, computer-use actions.
 - `Agent.OpenAI.Error` — `ApiError` / `ErrorType` and classification helpers.
