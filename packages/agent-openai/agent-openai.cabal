@@ -80,6 +80,7 @@ library
                     , Agent.OpenAI.LoopBackend
                     , Agent.OpenAI.CompactClient
                     , Agent.OpenAI.Compaction
+                    , Agent.OpenAI.Compaction.Envelope
                     , Agent.OpenAI.Compaction.Manager
                     , Agent.OpenAI.Compaction.Native
                     , Agent.OpenAI.Compaction.Transport
@@ -162,6 +163,7 @@ test-suite agent-openai-test
                     , Agent.OpenAI.ModelsManagerSpec
                     , Agent.OpenAI.ModelsTypesSpec
                     , Agent.OpenAI.CompactionSpec
+                    , Agent.OpenAI.CompactionEnvelopeSpec
                     , Agent.OpenAI.CompactionManagerSpec
                     , Agent.OpenAI.CompactionNativeSpec
                     , Agent.OpenAI.RequestIdentitySpec

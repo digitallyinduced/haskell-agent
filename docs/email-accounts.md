@@ -100,8 +100,7 @@ Custom IMAP accounts otherwise support
 account/mailbox listing, structured search, bounded MIME message retrieval,
 and bounded attachment-part downloads. The runtime checks RFC822 size before
 fetching, caps each raw message at 8 MiB, decodes MIME locally, and never
-performs the unbounded full-mailbox fetch used by the older belege.ai
-integration.
+performs an unbounded full-mailbox fetch.
 
 All mailbox text is untrusted external content. Tool descriptions and results
 explicitly warn the model not to follow instructions found in messages or

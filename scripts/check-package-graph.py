@@ -55,6 +55,7 @@ def check(root):
             forbidden.add("agent-tools")
             contracts = {
                 "Agent.Tools.Types", "Agent.Tools.Scheduling",
+                "Agent.Tools.Registration",
                 "Agent.Tools.ResourceArbiter", "Agent.Tools.OutputArtifact.Memory",
             }
             test_root = path.parent / "test"

@@ -6,6 +6,7 @@ module Agent.OpenAI.Compaction.Transport
 import qualified Agent.Error as Agent
 import Agent.Http.Header (parseRetryAfterSeconds)
 import qualified Agent.OpenAI.Client as Client
+import Agent.OpenAI.Compaction.Envelope (nativeCompactionRequestBody)
 import Agent.OpenAI.Error (classifyHttpFailure)
 import Agent.OpenAI.Features (remoteCompactionV2Feature)
 import Agent.OpenAI.Http (postCodexJson)
@@ -14,7 +15,6 @@ import Control.Applicative ((<|>))
 import qualified Control.Exception.Safe as Exception
 import Control.Monad (when)
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import Data.Maybe (maybeToList)
 import Data.Text (Text)
@@ -69,30 +69,6 @@ sendNativeCompaction accessToken accountId model request =
                 other -> other
       where
         status = Http.getStatusCode response
-
--- | Generic wire-envelope adaptation, not domain decoding: every nested
--- provider field is retained except documented replay-only lifecycle markers.
-nativeCompactionRequestBody :: Aeson.ToJSON request => Text -> request -> Aeson.Value
-nativeCompactionRequestBody model request = case Aeson.toJSON request of
-    Aeson.Object fields -> Aeson.Object $
-        KeyMap.insert "stream" (Aeson.Bool True) $
-        KeyMap.insert "store" (Aeson.Bool False) $
-        KeyMap.insert "tool_choice" (Aeson.String "auto") $
-        KeyMap.insert "parallel_tool_calls" (Aeson.Bool (not (isCodexResponsesLiteModel model))) $
-        KeyMap.delete "previous_response_id" $
-        KeyMap.delete "prompt_cache_retention" $
-        KeyMap.mapWithKey (\key value -> if key == "input" then sanitizeInput value else value) fields
-    other -> other
-  where
-    sanitizeInput (Aeson.Array items) = Aeson.Array (fmap sanitizeItem items)
-    sanitizeInput other = other
-    sanitizeItem (Aeson.Object fields) = Aeson.Object $
-        KeyMap.mapWithKey (\key value -> if key == "passthrough" then sanitizeMetadata value else value) $
-        KeyMap.delete "content_item_kinds" $ KeyMap.delete "status" fields
-    sanitizeItem other = other
-    sanitizeMetadata (Aeson.Object fields) =
-        Aeson.Object (KeyMap.delete "content_item_kinds" fields)
-    sanitizeMetadata other = other
 
 readErrorBody :: Int -> Streams.InputStream BS.ByteString -> IO Text
 readErrorBody idleMicros stream = go 65536 []
