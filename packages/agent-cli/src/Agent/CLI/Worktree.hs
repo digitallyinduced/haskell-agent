@@ -10,6 +10,7 @@ module Agent.CLI.Worktree
     , gcWorktrees
     , gcWorktreesWithActivity
     , gcWorktreesManuallyWithActivity
+    , cleanWorktreeArtifacts
     , worktreeInactive
     , enrollWorktree
     , protectWorktree
@@ -35,6 +36,7 @@ import Agent.CLI.Worktree.Registry
 import Agent.CLI.Worktree.ReadOnlyLock (withExistingReadOnlyLock)
 import qualified Agent.CLI.Worktree.Snapshot as Snapshot
 import qualified Agent.CLI.Worktree.Clean as Clean
+import qualified Agent.CLI.Worktree.Ignored as Ignored
 import Agent.CLI.Worktree.Incorporation (inspectIncorporation)
 import Control.Applicative ((<|>))
 import Control.Exception.Safe
@@ -374,6 +376,57 @@ restoreManagedWorktree root requested =
                         now <- lift getCurrentTime
                         ExceptT $ writeRecord root path record
                             { recordState = "present", recordLastActivity = now }
+
+-- | Independent, explicitly bounded artifact maintenance. Dirty and unmerged
+-- source is immaterial: no checkout, source, or recovery state is removed.
+-- Explicit path selection does not enroll a legacy checkout for automatic GC.
+cleanWorktreeArtifacts :: OsPath -> OsPath -> Bool -> [OsPath] -> IO (Either Text [(FilePath, Integer)])
+cleanWorktreeArtifacts root path execute protected = catchingWorktree $ do
+    -- Validate before any execution-mode lock-file creation.
+    identity <- runExceptT (inspectManagedIdentity root path)
+    case identity of
+        Left err -> pure (Left err)
+        Right common -> checkoutLock $ repositoryLock common $ runExceptT do
+            when (any (isUnderWorktreeRoot path . normalise) protected)
+                (throwE "current session")
+            existing <- ExceptT (readRecord root path)
+            case existing of
+                Nothing -> pure ()
+                Just record -> do
+                    when (record.recordProtected) (throwE "protected")
+                    unless (record.recordState == "present") (throwE "checkout is not present")
+                    unless (record.recordCommonDir == unsafeToFilePath common)
+                        (throwE "enrolled repository identity changed")
+            verified <- inspectManagedIdentity root path
+            unless (verified == common) (throwE "repository identity changed")
+            admin <- Text.strip <$> ExceptT (git path ["rev-parse", "--path-format=absolute", "--git-dir"])
+            locked <- lift $ doesPathExist (unsafeEncodeUtf (Text.unpack admin) </> unsafeEncodeUtf "locked")
+            when locked (throwE "Git worktree is locked")
+            inventory <- lift $ Ignored.inspectCabalArtifacts artifactGit (unsafeToFilePath path)
+            when (execute && not (null inventory)) do
+                -- Leases fence harness sessions, not independent compilers.
+                -- Failure, warnings, or a deadline cannot establish quiescence.
+                openFiles <- lift $ timeout (30 * 1000000) $
+                    readCreateProcessWithExitCode
+                        (proc "lsof" ["-nP", "+D", unsafeToFilePath path, "-F", "p"]) ""
+                unless (openFiles == Just (ExitFailure 1, "", ""))
+                    (throwE "cannot establish quiescence: open files, lsof diagnostics or inspection deadline; stop external processes and retry")
+                lift $ Ignored.removeCabalArtifacts artifactGit (unsafeToFilePath path) inventory
+            pure inventory
+  where
+    checkoutLock = if execute then withExclusiveManaged root path
+        else withReadOnlyLock (worktreeLeasePath root path)
+    repositoryLock common = if execute then withGitWorktreeLockAt common
+        else withReadOnlyLock (common </> unsafeEncodeUtf "haskell-agent-worktree.lock")
+    artifactGit arguments input = do
+        environment <- filter (not . isPrefixOf "GIT_" . fst) <$> getEnvironment
+        (code, output, errors) <- readCreateProcessWithExitCode
+            ((proc "git" (["--no-optional-locks", "-C", unsafeToFilePath path] <> arguments))
+                { env = Just environment }) input
+        case code of
+            ExitSuccess -> pure output
+            ExitFailure 1 | take 1 arguments == ["check-ignore"] -> pure ""
+            _ -> ioError (userError ("artifact Git inspection failed: " <> errors))
 
 withExclusiveManaged :: OsPath -> OsPath -> IO (Either Text a) -> IO (Either Text a)
 withExclusiveManaged root path action = mask $ \restore ->
@@ -1000,9 +1053,10 @@ quote value = "'" <> value <> "'"
 git :: OsPath -> [String] -> IO (Either Text Text)
 git dir args = do
     -- Only fetch diagnostics are parsed for missing-ref recovery.
-    environment <- if listToMaybe args == Just "fetch"
-        then Just . (("LC_ALL", "C") :) . filter ((/= "LC_ALL") . fst) <$> getEnvironment
-        else pure Nothing
+    inherited <- filter (not . isPrefixOf "GIT_" . fst) <$> getEnvironment
+    let environment = Just $ if listToMaybe args == Just "fetch"
+            then ("LC_ALL", "C") : filter ((/= "LC_ALL") . fst) inherited
+            else inherited
     (code, out, err) <-
         readCreateProcessWithExitCode
             (proc "git" args)

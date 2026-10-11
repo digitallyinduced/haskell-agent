@@ -10,6 +10,7 @@ import Control.Monad (void)
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.List (dropWhileEnd, isInfixOf)
 import qualified Data.Map.Strict as Map
+import qualified Data.ByteString as ByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
@@ -41,6 +42,43 @@ toFilePath path = either (error . show) id (decodeUtf path)
 
 spec :: Spec
 spec = describe "Agent.CLI.Worktree" do
+    describe "independent artifact maintenance" do
+        it "inspects legacy dirty worktrees without enrollment and preserves their source" $
+            withTempGitRepo \repo ->
+            withTempDir "artifact-home-" \home -> do
+                let root = worktreeRoot home
+                path <- addManagedWorktree repo root "2026-08-20-00000001"
+                let output = path </> fromFilePath "dist-newstyle/build/Example.o"
+                createDirectoryIfMissing True (takeDirectory output)
+                writeFile (toFilePath (path </> fromFilePath ".gitignore")) "dist-newstyle/\n"
+                writeFile (toFilePath (path </> fromFilePath "source.txt")) "uncommitted source"
+                ByteString.writeFile (toFilePath output) (ByteString.pack [0xcf, 0xfa, 0xed, 0xfe, 0, 0, 0, 0])
+                cleanWorktreeArtifacts root path False [] `shouldReturn` Right [("dist-newstyle/build/Example.o", 8)]
+                doesFileExist output `shouldReturn` True
+                readRecord root path `shouldReturn` Right Nothing
+                doesDirectoryExist (root </> fromFilePath ".locks") `shouldReturn` False
+                cleanWorktreeArtifacts root path True [] `shouldReturn` Right [("dist-newstyle/build/Example.o", 8)]
+                doesFileExist output `shouldReturn` False
+                doesDirectoryExist path `shouldReturn` True
+                readFile (toFilePath (path </> fromFilePath "source.txt")) `shouldReturn` "uncommitted source"
+                readRecord root path `shouldReturn` Right Nothing
+        it "rejects current, protected, active and Git-locked worktrees" $
+            withTempGitRepo \repo ->
+            withTempDir "artifact-home-" \home -> do
+                let root = worktreeRoot home
+                path <- addManagedWorktree repo root "2026-08-20-00000001"
+                let rejected action = action >>= (`shouldSatisfy` either (const True) (const False))
+                rejected (cleanWorktreeArtifacts root path False [path])
+                enrollWorktree root path `shouldReturn` Right ()
+                protectWorktree root path True `shouldReturn` Right ()
+                rejected (cleanWorktreeArtifacts root path True [])
+                protectWorktree root path False `shouldReturn` Right ()
+                bracket (acquireWorktreeLease root path) releaseLease $ \_ -> do
+                    rejected (cleanWorktreeArtifacts root path False [])
+                    rejected (cleanWorktreeArtifacts root path True [])
+                _ <- git repo ["worktree", "lock", toFilePath path]
+                rejected (cleanWorktreeArtifacts root path False [])
+                rejected (cleanWorktreeArtifacts root path True [])
     describe "worktreePath" do
         it "builds root/repo/YYYY-MM-DD-hex" do
             worktreePath
