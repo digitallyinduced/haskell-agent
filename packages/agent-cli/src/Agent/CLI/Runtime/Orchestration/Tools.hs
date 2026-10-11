@@ -142,6 +142,7 @@ import Control.Exception.Safe
     ( SomeException, mask_, throwIO, try )
 import Control.Monad ( forM_, when, void )
 import Data.Acquire (Acquire, mkAcquire)
+import Agent.Runtime.Transcription (transcribeAudioFile)
 import Data.IORef
     (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Maybe (isJust)
@@ -331,8 +332,10 @@ acquireLocalToolRuntime AgentToolsRequest
     { startup
     , baseToolEnv
     , initialSkills
+    , gatewayModelsRef
     } ToolModelRuntime
     { toolDialect = dialect
+    , toolProvider = provider
     } ToolHostHooks
     { toolPlanHooks = planHooks
     , toolSecretHooks = secretHooks
@@ -346,12 +349,18 @@ acquireLocalToolRuntime AgentToolsRequest
     let preparedDiscovery =
             startup.startupNativeHooks
                 >>= nativePreparedDiscovery . (.nativeWorkspaceDiscovery)
+        filesystemToolEnv =
+            baseToolEnv
+                { toolTranscribeAudio = Just \filename mime bytes -> do
+                    gateway <- readIORef gatewayModelsRef
+                    transcribeAudioFile provider gateway filename mime bytes
+                }
         codingToolEnv =
             case preparedDiscovery of
                 Just context ->
-                    baseToolEnv
+                    filesystemToolEnv
                         { toolCwd = context.nativeDiscoveryProjectRoot }
-                Nothing -> baseToolEnv
+                Nothing -> filesystemToolEnv
     localCoding <- mkAcquire
         (codingToolsForWithTypes
             dialect

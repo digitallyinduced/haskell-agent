@@ -27,12 +27,13 @@ import Agent.Tools.Scheduling
     )
 import Agent.Tools.Types
     ( AppTool
-    , ToolEnv
+    , ToolEnv(..)
     , ToolExecutionPolicy(..)
     , jsonTool
     , withSharedToolResourceClaims
     )
 import Agent.Tools.ViewImage (imageResultFromBytes, supportedImageMime)
+import Agent.Tools.TranscribeAudio (supportedAudioMime)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -93,10 +94,10 @@ readFileClaims env call =
 
 readFileDescription :: Text
 readFileDescription =
-    "Read a text file, or load a PDF or image into your model context.\n\
+    "Read a text file, or load a PDF or image.\n\
     \\n\
     \- The target_file parameter can be relative to the workspace or an absolute path in an allowed filesystem root\n\
-    \- PDFs and supported images are detected by content, including extensionless files, and attached directly to your context (maximum 20 MiB). PDF reading requires a provider/model supporting native file inputs. No local conversion is needed.\n\
+    \- PDFs and supported images are detected by content and attached directly to your context (maximum 20 MiB); PDFs require native file input. For WAV/MP3 speech recordings, use transcribe_audio instead.\n\
     \- offset and limit apply only to text. PDFs and images are loaded whole; omit line ranges for them.\n\
     \- By default, it reads up to 1000 lines starting from the beginning of the file\n\
     \- offset is 1-based. Negative offsets count from the end of the file (-1 is the last line).\n\
@@ -131,18 +132,21 @@ runReadFile env args = resolveForRead env (fromText args.targetFile) >>= \case
             prefix <- BS.hGet handle 1024
             let pdf = "%PDF-" `BS.isPrefixOf` prefix
                 image = isJust (supportedImageMime prefix)
-            if pdf || image
+                audio = supportedAudioMime prefix
+            if isJust audio
+                then pure (Just (Left "This is an audio recording. Use transcribe_audio with this file's path to obtain a speech transcript."))
+                else if pdf || image
                 then if any isJust [args.offset, args.limit]
                     || any isJust [args.pages, args.format]
                     then pure (Just (Left "PDFs and images are loaded whole; omit offset, limit, pages and format."))
                     else do
                         remainder <- BS.hGet handle (maxAttachmentBytes + 1 - BS.length prefix)
                         let bytes = prefix <> remainder
-                        pure . Just $
+                        result <-
                             if BS.length bytes > maxAttachmentBytes
-                                then Left "File is too large to attach (maximum 20 MiB)."
+                                then pure (Left "File is too large to attach (maximum 20 MiB).")
                                 else if pdf
-                                    then Right ToolHandlerResultWithFiles
+                                    then pure $ Right ToolHandlerResultWithFiles
                                         { resultText = "Loaded PDF file into model context: " <> display
                                         , resultImages = []
                                         , resultFiles =
@@ -153,22 +157,28 @@ runReadFile env args = resolveForRead env (fromText args.targetFile) >>= \case
                                                 }
                                             ]
                                         }
-                                    else imageResultFromBytes display bytes
+                                    else pure (imageResultFromBytes display bytes)
+                        pure (Just result)
                 else pure Nothing
         case attachment of
             Just result -> pure result
             Nothing
                 | ".pdf" `Text.isSuffixOf` Text.toLower args.targetFile ->
                     pure (Left "The file does not contain a PDF header.")
+                | any (`Text.isSuffixOf` Text.toLower args.targetFile) [".wav", ".mp3"] ->
+                    pure (Left "The file does not contain a supported WAV or MP3 audio header.")
                 | otherwise ->
                     fmap (\text -> ToolHandlerResult text []) <$> streamReadFile path args
 
     -- Native file inputs need a useful PDF filename even when storage uses UUIDs.
-    pdfName path =
+    pdfName = attachmentName ".pdf"
+    attachmentName extension path =
         let name = toText (takeFileName path)
-        in if ".pdf" `Text.isSuffixOf` Text.toLower name
-            then Text.take 251 (Text.dropEnd 4 name) <> Text.takeEnd 4 name
-            else Text.take 251 name <> ".pdf"
+            extensionLength = Text.length extension
+            basenameLimit = 255 - extensionLength
+        in if extension `Text.isSuffixOf` Text.toLower name
+            then Text.take basenameLimit (Text.dropEnd extensionLength name) <> Text.takeEnd extensionLength name
+            else Text.take basenameLimit name <> extension
 
 -- | Bounded, incremental implementation used by the tool.  The first pass
 -- counts lines (needed for negative offsets and stable out-of-range errors);

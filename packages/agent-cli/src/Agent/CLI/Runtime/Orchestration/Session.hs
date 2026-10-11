@@ -200,7 +200,8 @@ import Agent.CLI.Subagents.Runtime
                       subagentShellEnvironment, subagentShellEnvironmentLock,
                       subagentOutputMemoryStore, subagentOutputMemoryCap,
                       subagentSpawnModelGuidance, subagentAllowedChildModels,
-                      subagentResolveChildModel, subagentChildModelAllowed) )
+                      subagentResolveChildModel, subagentChildModelAllowed,
+                      subagentTranscribeAudio) )
 import Agent.CLI.Subagents.Runtime.Types
     (SubagentSession, SubagentStoreRoot)
 import Agent.CLI.TUI.App
@@ -265,6 +266,7 @@ import Control.Exception.Safe ( mask_, finally )
 import Control.Monad ( forM_, void, when )
 import Data.Acquire (mkAcquire)
 import Data.Functor ( (<&>) )
+import Agent.Runtime.Transcription (transcribeAudioFile)
 import Data.IORef
     ( IORef,
       modifyIORef',
@@ -772,6 +774,7 @@ buildSessionSubagentRuntime AgentSessionRequest
     , resolveChildModel
     , childModelAllowed
     , openaiChild
+    , gatewayModelsRef
     } promptRuntime =
     SubagentRuntime
         { subagentOptions = options
@@ -823,6 +826,9 @@ buildSessionSubagentRuntime AgentSessionRequest
         , subagentResolveChildModel = resolveChildModel
         , subagentChildModelAllowed = childModelAllowed
         , subagentOpenAiChild = openaiChild
+        , subagentTranscribeAudio = \childProvider filename mime bytes -> do
+            gateway <- readIORef gatewayModelsRef
+            transcribeAudioFile childProvider gateway filename mime bytes
         }
 
 prepareSessionLiveRuntime

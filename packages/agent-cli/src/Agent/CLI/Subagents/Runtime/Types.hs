@@ -32,6 +32,7 @@ import Control.Concurrent.MVar (MVar)
 import Data.IORef (IORef)
 import Data.Map.Strict (Map)
 import Data.Text (Text)
+import qualified Data.ByteString as BS
 import System.OsPath (OsPath)
 
 -- | Lifecycle state for an in-memory child session.
@@ -95,6 +96,7 @@ data SubagentRuntime = SubagentRuntime
         :: !(Maybe (Text -> IO (Maybe CollaborationModelTarget)))
     , subagentChildModelAllowed :: !(Maybe (Text -> IO Bool))
     , subagentOpenAiChild :: !(Maybe TokenProvider)
+    , subagentTranscribeAudio :: !(Provider -> Text -> Text -> BS.ByteString -> IO (Either Text Text))
     }
 
 data PreparedChild = PreparedChild

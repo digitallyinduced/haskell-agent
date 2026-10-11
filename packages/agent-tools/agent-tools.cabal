@@ -61,6 +61,7 @@ library
                     , Agent.Tools.FileSystem.Grep
                     , Agent.Tools.FileSystem.ListDir
                     , Agent.Tools.FileSystem.ReadFile
+                    , Agent.Tools.TranscribeAudio
                     , Agent.Tools.Ghci
                     , Agent.Tools.Ghci.Classify
                     , Agent.Tools.Ghci.Runtime
@@ -233,6 +234,7 @@ test-suite agent-tools-test
                     , Agent.Tools.FileSystem.GrepSpec
                     , Agent.Tools.FileSystem.ListDirSpec
                     , Agent.Tools.FileSystem.ReadFileSpec
+                    , Agent.Tools.TranscribeAudioSpec
                     , Agent.Tools.GhciSpec
                     , Agent.Tools.IOSpec
                     , Agent.Tools.LoopIntegrationSpec

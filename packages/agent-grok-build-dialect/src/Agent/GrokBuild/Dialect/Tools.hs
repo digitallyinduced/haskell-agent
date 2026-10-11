@@ -16,6 +16,7 @@ import Agent.Tools.Ghci (GhciSession, runGhciTool)
 import Agent.Tools.FileSystem.Grep (grepTool)
 import Agent.Tools.FileSystem.ListDir (listDirTool)
 import Agent.Tools.FileSystem.ReadFile (readFileTool)
+import Agent.Tools.TranscribeAudio (transcribeAudioTool)
 import Agent.Tools.ViewImage (viewImageTool)
 import Agent.GrokBuild.Dialect.Goal (GoalRuntime, updateGoalTool)
 import Agent.GrokBuild.Dialect.Monitor (monitorTool)
@@ -80,6 +81,7 @@ grokTools
             [ runGhciTool ghci
             , viewImageTool env
             , readFileTool env
+            , transcribeAudioTool env
             , grepTool env
             , listDirTool env
             , searchReplaceTool env planMode
