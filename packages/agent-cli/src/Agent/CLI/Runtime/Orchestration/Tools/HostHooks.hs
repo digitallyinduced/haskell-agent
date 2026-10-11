@@ -5,7 +5,16 @@ module Agent.CLI.Runtime.Orchestration.Tools.HostHooks
     , terminalChartTool
     ) where
 
+import Agent.CLI.CancelWatch (withStdinPaused)
+import Agent.CLI.Notification (AttentionRequest(InputRequested), notifyAttention)
+import Agent.CLI.Render (renderAssistantTextForHandle)
+import Agent.CLI.TUI.App (emitUiEvent)
+import Agent.TUI.Model (UiEvent(UiAssistantHistory))
+import Agent.Loop (LoopEvent(TextDelta))
 import Agent.CLI.Options (isOneShot)
+import Data.IORef (readIORef)
+import Data.Text (Text)
+import qualified Data.Text.IO as Text
 import Agent.CLI.ChartImage (terminalChartTool)
 import Agent.CLI.ImagePreview (routeChartPresentation)
 import Agent.CLI.Plan (cliPlanHooks)
@@ -28,6 +37,7 @@ data ToolHostHooks = ToolHostHooks
     { toolPlanHooks :: PlanModeHooks
     , toolSecretHooks :: Maybe SecretPromptHooks
     , toolImageHooks :: Maybe ImageDisplayHooks
+    , toolAsyncQuestionDelivery :: Maybe (Text -> IO (Either Text ()))
     }
 
 buildToolHostHooks
@@ -63,6 +73,21 @@ buildToolHostHooks AgentToolsRequest
             cliPlanHooks
                 provider interrupt stdinControl (resolveColor stderrHandle)
     toolPlanHooks = fullscreenAwarePlanHooks uiRuntimeRef basePlanHooks
+    toolAsyncQuestionDelivery
+        | Just hooks <- startup.startupNativeHooks =
+            Just \message -> do
+                hooks.nativeOnLoopEvent (TextDelta ("\n\n" <> message <> "\n\n"))
+                pure (Right ())
+        | startup.startupBackground || isOneShot options || not isTty = Nothing
+        | otherwise = Just \message -> do
+            notifyAttention stderrHandle InputRequested
+            readIORef uiRuntimeRef >>= \case
+                Just runtime -> emitUiEvent runtime (UiAssistantHistory message)
+                Nothing -> withStdinPaused stdinControl do
+                    color <- resolveColor stderrHandle
+                    rendered <- renderAssistantTextForHandle stderrHandle color message
+                    Text.hPutStrLn stderrHandle ("\n" <> rendered)
+            pure (Right ())
     baseSecretHooks = SecretPromptHooks \request ->
         Right <$> promptSecretLine
             stdinControl

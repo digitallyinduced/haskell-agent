@@ -7,6 +7,106 @@ const retiredCallOrder = [];
 let nextCallId = 0;
 let executionStarted = false;
 
+// Promise settlement helpers adapted from OpenAI Codex, Copyright 2025 OpenAI,
+// licensed under Apache-2.0 (see this package's LICENSE). Modified to install
+// immutable globals, close explicitly returned iterators, and retire cell state.
+// Evaluated inside each cell so Map, Promise, and result objects belong to its
+// realm, not the worker's realm. Observe each input once and retain settlement
+// order even while the consumer awaits other work.
+function installSettlementHelpers() {
+  const activeIterators = new Set();
+
+  function as_settled(promises) {
+    let ready = [];
+    let pending = 0;
+    let wake;
+    let closed = false;
+
+    function signal() {
+      const resolve = wake;
+      wake = undefined;
+      if (resolve) resolve();
+    }
+
+    function close(resumeConsumer = true) {
+      closed = true;
+      ready = [];
+      activeIterators.delete(close);
+      if (resumeConsumer) signal();
+      else wake = undefined;
+    }
+
+    function settle(result) {
+      pending--;
+      if (closed) return;
+      ready.push(result);
+      signal();
+    }
+
+    const keyed = promises instanceof Map;
+    let position = 0;
+    try {
+      for (const entry of promises) {
+        const [index, promise] = keyed ? entry : [position++, entry];
+        pending++;
+        Promise.resolve(promise).then(
+          (value) => settle({ index, status: "fulfilled", value }),
+          (reason) => settle({ index, status: "rejected", reason }),
+        );
+      }
+    } catch (error) {
+      close();
+      throw error;
+    }
+
+    activeIterators.add(close);
+    const iterator = (async function* () {
+      try {
+        while (!closed && (pending > 0 || ready.length > 0)) {
+          if (ready.length === 0) {
+            await new Promise((resolve) => { wake = resolve; });
+          }
+          const batch = ready;
+          ready = [];
+          for (const result of batch) {
+            if (closed) return;
+            yield result;
+          }
+        }
+      } finally {
+        close();
+      }
+    })();
+    // Generator finally blocks do not run when return() precedes the first
+    // next(). Close eagerly, including when a next() is waiting on an input.
+    const returnIterator = iterator.return.bind(iterator);
+    iterator.return = (value) => {
+      close();
+      return returnIterator(value);
+    };
+    return iterator;
+  }
+
+  async function stream_settled(promises, emit) {
+    if (typeof emit !== "function") {
+      throw new TypeError("stream_settled requires a callback");
+    }
+    for await (const result of as_settled(promises)) {
+      await emit(result);
+    }
+  }
+
+  Object.defineProperties(globalThis, {
+    as_settled: { value: as_settled },
+    stream_settled: { value: stream_settled },
+  });
+  return () => {
+    // The cell has ended: release retained results without restarting an
+    // unawaited consumer in a completed cell.
+    for (const close of activeIterators) close(false);
+  };
+}
+
 function retirePendingCalls() {
   for (const id of pendingCalls.keys()) {
     retiredCallIds.add(id);
@@ -465,6 +565,10 @@ async function execute(id, params) {
     name: "code-mode-cell",
     codeGeneration: { strings: false, wasm: false },
   });
+  const closeSettlementIterators = vm.runInContext(
+    `(${installSettlementHelpers.toString()})()`,
+    context,
+  );
 
   let response;
   try {
@@ -501,6 +605,7 @@ async function execute(id, params) {
       stored_value_writes: storedValueWrites,
     };
   } finally {
+    closeSettlementIterators();
     for (const nativeTimeout of activeTimeouts.values()) {
       safeClearTimeout(nativeTimeout);
     }

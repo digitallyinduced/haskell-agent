@@ -14,6 +14,7 @@ import Agent.Runtime.Session.Request
     ( withPersistentSessionRequest
     )
 import Agent.CLI.CancelWatch (withEscCancel)
+import Agent.CLI.TerminalStatus (withTerminalWorking)
 import Agent.Runtime.Compaction (AutomaticCompactionBoundary)
 import Agent.CLI.Interrupt (withTurnCancel, resetIdleTurnCancel)
 import Agent.CLI.Plan (extractProposedPlan, planDecisionFollowUp)
@@ -80,6 +81,7 @@ import Agent.CLI.SessionEnv
     )
 import Agent.Runtime.Session.History
     ( durableTranscriptCheckpoint
+    , withLiveBackendState
     )
 import Agent.CLI.SessionTitle
     ( SessionTitleResult(..)
@@ -118,7 +120,8 @@ import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.Dialect (DialectId(..), dialectId)
 import Agent.Error (ApiError)
 import Agent.Loop
-    ( LoopConfig(..)
+    ( BackendSnapshot(..)
+    , LoopConfig(..)
     , LoopExecution(..)
     , LoopError(..)
     , LoopResult(..)
@@ -252,6 +255,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv{}
   resetIdleTurnCancel env.sessionInterrupt config.loopCancel
   writeIORef env.sessionRestartEffort Nothing
   withTurnCancel env.sessionInterrupt config.loopCancel $
+    (if env.sessionBackground then id else withTerminalWorking) $
     (if isJust fullscreen || env.sessionBackground
         then id
         else withEscCancel config.loopCancel env.sessionStdinControl) do
@@ -977,9 +981,15 @@ persistSuccessfulTurn
                         executed.executedLoop.executionProviderTelemetry
                     }
             titleTurns <- (+ 1) <$> readIORef env.sessionTitleTurnCount
+            providerState <- withLiveBackendState
+                (RuntimeState.borrowConversationRef env.sessionState)
+                (pure . (.backendProviderState))
             (countedHandle, turnIndex) <-
                 appendTurnWithMetaUpdateIndexed handle turn \meta ->
-                    meta { metaTitleUserTurns = titleTurns }
+                    meta
+                        { metaTitleUserTurns = titleTurns
+                        , metaProviderState = providerState
+                        }
             writeIORef env.sessionTitleTurnCount titleTurns
             let countedMeta = countedHandle.sessionMeta
             writeIORef slotRef (PersistenceActive countedHandle)

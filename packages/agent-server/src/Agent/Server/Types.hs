@@ -35,6 +35,7 @@ module Agent.Server.Types
     , RepositoryDescriptor(..)
     , CreateSessionRequest(..)
     , PatchSessionRequest(..)
+    , UpdateSessionReadStateRequest(..)
     , ForkSessionRequest(..)
     , CreateTurnRequest(..)
     , TurnMessageClock(..)
@@ -403,6 +404,20 @@ instance FromJSON CreateSessionRequest where
             <*> value .:? "effort"
             <*> value .:? "title"
             <*> value .:? "repository"
+
+data UpdateSessionReadStateRequest = UpdateSessionReadStateRequest
+    { expectedRevision :: !Text
+    , unread :: !Bool
+    }
+    deriving (Eq, Show)
+
+instance FromJSON UpdateSessionReadStateRequest where
+    parseJSON = withObject "UpdateSessionReadStateRequest" \value -> do
+        rejectUnknownFields "UpdateSessionReadStateRequest" ["expected_revision", "unread"] value
+        revision <- value .: "expected_revision"
+        if Text.null revision
+            then fail "expected_revision must not be empty"
+            else UpdateSessionReadStateRequest revision <$> value .: "unread"
 
 data PatchSessionRequest = PatchSessionRequest
     { patchSessionTitle :: !(Maybe Text)

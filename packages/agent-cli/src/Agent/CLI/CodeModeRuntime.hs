@@ -16,6 +16,7 @@ module Agent.CLI.CodeModeRuntime
     , newCodeModeNestedSlot
     , setCodeModeNestedInvoke
     , loadCodexCatalogModelInfo
+    , codexCatalogFallbackWarning
     , codexCatalogDefaultEffort
     , projectCodeModeTools
     , projectCodeModeToolsFor
@@ -361,7 +362,7 @@ projectCodeModeTools mode tools = case mode of
     isConversationControlTool tool =
         tool.appToolName `elem`
             [ "update_plan", "enter_plan_mode", "write_plan", "exit_plan_mode"
-            , "ask_user_question", "ask_secret"
+            , "ask_user_question", "request_user_input_async", "ask_secret"
             ]
     isDirectShellTool tool =
         tool.appToolName `elem` ["shell_command", "write_stdin", "set_environment"]
@@ -383,6 +384,25 @@ projectCodeModeToolsFor strategy tools =
             case imageGenerationCodeModeProjection CodeOnlyToolMode tools of
                 Just projection -> projection
                 Nothing -> CodeModeToolProjection tools []
+
+-- | Report only a fallback from the OpenAI Codex catalog path. Other providers
+-- and dialects deliberately use their own instructions.
+codexCatalogFallbackWarning
+    :: Provider
+    -> Dialect
+    -> Text
+    -> Maybe ModelInfo
+    -> Maybe Text
+codexCatalogFallbackWarning provider dialect model info
+    | provider /= OpenAIProvider = Nothing
+    | dialectPromptStyle dialect /= CodexPromptStyle = Nothing
+    | Just _ <- info = Nothing
+    | otherwise = Just $
+        "The original Codex instructions for "
+            <> model
+            <> " could not be loaded. Using the generic harness prompt; "
+            <> "model behavior may differ from Codex. "
+            <> "Update haskell-agent or retry with access to the OpenAI model catalog."
 
 -- | Resolve catalog metadata for the active model. With ChatGPT credentials
 -- the live @/models@ catalog is fetched at session start (Codex parity:

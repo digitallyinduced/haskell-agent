@@ -4,7 +4,7 @@ version:            0.1.0.0
 synopsis:           Concrete local tools for the agent harness
 description:        Filesystem, shell, GHCi, code-mode, planning, artifact,
                     image, chart, and subagent tool implementations.
-license:            MIT
+license:            MIT AND Apache-2.0
 license-file:       LICENSE
 author:             digitally induced GmbH
 maintainer:         marc@digitallyinduced.com
@@ -47,7 +47,10 @@ library
                     , Agent.Tools.CodeMode.Haskell.Bindings
                     , Agent.Tools.CodeMode.Haskell.Host
                     , Agent.Tools.CodeMode.Host
+                    , Agent.Tools.CodeMode.IsolatedHost
+                    , Agent.Tools.CodeMode.IsolatedHost.Limits
                     , Agent.Tools.CodeMode.Protocol
+                    , Agent.Tools.CodeMode.Protocol.Value
                     , Agent.Tools.CodeMode.ReturnShape
                     , Agent.Tools.CodeMode.Tool
                     , Agent.Tools.Dangerous
@@ -73,6 +76,8 @@ library
                     , Agent.Tools.ViewImage
                     , Agent.Tools.RenderChart
     other-modules:    Agent.Tools.CodeMode.Host.Types
+                    , Agent.Tools.CodeMode.IsolatedHost.Types
+                    , Agent.Tools.CodeMode.IsolatedHost.Process
                     , Agent.Tools.CodeMode.Host.Availability
                     , Agent.Tools.CodeMode.Host.Worker
                     , Paths_agent_tools
@@ -212,6 +217,8 @@ test-suite agent-tools-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.Tools.CodeMode.HostSpec
+                    , Agent.Tools.CodeMode.IsolatedHostSpec
+                    , Agent.Tools.CodeMode.IsolatedHostLimitsSpec
                     , Agent.Tools.CodeMode.Haskell.BindingsSpec
                     , Agent.Tools.CodeMode.Haskell.HostSpec
                     , Agent.Tools.CodeMode.ToolSpec

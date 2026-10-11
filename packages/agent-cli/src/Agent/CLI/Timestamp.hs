@@ -1,4 +1,4 @@
--- | Wall-clock stamps on model-facing user messages (belege.ai style).
+-- | Wall-clock timestamps on model-facing user messages.
 --
 -- User turns sent after a pause may end with a compact local timestamp like
 -- @[4:45pm CEST]@ so the agent can judge pauses between turns.
@@ -261,7 +261,7 @@ hasTrailingTimestamp text =
                 Just leftover -> Text.null leftover
                 Nothing -> False
 
--- | Remove belege-style @[YYYY-MM-DD HH:MM TZ]@ fragments the model may echo.
+-- | Remove bracketed @[YYYY-MM-DD HH:MM TZ]@ fragments the model may echo.
 stripBracketedTimestamps :: Text -> Text
 stripBracketedTimestamps = Text.strip . go
   where
@@ -340,7 +340,7 @@ isDate d =
         && Text.index d 7 == '-'
         && Text.all isDigit (Text.take 2 (Text.drop 8 d))
 
--- | System-prompt note mirroring belege.ai Zeitkontext (English for this harness).
+-- | System-prompt guidance for interpreting local timestamps.
 timeContextGuidance :: Text
 timeContextGuidance =
     Text.unlines

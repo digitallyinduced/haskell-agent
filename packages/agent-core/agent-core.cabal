@@ -48,6 +48,7 @@ library
                     , Agent.ComputerUse.Protocol
                     , Agent.Dialect
                     , Agent.Error
+                    , Agent.History
                     , Agent.Environment
                     , Agent.ExceptionText
                     , Agent.PrivateFileLock
@@ -57,6 +58,9 @@ library
                     , Agent.Provider.Options
                     , Agent.ReasoningEffort
                     , Agent.Loop
+                    , Agent.Loop.Native
+                    , Agent.Loop.OutputDelivery
+                    , Agent.Loop.Recovery
                     , Agent.Loop.InputBudget
                     , Agent.Loop.InputItems
                     , Agent.Loop.SteeringInputs
@@ -68,11 +72,13 @@ library
                     , Agent.ResourceScope
                     , Agent.Retry
                     , Agent.Skills
+                    , Agent.Skills.ToolSearch
                     , Agent.Subagents
                     , Agent.Subagents.Child
                     , Agent.Subagents.Format
                     , Agent.Subagents.History
                     , Agent.Subagents.Loop
+                    , Agent.Subagents.Native
                     , Agent.Subagents.Registry
                     , Agent.Subagents.Spawn
                     , Agent.Subagents.TaskPath
@@ -87,6 +93,7 @@ library
                     , Agent.Tools.Scheduling
                     , Agent.Tools.ResourceArbiter
                     , Agent.Tools.Types
+                    , Agent.Tools.Registration
                     , Agent.Transport.SSE
                     , Agent.Transport.WebSocket
     other-modules:    Agent.Image.Normalize
@@ -253,8 +260,11 @@ test-suite agent-core-test
                     , Agent.ConcurrentSpec
                     , Agent.DialectSpec
                     , Agent.ErrorSpec
+                    , Agent.HistorySpec
                     , Agent.Http.HeaderSpec
                     , Agent.LoopSpec
+                    , Agent.Loop.RecoverySpec
+                    , Agent.Loop.NativeSpec
                     , Agent.Loop.EventDeliverySpec
                     , Agent.Loop.FailedDisplaySpec
                     , Agent.Loop.Fixtures
@@ -266,6 +276,7 @@ test-suite agent-core-test
                     , Agent.ResourceScopeSpec
                     , Agent.RetrySpec
                     , Agent.SkillsSpec
+                    , Agent.Skills.ToolSearchSpec
                     , Agent.SubagentsSpec
                     , Agent.Subagents.ChildSpec
                     , Agent.Subagents.HistorySpec
@@ -277,6 +288,7 @@ test-suite agent-core-test
                     , Agent.TelemetrySpec
                     , Agent.ToolArgsSpec
                     , Agent.Tools.ResourceArbiterSpec
+                    , Agent.Tools.RegistrationSpec
                     , Agent.ToolDSLSpec
                     , Agent.Transport.SSESpec
                     , Agent.Transport.WebSocketSpec

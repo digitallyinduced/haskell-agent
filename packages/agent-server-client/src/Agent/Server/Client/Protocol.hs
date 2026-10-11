@@ -2,6 +2,8 @@
 module Agent.Server.Client.Protocol
     ( AgentServerCreateSessionRequest (..)
     , AgentServerSession (..)
+    , AgentServerSessionReadState (..)
+    , AgentServerUpdateReadState (..)
     , AgentServerCreateTurnRequest (..)
     , AgentServerTurnImage (..)
     , AgentServerTurnFile (..)
@@ -88,6 +90,32 @@ instance FromJSON AgentServerSession where
     parseJSON = withObject "AgentServerSession" \value ->
         AgentServerSession
             <$> (value .: "id" >>= parseSessionIdentifier)
+
+data AgentServerSessionReadState = AgentServerSessionReadState
+    { readStateRevision :: !Text
+    , readStateUnread :: !Bool
+    , readStateFirstUnreadTurn :: !(Maybe Int64)
+    }
+    deriving (Eq, Show)
+
+instance FromJSON AgentServerSessionReadState where
+    parseJSON = withObject "AgentServerSessionReadState" \value ->
+        AgentServerSessionReadState
+            <$> value .: "revision"
+            <*> value .: "unread"
+            <*> value .:? "first_unread_turn"
+
+data AgentServerUpdateReadState = AgentServerUpdateReadState
+    { updateReadStateExpectedRevision :: !Text
+    , updateReadStateUnread :: !Bool
+    }
+    deriving (Eq, Show)
+
+instance ToJSON AgentServerUpdateReadState where
+    toJSON request = object
+        [ "expected_revision" .= request.updateReadStateExpectedRevision
+        , "unread" .= request.updateReadStateUnread
+        ]
 
 data AgentServerCreateTurnRequest = AgentServerCreateTurnRequest
     { createTurnClientRequestId :: !Text

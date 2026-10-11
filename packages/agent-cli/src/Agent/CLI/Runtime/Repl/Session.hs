@@ -49,7 +49,7 @@ import Agent.Runtime.Session
                     createTitleIsManual, createRoot, createHeadless),
       SessionHandle(sessionMeta, sessionPool,
                     sessionTempDir, sessionDir),
-      SessionMeta(metaTitle, metaLastResponseId,
+      SessionMeta(metaTitle, metaLastResponseId, metaProviderState,
                   metaInputTokens, metaOutputTokens, metaCachedTokens, metaLastRecap,
                   metaLastTurnSummary, metaLastRecapMainTurns, metaTransportModel,
                   metaTitleUserTurns, metaId, metaCwd, metaGatewayIdentity),
@@ -522,6 +522,7 @@ handleClearAction runtime = do
                                 \meta ->
                                     meta
                                         { metaLastResponseId = Nothing
+                                        , metaProviderState = Nothing
                                         , metaInputTokens = 0
                                         , metaOutputTokens = 0
                                         , metaCachedTokens = 0

@@ -84,7 +84,7 @@ protocolMessageDecoder = Json.object do
             else parseBody
       where
         parseBody = do
-            method <- Json.atKeyOptional "method" Json.text
+            method <- Json.optionalKey "method" Json.text
             case (method :: Maybe Text) of
                 Just "ready" -> pure WorkerReady
                 Just "tool/call" -> do
@@ -107,15 +107,17 @@ protocolMessageDecoder = Json.object do
                     requestId <- Json.atKey "id" Json.text
                     result <- Json.atKeyOptional "result" rawJsonDecoder
                     err <- Json.atKeyOptional "error" errorDecoder
-                    writes <- maybe Map.empty id
-                        <$> Json.atKeyOptional "stored_value_writes"
-                            (Json.objectAsMap pure rawJsonDecoder)
+                    -- Optional state and partial results retain the original
+                    -- Aeson protocol's missing-or-null default semantics.
+                    -- Result/error above are presence-sensitive instead:
+                    -- a successful JSON null is a real result.
+                    writes <- Json.defaultKey Map.empty "stored_value_writes"
+                        (Json.objectAsMap pure rawJsonDecoder)
                     case (result, err) of
                         (Just value, Nothing) ->
                             pure (WorkerExecSucceeded requestId value writes)
                         (Nothing, Just message) -> do
-                            partial <- maybe emptyResult id
-                                <$> Json.atKeyOptional "partial_result" rawJsonDecoder
+                            partial <- Json.defaultKey emptyResult "partial_result" rawJsonDecoder
                             pure (WorkerExecFailed requestId message partial writes)
                         _ -> fail "response must contain exactly one of result or error"
 

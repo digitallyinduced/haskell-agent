@@ -1,6 +1,10 @@
 -- | Typed PostgreSQL persistence for harness sessions.
 module Agent.Store.Postgres.Session
     ( SessionMetadata(..)
+    , SessionReadState(..)
+    , loadSessionReadState
+    , loadSessionReadStates
+    , updateSessionReadState
     , SessionLegacyTarget(..)
     , SessionPromptSnapshot(..)
     , SessionPromptEpoch(..)
@@ -84,6 +88,7 @@ module Agent.Store.Postgres.Session
     ) where
 
 import Agent.Store.Postgres.Session.PullRequests
+import Agent.Store.Postgres.Session.ReadState
 import Agent.Store.Postgres.Session.Read
 import Agent.Store.Postgres.Session.Schema
 import Agent.Store.Postgres.Session.TaskPlan

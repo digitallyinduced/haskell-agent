@@ -832,6 +832,22 @@ todoListFromToolArguments arguments =
                                 }
             _ -> pure Nothing
 
+-- Reconstruct readable questions from canonical persisted tool arguments.
+-- The immediate delivery notice is not a synthetic provider message.
+asyncQuestionDetail :: Text -> Text
+asyncQuestionDetail arguments =
+    fromMaybe "" (decodeMaybe decoder arguments)
+  where
+    decoder = Hermes.object do
+        questions <- Hermes.atKey "questions" $ Hermes.list $ Hermes.object do
+            title <- Hermes.atKey "title" Hermes.text
+            options <- Hermes.atKeyOptional "options" (Hermes.list Hermes.text)
+            pure $ title <> case options of
+                Just values | not (null values) ->
+                    " (" <> Text.intercalate " / " values <> ")"
+                _ -> ""
+        pure (Text.intercalate "; " questions)
+
 parseTodoList :: Text -> [TodoDisplayLine]
 parseTodoList output =
     let rows =
@@ -1035,6 +1051,7 @@ toolVerb name = case canonicalToolName name of
     "enter_plan_mode" -> "Entered"
     "exit_plan_mode" -> "Exited"
     "ask_user_question" -> "Asked"
+    "request_user_input_async" -> "Asked asynchronously"
     "ask_secret" -> "Requested secret"
     "skill_search" -> "Searched skills"
     "view_skill" -> "Viewed skill"
@@ -1130,6 +1147,7 @@ toolDetail call = case canonicalToolName call.name of
     "enter_plan_mode" -> "enter"
     "exit_plan_mode" -> "exit"
     "ask_user_question" -> askUserQuestionDetail call.arguments
+    "request_user_input_async" -> asyncQuestionDetail call.arguments
     "ask_secret" ->
         firstLine $
             let purpose = partialField "purpose"

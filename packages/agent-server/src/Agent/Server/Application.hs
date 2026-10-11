@@ -265,6 +265,13 @@ dispatchBoundary
         ("GET", ["v1", "sessions", sessionId, "history"]) ->
             sessionHistoryResponse
                 backend supervisor boundary sessionId headers request
+        ("GET", ["v1", "sessions", sessionId, "read-state"]) ->
+            fmap (fmap (jsonResponse status200 headers)) $
+                backend.backendGetSessionReadState boundary sessionId
+        ("PATCH", ["v1", "sessions", sessionId, "read-state"]) ->
+            withJsonBody config request \(body :: UpdateSessionReadStateRequest) ->
+                fmap (fmap (jsonResponse status200 headers)) $
+                    backend.backendUpdateSessionReadState boundary sessionId body
         ("POST", ["v1", "sessions", sessionId, "fork"]) ->
             forkSessionResponse
                 config backend supervisor boundary sessionId headers request

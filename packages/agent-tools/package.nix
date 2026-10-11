@@ -26,5 +26,5 @@ mkDerivation {
     safe-exceptions text time unix vector
   ];
   description = "Concrete local tools for the agent harness";
-  license = lib.meta.getLicenseFromSpdxId "MIT";
+  license = "MIT AND Apache-2.0";
 }

@@ -326,6 +326,7 @@ forkSessionAtTurn pool root sourceId throughIndex = runExceptT do
             (mapMaybe (.turnUsage) turns)
         meta = sourceMeta
             { metaLastResponseId = continuationResponseId turns
+            , metaProviderState = Nothing
             , metaInputTokens = usage.inputTokens
             , metaOutputTokens = usage.outputTokens
             , metaCachedTokens = usage.cachedTokens

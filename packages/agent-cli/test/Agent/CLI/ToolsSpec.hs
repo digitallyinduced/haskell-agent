@@ -7,6 +7,7 @@ import Agent.Runtime.ProviderRequest (requestPromptParts)
 import Agent.CLI.CodeModeRuntime
     ( CodeModeProjectionStrategy(..)
     , needsDynamicToolRefresh
+    , codexCatalogFallbackWarning
     , CodeModeRuntimePlan(..)
     , CodeModeToolProjection(..)
     , codeModeRuntimePlan
@@ -19,6 +20,7 @@ import Agent.CLI.CodeModeRuntime
     , projectCodeModeTools
     , projectCodeModeToolsFor
     )
+import Agent.Provider (Provider(..))
 import Agent.OpenAI.Models
     ( ModelInfo(..)
     , loadBundledModelsOrThrow
@@ -102,6 +104,36 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "schemasFromAppTools" do
+    describe "Codex catalog fallback warning" do
+        it "warns when the original OpenAI Codex model instructions are unavailable" do
+            let warning =
+                    codexCatalogFallbackWarning
+                        OpenAIProvider codexDialect "gpt-6.1-sol" Nothing
+            warning `shouldSatisfy` maybe False
+                (\message ->
+                    Text.isInfixOf "gpt-6.1-sol" message
+                        && Text.isInfixOf "generic harness prompt" message
+                        && Text.isInfixOf "Update haskell-agent" message)
+
+        it "does not warn when catalog instructions are available" do
+            catalog <- loadBundledModelsOrThrow
+            let info = modelInfoForSlug "gpt-6.1-sol" catalog
+            info.usedFallbackModelMetadata `shouldBe` False
+            codexCatalogFallbackWarning
+                OpenAIProvider codexDialect "gpt-6.1-sol" (Just info)
+                `shouldBe` Nothing
+
+        it "does not warn for providers and dialects that intentionally use another prompt" do
+            codexCatalogFallbackWarning
+                XAIProvider grokBuildDialect "grok-4.7" Nothing
+                `shouldBe` Nothing
+            codexCatalogFallbackWarning
+                OpenAIProvider grokBuildDialect "gpt-6.1-sol" Nothing
+                `shouldBe` Nothing
+            codexCatalogFallbackWarning
+                XAIProvider codexDialect "gpt-6.1-sol" Nothing
+                `shouldBe` Nothing
+
     it "refreshes code-mode registries without deferred discovery while leaving static sessions alone" do
         needsDynamicToolRefresh Nothing Nothing `shouldBe` False
         needsDynamicToolRefresh (Just ()) Nothing `shouldBe` True
@@ -366,7 +398,7 @@ spec = describe "schemasFromAppTools" do
         it ("keeps planning and user interaction tools direct-only in " <> show mode) do
             let controls =
                     [ "update_plan", "enter_plan_mode", "write_plan", "exit_plan_mode"
-                    , "ask_user_question", "ask_secret"
+                    , "ask_user_question", "request_user_input_async", "ask_secret"
                     ]
                 ordinary = ["read_file", "shell_command", "write_stdin"]
                 tools = map testTool (controls <> ordinary)
@@ -386,7 +418,7 @@ spec = describe "schemasFromAppTools" do
     it "keeps newly available planning controls direct-only after code-mode reprojection" do
         let controls =
                 [ "update_plan", "enter_plan_mode", "write_plan", "exit_plan_mode"
-                , "ask_user_question", "ask_secret"
+                , "ask_user_question", "request_user_input_async", "ask_secret"
                 ]
             tools = map testTool (["read_file", "imagegen"] <> controls)
             full = projectCodeModeToolsFor FullCodeModeProjection tools

@@ -32,9 +32,9 @@ import Agent.Subagents
 import Agent.ToolDispatch (functionToolCall)
 import Agent.Codex.Dialect.MultiAgents (multiAgentTools)
 import Agent.Tools.Types (AppTool, ToolApproval(..), ToolRegistry, mkToolRegistry)
-import Control.Concurrent (threadDelay)
+import qualified Control.Concurrent as Concurrent
 import Control.Exception.Safe (bracket)
-import Control.Monad (forever)
+import qualified Control.Monad as Monad
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -106,7 +106,7 @@ spec = describe "Agent.Codex.Dialect.MultiAgents in a root loop" do
                         , loopOnEvent = const (pure ())
                         , loopApprove = const (pure ToolApprovalGranted)
                         , loopReadSteering = pure []
-                        , loopWaitSteering = \_ -> forever (threadDelay maxBound)
+                        , loopWaitSteering = \_ -> Monad.forever (Concurrent.threadDelay maxBound)
                         , loopCommitSteering = const (pure ())
                         , loopCloseSteering = pure []
                         , loopInterrupt = pure ()

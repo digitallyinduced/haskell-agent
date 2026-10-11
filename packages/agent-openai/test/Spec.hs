@@ -15,10 +15,13 @@ import qualified Agent.OpenAI.ModelsClientSpec as ModelsClientSpec
 import qualified Agent.OpenAI.ModelsManagerSpec as ModelsManagerSpec
 import qualified Agent.OpenAI.ModelsTypesSpec as ModelsTypesSpec
 import qualified Agent.OpenAI.CompactionSpec as CompactionSpec
+import qualified Agent.OpenAI.CompactionEnvelopeSpec as CompactionEnvelopeSpec
 import qualified Agent.OpenAI.CompactionManagerSpec as CompactionManagerSpec
 import qualified Agent.OpenAI.CompactionNativeSpec as CompactionNativeSpec
 import qualified Agent.OpenAI.RequestIdentitySpec as RequestIdentitySpec
 import qualified Agent.OpenAI.ToolDSLSpec as ToolDSLSpec
+import qualified Agent.OpenAI.ToolCatalogSpec as ToolCatalogSpec
+import qualified Agent.OpenAI.ToolCatalogRequestSpec as ToolCatalogRequestSpec
 import qualified Agent.OpenAI.TranscriptionSpec as TranscriptionSpec
 import qualified Agent.OpenAI.TurnStateSpec as TurnStateSpec
 import qualified Agent.OpenAI.UsageSpec as UsageSpec
@@ -39,10 +42,13 @@ main = hspec do
     ModelsManagerSpec.spec
     ModelsTypesSpec.spec
     CompactionSpec.spec
+    CompactionEnvelopeSpec.spec
     CompactionManagerSpec.spec
     CompactionNativeSpec.spec
     RequestIdentitySpec.spec
     ToolDSLSpec.spec
+    ToolCatalogSpec.spec
+    ToolCatalogRequestSpec.spec
     TranscriptionSpec.spec
     TurnStateSpec.spec
     UsageSpec.spec

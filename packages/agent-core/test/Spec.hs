@@ -7,6 +7,10 @@ import qualified Agent.ConcurrentSpec as ConcurrentSpec
 import qualified Agent.ComputerUse.ProtocolSpec as ComputerUseProtocolSpec
 import qualified Agent.DialectSpec as DialectSpec
 import qualified Agent.ErrorSpec as ErrorSpec
+import qualified Agent.HistorySpec as HistorySpec
+import qualified Agent.Loop.RecoverySpec as RecoverySpec
+import qualified Agent.Loop.NativeSpec as NativeSpec
+import qualified Agent.Tools.RegistrationSpec as RegistrationSpec
 import qualified Agent.Http.HeaderSpec as HttpHeaderSpec
 import qualified Agent.JsonTextSpec as JsonTextSpec
 import qualified Agent.LoopSpec as LoopSpec
@@ -17,6 +21,7 @@ import qualified Agent.ProviderSpec as ProviderSpec
 import qualified Agent.ResourceScopeSpec as ResourceScopeSpec
 import qualified Agent.RetrySpec as RetrySpec
 import qualified Agent.SkillsSpec as SkillsSpec
+import qualified Agent.Skills.ToolSearchSpec as SkillsToolSearchSpec
 import qualified Agent.SubagentsSpec as SubagentsSpec
 import qualified Agent.Subagents.ChildSpec as SubagentChildSpec
 import qualified Agent.Subagents.HistorySpec as SubagentHistorySpec
@@ -43,6 +48,10 @@ main = hspec do
     ComputerUseProtocolSpec.spec
     DialectSpec.spec
     ErrorSpec.spec
+    HistorySpec.spec
+    RecoverySpec.spec
+    NativeSpec.spec
+    RegistrationSpec.spec
     HttpHeaderSpec.spec
     JsonTextSpec.spec
     LoopSpec.spec
@@ -53,6 +62,7 @@ main = hspec do
     ResourceScopeSpec.spec
     RetrySpec.spec
     SkillsSpec.spec
+    SkillsToolSearchSpec.spec
     SubagentsSpec.spec
     SubagentChildSpec.spec
     SubagentHistorySpec.spec
