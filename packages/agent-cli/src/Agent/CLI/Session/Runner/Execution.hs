@@ -143,7 +143,7 @@ import Agent.Subagents
 import Agent.Subagents.TaskPath
 import Agent.ToolDispatch
 import Agent.Tools.Environment (restoreShellEnvironment)
-import Agent.Tools.MultiAgents
+import Agent.Codex.Dialect.MultiAgents (multiAgentToolNames)
 import Agent.Tools.PlanMode
 import Agent.Tools.Types
 import Agent.OsPath

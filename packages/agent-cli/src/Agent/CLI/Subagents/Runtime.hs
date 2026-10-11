@@ -120,7 +120,7 @@ import Agent.GrokBuild.Dialect.Task
     , lunaSubagentModel
     , recordAgentSpec
     )
-import Agent.Tools.MultiAgents
+import Agent.Subagents.Spawn
     ( CollaborationModelTarget(..)
     , CollaborationSpawnOptions(..)
     , MultiAgentContext(..)

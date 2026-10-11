@@ -15,8 +15,6 @@ import qualified Agent.Tools.FileSystem.ReadFileSpec as ReadFileSpec
 import qualified Agent.Tools.GhciSpec as GhciSpec
 import qualified Agent.Tools.IOSpec as IOSpec
 import qualified Agent.Tools.LoopIntegrationSpec as LoopIntegrationSpec
-import qualified Agent.Tools.MultiAgentsSpec as MultiAgentsSpec
-import qualified Agent.Tools.MultiAgentsLoopSpec as MultiAgentsLoopSpec
 import qualified Agent.Tools.OutputArtifactSpec as OutputArtifactSpec
 import qualified Agent.Tools.OutputArtifactMemorySpec as OutputArtifactMemorySpec
 import qualified Agent.Tools.OutputArtifact.RetrievalSpec as OutputArtifactRetrievalSpec
@@ -41,8 +39,6 @@ main = hspec do
     GhciSpec.spec
     IOSpec.spec
     LoopIntegrationSpec.spec
-    MultiAgentsSpec.spec
-    MultiAgentsLoopSpec.spec
     OutputArtifactSpec.spec
     OutputArtifactMemorySpec.spec
     OutputArtifactRetrievalSpec.spec

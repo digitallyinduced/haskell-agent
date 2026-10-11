@@ -1,26 +1,18 @@
 -- | Codex multi-agent v2 tools (collaboration namespace).
 --
 -- Wire names and schemas follow openai/codex
--- @codex-rs/core/src/tools/handlers/multi_agents_spec.rs@ (v2).
-module Agent.Tools.MultiAgents
-    ( MultiAgentContext(..)
-    , CollaborationModelTarget(..)
-    , CollaborationSpawnOptions(..)
-    , SubagentWorktree(..)
-    , multiAgentTools
+-- @codex-rs/core/src/tools/handlers/multi_agents_spec.rs@ (v2). The spawn
+-- machinery the tools share with other dialects is "Agent.Subagents.Spawn".
+module Agent.Codex.Dialect.MultiAgents
+    ( multiAgentTools
+    , plainMultiAgentTools
     , multiAgentNamespace
     , multiAgentToolNames
-    , rootMultiAgentContext
-    , spawnSharedSubagent
     ) where
 
 import Agent.Json.Decode (Decoder)
 import Agent.Subagents
     ( SubagentId(..)
-    , SubagentRegistry
-    , RootSubagents
-    , currentRootTurn
-    , rootSubagentsRegistry
     , RootTurnId
     , SubagentStatus(..)
     , defaultWaitTimeoutMs
@@ -29,10 +21,15 @@ import Agent.Subagents
     , queueMessageFromForTurn
     , resolveAgentTarget
     , sendInputMessageForTurn
-    , spawnSubagentAtWithCwdPreparedForTurn
-    , subagentLease
     , waitAnyLive
     , waitSubagentsFrom
+    )
+import Agent.Subagents.Spawn
+    ( MultiAgentContext(..)
+    , SpawnRequest(..)
+    , SpawnWorkspace(..)
+    , callMessageContent
+    , spawnSubagentFromCall
     )
 import Agent.Subagents.TaskPath
     ( TaskPath
@@ -44,20 +41,13 @@ import Agent.InterAgentMessage
     ( InterAgentMessage(..)
     , InterAgentMessageContent
     , InterAgentMessageType(..)
-    , encryptedInterAgentContent
-    , plainInterAgentContent
     )
-import Agent.OsPath (toText)
-import Agent.Dialect (DialectId)
-import Agent.Provider (Provider)
-import System.OsPath (OsPath)
 import Agent.ToolArgs
     ( objectArgs
     , objectArgsLenient
     , optInt
     , optText
     , optTextList
-    , readExactInt
     , rejectField
     , reqText
     )
@@ -71,90 +61,13 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , jsonTool
     )
-import Control.Concurrent.MVar (modifyMVar, newMVar)
-import Control.Exception.Safe (mask, onException)
-import Control.Monad (void)
 import Data.Aeson (object, (.=))
 import Data.List (sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
-
-data SubagentWorktree = SubagentWorktree
-    { subagentWorktreePath :: !OsPath
-    , subagentWorktreeCleanup :: !(IO (Either Text ()))
-    }
-
-data CollaborationModelTarget = CollaborationModelTarget
-    { collaborationTargetProvider :: !Provider
-    , collaborationTargetConnection :: !Text
-    , collaborationTargetEffectiveModel :: !Text
-    , collaborationTargetDialect :: !DialectId
-    } deriving (Eq, Show)
-
-data CollaborationSpawnOptions = CollaborationSpawnOptions
-    { collaborationModel :: !(Maybe Text)
-    , collaborationResolvedModel :: !(Maybe CollaborationModelTarget)
-    , collaborationReasoningEffort :: !(Maybe Text)
-    , collaborationForkTurns :: !(Maybe Text)
-    } deriving (Eq, Show)
-
--- | Per-agent identity for nesting depth / parent linkage / task path.
-data MultiAgentContext = MultiAgentContext
-    { multiRegistry :: !SubagentRegistry
-    , multiCwd :: !OsPath
-    , multiSelfId :: !(Maybe SubagentId)
-    , multiDepth :: !Int
-    , multiTaskPath :: !TaskPath
-    , multiRootTurnId :: !(IO (Maybe RootTurnId))
-      -- | Optional host hook to rehydrate a closed/missing agent from disk
-      -- before follow-ups. 'Nothing' means in-memory only.
-    , multiResumeFromDisk :: !(Maybe (SubagentId -> IO (Either Text ())))
-      -- | Optional host hook for isolated worktree children.
-    , multiCreateWorktree :: !(Maybe (OsPath -> IO (Either Text SubagentWorktree)))
-      -- | Record model/effort overrides and seed the child transcript before
-      -- its worker starts.
-    , multiPrepareSpawn
-        :: !(Maybe (SubagentId -> CollaborationSpawnOptions -> IO ()))
-      -- | Deliver a child message to the root agent's next model turn.
-    , multiSendToRoot :: !(Maybe (InterAgentMessage -> IO (Either Text Text)))
-      -- | Optional provider/billing-specific guidance for model overrides.
-    , multiSpawnModelGuidance :: !(Maybe Text)
-      -- | When set, spawn_subagent may only use these model slugs (or inherit).
-    , multiAllowedChildModels :: !(Maybe [Text])
-      -- | Optional live resolver for organization-scoped model aliases.
-      -- Unknown explicit aliases are denied and resolved transport metadata is
-      -- carried atomically into spawn preparation.
-    , multiResolveChildModel
-        :: !(Maybe (Text -> IO (Maybe CollaborationModelTarget)))
-      -- | Optional live policy used instead of the advertised snapshot above.
-      -- This lets hosts enforce organization catalog refreshes without
-      -- rebuilding every tool definition in an active session.
-    , multiChildModelAllowed :: !(Maybe (Text -> IO Bool))
-    }
-
--- | The root agent's context for a loop that runs its children through a
--- 'RootSubagents' ('Agent.Subagents.subagentLoop'). Optional host hooks
--- are off; set them with a record update.
-rootMultiAgentContext :: RootSubagents -> OsPath -> MultiAgentContext
-rootMultiAgentContext session cwd = MultiAgentContext
-    { multiRegistry = rootSubagentsRegistry session
-    , multiCwd = cwd
-    , multiSelfId = Nothing
-    , multiDepth = 0
-    , multiTaskPath = taskPathRoot
-    , multiRootTurnId = currentRootTurn session
-    , multiResumeFromDisk = Nothing
-    , multiCreateWorktree = Nothing
-    , multiPrepareSpawn = Nothing
-    , multiSendToRoot = Nothing
-    , multiSpawnModelGuidance = Nothing
-    , multiAllowedChildModels = Nothing
-    , multiResolveChildModel = Nothing
-    , multiChildModelAllowed = Nothing
-    }
 
 multiAgentNamespace :: Text
 multiAgentNamespace = "collaboration"
@@ -169,13 +82,32 @@ multiAgentToolNames =
     , "interrupt_agent"
     ]
 
+-- | How a host passes the tools to the model.
+data ToolSurface
+    -- | OpenAI's reserved collaboration namespace. The schemas stay exact,
+    -- with encrypted message fields.
+    = ReservedNamespace
+    -- | Ordinary function tools with plain-text message fields.
+    | PlainFunctions
+
+-- | The tools with the reserved collaboration namespace's schemas.
 multiAgentTools :: MultiAgentContext -> [AppTool]
-multiAgentTools ctx =
-    [spawnAgentTool ctx]
-    <> maybe [] (const [spawnAgentInWorktreeTool ctx]) ctx.multiCreateWorktree
+multiAgentTools = multiAgentToolsFor ReservedNamespace
+
+-- | The tools as ordinary function tools, for hosts whose requests carry no
+-- encrypted arguments. Message fields are plain text, and @spawn_agent@
+-- offers model, effort and history-fork options only to hosts that prepare
+-- spawns ('multiPrepareSpawn'), which is what applies them.
+plainMultiAgentTools :: MultiAgentContext -> [AppTool]
+plainMultiAgentTools = multiAgentToolsFor PlainFunctions
+
+multiAgentToolsFor :: ToolSurface -> MultiAgentContext -> [AppTool]
+multiAgentToolsFor surface ctx =
+    [spawnAgentTool surface ctx]
+    <> maybe [] (const [spawnAgentInWorktreeTool surface ctx]) ctx.multiCreateWorktree
     <> [ waitAgentTool ctx
-    , sendMessageTool ctx
-    , followupTaskTool ctx
+    , sendMessageTool surface ctx
+    , followupTaskTool surface ctx
     , listAgentsTool ctx
     , interruptAgentTool ctx
     ]
@@ -184,55 +116,53 @@ multiAgentTools ctx =
 -- spawn_agent
 --------------------------------------------------------------------------------
 
-data SpawnAgentArgs = SpawnAgentArgs
-    { taskName :: Text
-    , message :: Text
-    , model :: Maybe Text
-    , reasoningEffort :: Maybe Text
-    , forkTurns :: Maybe Text
-    }
-
-spawnAgentArgsDecoder :: Decoder SpawnAgentArgs
+spawnAgentArgsDecoder :: Decoder SpawnRequest
 spawnAgentArgsDecoder = objectArgs \object_ -> do
         rejectField object_ "isolation"
             "isolation is no longer supported; use spawn_agent_in_worktree"
-        SpawnAgentArgs
+        SpawnRequest
             <$> reqText object_ "task_name"
             <*> reqText object_ "message"
             <*> optText object_ "model"
             <*> optText object_ "reasoning_effort"
             <*> optText object_ "fork_turns"
 
-spawnAgentTool :: MultiAgentContext -> AppTool
-spawnAgentTool ctx = jsonTool "spawn_agent" spawnAgentDescription
-    (spawnAgentParameters ctx True)
+spawnAgentTool :: ToolSurface -> MultiAgentContext -> AppTool
+spawnAgentTool surface ctx = jsonTool "spawn_agent" spawnAgentDescription
+    (spawnAgentParameters ctx surface
+        (messageProperty surface "Initial plain-text task for the new agent."))
     True
     TurnSequential
-    (typedToolWithCall "spawn_agent" spawnAgentArgsDecoder (runSpawn ctx SharedWorkspace))
+    (typedToolWithCall "spawn_agent" spawnAgentArgsDecoder (spawnSubagentFromCall ctx SharedWorkspace))
 
-spawnAgentInWorktreeTool :: MultiAgentContext -> AppTool
-spawnAgentInWorktreeTool ctx =
+spawnAgentInWorktreeTool :: ToolSurface -> MultiAgentContext -> AppTool
+spawnAgentInWorktreeTool surface ctx =
     jsonTool "spawn_agent_in_worktree" spawnAgentInWorktreeDescription
-        (spawnAgentParameters ctx False)
+        (spawnAgentParameters ctx surface
+            (messageProperty PlainFunctions "Initial plain-text task for the new agent."))
         True
         TurnSequential
         (typedToolWithCall
             "spawn_agent_in_worktree"
             spawnAgentArgsDecoder
-            (runSpawn ctx IsolatedWorktree))
+            (spawnSubagentFromCall ctx IsolatedWorktree))
 
-spawnAgentParameters :: MultiAgentContext -> Bool -> [PropertySchema]
-spawnAgentParameters ctx encryptMessage =
+spawnAgentParameters
+    :: MultiAgentContext -> ToolSurface -> PropertySchema -> [PropertySchema]
+spawnAgentParameters ctx surface messageField =
     [ PropertySchema "task_name" PropertyString True $ Just
         "Task name for the new agent. Use lowercase letters, digits, and underscores."
-    , if encryptMessage
-        then PropertySchema "message"
-            (encryptedString "Initial plain-text task for the new agent.")
-            True
-            Nothing
-        else PropertySchema "message" PropertyString True $ Just
-            "Initial plain-text task for the new agent."
-    , PropertySchema "model" PropertyString False $ Just
+    , messageField
+    ]
+        <> case surface of
+            -- The host's preparation hook applies overrides and history
+            -- forks. Without one, a child starts from its message alone.
+            PlainFunctions | isNothing ctx.multiPrepareSpawn -> []
+            _ -> spawnOptionParameters ctx
+
+spawnOptionParameters :: MultiAgentContext -> [PropertySchema]
+spawnOptionParameters ctx =
+    [ PropertySchema "model" PropertyString False $ Just
         (Text.intercalate " " $
             [ "Model override for the new agent. Omit unless an explicit override is needed."
             , "Model or reasoning-effort overrides require `fork_turns` to be `none` or a positive integer."
@@ -244,6 +174,13 @@ spawnAgentParameters ctx encryptMessage =
     , PropertySchema "fork_turns" PropertyString False $ Just
         "Optional number of turns to fork. Defaults to `all`. Full-history forks (`all` or omitted) inherit the parent model and reasoning effort and do not accept overrides. Use `none` or a positive integer string such as `3` when setting `model` or `reasoning_effort`."
     ]
+
+messageProperty :: ToolSurface -> Text -> PropertySchema
+messageProperty surface description = case surface of
+    ReservedNamespace ->
+        PropertySchema "message" (encryptedString description) True Nothing
+    PlainFunctions ->
+        PropertySchema "message" PropertyString True (Just description)
 
 spawnAgentDescription :: Text
 spawnAgentDescription =
@@ -260,231 +197,6 @@ spawnAgentInWorktreeDescription =
     \closed. Returns labeled text with the canonical task name and worktree \
     \path."
 
-data SpawnWorkspace
-    = SharedWorkspace
-    | IsolatedWorktree
-
-runSpawn
-    :: MultiAgentContext
-    -> SpawnWorkspace
-    -> ToolCall
-    -> SpawnAgentArgs
-    -> IO (Either Text Text)
-runSpawn ctx workspace call args
-    | Text.null (Text.strip args.message) =
-        pure (Left (spawnToolName workspace <> " requires a non-empty message"))
-    | not (validForkTurns args.forkTurns) =
-        pure (Left "fork_turns must be none, all, or a positive integer string")
-    | hasSpawnOverride args && usesFullHistory args.forkTurns =
-        pure (Left
-            "full-history forks inherit the parent model and reasoning effort; \
-            \set fork_turns to none or a positive integer when overriding \
-            \model or reasoning_effort")
-    | otherwise = do
-        resolveChildModelOverride ctx args.model >>= \case
-            Left err -> pure (Left err)
-            Right resolvedModel -> mask \restore ->
-                resolveSpawnWorkspace ctx workspace >>= \case
-                    Left err -> pure (Left err)
-                    Right (childCwd, worktree) ->
-                        restore
-                            (spawnInWorkspace
-                                ctx call args resolvedModel childCwd worktree)
-
--- | Spawn a tracked child in the caller's shared workspace.
---
--- This is the programmatic counterpart of @spawn_agent@: hosts may use it
--- from another built-in tool without round-tripping through the JSON tool
--- dispatcher.  Validation, model sanitization, preparation hooks, task-path
--- accounting, and lifecycle ownership remain exactly the same as for the
--- public collaboration tool.
-spawnSharedSubagent
-    :: MultiAgentContext
-    -> ToolCall
-    -> Text
-    -> Text
-    -> Maybe Text
-    -> Maybe Text
-    -> Maybe Text
-    -> IO (Either Text Text)
-spawnSharedSubagent ctx call taskName message model reasoningEffort forkTurns =
-    runSpawn
-        ctx
-        SharedWorkspace
-        call
-        SpawnAgentArgs
-            { taskName
-            , message
-            , model
-            , reasoningEffort
-            , forkTurns
-            }
-
-spawnToolName :: SpawnWorkspace -> Text
-spawnToolName = \case
-    SharedWorkspace -> "spawn_agent"
-    IsolatedWorktree -> "spawn_agent_in_worktree"
-
-spawnInWorkspace
-    :: MultiAgentContext
-    -> ToolCall
-    -> SpawnAgentArgs
-    -> Maybe CollaborationModelTarget
-    -> OsPath
-    -> Maybe SubagentWorktree
-    -> IO (Either Text Text)
-spawnInWorkspace ctx call args resolvedModel childCwd worktree = mask \restore -> do
-    ownedWorktree <- traverse makeIdempotentWorktree worktree
-    rootTurnId <- ctx.multiRootTurnId
-    let spawnOptions = CollaborationSpawnOptions
-            { collaborationModel = sanitizeOverride args.model
-            , collaborationResolvedModel = resolvedModel
-            , collaborationReasoningEffort =
-                sanitizeOverride args.reasoningEffort
-            , collaborationForkTurns = normalizeForkTurns args.forkTurns
-            }
-        prepare agentId = do
-            maybe (pure ()) (\hook -> hook agentId spawnOptions)
-                ctx.multiPrepareSpawn
-            pure $ case ownedWorktree of
-                Nothing -> mempty
-                Just lease ->
-                    subagentLease (void lease.subagentWorktreeCleanup)
-    result <- restore
-        (spawnSubagentAtWithCwdPreparedForTurn
-            ctx.multiRegistry
-            rootTurnId
-            childCwd
-            prepare
-            ctx.multiSelfId
-            ctx.multiTaskPath
-            ctx.multiDepth
-            args.taskName
-            (messageContent call args.message)
-            Nothing)
-        `onException` cleanupWorktreeQuietly ownedWorktree
-    case result of
-        Left err -> cleanupFailedWorktree ownedWorktree err
-        Right (_agentId, path) ->
-            pure $ Right $ renderSpawnResult path ownedWorktree
-
-renderSpawnResult :: TaskPath -> Maybe SubagentWorktree -> Text
-renderSpawnResult path worktree =
-    Text.intercalate "\n" $
-        ("Agent: " <> taskPathText path)
-            : maybe
-                []
-                (\lease -> ["Worktree: " <> toText lease.subagentWorktreePath])
-                worktree
-
-resolveSpawnWorkspace
-    :: MultiAgentContext
-    -> SpawnWorkspace
-    -> IO (Either Text (OsPath, Maybe SubagentWorktree))
-resolveSpawnWorkspace ctx = \case
-    SharedWorkspace -> pure (Right (ctx.multiCwd, Nothing))
-    IsolatedWorktree ->
-        case ctx.multiCreateWorktree of
-            Nothing ->
-                pure (Left "spawn_agent_in_worktree is unavailable in this host.")
-            Just create ->
-                create ctx.multiCwd >>= \case
-                    Left err -> pure (Left err)
-                    Right worktree ->
-                        pure (Right (worktree.subagentWorktreePath, Just worktree))
-
-makeIdempotentWorktree :: SubagentWorktree -> IO SubagentWorktree
-makeIdempotentWorktree worktree = do
-    resultVar <- newMVar Nothing
-    let cleanup = modifyMVar resultVar \case
-            Just result -> pure (Just result, result)
-            Nothing -> do
-                result <- worktree.subagentWorktreeCleanup
-                pure (Just result, result)
-    pure worktree { subagentWorktreeCleanup = cleanup }
-
-cleanupWorktreeQuietly :: Maybe SubagentWorktree -> IO ()
-cleanupWorktreeQuietly Nothing = pure ()
-cleanupWorktreeQuietly (Just worktree) =
-    void worktree.subagentWorktreeCleanup
-
-cleanupFailedWorktree
-    :: Maybe SubagentWorktree
-    -> Text
-    -> IO (Either Text Text)
-cleanupFailedWorktree Nothing spawnError = pure (Left spawnError)
-cleanupFailedWorktree (Just worktree) spawnError =
-    worktree.subagentWorktreeCleanup >>= \case
-        Right () -> pure (Left spawnError)
-        Left cleanupError ->
-            pure $ Left $
-                spawnError <> "\nAdditionally, worktree cleanup failed: " <> cleanupError
-
-validForkTurns :: Maybe Text -> Bool
-validForkTurns = \case
-    Nothing -> True
-    Just turns ->
-        let stripped = Text.toLower (Text.strip turns)
-        in stripped `elem` ["none", "all", ""]
-            || case readExactInt stripped of
-                Just count -> count > 0
-                _ -> False
-
-hasSpawnOverride :: SpawnAgentArgs -> Bool
-hasSpawnOverride args =
-    any (/= Nothing)
-        [ sanitizeOverride args.model
-        , sanitizeOverride args.reasoningEffort
-        ]
-
-usesFullHistory :: Maybe Text -> Bool
-usesFullHistory forkTurns =
-    normalizeForkTurns forkTurns == Just "all"
-
-sanitizeOverride :: Maybe Text -> Maybe Text
-sanitizeOverride value = value >>= \raw ->
-    let stripped = Text.strip raw
-    in if Text.null stripped then Nothing else Just stripped
-
-allowedModelOverride :: Maybe [Text] -> Maybe Text -> Bool
-allowedModelOverride allowed override =
-    case sanitizeOverride override of
-        Nothing -> True
-        Just requested ->
-            maybe
-                True
-                (elem requested . map Text.strip)
-                allowed
-
-resolveChildModelOverride
-    :: MultiAgentContext
-    -> Maybe Text
-    -> IO (Either Text (Maybe CollaborationModelTarget))
-resolveChildModelOverride ctx override =
-    case sanitizeOverride override of
-        Nothing -> pure (Right Nothing)
-        Just requested ->
-            case ctx.multiResolveChildModel of
-                Just resolve ->
-                    resolve requested >>= \case
-                        Nothing -> pure (Left notAllowed)
-                        Just target -> pure (Right (Just target))
-                Nothing -> do
-                    allowed <- case ctx.multiChildModelAllowed of
-                        Just isAllowed -> isAllowed requested
-                        Nothing ->
-                            pure
-                                (allowedModelOverride
-                                    ctx.multiAllowedChildModels
-                                    (Just requested))
-                    pure
-                        (if allowed
-                            then Right Nothing
-                            else Left notAllowed)
-  where
-    notAllowed =
-        "The requested child model is not allowed by this organization."
-
 allowedModelGuidance :: Maybe [Text] -> [Text]
 allowedModelGuidance = \case
     Nothing -> []
@@ -499,13 +211,6 @@ allowedModelGuidance = \case
                 <> rendered
                 <> ". Omit to inherit the parent model."
             ]
-
-normalizeForkTurns :: Maybe Text -> Maybe Text
-normalizeForkTurns value =
-    case Text.toLower . Text.strip <$> value of
-        Nothing -> Just "all"
-        Just "" -> Just "all"
-        normalized -> normalized
 
 --------------------------------------------------------------------------------
 -- wait_agent
@@ -608,12 +313,11 @@ messageArgsDecoder = objectArgs \object_ -> MessageArgs
         <$> reqText object_ "target"
         <*> reqText object_ "message"
 
-sendMessageTool :: MultiAgentContext -> AppTool
-sendMessageTool ctx = jsonTool "send_message" sendMessageDescription
+sendMessageTool :: ToolSurface -> MultiAgentContext -> AppTool
+sendMessageTool surface ctx = jsonTool "send_message" sendMessageDescription
     [ PropertySchema "target" PropertyString True $ Just
         "Relative or canonical task name to message (from a spawn tool)."
-    , PropertySchema "message"
-        (encryptedString "Message text to queue on the target agent.") True Nothing
+    , messageProperty surface "Message text to queue on the target agent."
     ]
     True
     TurnSequential
@@ -632,19 +336,18 @@ runSendMessage ctx call args
             withMessageTarget ctx args.target \target ->
                 case target of
                     RootMessageTarget ->
-                        sendToRoot ctx (messageContent call args.message)
+                        sendToRoot ctx (callMessageContent call args.message)
                     AgentMessageTarget agentId rootTurnId ->
                         queueMessageFromForTurn
                             ctx.multiRegistry rootTurnId
                             ctx.multiTaskPath agentId
-                            (messageContent call args.message)
+                            (callMessageContent call args.message)
 
-followupTaskTool :: MultiAgentContext -> AppTool
-followupTaskTool ctx = jsonTool "followup_task" followupDescription
+followupTaskTool :: ToolSurface -> MultiAgentContext -> AppTool
+followupTaskTool surface ctx = jsonTool "followup_task" followupDescription
     [ PropertySchema "target" PropertyString True $ Just
         "Agent id or canonical task name to follow up with (from a spawn tool)."
-    , PropertySchema "message"
-        (encryptedString "Message text to send to the target agent.") True Nothing
+    , messageProperty surface "Message text to send to the target agent."
     ]
     True
     TurnSequential
@@ -669,7 +372,7 @@ runFollowup ctx call args
                         sendInputMessageForTurn
                             ctx.multiRegistry rootTurnId
                             ctx.multiTaskPath agentId
-                            (messageContent call args.message) False
+                            (callMessageContent call args.message) False
 
 validateMessage :: Text -> Text -> Either Text ()
 validateMessage toolName message
@@ -719,11 +422,6 @@ rootMessage ctx content = InterAgentMessage
     , messageType = QueuedMessage
     , messageContent = content
     }
-
-messageContent :: ToolCall -> Text -> InterAgentMessageContent
-messageContent call
-    | call.argumentsEncrypted = encryptedInterAgentContent
-    | otherwise = plainInterAgentContent
 
 maybeRestore :: MultiAgentContext -> Text -> IO (Either Text ())
 maybeRestore ctx target = case ctx.multiResumeFromDisk of

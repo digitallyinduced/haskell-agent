@@ -31,7 +31,7 @@ import Agent.ToolDispatch
     , functionToolCall
     , noArgsTool
     )
-import Agent.Tools.MultiAgents (MultiAgentContext(..))
+import Agent.Subagents.Spawn (MultiAgentContext(..))
 import Agent.Tools.OutputArtifact (artifactTools, writeOutputArtifact)
 import Agent.Tools.Types
     ( AppTool(..)

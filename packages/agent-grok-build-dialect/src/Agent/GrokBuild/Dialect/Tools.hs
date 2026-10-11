@@ -42,7 +42,7 @@ import Agent.GrokBuild.Dialect.TaskControl
 import Agent.GrokBuild.Dialect.Terminal (runTerminalCmdTool)
 import Agent.GrokBuild.Dialect.Todo (todoWriteTool)
 import Agent.GrokBuild.Dialect.Workflow (WorkflowRuntime, workflowTool)
-import Agent.Tools.MultiAgents (MultiAgentContext(..))
+import Agent.Subagents.Spawn (MultiAgentContext(..))
 import Agent.Tools.PlanMode
     ( PlanModeEnv
     , askUserQuestionTool

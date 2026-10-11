@@ -7,7 +7,7 @@ import Agent.Runtime.Models (ModelOption(..), ModelTarget(..))
 import Agent.Subagents
     ( SubagentId, SubagentRegistry, SubagentStatus(..), defaultMaxConcurrent
     , getStatus, setSubagentRunner, spawnSubagent )
-import Agent.Tools.MultiAgents (CollaborationModelTarget(..))
+import Agent.Subagents.Spawn (CollaborationModelTarget(..))
 import Control.Concurrent.Async (cancel, withAsync)
 import Control.Concurrent.MVar
     ( MVar, newEmptyMVar, putMVar, readMVar )

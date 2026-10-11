@@ -19,7 +19,7 @@ import Agent.Subagents
     ( SubagentConfig(..), SubagentRegistry, closeSubagentRegistry
     , defaultMaxConcurrent, defaultSubagentConfig, interruptActiveSubagents
     , newSubagentRegistry )
-import Agent.Tools.MultiAgents (CollaborationModelTarget(..))
+import Agent.Subagents.Spawn (CollaborationModelTarget(..))
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (finally)
 import Data.Acquire (Acquire, mkAcquire)

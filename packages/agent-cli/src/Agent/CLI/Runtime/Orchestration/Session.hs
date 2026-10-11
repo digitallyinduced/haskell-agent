@@ -247,8 +247,11 @@ import Agent.Subagents (SubagentRegistry, setSubagentRunner)
 import Agent.Subagents (RootSubagents)
 import Agent.Subagents.Types (SubagentId)
 import Agent.TUI.Model (UiEvent(UiSystemMessage))
-import Agent.Tools.MultiAgents
-    (CollaborationModelTarget(..), MultiAgentContext(..), SubagentWorktree)
+import Agent.Subagents.Spawn
+    ( CollaborationModelTarget(..)
+    , MultiAgentContext(..)
+    , SubagentWorktree
+    )
 import Agent.XAI.LoopBackend (xaiBackendWithClientOptions)
 import qualified Agent.XAI.Options as XAI
 import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks)

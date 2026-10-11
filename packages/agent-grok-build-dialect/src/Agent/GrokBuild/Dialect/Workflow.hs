@@ -36,7 +36,7 @@ import Agent.GrokBuild.Dialect.Json
     , optionalText
     , optionalTextValue
     )
-import Agent.Tools.MultiAgents (MultiAgentContext(..))
+import Agent.Subagents.Spawn (MultiAgentContext(..))
 import Agent.Tools.Types (AppTool, ToolExecutionPolicy(..))
 import Control.Concurrent.MVar
     ( MVar

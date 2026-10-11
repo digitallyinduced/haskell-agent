@@ -35,7 +35,7 @@ import Agent.Tools.Ghci
     , newGhciSession
     , suspendGhciSession
     )
-import Agent.Tools.MultiAgents (MultiAgentContext(..))
+import Agent.Subagents.Spawn (MultiAgentContext(..))
 import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks, newPlanModeEnv)
 import Agent.Tools.Types
     ( AppTool

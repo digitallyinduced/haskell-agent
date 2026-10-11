@@ -42,10 +42,7 @@ import Agent.GrokBuild.Dialect.Task
     )
 import Agent.ProjectInstructions (LoadedAgentsMd)
 import Agent.ToolDispatch (ToolCall(..))
-import Agent.Tools.MultiAgents
-    ( MultiAgentContext(..)
-    , spawnSharedSubagent
-    )
+import Agent.Subagents.Spawn (MultiAgentContext(..), spawnSharedSubagent)
 import Agent.Tools.OutputArtifact (artifactAnalysisTools, artifactReaderTools)
 import Agent.Tools.PlanMode
     ( PlanModeEnv

@@ -1,4 +1,4 @@
-module Agent.Tools.MultiAgentsSpec (spec) where
+module Agent.Codex.Dialect.MultiAgentsSpec (spec) where
 
 import Agent.InterAgentMessage
 import Agent.Dialect (DialectId(..))
@@ -18,8 +18,8 @@ import Agent.ToolDispatch
     , ToolCallResult(..)
     , dispatchToolCall
     )
-import Agent.ToolDSL (PropertySchema(..))
-import Agent.Tools.MultiAgents
+import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
+import Agent.Codex.Dialect.MultiAgents
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
@@ -37,7 +37,7 @@ import Test.Hspec
 fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
-spec = describe "Agent.Tools.MultiAgents" do
+spec = describe "Agent.Codex.Dialect.MultiAgents" do
     it "keeps plaintext inter-agent content useful in Show output" do
         let rendered = show (PlainInterAgentContent "visible task")
         rendered `shouldContain` "PlainInterAgentContent"
@@ -182,6 +182,50 @@ spec = describe "Agent.Tools.MultiAgents" do
                 ]
         descriptions `shouldSatisfy`
             any (Text.isInfixOf "Prefer `gpt-5.6-luna` for small tasks.")
+        closeSubagentRegistry registry
+
+    it "offers spawn options as plain tools only to hosts that prepare spawns" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ())
+        let spawnProperties tools context =
+                [ property.propertyName
+                | tool <- tools context
+                , tool.appToolName == "spawn_agent"
+                , property <- fromMaybe [] (jsonToolParameters tool)
+                ]
+            withoutHook = rootContext registry Nothing
+            preparing = withoutHook { multiPrepareSpawn = Just (\_ _ -> pure ()) }
+            allOptions =
+                ["task_name", "message", "model", "reasoning_effort", "fork_turns"]
+        spawnProperties plainMultiAgentTools withoutHook
+            `shouldBe` ["task_name", "message"]
+        spawnProperties plainMultiAgentTools preparing `shouldBe` allOptions
+        -- The reserved collaboration schemas stay exact.
+        spawnProperties multiAgentTools withoutHook `shouldBe` allOptions
+        closeSubagentRegistry registry
+
+    it "declares plain message fields for hosts without encrypted arguments" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ())
+        let messageTypes tools =
+                [ (tool.appToolName, property.propertyType)
+                | tool <- tools (rootContext registry Nothing)
+                , property <- fromMaybe [] (jsonToolParameters tool)
+                , property.propertyName == "message"
+                ]
+            isRawSchema = \case
+                PropertyRaw _ -> True
+                _ -> False
+        messageTypes plainMultiAgentTools `shouldBe`
+            [ ("spawn_agent", PropertyString)
+            , ("send_message", PropertyString)
+            , ("followup_task", PropertyString)
+            ]
+        map fst (messageTypes multiAgentTools) `shouldBe`
+            ["spawn_agent", "send_message", "followup_task"]
+        map snd (messageTypes multiAgentTools) `shouldSatisfy` all isRawSchema
         closeSubagentRegistry registry
 
     it "advertises and enforces the allowed child-model list" do

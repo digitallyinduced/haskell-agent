@@ -42,7 +42,7 @@ import qualified Agent.Json.Decode as Json
 import Agent.GrokBuild.Dialect.Json (optionalBool, optionalText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
-import Agent.Tools.MultiAgents (MultiAgentContext(..))
+import Agent.Subagents.Spawn (MultiAgentContext(..))
 import Agent.Tools.Types (AppTool, ToolExecutionPolicy(..))
 import Control.Concurrent
     ( Chan

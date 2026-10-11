@@ -19,7 +19,7 @@ import Agent.Loop (BackendSnapshot)
 import Agent.Provider (Provider, TokenProvider)
 import Agent.Responses.Types (ResponseCreateParams)
 import Agent.Subagents (SubagentId, SubagentRegistry)
-import Agent.Tools.MultiAgents
+import Agent.Subagents.Spawn
     ( CollaborationModelTarget
     , MultiAgentContext
     , SubagentWorktree

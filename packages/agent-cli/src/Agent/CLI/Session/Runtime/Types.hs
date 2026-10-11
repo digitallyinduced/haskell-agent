@@ -85,7 +85,7 @@ import Agent.Subagents
     ( RootSubagents
     , SubagentId
     )
-import Agent.Tools.MultiAgents (MultiAgentContext)
+import Agent.Subagents.Spawn (MultiAgentContext)
 import Agent.Tools.PlanMode (PlanModeEnv)
 import Agent.Tools.TaskPlan (TaskPlanEnv)
 import Agent.Tools.Types

@@ -27,7 +27,7 @@ import Agent.ToolDispatch
     ( dispatchToolCall
     , functionToolCall
     )
-import Agent.Tools.MultiAgents (MultiAgentContext(..))
+import Agent.Subagents.Spawn (MultiAgentContext(..))
 import Agent.Tools.Types (AppTool(..))
 import Control.Concurrent (newMVar, threadDelay, withMVar)
 import Control.Exception.Safe (bracket)

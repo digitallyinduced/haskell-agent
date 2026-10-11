@@ -40,8 +40,7 @@ import Agent.Subagents
     , newSubagentRegistry
     )
 import Agent.Subagents.TaskPath (parseTaskPath)
-import Agent.Tools.MultiAgents
-    (CollaborationModelTarget(..), CollaborationSpawnOptions(..))
+import Agent.Subagents.Spawn (CollaborationModelTarget(..), CollaborationSpawnOptions(..))
 import Control.Concurrent.Async (mapConcurrently, wait, withAsync)
 import Control.Concurrent.MVar
     ( newEmptyMVar

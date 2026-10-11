@@ -80,6 +80,7 @@ library
                     , Agent.Subagents.Loop
                     , Agent.Subagents.Native
                     , Agent.Subagents.Registry
+                    , Agent.Subagents.Spawn
                     , Agent.Subagents.TaskPath
                     , Agent.Subagents.Types
                     , Agent.Telemetry
