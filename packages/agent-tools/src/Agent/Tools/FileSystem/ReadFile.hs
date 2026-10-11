@@ -33,6 +33,7 @@ import Agent.Tools.Types
     , withSharedToolResourceClaims
     )
 import Agent.Tools.ViewImage (imageResultFromBytes, supportedImageMime)
+import Agent.Tools.TranscribeAudio (supportedAudioMime)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -40,7 +41,6 @@ import qualified Data.ByteString as BS
 import Data.Text.Encoding (decodeUtf8With)
 import Data.Text.Encoding.Error (lenientDecode)
 import Data.Word (Word8)
-import Data.Bits ((.&.))
 import Control.Exception.Safe (SomeException, try)
 import System.IO (Handle, IOMode(ReadMode), withBinaryFile)
 import System.OsPath (OsPath, takeFileName)
@@ -94,11 +94,11 @@ readFileClaims env call =
 
 readFileDescription :: Text
 readFileDescription =
-    "Read a text file, load a PDF or image, or transcribe an audio recording.\n\
+    "Read a text file, or load a PDF or image.\n\
     \\n\
     \- The target_file parameter can be relative to the workspace or an absolute path in an allowed filesystem root\n\
-    \- PDFs and supported images are detected by content and attached directly to your context (maximum 20 MiB); PDFs require native file input. WAV/MP3 recordings are detected by content, including extensionless files, and transcribed through the configured provider. Use this tool for speech recordings without installing transcription software.\n\
-    \- offset and limit apply only to text. PDFs, images and audio are loaded whole; omit line ranges for them.\n\
+    \- PDFs and supported images are detected by content and attached directly to your context (maximum 20 MiB); PDFs require native file input. For WAV/MP3 speech recordings, use transcribe_audio instead.\n\
+    \- offset and limit apply only to text. PDFs and images are loaded whole; omit line ranges for them.\n\
     \- By default, it reads up to 1000 lines starting from the beginning of the file\n\
     \- offset is 1-based. Negative offsets count from the end of the file (-1 is the last line).\n\
     \- Line numbers (1-based) appear as anchors in the format LINE_NUMBER\8594LINE_CONTENT on the first returned line and on every 10th line of the file; the lines in between show content only. Count from the nearest anchor when referring to a specific line"
@@ -133,10 +133,12 @@ runReadFile env args = resolveForRead env (fromText args.targetFile) >>= \case
             let pdf = "%PDF-" `BS.isPrefixOf` prefix
                 image = isJust (supportedImageMime prefix)
                 audio = supportedAudioMime prefix
-            if pdf || image || isJust audio
+            if isJust audio
+                then pure (Just (Left "This is an audio recording. Use transcribe_audio with this file's path to obtain a speech transcript."))
+                else if pdf || image
                 then if any isJust [args.offset, args.limit]
                     || any isJust [args.pages, args.format]
-                    then pure (Just (Left "PDFs, images and audio are loaded whole; omit offset, limit, pages and format."))
+                    then pure (Just (Left "PDFs and images are loaded whole; omit offset, limit, pages and format."))
                     else do
                         remainder <- BS.hGet handle (maxAttachmentBytes + 1 - BS.length prefix)
                         let bytes = prefix <> remainder
@@ -155,14 +157,7 @@ runReadFile env args = resolveForRead env (fromText args.targetFile) >>= \case
                                                 }
                                             ]
                                         }
-                                    else case audio of
-                                        Just (mime, extension) -> case env.toolTranscribeAudio of
-                                            Nothing -> pure (Left "Audio transcription is unavailable for this session. Configure a supported transcription provider; do not install local transcription software automatically.")
-                                            Just transcribe -> transcribe (attachmentName extension path) mime bytes >>= \case
-                                                Left err -> pure (Left ("Audio transcription failed: " <> err))
-                                                Right transcript -> pure $ Right $ ToolHandlerResult
-                                                    ("Audio transcript: " <> display <> "\n\n" <> transcript) []
-                                        Nothing -> pure (imageResultFromBytes display bytes)
+                                    else pure (imageResultFromBytes display bytes)
                         pure (Just result)
                 else pure Nothing
         case attachment of
@@ -184,30 +179,6 @@ runReadFile env args = resolveForRead env (fromText args.targetFile) >>= \case
         in if extension `Text.isSuffixOf` Text.toLower name
             then Text.take basenameLimit (Text.dropEnd extensionLength name) <> Text.takeEnd extensionLength name
             else Text.take basenameLimit name <> extension
-
--- Recognize containers by content; the transcription backend validates decoding.
--- A RIFF file can also contain video, and an MPEG sync word can identify AAC,
--- so require WAVE or a valid MPEG audio version/layer and rate header.
-supportedAudioMime :: BS.ByteString -> Maybe (Text, Text)
-supportedAudioMime prefix
-    | BS.length prefix >= 12
-    , "RIFF" `BS.isPrefixOf` prefix
-    , BS.take 4 (BS.drop 8 prefix) == "WAVE" = Just ("audio/wav", ".wav")
-    | BS.length prefix >= 10
-    , "ID3" `BS.isPrefixOf` prefix
-    , BS.index prefix 3 `elem` [2, 3, 4]
-    , BS.index prefix 4 /= 255
-    , BS.all (< 128) (BS.take 4 (BS.drop 6 prefix)) = Just ("audio/mpeg", ".mp3")
-    | BS.length prefix >= 4
-    , BS.index prefix 0 == 255
-    , let versionLayer = BS.index prefix 1
-    , versionLayer .&. 224 == 224
-    , versionLayer .&. 24 /= 8
-    , versionLayer .&. 6 == 2
-    , let rates = BS.index prefix 2
-    , rates .&. 240 /= 240
-    , rates .&. 12 /= 12 = Just ("audio/mpeg", ".mp3")
-    | otherwise = Nothing
 
 -- | Bounded, incremental implementation used by the tool.  The first pass
 -- counts lines (needed for negative offsets and stable out-of-range errors);

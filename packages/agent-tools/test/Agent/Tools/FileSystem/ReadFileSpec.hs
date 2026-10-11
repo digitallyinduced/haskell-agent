@@ -16,7 +16,6 @@ import Agent.Tools.FileSystem.ReadFile
     , streamReadFile
     )
 import Agent.Tools.Types (AppTool(..), ToolEnv(..), defaultToolEnv, setToolSessionTmp)
-import Data.IORef (newIORef, modifyIORef', readIORef)
 import qualified Data.ByteString as BS
 import Data.Either (isLeft)
 import qualified Data.Text as Text
@@ -212,41 +211,33 @@ spec = describe "formatReadFile" do
                     result.output `shouldSatisfy` Text.isPrefixOf "ERR "
                     toolCallResultFiles result `shouldBe` []
 
-        it "transcribes extensionless WAV and MP3 bytes without attaching unsupported audio" do
-            calls <- newIORef []
-            let transcribe name mime bytes = do
-                    modifyIORef' calls (<> [(name, mime, bytes)])
-                    pure (Right "Hallo Welt")
+        it "directs extensionless WAV and MP3 recordings to transcribe_audio without invoking the provider" do
+            let transcribe _ _ _ = expectationFailure "Unexpected transcription" >> pure (Right "")
             withConfiguredTool (\env -> env {toolTranscribeAudio = Just transcribe}) \workspace tool -> do
                 BS.writeFile (workspace </> "recording") wavBytes
                 BS.writeFile (workspace </> "song") mp3Bytes
                 result <- runReadTool tool "{\"target_file\":\"recording\"}"
-                result.output `shouldBe` "Audio transcript: recording\n\nHallo Welt"
+                result.output `shouldSatisfy` Text.isInfixOf "Use transcribe_audio"
                 toolCallResultFiles result `shouldBe` []
                 result.toolResultImages `shouldBe` []
-                _ <- runReadTool tool "{\"target_file\":\"song\"}"
-                readIORef calls `shouldReturn`
-                    [("recording.wav", "audio/wav", wavBytes), ("song.mp3", "audio/mpeg", mp3Bytes)]
+                song <- runReadTool tool "{\"target_file\":\"song\"}"
+                song.output `shouldSatisfy` Text.isInfixOf "Use transcribe_audio"
 
-        it "rejects audio ranges and oversized files before calling transcription" do
+        it "directs audio ranges and oversized recordings to transcribe_audio without reading the whole file" do
             let transcribe _ _ _ = expectationFailure "Unexpected transcription" >> pure (Right "")
             withConfiguredTool (\env -> env {toolTranscribeAudio = Just transcribe}) \workspace tool -> do
                 BS.writeFile (workspace </> "recording.wav") wavBytes
                 ranged <- runReadTool tool "{\"target_file\":\"recording.wav\",\"offset\":1}"
-                ranged.output `shouldSatisfy` Text.isInfixOf "loaded whole"
+                ranged.output `shouldSatisfy` Text.isInfixOf "Use transcribe_audio"
                 BS.writeFile (workspace </> "recording.wav") (wavBytes <> BS.replicate (20 * 1024 * 1024) 0)
                 oversized <- runReadTool tool "{\"target_file\":\"recording.wav\"}"
-                oversized.output `shouldSatisfy` Text.isInfixOf "maximum 20 MiB"
+                oversized.output `shouldSatisfy` Text.isInfixOf "Use transcribe_audio"
 
-        it "reports unavailable transcription and provider failures explicitly" do
+        it "directs audio to transcribe_audio even when transcription is unavailable" do
             withTool \workspace tool -> do
                 BS.writeFile (workspace </> "recording.wav") wavBytes
                 result <- runReadTool tool "{\"target_file\":\"recording.wav\"}"
-                result.output `shouldSatisfy` Text.isInfixOf "Audio transcription is unavailable"
-            withConfiguredTool (\env -> env {toolTranscribeAudio = Just (\_ _ _ -> pure (Left "Provider unavailable"))}) \workspace tool -> do
-                BS.writeFile (workspace </> "recording.wav") wavBytes
-                result <- runReadTool tool "{\"target_file\":\"recording.wav\"}"
-                result.output `shouldBe` "ERR Audio transcription failed: Provider unavailable"
+                result.output `shouldSatisfy` Text.isInfixOf "Use transcribe_audio"
 
         it "does not mistake other RIFF containers or AAC headers for supported audio" do
             withTool \workspace tool -> do

@@ -48,6 +48,7 @@ import Agent.Tools.Dangerous (blockedShellCommandReasonAt)
 import Agent.Tools.FileSystem.Grep (grepTool)
 import Agent.Tools.FileSystem.ListDir (listDirTool)
 import Agent.Tools.FileSystem.ReadFile (readFileTool)
+import Agent.Tools.TranscribeAudio (transcribeAudioTool)
 import Agent.Tools.IO
     ( CommandResult(..)
     , commandResultArtifacts
@@ -134,6 +135,7 @@ codexTools env shellSession ghci planMode taskPlan multi =
         [ runGhciTool ghci
         , viewImageTool env
         , readFileTool env
+        , transcribeAudioTool env
         , grepTool env
         , listDirTool env
         , applyPatchTool env

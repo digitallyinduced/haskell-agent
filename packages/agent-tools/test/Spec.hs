@@ -13,6 +13,7 @@ import qualified Agent.Tools.EnvironmentSpec as EnvironmentSpec
 import qualified Agent.Tools.FileSystem.GrepSpec as GrepSpec
 import qualified Agent.Tools.FileSystem.ListDirSpec as ListDirSpec
 import qualified Agent.Tools.FileSystem.ReadFileSpec as ReadFileSpec
+import qualified Agent.Tools.TranscribeAudioSpec as TranscribeAudioSpec
 import qualified Agent.Tools.GhciSpec as GhciSpec
 import qualified Agent.Tools.IOSpec as IOSpec
 import qualified Agent.Tools.LoopIntegrationSpec as LoopIntegrationSpec
@@ -40,6 +41,7 @@ main = hspec do
     GrepSpec.spec
     ListDirSpec.spec
     ReadFileSpec.spec
+    TranscribeAudioSpec.spec
     GhciSpec.spec
     IOSpec.spec
     LoopIntegrationSpec.spec
