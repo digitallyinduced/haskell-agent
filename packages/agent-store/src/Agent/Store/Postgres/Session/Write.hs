@@ -24,6 +24,8 @@ module Agent.Store.Postgres.Session.Write
     , withSessionAdvisoryLock
     ) where
 
+import Agent.Store.Postgres.Session.ReadState (publishSessionReadStateTransaction)
+
 import Control.Monad (forM_, unless, when)
 import Data.Functor.Contravariant ((>$<))
 import Data.Int (Int32, Int64)
@@ -320,6 +322,8 @@ appendSessionTurnIndexedInternal resetPrompt clearTaskPlan pool turn metadata =
                         ( turn.sessionTurnItems
                             <> turn.sessionTurnDisplayItems
                         )
+                    when (turn.sessionTurnEffect == TranscriptAppend) $
+                        publishSessionReadStateTransaction metadata.sessionMetadataKey
                     when resetPrompt do
                         _ <- Transaction.statement
                             ( metadata.sessionMetadataKey
@@ -339,6 +343,7 @@ appendSessionTurnIndexedInternal resetPrompt clearTaskPlan pool turn metadata =
 -- This is used when an immutable transcript needs to publish a reset marker
 -- and a replayed prefix together: readers observe either the entire new branch
 -- or none of it.
+-- Historical replay leaves the session read receipt unchanged.
 appendSessionTurns
     :: StorePool
     -> [SessionTurn]
