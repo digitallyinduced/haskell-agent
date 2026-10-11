@@ -41,6 +41,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlphaNum)
 import Data.Text (Text)
+import Data.Time.Format.ISO8601 (iso8601ParseM)
 import qualified Data.Text as Text
 import System.Directory.OsPath
     ( createDirectoryIfMissing
@@ -198,6 +199,8 @@ encodeDiskStatus = \case
     NotFound -> Aeson.String "not_found"
     Completed finalText -> Aeson.object ["completed" .= finalText]
     Errored err -> Aeson.object ["errored" .= err]
+    Suspended deadline reason -> Aeson.object
+        ["suspended_until" .= deadline, "reason" .= reason]
 
 diskStatusDecoder :: Hermes.Decoder SubagentStatus
 diskStatusDecoder = Hermes.withType \case
@@ -213,9 +216,15 @@ diskStatusDecoder = Hermes.withType \case
     Hermes.VObject -> Hermes.object do
         completed <- Hermes.atKeyOptional "completed" (Hermes.nullable Hermes.text)
         errored <- optionalKey "errored" Hermes.text
-        case (completed, errored) of
-            (Just value, _) -> pure (Completed value)
-            (_, Just value) -> pure (Errored value)
+        suspended <- optionalKey "suspended_until" Hermes.text
+        reason <- optionalKey "reason" Hermes.text
+        case (completed, errored, suspended, reason) of
+            (Just value, _, _, _) -> pure (Completed value)
+            (_, Just value, _, _) -> pure (Errored value)
+            (_, _, Just deadline, Just explanation) ->
+                case iso8601ParseM (Text.unpack deadline) of
+                    Just timestamp -> pure (Suspended timestamp explanation)
+                    Nothing -> fail "invalid persisted suspension timestamp"
             _ -> fail "invalid persisted subagent status object"
     _ -> fail "invalid persisted subagent status"
 

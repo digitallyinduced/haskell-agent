@@ -12,7 +12,7 @@ module Agent.Loop.Internal
     , runLoopInputsDetailed
     ) where
 
-import Agent.Cancel (CancelFlag, isCancelled, waitCancel)
+import Agent.Cancel (CancelFlag, isCancelled, isTurnYieldRequested, waitCancel)
 import Agent.Error (ApiError)
 import Agent.Loop.Backend
 import Agent.Loop.DisplayJournal
@@ -823,7 +823,8 @@ completeLoopTurn runtime turn = do
                 -- steering interrupts the transition to the next turn.
                 setPendingInputs runtime (map CompletedTool results)
                 cancelled <- isCancelled config.loopCancel
-                if cancelled
+                yielded <- isTurnYieldRequested config.loopCancel
+                if cancelled || yielded
                     then finishLoopExecution runtime (Left (LoopCancelled results))
                     else advanceCompletedTurn runtime turn results
 

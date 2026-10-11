@@ -14,6 +14,7 @@ module Agent.Subagents.Registry
     , abortRootTurn
     , activeSubagentsForTurnSTM
     , closeSubagentRegistry
+    , stopSubagentRegistry
     , interruptActiveSubagents
     , resetSubagentRegistry
     , spawnSubagent
@@ -53,8 +54,12 @@ module Agent.Subagents.Registry
     , listAgents
     , subagentConfig
     , setMaxConcurrent
+    , setSubagentSuspensionPersistence
+    , requestSubagentSuspension
+    , resumeDueSubagents
     ) where
 
 import Agent.Subagents.Registry.Internal.Core
 import Agent.Subagents.Registry.Internal.Operations
 import Agent.Subagents.Registry.Internal.Types
+import Agent.Subagents.Registry.Internal.Suspension

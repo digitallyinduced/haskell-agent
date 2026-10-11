@@ -386,7 +386,7 @@ spawnFresh childCwd worktree ctx typesRef args resolvedModel = mask \restore -> 
             }
         worktreePath = (.subagentWorktreePath) <$> ownedWorktree
         prepare agentId = do
-            prepareGrokSpawn ctx typesRef spec resolvedModel agentId
+            prepareGrokSpawn ctx typesRef spec resolvedModel args.prompt agentId
             pure $ case ownedWorktree of
                 Nothing -> mempty
                 Just lease ->
@@ -573,7 +573,7 @@ spawnManagedGrokSubagent childCwd ctx typesRef spec prompt nickname
                     childCwd
                     (\agentId -> do
                         prepareGrokSpawn
-                            ctx typesRef preparedSpec resolvedModel agentId
+                            ctx typesRef preparedSpec resolvedModel prompt agentId
                         pure mempty)
                     ctx.multiSelfId
                     ctx.multiDepth
@@ -585,9 +585,10 @@ prepareGrokSpawn
     -> GrokSubagentSpecs
     -> GrokSubagentSpec
     -> Maybe CollaborationModelTarget
+    -> Text
     -> SubagentId
     -> IO ()
-prepareGrokSpawn ctx typesRef spec resolvedModel agentId = do
+prepareGrokSpawn ctx typesRef spec resolvedModel prompt agentId = do
     case ctx.multiPrepareSpawn of
         Just prepare
             | isNothing spec.modelOverride || isJust resolvedModel ->
@@ -597,6 +598,7 @@ prepareGrokSpawn ctx typesRef spec resolvedModel agentId = do
                     , collaborationReasoningEffort =
                         spec.reasoningEffortOverride
                     , collaborationForkTurns = Just "none"
+                    , collaborationInitialMessage = plainInterAgentContent prompt
                     }
         _ -> pure ()
     -- The host hook records collaboration defaults; retain the Grok task's
@@ -642,6 +644,7 @@ formatTaskCompleted agentId args worktreePath timedOut mstatus =
             Just (Completed Nothing) -> "status: completed"
             Just (Errored err) -> "status: errored\nerror: " <> err
             Just Interrupted -> "status: interrupted"
+            Just (Suspended _ reason) -> "status: suspended\nreason: " <> reason
             Just Closed -> "status: shutdown"
             Just Running
                 | timedOut -> "status: running (wait timed out)"

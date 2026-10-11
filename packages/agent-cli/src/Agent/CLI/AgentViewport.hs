@@ -531,6 +531,8 @@ agentStepsForStatusRelative workspace count status items
                 : settled
         Interrupted ->
             AgentStep AgentStepFailed "Agent interrupted" Nothing : settled
+        Suspended _ reason ->
+            AgentStep AgentStepCompleted "Agent suspended" (Just reason) : settled
         Closed ->
             fallback
                 (AgentStep AgentStepCompleted "Agent closed" Nothing)

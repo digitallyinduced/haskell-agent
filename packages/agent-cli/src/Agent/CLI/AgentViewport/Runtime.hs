@@ -395,6 +395,8 @@ settleConversation items status conversation =
                 (finalizeAll BlockFailed conversation)
         Interrupted ->
             finalizeAll BlockCancelled conversation
+        Suspended{} ->
+            finalizeAll BlockComplete conversation
         Closed ->
             finalizeAll BlockComplete conversation
         NotFound ->

@@ -395,6 +395,7 @@ workflowStatusName = \case
     Interrupted -> "interrupted"
     Closed -> "closed"
     NotFound -> "unknown"
+    Suspended{} -> "suspended"
 
 deepResearchPrompt :: Text -> Text
 deepResearchPrompt objective =

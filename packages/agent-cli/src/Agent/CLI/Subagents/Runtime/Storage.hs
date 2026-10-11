@@ -108,6 +108,7 @@ persistAndEvictSubagentSessionWithStatus
         Completed{} -> True
         Errored{} -> True
         Interrupted -> True
+        Suspended{} -> True
         Closed -> True
         Pending -> False
         Running -> False

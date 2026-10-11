@@ -25,6 +25,7 @@ import Agent.Subagents
     , SubagentStatus(..)
     , defaultWaitTimeoutMs
     , interruptSubagent
+    , requestSubagentSuspension
     , listAgents
     , queueMessageFromForTurn
     , resolveAgentTarget
@@ -81,6 +82,7 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Time.Format.ISO8601 (iso8601ParseM)
 
 data SubagentWorktree = SubagentWorktree
     { subagentWorktreePath :: !OsPath
@@ -99,6 +101,8 @@ data CollaborationSpawnOptions = CollaborationSpawnOptions
     , collaborationResolvedModel :: !(Maybe CollaborationModelTarget)
     , collaborationReasoningEffort :: !(Maybe Text)
     , collaborationForkTurns :: !(Maybe Text)
+      -- | Exact initial prompt, available for durable admission before launch.
+    , collaborationInitialMessage :: !InterAgentMessageContent
     } deriving (Eq, Show)
 
 -- | Per-agent identity for nesting depth / parent linkage / task path.
@@ -167,6 +171,7 @@ multiAgentToolNames =
     , "followup_task"
     , "list_agents"
     , "interrupt_agent"
+    , "suspend_until"
     ]
 
 multiAgentTools :: MultiAgentContext -> [AppTool]
@@ -179,6 +184,33 @@ multiAgentTools ctx =
     , listAgentsTool ctx
     , interruptAgentTool ctx
     ]
+    <> maybe [] (const [suspendUntilTool ctx]) ctx.multiSelfId
+
+data SuspendUntilArgs = SuspendUntilArgs
+    { deadline :: Text
+    , reason :: Text
+    }
+
+suspendUntilTool :: MultiAgentContext -> AppTool
+suspendUntilTool ctx = jsonTool "suspend_until"
+    "Persist a suspension of this subagent until an ISO-8601 timestamp with timezone. \
+    \The current tool batch ends and execution capacity is released. \
+    \A follow-up may resume it earlier. Use this as the only call in its batch."
+    [ PropertySchema "deadline" PropertyString True (Just "Absolute ISO-8601 timestamp including timezone.")
+    , PropertySchema "reason" PropertyString True (Just "Why work must wait, and what to recheck on resumption.")
+    ]
+    True TurnSequential
+    (typedTool "suspend_until" decoder \args ->
+        case (ctx.multiSelfId, iso8601ParseM (Text.unpack args.deadline)) of
+            (Nothing, _) -> pure (Left "Only a subagent can suspend itself.")
+            (_, Nothing) -> pure (Left "deadline must be an ISO-8601 timestamp with timezone.")
+            (Just agentId, Just deadline) ->
+                fmap (const "Suspension requested; this turn will yield and checkpoint before pausing.") <$>
+                    requestSubagentSuspension ctx.multiRegistry agentId deadline args.reason)
+  where
+    decoder = objectArgs \object_ -> SuspendUntilArgs
+        <$> reqText object_ "deadline"
+        <*> reqText object_ "reason"
 
 --------------------------------------------------------------------------------
 -- spawn_agent
@@ -342,6 +374,7 @@ spawnInWorkspace ctx call args resolvedModel childCwd worktree = mask \restore -
             , collaborationReasoningEffort =
                 sanitizeOverride args.reasoningEffort
             , collaborationForkTurns = normalizeForkTurns args.forkTurns
+            , collaborationInitialMessage = messageContent call args.message
             }
         prepare agentId = do
             maybe (pure ()) (\hook -> hook agentId spawnOptions)
@@ -593,6 +626,7 @@ shortStatus = \case
     Running -> "running"
     Pending -> "pending"
     NotFound -> "not_found"
+    Suspended{} -> "suspended"
 
 --------------------------------------------------------------------------------
 -- send_message / followup_task
@@ -743,16 +777,22 @@ maybeRestore ctx target = case ctx.multiResumeFromDisk of
 
 data ListAgentsArgs = ListAgentsArgs
     { pathPrefix :: Maybe Text
+    , pageOffset :: Maybe Int
+    , pageLimit :: Maybe Int
     }
 
 listAgentsArgsDecoder :: Decoder ListAgentsArgs
 listAgentsArgsDecoder = objectArgsLenient \object_ -> ListAgentsArgs
         <$> optText object_ "path_prefix"
+        <*> optInt object_ "offset"
+        <*> optInt object_ "limit"
 
 listAgentsTool :: MultiAgentContext -> AppTool
 listAgentsTool ctx = jsonTool "list_agents" listAgentsDescription
     [ PropertySchema "path_prefix" PropertyString False $ Just
         "Task-path prefix filter without a trailing slash. Omit to list all live agents."
+    , PropertySchema "offset" PropertyNumber False $ Just "Zero-based page offset, default 0."
+    , PropertySchema "limit" PropertyNumber False $ Just "Page size, default 30, maximum 100."
     ]
     True
     ParallelSafe
@@ -761,16 +801,32 @@ listAgentsTool ctx = jsonTool "list_agents" listAgentsDescription
 listAgentsDescription :: Text
 listAgentsDescription =
     "List live agents in the current root thread tree. Optionally filter by \
-    \task-path prefix. Returns readable labeled text, not JSON."
+    \task-path prefix. Bounded pages prioritize running/pending, then suspended, \
+    \then settled agents, each sorted by task path. Returns readable labeled text."
 
 runListAgents :: MultiAgentContext -> ListAgentsArgs -> IO (Either Text Text)
 runListAgents ctx args = do
     agents <- listAgents ctx.multiRegistry args.pathPrefix
-    pure $ Right $ renderAgentList agents
+    let offset = max 0 (fromMaybe 0 args.pageOffset)
+        limit = max 1 (min 100 (fromMaybe 30 args.pageLimit))
+        ordered = sortOn (\(path, _, status) -> (priority status, taskPathText path)) agents
+        page = take limit (drop offset ordered)
+        next = offset + length page
+        footer = if next < length agents
+            then "\n\nMore agents available; call list_agents with offset="
+                <> Text.pack (show next) <> "."
+            else ""
+    pure $ Right $ renderAgentList page <> footer
+  where
+    priority :: SubagentStatus -> Int
+    priority Pending = 0
+    priority Running = 0
+    priority Suspended{} = 1
+    priority _ = 2
 
 renderAgentList :: [(TaskPath, SubagentId, SubagentStatus)] -> Text
 renderAgentList agents =
-    case sortOn (\(path, _, _) -> taskPathText path) agents of
+    case agents of
         [] -> "(no live agents)"
         sorted -> Text.intercalate "\n\n" (map renderAgentListEntry sorted)
 
@@ -785,6 +841,7 @@ renderAgentListEntry (path, agentId, status) =
 
 agentListStatus :: SubagentStatus -> Text
 agentListStatus = \case
+    Suspended{} -> "suspended"
     Pending -> "pending_init"
     Running -> "running"
     Completed _ -> "completed"
@@ -795,9 +852,13 @@ agentListStatus = \case
 
 agentListDetails :: SubagentStatus -> [Text]
 agentListDetails = \case
-    Completed (Just text) -> labeledField "Final" text
-    Errored err -> labeledField "Error" err
+    Completed (Just text) -> labeledField "Final" (preview text)
+    Errored err -> labeledField "Error" (preview err)
+    Suspended deadline reason ->
+        labeledField "Until" (Text.pack (show deadline)) <> labeledField "Reason" (preview reason)
     _ -> []
+  where
+    preview text = Text.take 500 text <> if Text.length text > 500 then "… (truncated)" else ""
 
 labeledField :: Text -> Text -> [Text]
 labeledField label value =

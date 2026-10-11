@@ -3,7 +3,7 @@ module Agent.GrokBuild.TaskSpec (spec) where
 import Agent.GrokBuild.Dialect.Task
 import Agent.Dialect (DialectId(..))
 import Agent.Loop (LoopError(..), LoopResult(..), defaultLoopDispatch, emptyTokenUsage)
-import Agent.InterAgentMessage (interAgentMessagePayload)
+import Agent.InterAgentMessage (interAgentMessagePayload, plainInterAgentContent)
 import Agent.Provider (Provider(..))
 import System.OsPath (OsPath, unsafeEncodeUtf)
 import Agent.Subagents
@@ -207,6 +207,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
                     , collaborationResolvedModel = Just target
                     , collaborationReasoningEffort = Nothing
                     , collaborationForkTurns = Just "none"
+                    , collaborationInitialMessage = plainInterAgentContent "hello"
                     }
                 ]
             specs <- Map.elems <$> readIORef typesRef
@@ -245,6 +246,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
                     , collaborationResolvedModel = Nothing
                     , collaborationReasoningEffort = Nothing
                     , collaborationForkTurns = Just "none"
+                    , collaborationInitialMessage = plainInterAgentContent "hello"
                     }
                 ]
             closeSubagentRegistry registry
@@ -321,6 +323,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
                     , collaborationResolvedModel = Nothing
                     , collaborationReasoningEffort = Nothing
                     , collaborationForkTurns = Just "none"
+                    , collaborationInitialMessage = plainInterAgentContent "scheduled work"
                     }
                 ]
             closeSubagentRegistry registry

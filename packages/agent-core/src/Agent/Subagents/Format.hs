@@ -9,6 +9,7 @@ import Agent.Subagents.Types (SubagentId(..), SubagentStatus(..))
 import Data.Aeson ((.=), object)
 import qualified Data.Aeson as Aeson
 import Data.Text (Text)
+import qualified Data.Text as Text
 
 isFinalStatus :: SubagentStatus -> Bool
 isFinalStatus = \case
@@ -19,6 +20,7 @@ isFinalStatus = \case
     NotFound -> True
     Pending -> False
     Running -> False
+    Suspended{} -> True
 
 encodeStatus :: SubagentStatus -> Aeson.Value
 encodeStatus = \case
@@ -29,6 +31,8 @@ encodeStatus = \case
     NotFound -> Aeson.String "not_found"
     Completed text -> object ["completed" .= text]
     Errored err -> object ["errored" .= err]
+    Suspended deadline reason -> object
+        ["suspended_until" .= deadline, "reason" .= reason]
 
 -- | Parent-facing notice when a child finishes without an active wait_agent.
 formatCompletionNotice :: SubagentId -> SubagentStatus -> Text
@@ -50,3 +54,5 @@ statusSummary = \case
     Pending -> "pending_init"
     Running -> "running"
     NotFound -> "not_found"
+    Suspended deadline reason ->
+        "suspended\nuntil: " <> Text.pack (show deadline) <> "\nreason: " <> reason

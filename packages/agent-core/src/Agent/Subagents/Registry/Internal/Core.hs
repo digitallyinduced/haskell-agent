@@ -26,6 +26,7 @@ import Agent.Subagents.Types
     , SubagentId(..)
     , SubagentSpawnEnv(..)
     , SubagentStatus(..)
+    , SuspensionPersistence(..)
     )
 import Control.Concurrent.Async (Async, async, cancel, race, waitCatch)
 import Control.Concurrent.MVar (newMVar, withMVar)
@@ -60,6 +61,7 @@ import Agent.Subagents.TaskPath
     , taskPathText
     )
 import Agent.Subagents.Registry.Internal.Types
+import Agent.Subagents.Registry.Internal.Suspension (commitRequestedSuspension)
 
 
 newSubagentRegistry
@@ -88,6 +90,9 @@ newSubagentRegistry config cwd run onEvent = do
     runRef <- newIORef run
     onCompleteRef <- newIORef (\_ _ -> pure ())
     onSettledRef <- newIORef (\_ _ -> pure ())
+    suspensions <- newTVarIO Map.empty
+    suspensionSignals <- newTVarIO Map.empty
+    suspensionPersistence <- newIORef Nothing
     pure SubagentRegistry
         { registryAgents = agents
         , registryPaths = paths
@@ -107,6 +112,9 @@ newSubagentRegistry config cwd run onEvent = do
         , registryNextRootTurnId = nextRootTurnId
         , registryAbortedRootTurns = abortedRootTurns
         , registryLifecycle = lifecycle
+        , registrySuspensions = suspensions
+        , registrySuspensionSignals = suspensionSignals
+        , registrySuspensionPersistence = suspensionPersistence
         }
 
 setSubagentRunner :: SubagentRegistry -> RunSubagent -> IO ()
@@ -156,6 +164,17 @@ closeSubagentRegistry registry =
     withMVar registry.registryLifecycle \_ ->
         closeSubagentRegistryLocked registry
 
+-- | Stop process-local supervisors without cancelling durable suspensions.
+-- Hosts must first stop intake and persist/checkpoint active work. Unlike
+-- permanent close this operation does not publish terminal lifecycle events.
+stopSubagentRegistry :: SubagentRegistry -> IO ()
+stopSubagentRegistry registry = withMVar registry.registryLifecycle \_ -> do
+    records <- atomically do
+        writeTVar registry.registryClosed True
+        Map.elems <$> readTVar registry.registryAgents
+    mapM_ stopRecordSupervisor records
+    atomically $ writeTVar registry.registryLiveCount 0
+
 closeSubagentRegistryLocked :: SubagentRegistry -> IO ()
 closeSubagentRegistryLocked registry = do
     records <- atomically do
@@ -174,6 +193,8 @@ resetSubagentRegistry registry =
         closeSubagentRegistryLocked registry
         atomically do
             writeTVar registry.registryAgents Map.empty
+            writeTVar registry.registrySuspensions Map.empty
+            writeTVar registry.registrySuspensionSignals Map.empty
             writeTVar registry.registryPaths Map.empty
             writeTVar registry.registryLiveCount 0
             writeTVar registry.registryRootTurnSpawnCounts Map.empty
@@ -530,22 +551,41 @@ runSupervisor registry record = awaitWork
         raced <- race
             (waitCancel record.recordCancel)
             (tryAny (run env previous work.workMessage onEvent))
-        let result = case raced of
-                Left () -> Right (Left (LoopCancelled []))
-                Right completed -> completed
-            status = case result of
+        persisted <- tryAny $ case raced of
+            Right (Right (Left LoopCancelled{})) ->
+                commitRequestedSuspension registry record.recordId
+            Right (Right (Right _)) ->
+                commitRequestedSuspension registry record.recordId
+            _ -> atomically $ modifyTVar' registry.registrySuspensions
+                (Map.delete record.recordId)
+        let result = case (persisted, raced) of
+                (Left exc, _) -> Left exc
+                (_, Left ()) -> Right (Left (LoopCancelled []))
+                (_, Right completed) -> completed
+            resultStatus = case result of
                 Left (exc :: SomeException) ->
                     Errored (Text.pack (show exc))
                 Right (Left LoopCancelled{}) -> Interrupted
                 Right (Left err) -> Errored (Text.pack (show err))
                 Right (Right loopResult) -> Completed loopResult.finalText
+        suspension <- atomically do
+            requests <- readTVar registry.registrySuspensions
+            pure (Map.lookup record.recordId requests)
+        let status = case (result, suspension) of
+                (Right (Left LoopCancelled{}), Just (deadline, reason)) ->
+                    Suspended deadline reason
+                (Right (Right _), Just (deadline, reason)) ->
+                    Suspended deadline reason
+                _ -> resultStatus
         case result of
             Right (Right loopResult) ->
                 atomically $
                     writeTVar record.recordPreviousResponseId
                         (Just loopResult.finalResponseId)
             _ -> pure ()
-        atomically (nextSupervisorStep registry record) >>= \case
+        atomically (if isSuspended status
+            then supervisorStepWithoutMailbox registry record
+            else nextSupervisorStep registry record) >>= \case
             SupervisorStop -> pure ()
             SupervisorIdle -> awaitWork
             SupervisorMessage nextWork -> do
@@ -748,9 +788,23 @@ finishSupervisorStep
     -> SubagentStatus
     -> STM SupervisorStep
 finishSupervisorStep registry record status = do
-    supervisorStep registry record do
-        transitionToIdleSTM registry record status
-        pure SupervisorIdle
+    if isSuspended status
+        then do
+            phase <- readTVar record.recordPhase
+            case phase of
+                AgentRunning{} -> do
+                    transitionToIdleSTM registry record status
+                    pure SupervisorIdle
+                _ -> supervisorStep registry record (pure SupervisorIdle)
+        else supervisorStep registry record do
+            transitionToIdleSTM registry record status
+            pure SupervisorIdle
+
+supervisorStepWithoutMailbox :: SubagentRegistry -> SubagentRecord -> STM SupervisorStep
+supervisorStepWithoutMailbox registry record =
+    readTVar record.recordPhase >>= \case
+        AgentRunning{} -> pure SupervisorComplete
+        _ -> supervisorStep registry record (pure SupervisorComplete)
 
 supervisorStep
     :: SubagentRegistry
@@ -785,6 +839,7 @@ transitionToIdleSTM
 transitionToIdleSTM registry record status = do
     releaseSlotSTM registry record
     writeTVar record.recordPhase (AgentIdle status Nothing)
+    modifyTVar' registry.registrySuspensions (Map.delete record.recordId)
 
 notifyComplete
     :: SubagentRegistry
@@ -875,18 +930,31 @@ descendants agents parentId =
 
 shutdownRecord :: SubagentRegistry -> SubagentRecord -> IO ()
 shutdownRecord registry record = do
+    persistence <- readIORef registry.registrySuspensionPersistence
+    pending <- atomically $ Map.member record.recordId <$> readTVar registry.registrySuspensions
+    status <- atomically $ phaseStatus <$> readTVar record.recordPhase
+    case (persistence, pending || isSuspended status) of
+        (Just storage, True) ->
+            storage.persistSuspensionCancellation record.recordId >>= either
+                (throwIO . userError . Text.unpack) pure
+        _ -> pure ()
     requestCancel record.recordCancel
     transitioned <- atomically do
         phase <- readTVar record.recordPhase
         releaseSlotSTM registry record
         writeTVar record.recordPhase AgentClosed
         void $ flushTQueue record.recordMailbox
+        modifyTVar' registry.registrySuspensions (Map.delete record.recordId)
         pure $ case phase of
             AgentClosed -> False
             _ -> True
     stopRecordSupervisor record
     whenIO transitioned $
         notifySettled registry record.recordId Closed
+
+isSuspended :: SubagentStatus -> Bool
+isSuspended Suspended{} = True
+isSuspended _ = False
 
 whenIO :: Bool -> IO () -> IO ()
 whenIO True action = action

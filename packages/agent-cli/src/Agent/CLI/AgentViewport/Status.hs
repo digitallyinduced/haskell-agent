@@ -17,6 +17,7 @@ formatAgentStatus status = case status of
     Interrupted -> "interrupted"
     Closed -> "closed"
     NotFound -> "missing"
+    Suspended{} -> "suspended"
 
 agentStatusGlyph :: Text -> Text
 agentStatusGlyph status = case Text.toLower status of

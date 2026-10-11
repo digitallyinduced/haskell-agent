@@ -107,6 +107,7 @@ library
                     , Agent.Loop.TokenUsage
                     , Agent.Subagents.Registry.Internal.Core
                     , Agent.Subagents.Registry.Internal.Operations
+                    , Agent.Subagents.Registry.Internal.Suspension
                     , Agent.Subagents.Registry.Internal.Types
                     , Paths_agent_core
     autogen-modules:  Paths_agent_core
@@ -278,6 +279,7 @@ test-suite agent-core-test
                     , Agent.Skills.ToolSearchSpec
                     , Agent.SubagentsSpec
                     , Agent.Subagents.ChildSpec
+                    , Agent.Subagents.SuspensionSpec
                     , Agent.Subagents.HistorySpec
                     , Agent.Subagents.LoopSpec
                     , Agent.Subagents.TaskPathSpec
