@@ -14,6 +14,20 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Input inbox" do
+    it "freezes payloads and coverage together before another read extends the batch" do
+        rows <- newIORef [(2 :: Int, "accepted" :: Text)]
+        inbox <- newInputInbox [1] (readIORef rows)
+        _ <- readInputInbox inbox
+        acknowledgeInputInbox inbox 1
+        modifyIORef' rows (<> [(3, "submitted")])
+        (payloads, coverageIds) <- readInputInboxSnapshot inbox
+        modifyIORef' rows (<> [(4, "later")])
+        readInputInboxSnapshot inbox `shouldReturn` (["submitted", "later"], [1, 2, 3, 4])
+        (payloads, coverageIds) `shouldBe` (["submitted"], [1, 2, 3])
+        acknowledgeInputInbox inbox (length payloads)
+        acceptedInputInboxIds inbox `shouldReturn` coverageIds
+        outstandingInputInboxIds inbox `shouldReturn` [4]
+
     it "never acknowledges an arrival after the submitted batch" do
         rows <- newIORef [(1 :: Int, "initial" :: Text), (2, "steering")]
         inbox <- newInputInbox [1] (readIORef rows)

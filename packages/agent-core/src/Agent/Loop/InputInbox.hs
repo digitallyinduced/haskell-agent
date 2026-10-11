@@ -5,6 +5,7 @@ module Agent.Loop.InputInbox
     ( InputInbox
     , newInputInbox
     , readInputInbox
+    , readInputInboxSnapshot
     , acknowledgeInputInbox
     , acceptedInputInboxItems
     , acceptedInputInboxIds
@@ -48,15 +49,25 @@ newInputInbox initialIds loadPending = do
     inboxState <- newMVar (InboxState [] [])
     pure InputInbox { initialIds, loadPending, inboxState }
 
+-- | Read outstanding payloads. Use 'readInputInboxSnapshot' when the request
+-- also needs coverage identities, rather than reading those separately.
 readInputInbox :: Ord key => InputInbox key item -> IO [item]
-readInputInbox inbox =
+readInputInbox inbox = fst <$> readInputInboxSnapshot inbox
+
+-- | Atomically load outstanding payloads and their request coverage identities
+-- (initial, accepted, then outstanding). Retain this pair for the request:
+-- later reads cannot add identities to it without their corresponding payloads.
+-- Acknowledge using the length of this pair's payload list, not its identity list.
+readInputInboxSnapshot :: Ord key => InputInbox key item -> IO ([item], [key])
+readInputInboxSnapshot inbox =
     modifyMVar inbox.inboxState \state -> do
         rows <- inbox.loadPending
         let seen = Set.fromList
                 (inbox.initialIds <> map fst state.accepted <> map fst state.outstanding)
             extended = state.outstanding
                 <> filter (\(key, _) -> Set.notMember key seen) rows
-        pure (state { outstanding = extended }, map snd extended)
+            coverageIds = inbox.initialIds <> map fst state.accepted <> map fst extended
+        pure (state { outstanding = extended }, (map snd extended, coverageIds))
 
 acknowledgeInputInbox :: InputInbox key item -> Int -> IO ()
 acknowledgeInputInbox inbox count =
@@ -83,15 +94,16 @@ acceptedInputInboxIds inbox = do
     state <- readMVar inbox.inboxState
     pure (inbox.initialIds <> map fst state.accepted)
 
--- | Freeze this before submitting the model request. Publishing another row
--- concurrently cannot make that row part of this successful request's coverage.
+-- | Current initial, accepted, and outstanding identities. This state getter
+-- is not tied to any previous read: another read may already have extended
+-- the batch. Use 'readInputInboxSnapshot' for a request's frozen coverage.
 submittedInputInboxIds :: InputInbox key item -> IO [key]
 submittedInputInboxIds inbox = do
     state <- readMVar inbox.inboxState
     pure (inbox.initialIds <> map fst state.accepted <> map fst state.outstanding)
 
--- | The unaccepted batch as of the last read: the steering of the request
--- that is about to be submitted.
+-- | Current unaccepted identities. Another read may have extended this batch
+-- since a caller obtained its request payloads.
 outstandingInputInboxIds :: InputInbox key item -> IO [key]
 outstandingInputInboxIds inbox = map fst . (.outstanding) <$> readMVar inbox.inboxState
 
