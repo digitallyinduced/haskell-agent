@@ -13,6 +13,8 @@ ESC ] 7501 ; state=clear ESC \
 covers foreground model turns and their tools. `blocked` means a human-input
 wait is outstanding (including permission requests and questions). Overlapping
 waits are counted, so resolving one request does not clear another.
+Background sessions retain their own waiting observations without changing
+the foreground terminal status or its input-wait count.
 
 Status is cleared on ordinary or exceptional exit and during external-program,
 fullscreen suspension and update-exec handoffs. Returning from a handoff

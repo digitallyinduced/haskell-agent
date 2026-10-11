@@ -121,10 +121,11 @@ runChildTurn registry env child start = do
                         child.childTranscript
                         \current ->
                             let committed =
-                                    advanceBackendSnapshot
+                                    (advanceBackendSnapshot
                                         current
                                         snapshot.backendItems
-                                        snapshot.backendContinuation
+                                        snapshot.backendContinuation)
+                                        { backendProviderState = snapshot.backendProviderState }
                             in (committed, committed)
                 }
             , loopTools = child.childTools

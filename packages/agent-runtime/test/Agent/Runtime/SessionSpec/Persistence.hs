@@ -7,7 +7,8 @@ import Agent.Runtime.SessionSpec.ResponseItems (asyncPersistenceItems)
 import Agent.Runtime.Models (ModelTarget(..))
 import Agent.Runtime.ModelConfig (organizationGatewayConnectionId)
 import Agent.Dialect (DialectId(..))
-import Agent.Loop (TokenUsage(..))
+import Agent.Loop (BackendProviderState(..), TokenUsage(..))
+import Agent.Json (rawJsonFromEncoding)
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types
 import Agent.Runtime.TurnStateSpec (managedRecoveryRoundTrip)
@@ -20,6 +21,7 @@ import Agent.Tools.TaskPlan
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.Async (cancelWith, waitCatch, withAsync)
 import Control.Exception (AsyncException(UserInterrupt), fromException)
+import Control.Monad (forM_)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString as BS
@@ -43,6 +45,49 @@ spec = do
             managedRecoveryRoundTrip persistRecovery True
 
     describe "PostgreSQL session persistence" do
+        forM_ [("manual", "/compact"), ("automatic", "")] \(label, userText) ->
+            it ("clears durable provider state before resuming after " <> label <> " compaction") $
+                withTempStore \store root -> do
+                    let pool = trustedPool store
+                        providerState = Just (BackendProviderState
+                            "openai.responses.catalog.v1"
+                            (rawJsonFromEncoding (Aeson.toEncoding (Aeson.object []))))
+                        responseTurn = SessionTurn
+                            { turnAt = fixedTime
+                            , turnUserText = "retain a catalog checkpoint"
+                            , turnAssistantText = Just "complete"
+                            , turnError = Nothing
+                            , turnResponseId = Just "response-before-compaction"
+                            , turnEffect = TranscriptAppend
+                            , turnItems = []
+                            , turnDisplayItems = []
+                            , turnUsage = Nothing
+                            , turnProviderTelemetry = []
+                            }
+                        compactTurn = responseTurn
+                            { turnUserText = userText
+                            , turnAssistantText = Nothing
+                            , turnResponseId = Nothing
+                            , turnEffect = TranscriptReplace
+                            }
+                    handle <- createSession (testCreate pool root)
+                    checkpoint <- appendTurnWithMetaUpdate handle responseTurn \meta ->
+                        meta { metaProviderState = providerState }
+                    loadSessionMeta pool root checkpoint.sessionMeta.metaId >>= \case
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right meta -> meta.metaProviderState `shouldBe` providerState
+                    -- Both CLI compaction paths use this transaction. No later
+                    -- successful model turn may be needed to invalidate state.
+                    (compacted, _) <- appendTurnWithMetaUpdateIndexed checkpoint compactTurn
+                        \meta -> meta { metaLastResponseId = Nothing }
+                    compacted.sessionMeta.metaProviderState `shouldBe` Nothing
+                    loadSession pool root compacted.sessionMeta.metaId >>= \case
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right (meta, turns) -> do
+                            meta.metaProviderState `shouldBe` Nothing
+                            meta.metaLastResponseId `shouldBe` Nothing
+                            turns `shouldBe` [responseTurn, compactTurn]
+
         it "materializes and round-trips task plans through persistence hooks" $
             withTempStore \store root -> do
                 persistence <-
