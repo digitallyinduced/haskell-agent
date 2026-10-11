@@ -792,7 +792,7 @@ listAgentsTool ctx = jsonTool "list_agents" listAgentsDescription
     [ PropertySchema "path_prefix" PropertyString False $ Just
         "Task-path prefix filter without a trailing slash. Omit to list all live agents."
     , PropertySchema "offset" PropertyNumber False $ Just "Zero-based page offset, default 0."
-    , PropertySchema "limit" PropertyNumber False $ Just "Page size, default 30, maximum 100."
+    , PropertySchema "limit" PropertyNumber False $ Just "Page size, default 20, maximum 100."
     ]
     True
     ParallelSafe
@@ -808,7 +808,7 @@ runListAgents :: MultiAgentContext -> ListAgentsArgs -> IO (Either Text Text)
 runListAgents ctx args = do
     agents <- listAgents ctx.multiRegistry args.pathPrefix
     let offset = max 0 (fromMaybe 0 args.pageOffset)
-        limit = max 1 (min 100 (fromMaybe 30 args.pageLimit))
+        limit = max 1 (min 100 (fromMaybe 20 args.pageLimit))
         ordered = sortOn (\(path, _, status) -> (priority status, taskPathText path)) agents
         page = take limit (drop offset ordered)
         next = offset + length page
