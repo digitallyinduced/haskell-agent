@@ -80,6 +80,8 @@ library
                     , Agent.Subagents.Loop
                     , Agent.Subagents.Native
                     , Agent.Subagents.Registry
+                    , Agent.Subagents.Runtime
+                    , Agent.Subagents.Runtime.Internal
                     , Agent.Subagents.TaskPath
                     , Agent.Subagents.Types
                     , Agent.Telemetry
@@ -280,6 +282,7 @@ test-suite agent-core-test
                     , Agent.SubagentsSpec
                     , Agent.Subagents.ChildSpec
                     , Agent.Subagents.SuspensionSpec
+                    , Agent.Subagents.RuntimeSpec
                     , Agent.Subagents.HistorySpec
                     , Agent.Subagents.LoopSpec
                     , Agent.Subagents.TaskPathSpec

@@ -25,6 +25,7 @@ import qualified Agent.Skills.ToolSearchSpec as SkillsToolSearchSpec
 import qualified Agent.SubagentsSpec as SubagentsSpec
 import qualified Agent.Subagents.ChildSpec as SubagentChildSpec
 import qualified Agent.Subagents.SuspensionSpec as SubagentSuspensionSpec
+import qualified Agent.Subagents.RuntimeSpec as SubagentRuntimeSpec
 import qualified Agent.Subagents.HistorySpec as SubagentHistorySpec
 import qualified Agent.Subagents.LoopSpec as SubagentLoopSpec
 import qualified Agent.Subagents.TaskPathSpec as TaskPathSpec
@@ -67,6 +68,7 @@ main = hspec do
     SubagentsSpec.spec
     SubagentChildSpec.spec
     SubagentSuspensionSpec.spec
+    SubagentRuntimeSpec.spec
     SubagentHistorySpec.spec
     SubagentLoopSpec.spec
     TaskPathSpec.spec
