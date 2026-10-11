@@ -12,6 +12,21 @@ The code-mode JavaScript worker and GHCi support module are Cabal data files own
 Tool-specific tests and allocation benchmarks live here alongside their
 implementations.
 
+## Nonblocking questions
+
+`Agent.Tools.AsyncQuestions` provides `requestUserInputAsyncTool` without a
+plan-mode environment. Its callback receives `RequestUserInputAsyncArgs` with
+structured question titles and optional suggested answers. Publish them in the
+current conversation and return `Right ()` only after successful delivery;
+return `Left` for delivery errors. Do not wait for the user's reply inside this
+callback. Replies use the host's ordinary user-message/steering path.
+
+Hosts with their own tool registry can reuse the exported parameter schema,
+`FromJSON` instances, and `executeRequestUserInputAsync`. Hosts retain control
+of presentation, persistence, routing, and domain-specific instructions. The
+existing `Agent.Tools.PlanMode` entry point remains a text-delivery adapter.
+These questions are clarifications, never a substitute for explicit approval.
+
 ## Experimental Haskell code mode
 
 JavaScript remains the default. Select GHCi with

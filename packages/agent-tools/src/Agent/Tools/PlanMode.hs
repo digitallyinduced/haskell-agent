@@ -44,6 +44,7 @@ import Agent.ToolDSL
     , PropertyType(..)
     )
 import Agent.ToolDispatch (typedTool)
+import qualified Agent.Tools.AsyncQuestions as AsyncQuestions
 import Agent.Tools.Types
     ( AppTool
     , ToolExecutionPolicy(..)
@@ -144,51 +145,18 @@ setAsyncQuestionDelivery :: PlanModeEnv -> (Text -> IO (Either Text ())) -> IO (
 setAsyncQuestionDelivery env deliver =
     writeIORef env.planAsyncQuestionDelivery (Just deliver)
 
-data AsyncQuestion = AsyncQuestion Text (Maybe [Text])
-
-asyncQuestionsDecoder :: Decoder [AsyncQuestion]
-asyncQuestionsDecoder = objectArgs \object -> do
-    questions <- optList questionDecoder object "questions" "Expected array for key: questions"
-        >>= maybe (fail "Missing parameter: questions") pure
-    if null questions then fail "questions must not be empty" else pure questions
-  where
-    questionDecoder = objectArgs \object -> do
-        title <- reqText object "title"
-        options <- optList Json.text object "options" "Expected array for key: options"
-        if Text.null (Text.strip title)
-            then fail "Question title must not be empty"
-            else case options of
-                Just choices | null choices || any (Text.null . Text.strip) choices ->
-                    fail "Question options must contain nonempty strings"
-                _ -> pure (AsyncQuestion title options)
-
+-- | Compatibility adapter for hosts using the plan-mode environment. New
+-- hosts can use 'AsyncQuestions.requestUserInputAsyncTool' directly.
 requestUserInputAsyncTool :: PlanModeEnv -> AppTool
-requestUserInputAsyncTool env = jsonTool "request_user_input_async"
-    ("Ask the user one or more questions without waiting for a reply. "
-        <> "Continue independent work after this tool returns. The user replies "
-        <> "with an ordinary message, which may steer the active turn. "
-        <> "Do not assume an answer, poll for it, or use this tool to obtain approval "
-        <> "for an action that requires explicit permission. Use ask_user_question "
-        <> "when progress depends on the answer.")
-    [ PropertySchema "questions" (PropertyArray (PropertyObject
-        [ PropertySchema "title" PropertyString True (Just "The question to ask.")
-        , PropertySchema "options" (PropertyArray PropertyString) False
-            (Just "Optional suggested answers. Omit for a free-text question.")
-        ])) True (Just "One or more questions.")
-    ]
-    True
-    TurnSequential
-    (typedTool "request_user_input_async" asyncQuestionsDecoder \questions ->
-        readIORef env.planAsyncQuestionDelivery >>= \case
-            Nothing -> pure (Left "Asynchronous questions are unavailable in this host.")
-            Just deliver -> do
-                result <- deliver $
-                    Text.intercalate "\n\n"
-                        [ Text.intercalate "\n" (title : map ("- " <>) (fromMaybe [] options))
-                        | AsyncQuestion title options <- questions
-                        ]
-                        <> "\n\nReply in the chat; I can continue independent work meanwhile."
-                pure (result >> Right "{\"accepted\":true}"))
+requestUserInputAsyncTool env = AsyncQuestions.requestUserInputAsyncTool \request ->
+    readIORef env.planAsyncQuestionDelivery >>= \case
+        Nothing -> pure (Left "Asynchronous questions are unavailable in this host.")
+        Just deliver -> deliver $
+            Text.intercalate "\n\n"
+                [ Text.intercalate "\n" (question.title : map ("- " <>) question.options)
+                | question <- request.questions
+                ]
+                <> "\n\nReply in the chat; I can continue independent work meanwhile."
 
 -- | Configure callbacks which bracket every plan-mode prompt that can wait
 -- for the user. The default callbacks are no-ops for non-interactive hosts.
