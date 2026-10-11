@@ -658,6 +658,169 @@ spec = describe "code-mode Bun host" do
                 }
         closeCodeModeHost host
 
+    describe "promise settlement helpers" do
+        let checkSettlement source expected = do
+                let config = defaultCodeModeConfig
+                        "data/code-mode/worker.mjs"
+                        (\_ _ -> pure $ Left "no tools")
+                withCodeModeHost config \host ->
+                    execCodeCell host source [] 3000 `shouldReturn`
+                        Right CodeModeFinished
+                            { cellId = "1"
+                            , cellValue = textContent expected
+                            }
+
+        it "retains settlement order while the consumer is occupied" $
+            checkSettlement
+                (Text.unlines
+                    [ "const resolve = [];"
+                    , "const inputs = [0, 1, 2].map(i => new Promise(r => resolve[i] = r));"
+                    , "const results = as_settled(inputs);"
+                    , "resolve[0]('first');"
+                    , "const order = [(await results.next()).value.index];"
+                    , "resolve[2]('second'); resolve[1]('third');"
+                    , "await Promise.resolve();"
+                    , "for await (const result of results) order.push(result.index);"
+                    , "text(order);"
+                    ])
+                "[0,2,1]"
+
+        it "accepts Map keys, plain values, thenables, and rejected promises" $
+            checkSettlement
+                (Text.unlines
+                    [ "let observed = 0;"
+                    , "const values = new Map([['plain', 7], ['failed', Promise.reject('failure')],"
+                    , "  ['thenable', { then(resolve) { observed++; resolve(9); } }]]);"
+                    , "const results = [];"
+                    , "for await (const result of as_settled(values)) results.push(result);"
+                    , "text({ results, observed });"
+                    ])
+                "{\"results\":[{\"index\":\"plain\",\"status\":\"fulfilled\",\"value\":7},{\"index\":\"failed\",\"status\":\"rejected\",\"reason\":\"failure\"},{\"index\":\"thenable\",\"status\":\"fulfilled\",\"value\":9}],\"observed\":1}"
+
+        it "completes empty input without invoking the callback" $
+            checkSettlement
+                "await stream_settled([], () => { throw new Error('unexpected'); }); text((await as_settled([]).next()).done);"
+                "true"
+
+        it "awaits each callback before invoking the next" $
+            checkSettlement
+                (Text.unlines
+                    [ "const events = [];"
+                    , "await stream_settled([1, 2], async result => {"
+                    , "  events.push('start' + result.index);"
+                    , "  await new Promise(resolve => setTimeout(resolve, 1));"
+                    , "  events.push('end' + result.index);"
+                    , "});"
+                    , "text(events);"
+                    ])
+                "[\"start0\",\"end0\",\"start1\",\"end1\"]"
+
+        it "propagates callback failures and rejects a missing callback" $
+            checkSettlement
+                (Text.unlines
+                    [ "const errors = [];"
+                    , "try { await stream_settled([1, 2], async () => { throw new Error('callback'); }); }"
+                    , "catch (error) { errors.push(error.message); }"
+                    , "try { await stream_settled([]); }"
+                    , "catch (error) { errors.push(error.message); }"
+                    , "text(errors);"
+                    ])
+                "[\"callback\",\"stream_settled requires a callback\"]"
+
+        it "closes before the first next and while a next is waiting" $
+            checkSettlement
+                (Text.unlines
+                    [ "const first = as_settled([new Promise(() => {})]);"
+                    , "await first.return();"
+                    , "const second = as_settled([new Promise(() => {})]);"
+                    , "const waiting = second.next();"
+                    , "await second.return();"
+                    , "text([(await first.next()).done, (await waiting).done, (await second.next()).done]);"
+                    ])
+                "[true,true,true]"
+
+        it "handles later rejections after early exit and input iteration failure" $
+            checkSettlement
+                (Text.unlines
+                    [ "let reject;"
+                    , "const pending = new Promise((_, r) => reject = r);"
+                    , "const iterator = as_settled([1, pending]);"
+                    , "for await (const result of iterator) break;"
+                    , "reject('late rejection');"
+                    , "const invalid = { *[Symbol.iterator]() { yield Promise.reject('observed'); throw new Error('input'); } };"
+                    , "let failure;"
+                    , "try { as_settled(invalid); } catch (error) { failure = error.message; }"
+                    , "await new Promise(resolve => setTimeout(resolve, 1));"
+                    , "text([failure, (await iterator.next()).done]);"
+                    ])
+                "[\"input\",true]"
+
+        it "streams a completed tool result before another tool is released" do
+            releaseTool <- newEmptyMVar
+            let handler name _
+                    | name == "delayed" = readMVar releaseTool >> pure (Right (String "second"))
+                    | otherwise = pure (Left "unexpected tool")
+                config = defaultCodeModeConfig "data/code-mode/worker.mjs" handler
+            withCodeModeHost config \host -> do
+                execCodeCell host
+                    "await stream_settled([Promise.resolve('first'), tools.delayed({})], result => { text(result.value); if (result.index === 0) yield_control(); });"
+                    ["delayed"] 3000 `shouldReturn`
+                        Right CodeModeRunning
+                            { cellId = "1"
+                            , cellOutput = textContent "first"
+                            }
+                putMVar releaseTool ()
+                waitCodeCell host "1" 3000 `shouldReturn`
+                    Right CodeModeFinished
+                        { cellId = "1"
+                        , cellValue = textContent "second"
+                        }
+
+        it "terminates a settlement consumer and its pending tool" do
+            entered <- newEmptyMVar
+            stopped <- newEmptyMVar
+            blocked <- newEmptyMVar
+            let handler _ _ =
+                    (putMVar entered () >> readMVar blocked >> pure (Right Null))
+                        `finally` putMVar stopped ()
+                config = defaultCodeModeConfig "data/code-mode/worker.mjs" handler
+            withCodeModeHost config \host -> do
+                execCodeCell host
+                    "await stream_settled([tools.blocked({})], result => text(result));"
+                    ["blocked"] 1 `shouldReturn`
+                        Right CodeModeRunning
+                            { cellId = "1"
+                            , cellOutput = emptyContent
+                            }
+                timeout 5000000 (readMVar entered) `shouldReturn` Just ()
+                terminateCodeCell host "1" `shouldReturn`
+                    Right CodeModeTerminated
+                        { cellId = "1"
+                        , cellValue = emptyContent
+                        }
+                timeout 5000000 (readMVar stopped) `shouldReturn` Just ()
+
+        it "discards unfinished settlements before reusing a worker" do
+            let config = (defaultCodeModeConfig
+                    "data/code-mode/worker.mjs"
+                    (\_ _ -> pure $ Left "no tools"))
+                    { workerPoolSize = 1 }
+            withCodeModeHost config \host -> do
+                execCodeCell host
+                    "const iterator = as_settled([new Promise(resolve => setTimeout(() => resolve('old'), 20))]); iterator.next().then(() => text('unexpected continuation')); text('first cell');"
+                    [] 3000 `shouldReturn`
+                        Right CodeModeFinished
+                            { cellId = "1"
+                            , cellValue = textContent "first cell"
+                            }
+                execCodeCell host
+                    "await new Promise(resolve => setTimeout(resolve, 40)); await stream_settled([42], result => text(result.value));"
+                    [] 3000 `shouldReturn`
+                        Right CodeModeFinished
+                            { cellId = "2"
+                            , cellValue = textContent "42"
+                            }
+
     it "persists successful store writes between cells" do
         let config = defaultCodeModeConfig
                 "data/code-mode/worker.mjs"

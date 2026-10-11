@@ -42,6 +42,8 @@ import Agent.Error
     , isInlineRetryableProviderResponseError
     )
 import qualified Agent.Responses.LoopBackend as Responses
+import Agent.OpenAI.ToolCatalog.Request
+    ( CatalogRequest(..), prepareCatalogRequest, isCatalogContextItem )
 import Agent.Loop
     ( Backend(..)
     , BackendCallbacks(..)
@@ -110,7 +112,7 @@ import Control.Retry
     , rsPreviousDelay
     )
 import Data.IORef
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -816,22 +818,33 @@ openAiBackendWithCallbackSender
         -- withRequestInput has copied the prefix. Wire sanitization removes
         -- that marker, so doing it here silently drops developer instructions.
         baseParams <- getParams
-        let history = snapshot.backendItems
+        let catalogRequest = prepareCatalogRequest baseParams snapshot newItems
+            history = snapshot.backendItems
             previousResponseId =
                 backendContinuationToken "openai.responses" snapshot
                     <|> legacyPreviousResponseId
             newItems = turnInputsToItems inputs
             deltaRequest =
-                sanitizeCodexRequest (withRequestInput baseParams newItems)
+                sanitizeCodexRequest $
+                    maybe (withRequestInput baseParams newItems)
+                        (.catalogDeltaRequest) catalogRequest
             -- Live and resumed transcripts already apply compaction snapshots
             -- as full replacements. Remote v2 intentionally keeps retained
             -- messages before its opaque checkpoint, so replay the complete
             -- replacement instead of trimming that retained prefix.
             fullRequest =
-                sanitizeCodexRequest
-                    (withRequestInput baseParams (history <> newItems))
+                sanitizeCodexRequest $
+                    maybe
+                        (withRequestInput baseParams
+                            (filter (not . isCatalogContextItem) history <> newItems))
+                        (.catalogFullRequest) catalogRequest
             (initialRequest, initialPrevious) =
                 case previousResponseId of
+                    _ | isNothing catalogRequest
+                      , isJust snapshot.backendProviderState ->
+                        (fullRequest, Nothing)
+                    _ | maybe False (.catalogRequiresReplay) catalogRequest ->
+                        (fullRequest, Nothing)
                     _ | hasLegacyComputerContinuation history inputs ->
                         (fullRequest, Nothing)
                     Nothing | not (null history) -> (fullRequest, Nothing)
@@ -851,15 +864,19 @@ openAiBackendWithCallbackSender
                 pure $ Right BackendResult
                     { backendOutput = responseToTurnOutput response
                     , backendState =
-                        advanceBackendSnapshot snapshot
+                        (advanceBackendSnapshot snapshot
                             ( normalizeResponseInputItems
-                                (history <> newItems)
+                                (maybe (filter (not . isCatalogContextItem) history <> newItems)
+                                    (.catalogCommittedInput) catalogRequest)
                                 <> response.output
                             )
                             (Just BackendContinuation
                                 { continuationProvider = "openai.responses"
                                 , continuationToken = response.responseId
-                                })
+                                }))
+                            { backendProviderState =
+                                (.catalogCandidateState) <$> catalogRequest
+                            }
                     }
   where
     sendRetrying callbacks request previousResponseId = do

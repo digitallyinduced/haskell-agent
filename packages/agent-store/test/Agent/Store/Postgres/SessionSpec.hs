@@ -61,7 +61,7 @@ spec = describe "PostgreSQL session schema" do
                         appendSessionTurnIndexed pool turn metadata `shouldReturn` Right (Just 0)
                         firstResult <- readState
                         firstResult.readStateFirstUnreadTurn `shouldBe` Just 0
-                        appendSessionTurns pool [turn] metadata `shouldReturn` Right True
+                        appendSessionTurnIndexed pool turn metadata `shouldReturn` Right (Just 1)
                         secondResult <- readState
                         secondResult.readStateFirstUnreadTurn `shouldBe` Just 0
                         secondResult.readStateRevision `shouldNotBe` firstResult.readStateRevision
@@ -75,6 +75,13 @@ spec = describe "PostgreSQL session schema" do
                                 acknowledged.readStateUnread `shouldBe` False
                                 acknowledged.readStateFirstUnreadTurn `shouldBe` Nothing
                                 replaceSessionMetadata pool "session.updated" metadata `shouldReturn` Right True
+                                readState `shouldReturn` acknowledged
+                                let reset = (testTurn now) { sessionTurnEffect = TranscriptReset }
+                                appendSessionTurnsClearingTaskPlan pool [reset, turn] metadata
+                                    `shouldReturn` Right True
+                                readState `shouldReturn` acknowledged
+                                appendSessionTurns pool [reset, turn] metadata
+                                    `shouldReturn` Right True
                                 readState `shouldReturn` acknowledged
                                 appendSessionTurns pool [testTurn now] metadata `shouldReturn` Right True
                                 readState `shouldReturn` acknowledged
@@ -182,7 +189,10 @@ spec = describe "PostgreSQL session schema" do
                             let
                                 pool = trustedPool store
                                 now = read "2026-08-23 12:00:00 UTC"
-                                metadata = testMetadata now
+                                metadata = (testMetadata now)
+                                    { sessionMetadataProviderState =
+                                        Just "{\"namespace\":\"openai.responses.catalog.v1\",\"payload\":{\"tools\":[]}}"
+                                    }
                                 turn =
                                     (testTurn now)
                                         { sessionTurnDisplayItems =
@@ -1402,6 +1412,7 @@ testMetadata now = SessionMetadata
     , sessionMetadataLastTurnSummary = Nothing
     , sessionMetadataLastRecapMainTurns = 0
     , sessionMetadataHeadless = False
+    , sessionMetadataProviderState = Nothing
     }
 
 testPromptSnapshot :: UTCTime -> SessionPromptSnapshot

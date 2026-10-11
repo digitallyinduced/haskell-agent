@@ -84,6 +84,10 @@ prepareSessionPersistence PersistenceRequest
                                 if targetChanged
                                     then Nothing
                                     else meta.metaLastResponseId
+                            , metaProviderState =
+                                if targetChanged
+                                    then Nothing
+                                    else meta.metaProviderState
                             , metaUpdatedAt = now
                             }
                     | otherwise = meta

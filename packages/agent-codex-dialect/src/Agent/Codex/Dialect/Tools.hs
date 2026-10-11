@@ -58,6 +58,7 @@ import Agent.Tools.MultiAgents (MultiAgentContext, multiAgentTools)
 import Agent.Tools.PlanMode
     ( PlanModeEnv
     , askUserQuestionTool
+    , requestUserInputAsyncTool
     , enterCodexPlanModeTool
     , isPlanModeActive
     , writePlanTool
@@ -142,6 +143,7 @@ codexTools env shellSession ghci planMode taskPlan multi =
         , enterCodexPlanModeTool planMode
         , writePlanTool planMode
         , askUserQuestionTool planMode
+        , requestUserInputAsyncTool planMode
         ]
     executionSuffix =
         [ shellCommandTool env shellSession
@@ -505,6 +507,7 @@ decodeApplyPatchArguments call = case call.callKind of
     ComputerCallKind -> Left "computer calls are not apply_patch calls"
     ComputerFunctionCallKind ->
         Left "computer calls are not apply_patch calls"
+    ToolSearchCallKind -> Left "tool search calls are not apply_patch calls"
 
 --------------------------------------------------------------------------------
 -- update_plan

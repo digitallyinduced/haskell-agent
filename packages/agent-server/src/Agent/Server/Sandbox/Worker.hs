@@ -640,6 +640,7 @@ parseToolCallKind = \case
     "custom" -> pure CustomCallKind
     "computer" -> pure ComputerCallKind
     "computer_function" -> pure ComputerFunctionCallKind
+    "tool_search" -> pure ToolSearchCallKind
     _ -> fail "unsupported sandbox tool call kind"
 
 validateRequest

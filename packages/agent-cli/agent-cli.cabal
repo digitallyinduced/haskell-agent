@@ -250,6 +250,7 @@ library
                     , Agent.CLI.Style
                     , Agent.CLI.Terminal
                     , Agent.CLI.TerminalDiagnostics
+                    , Agent.CLI.TerminalStatus
                     , Agent.CLI.TextLayout
                     , Agent.CLI.Timestamp
                     , Agent.CLI.Transcript
@@ -638,6 +639,7 @@ test-suite agent-cli-test
                     , Agent.CLI.TimestampSpec
                     , Agent.CLI.TerminalSpec
                     , Agent.CLI.TerminalDiagnosticsSpec
+                    , Agent.CLI.TerminalStatusSpec
                     , Agent.CLI.TextLayoutSpec
                     , Agent.CLI.TranscriptSpec
                     , Agent.CLI.TurnSpec

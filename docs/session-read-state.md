@@ -13,7 +13,7 @@ The authenticated server API exposes one shared read receipt per session:
 Live appended conversation turns mark the session unread atomically with their
 history commit. Each new result changes the revision, including when an earlier
 result is already unread. Replacing metadata, compaction, history reads, imports,
-and forks do not manufacture new unread results. Read receipts do not alter the
+forks, and rewind replay batches do not manufacture new unread results. Read receipts do not alter the
 session activity timestamp. A manually unread conversation can have no turns.
 
 State lives in PostgreSQL and is shared by clients within the existing session

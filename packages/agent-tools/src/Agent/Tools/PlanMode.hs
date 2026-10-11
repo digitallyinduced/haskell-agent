@@ -13,6 +13,8 @@ module Agent.Tools.PlanMode
     , PlanModeHooks(..)
     , newPlanModeEnv
     , setPlanModeInputWaitHooks
+    , setAsyncQuestionDelivery
+    , requestUserInputAsyncTool
     , planFileName
     , planFilePath
     , isPlanModeActive
@@ -87,6 +89,7 @@ data PlanModeEnv = PlanModeEnv
     , planFallbackDir :: !OsPath
     , planHooks :: !PlanModeHooks
     , planInputWaitHooks :: !(IORef (IO (), IO ()))
+    , planAsyncQuestionDelivery :: !(IORef (Maybe (Text -> IO (Either Text ()))))
     }
 
 data PlanModeHooks = PlanModeHooks
@@ -113,6 +116,7 @@ newPlanModeEnv fallbackDir hooks = do
     stateRef <- newIORef PlanInactive
     sessionRef <- newIORef Nothing
     inputWaitHooksRef <- newIORef (pure (), pure ())
+    asyncQuestionDelivery <- newIORef Nothing
     let baseHooks = fromMaybe defaultHooks hooks
         withInputWait action = do
             (beginWait, endWait) <- readIORef inputWaitHooksRef
@@ -131,7 +135,60 @@ newPlanModeEnv fallbackDir hooks = do
         , planFallbackDir = fallbackDir
         , planHooks = wrappedHooks
         , planInputWaitHooks = inputWaitHooksRef
+        , planAsyncQuestionDelivery = asyncQuestionDelivery
         }
+
+-- | Delivery only: callbacks must publish the question without waiting for a
+-- reply. Replies arrive through the host's ordinary user-message path.
+setAsyncQuestionDelivery :: PlanModeEnv -> (Text -> IO (Either Text ())) -> IO ()
+setAsyncQuestionDelivery env deliver =
+    writeIORef env.planAsyncQuestionDelivery (Just deliver)
+
+data AsyncQuestion = AsyncQuestion Text (Maybe [Text])
+
+asyncQuestionsDecoder :: Decoder [AsyncQuestion]
+asyncQuestionsDecoder = objectArgs \object -> do
+    questions <- optList questionDecoder object "questions" "Expected array for key: questions"
+        >>= maybe (fail "Missing parameter: questions") pure
+    if null questions then fail "questions must not be empty" else pure questions
+  where
+    questionDecoder = objectArgs \object -> do
+        title <- reqText object "title"
+        options <- optList Json.text object "options" "Expected array for key: options"
+        if Text.null (Text.strip title)
+            then fail "Question title must not be empty"
+            else case options of
+                Just choices | null choices || any (Text.null . Text.strip) choices ->
+                    fail "Question options must contain nonempty strings"
+                _ -> pure (AsyncQuestion title options)
+
+requestUserInputAsyncTool :: PlanModeEnv -> AppTool
+requestUserInputAsyncTool env = jsonTool "request_user_input_async"
+    ("Ask the user one or more questions without waiting for a reply. "
+        <> "Continue independent work after this tool returns. The user replies "
+        <> "with an ordinary message, which may steer the active turn. "
+        <> "Do not assume an answer, poll for it, or use this tool to obtain approval "
+        <> "for an action that requires explicit permission. Use ask_user_question "
+        <> "when progress depends on the answer.")
+    [ PropertySchema "questions" (PropertyArray (PropertyObject
+        [ PropertySchema "title" PropertyString True (Just "The question to ask.")
+        , PropertySchema "options" (PropertyArray PropertyString) False
+            (Just "Optional suggested answers. Omit for a free-text question.")
+        ])) True (Just "One or more questions.")
+    ]
+    True
+    TurnSequential
+    (typedTool "request_user_input_async" asyncQuestionsDecoder \questions ->
+        readIORef env.planAsyncQuestionDelivery >>= \case
+            Nothing -> pure (Left "Asynchronous questions are unavailable in this host.")
+            Just deliver -> do
+                result <- deliver $
+                    Text.intercalate "\n\n"
+                        [ Text.intercalate "\n" (title : map ("- " <>) (fromMaybe [] options))
+                        | AsyncQuestion title options <- questions
+                        ]
+                        <> "\n\nReply in the chat; I can continue independent work meanwhile."
+                pure (result >> Right "{\"accepted\":true}"))
 
 -- | Configure callbacks which bracket every plan-mode prompt that can wait
 -- for the user. The default callbacks are no-ops for non-interactive hosts.

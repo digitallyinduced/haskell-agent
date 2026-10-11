@@ -561,7 +561,13 @@ coreMigrations =
             ]
         }
     , Migration
-        { migrationVersion = 121
+        { migrationVersion = 122
+        , migrationName = "session provider checkpoint state"
+        , migrationStatements =
+            [ "ALTER TABLE harness.sessions ADD COLUMN provider_state text" ]
+        }
+    , Migration
+        { migrationVersion = 123
         , migrationName = "durable session read state"
         , migrationStatements = sessionReadStateSchemaStatements
         }

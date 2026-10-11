@@ -1111,6 +1111,7 @@ toolChrome call = case canonicalToolName call.name of
     "enter_plan_mode" -> ToolChrome "Entered" ToolDetailMuted
     "exit_plan_mode" -> ToolChrome "Exited" ToolDetailMuted
     "ask_user_question" -> ToolChrome "Asked" ToolDetailMuted
+    "request_user_input_async" -> ToolChrome "Asked asynchronously" ToolDetailMuted
     "skill_search" -> ToolChrome "Searched skills" ToolDetailMuted
     "view_skill" -> ToolChrome "Viewed skill" ToolDetailMuted
     "skill_create" -> ToolChrome "Learned" ToolDetailMuted

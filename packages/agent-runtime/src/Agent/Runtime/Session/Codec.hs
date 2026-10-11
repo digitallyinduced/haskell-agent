@@ -134,6 +134,9 @@ toStoredMetadata meta = Store.SessionMetadata
     , sessionMetadataLastRecapMainTurns =
         fromIntegral meta.metaLastRecapMainTurns
     , sessionMetadataHeadless = meta.metaHeadless
+    , sessionMetadataProviderState =
+        TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode
+            . backendProviderStateJson <$> meta.metaProviderState
     }
 
 toStoredPromptSnapshot
@@ -233,6 +236,11 @@ fromStoredMetadata stored = do
             )
     legacyTarget <-
         traverse fromStoredLegacyTarget stored.sessionMetadataLegacyTarget
+    providerState <- traverse
+        (either (Left . Hermes.jsonErrorMessage) Right
+            . Hermes.decodeEither backendProviderStateDecoder
+            . TextEncoding.encodeUtf8)
+        stored.sessionMetadataProviderState
     pure SessionMeta
         { metaVersion = fromIntegral stored.sessionMetadataVersion
         , metaId = stored.sessionMetadataKey
@@ -255,6 +263,7 @@ fromStoredMetadata stored = do
         , metaTitleUserTurns =
             fromIntegral stored.sessionMetadataTitleUserTurns
         , metaLastResponseId = stored.sessionMetadataLastResponseId
+        , metaProviderState = providerState
         , metaInputTokens = fromIntegral stored.sessionMetadataInputTokens
         , metaOutputTokens = fromIntegral stored.sessionMetadataOutputTokens
         , metaCachedTokens = fromIntegral stored.sessionMetadataCachedTokens

@@ -20,7 +20,7 @@ module Agent.Runtime.ConversationStore.Lifecycle
     ) where
 
 import Agent.Loop
-    ( BackendContinuation(..), BackendRevision(..), BackendSnapshot(..)
+    ( BackendContinuation(..), BackendProviderState, BackendRevision(..), BackendSnapshot(..)
     , ImageAttachment
     )
 import Agent.Responses.Types (ResponseItem)
@@ -47,6 +47,7 @@ data ConversationState checkpoint = ConversationState
     { stateGeneration :: !TranscriptGeneration
     , stateTranscript :: !(TranscriptState checkpoint)
     , stateContinuation :: !(Maybe BackendContinuation)
+    , stateProviderState :: !(Maybe BackendProviderState)
     , stateAttachments :: ![ImageAttachment]
     }
     deriving (Eq, Show)
@@ -102,6 +103,7 @@ commitTranscript transcript state =
             { stateGeneration = generation
             , stateTranscript = ResidentTranscript transcript CommittedResident
             , stateContinuation = Nothing
+            , stateProviderState = Nothing
             }
        , generation
        )
@@ -116,6 +118,7 @@ commitBackendState candidate state =
             { stateGeneration = generation
             , stateTranscript = ResidentTranscript committed.backendItems CommittedResident
             , stateContinuation = committed.backendContinuation
+            , stateProviderState = committed.backendProviderState
             }
        , committed
        )
@@ -153,6 +156,7 @@ resetState state = state
     { stateGeneration = nextGeneration state.stateGeneration
     , stateTranscript = ResidentTranscript [] CommittedResident
     , stateContinuation = Nothing
+    , stateProviderState = Nothing
     , stateAttachments = []
     }
 
@@ -170,4 +174,5 @@ snapshotFromState state items = BackendSnapshot
     { backendItems = items
     , backendRevision = generationRevision state.stateGeneration
     , backendContinuation = state.stateContinuation
+    , backendProviderState = state.stateProviderState
     }

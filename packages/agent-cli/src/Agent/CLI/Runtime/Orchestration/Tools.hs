@@ -128,6 +128,7 @@ import Agent.Store.Postgres ( trustedPool )
 import Agent.Tools.PlanMode
     ( PlanModeEnv(planSessionDir, planStateRef),
       activatePlanMode,
+      setAsyncQuestionDelivery,
       PlanModeState(PlanPending) )
 import Agent.Tools.Types
     ( AppTool(appToolName)
@@ -255,6 +256,8 @@ runAgentTools request = withSessionResourceScopes \resources -> do
             , ExecutionToolGroup (maybe [] (pure . lspRuntimeTool) lspRuntime)
             ]
         codingRuntime = CodingRuntime{..}
+    mapM_ (setAsyncQuestionDelivery runtimeCoding.codingPlanMode)
+        toolHostHooks.toolAsyncQuestionDelivery
     mapM_
         (reportStartupWarning request.startup)
         lspStartup.lspStartupWarnings
