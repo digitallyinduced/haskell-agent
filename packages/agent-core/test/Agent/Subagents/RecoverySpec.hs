@@ -19,6 +19,49 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "durable tree recovery" do
+    it "joins a running child before acknowledging its durable cancellation" $
+        withHandle \handle -> do
+            (config, rows) <- configuration [snapshot "child" Pending]
+            started <- newEmptyMVar
+            finished <- newEmptyMVar
+            blocker <- newEmptyMVar
+            let tested = config
+                    { runner = \_ _ _ _ _ ->
+                        (putMVar started () >> readMVar blocker >> pure (Left Loop.LoopNoResponseId))
+                            `finally` putMVar finished ()
+                    }
+                hooks = durableRuntimeHooks tested
+            hooks.initialize handle
+            timeout 1000000 (takeMVar started) `shouldReturn` Just ()
+            modifyIORef' rows (map \row -> row { cancellationRequested = True })
+            timeout 1000000 (hooks.pumpRunnable handle) `shouldReturn` Just True
+            tryTakeMVar finished `shouldReturn` Just ()
+            getStatus handle.registry (SubagentId "child") `shouldReturn` Closed
+            persisted <- readIORef rows
+            map (\row -> (row.status, row.cancellationRequested)) persisted `shouldBe` [(Closed, False)]
+
+    it "honors cancellation after restart without executing the interrupted task" $
+        withHandle \handle -> do
+            let child = (snapshot "child" Running) { cancellationRequested = True }
+            (config, rows) <- configuration [child]
+            executions <- newIORef (0 :: Int)
+            let hooks = durableRuntimeHooks config
+                    { runner = \_ _ _ _ _ -> modifyIORef' executions (+ 1) >> pure (Left Loop.LoopNoResponseId) }
+            hooks.initialize handle
+            readIORef executions `shouldReturn` 0
+            getStatus handle.registry (SubagentId "child") `shouldReturn` Closed
+            persisted <- readIORef rows
+            map (.status) persisted `shouldBe` [Closed]
+
+    it "does not reconcile a completion over an outstanding cancellation" $
+        withHandle \handle -> do
+            (config, rows) <- configuration [snapshot "child" (Completed Nothing)]
+            restoreStoredSubagent config.store config.cwd handle (SubagentId "child") `shouldReturn` Right ()
+            writeIORef rows [(snapshot "child" Running) { cancellationRequested = True }]
+            reconcileStoredSubagents config handle
+            persisted <- readIORef rows
+            map (\row -> (row.status, row.cancellationRequested)) persisted `shouldBe` [(Running, True)]
+
     it "leaves work durable when the execution limit is reached" $
         withHandle \handle -> do
             (config, rows) <- configuration [snapshot "first" Pending, snapshot "second" Running]
@@ -133,6 +176,7 @@ snapshot identifier status = SubagentSnapshot
     , status
     , initialMessage = "Recover this task"
     , wakeRequested = False
+    , cancellationRequested = False
     }
 
 configuration :: [SubagentSnapshot] -> IO (RecoveryConfig, IORef [SubagentSnapshot])
@@ -144,7 +188,10 @@ configuration initial = do
             , transaction = id
             , lockSnapshot = \_ -> pure ()
             , persistStatus = \agent status -> modifyIORef' rows $
-                map \row -> if row.agentId == agent then row { status } else row
+                map \row -> if row.agentId == agent then row
+                    { status
+                    , cancellationRequested = status /= Closed && row.cancellationRequested
+                    } else row
             , persistRunning = \_ _ -> pure ()
             , persistSuspension = \_ _ _ -> pure (Right ())
             , persistResume = \_ _ -> pure (Right ())

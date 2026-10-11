@@ -29,6 +29,7 @@ data SubagentSnapshot = SubagentSnapshot
     , status :: !SubagentStatus
     , initialMessage :: !Text
     , wakeRequested :: !Bool
+    , cancellationRequested :: !Bool
     }
 
 -- | Transactions must encompass the status write and domain settlement.
@@ -77,11 +78,13 @@ durableRuntimeHooks config@RecoveryConfig { withOwnership = ownership } = Runtim
         snapshots <- config.store.loadSnapshots
         forM_ snapshots \snapshot ->
             restoreSnapshot config.cwd handle snapshot >>= either (fail . Text.unpack) pure
+        processCancellations config handle
         pumpStoredSubagents config handle
     , pumpRunnable = \handle -> do
         allowed <- config.executionAllowed
         if allowed
             then do
+                processCancellations config handle
                 reconcileStoredSubagents config handle
                 pumpStoredSubagents config handle
                 pure True
@@ -120,7 +123,8 @@ restoreStoredSubagent store cwd handle agentId = do
         stored <- store.loadSnapshot agentId
         case stored of
             Nothing -> pure (Left "Unknown or permanently closed subagent")
-            Just snapshot | snapshot.status == Closed -> pure (Left "Unknown or permanently closed subagent")
+            Just snapshot | snapshot.status == Closed || snapshot.cancellationRequested ->
+                pure (Left "Unknown or permanently closed subagent")
             Just snapshot -> restoreSnapshot cwd handle snapshot
 
 -- | Retry failed settlement without repeating model execution. Read durable
@@ -134,7 +138,7 @@ reconcileStoredSubagents config handle = do
             stored <- config.store.loadSnapshot snapshot.agentId
             current <- getStatus handle.registry snapshot.agentId
             case stored of
-                Just stored | settledStatus current -> do
+                Just stored | not stored.cancellationRequested && settledStatus current -> do
                     let changed = restoredStatus stored.status /= current
                     when changed (config.store.persistStatus snapshot.agentId current)
                     config.settle snapshot.agentId current
@@ -163,9 +167,21 @@ pumpStoredSubagents config handle = do
                 Errored {} -> True
                 Interrupted -> True
                 _ -> False
-        when (recover || wake) $
+        when (not snapshot.cancellationRequested && (recover || wake)) $
             void (sendInput handle.registry snapshot.agentId
                 (if recover then snapshot.initialMessage else config.wakeMessage) False)
+
+-- | Cancellation remains requested until the actual worker has been joined.
+-- Never hold a database row lock while joining: the worker may need that row
+-- to finish its persistence callback.
+processCancellations :: RecoveryConfig -> RuntimeHandle -> IO ()
+processCancellations config handle = do
+    snapshots <- config.store.loadSnapshots
+    forM_ snapshots \snapshot -> when snapshot.cancellationRequested do
+        current <- getStatus handle.registry snapshot.agentId
+        unless (current == NotFound) $
+            closeSubagent handle.registry snapshot.agentId >>= either (fail . Text.unpack) (const (pure ()))
+        commitStatus config snapshot.agentId Closed
 
 withStoreTransaction :: RecoveryStore -> IO a -> IO a
 withStoreTransaction RecoveryStore { transaction = action } = action

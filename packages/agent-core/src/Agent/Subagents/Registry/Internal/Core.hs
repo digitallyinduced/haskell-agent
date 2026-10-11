@@ -933,22 +933,24 @@ shutdownRecord registry record = do
     persistence <- readIORef registry.registrySuspensionPersistence
     pending <- atomically $ Map.member record.recordId <$> readTVar registry.registrySuspensions
     status <- atomically $ phaseStatus <$> readTVar record.recordPhase
-    case (persistence, pending || isSuspended status) of
-        (Just storage, True) ->
-            storage.persistSuspensionCancellation record.recordId >>= either
-                (throwIO . userError . Text.unpack) pure
-        _ -> pure ()
     requestCancel record.recordCancel
     transitioned <- atomically do
         phase <- readTVar record.recordPhase
         releaseSlotSTM registry record
         writeTVar record.recordPhase AgentClosed
         void $ flushTQueue record.recordMailbox
-        modifyTVar' registry.registrySuspensions (Map.delete record.recordId)
         pure $ case phase of
             AgentClosed -> False
             _ -> True
     stopRecordSupervisor record
+    -- Join pending suspension tool work before durable closure releases claims.
+    -- Retain the suspension marker until persistence succeeds for retry.
+    case (persistence, pending || isSuspended status) of
+        (Just storage, True) ->
+            storage.persistSuspensionCancellation record.recordId >>= either
+                (throwIO . userError . Text.unpack) pure
+        _ -> pure ()
+    atomically $ modifyTVar' registry.registrySuspensions (Map.delete record.recordId)
     whenIO transitioned $
         notifySettled registry record.recordId Closed
 

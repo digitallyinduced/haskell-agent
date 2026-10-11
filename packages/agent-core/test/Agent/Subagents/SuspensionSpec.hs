@@ -8,7 +8,7 @@ import Agent.ToolDispatch (functionToolCall)
 import Agent.Subagents
 import Agent.Subagents.TaskPath (joinTaskPath, taskPathRoot)
 import Control.Concurrent.MVar (newEmptyMVar, takeMVar, putMVar)
-import Control.Exception.Safe (bracket)
+import Control.Exception.Safe (bracket, finally)
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -19,6 +19,45 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "durable subagent suspension" do
+    it "joins pending suspension tool work before persisting cancellation" $
+        withRegistry \registry -> do
+            now <- getCurrentTime
+            requested <- newEmptyMVar
+            blocker <- newEmptyMVar
+            finished <- newIORef False
+            setSubagentSuspensionPersistence registry acceptedStorage
+                { persistSuspensionCancellation = \_ -> do
+                    readIORef finished `shouldReturn` True
+                    pure (Right ())
+                }
+            setSubagentRunner registry \env _ _ _ -> do
+                submissions <- newIORef []
+                backend <- scriptedBackend submissions []
+                config <- testConfig backend
+                transcript <- newIORef emptyBackendSnapshot
+                let child = ChildTurn
+                        { childBackend = backend
+                        , childTools = config.loopTools
+                        , childDispatch = config.loopDispatch
+                        , childApproval = config.loopApprove
+                        , childMaxTurns = 5
+                        , childOnEvent = const (pure ())
+                        , childTranscript = transcript
+                        , childBackgroundTasks = Nothing
+                        }
+                runChildTurn registry env child (\_ -> do
+                    requestSubagentSuspension registry env.subId (addUTCTime 3600 now) "waiting"
+                        `shouldReturn` Right ()
+                    putMVar requested env.subId
+                    takeMVar blocker
+                    pure (Left (LoopCancelled [])))
+                    `finally` writeIORef finished True
+            _ <- spawnSubagent registry Nothing 0 "wait" Nothing
+            childId <- timeout 1000000 (takeMVar requested) >>= maybe (fail "child did not suspend") pure
+            result <- timeout 1000000 (closeSubagent registry childId)
+            result `shouldSatisfy` maybe False (either (const False) (const True))
+            readIORef finished `shouldReturn` True
+
     it "persists an active normal child suspension and publishes the suspended status" $
         withRegistry \registry -> do
             now <- getCurrentTime
