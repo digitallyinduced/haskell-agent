@@ -1,0 +1,168 @@
+{-# LANGUAGE RankNTypes, OverloadedStrings, OverloadedRecordDot, BlockArguments #-}
+module Agent.Subagents.RecoverySpec (spec) where
+
+import Agent.Subagents
+import Agent.Subagents.Runtime (RuntimeHandle (..), RuntimeHooks (..))
+import Agent.Subagents.Runtime.Recovery
+import Agent.Subagents.TaskPath (parseTaskPath)
+import qualified Agent.Loop as Loop
+import Agent.InterAgentMessage (renderInterAgentMessage)
+import Control.Concurrent.MVar
+import Control.Exception (bracket, finally)
+import Data.IORef
+import Data.List (find)
+import Data.Text (Text)
+import qualified Data.Text as Text
+import System.OsPath (unsafeEncodeUtf)
+import System.Timeout (timeout)
+import Test.Hspec
+
+spec :: Spec
+spec = describe "durable tree recovery" do
+    it "leaves work durable when the execution limit is reached" $
+        withHandle \handle -> do
+            (config, rows) <- configuration [snapshot "first" Pending, snapshot "second" Running]
+            started <- newEmptyMVar
+            release <- newEmptyMVar
+            admitted <- newIORef ([] :: [SubagentId])
+            let tested = config
+                    { runner = \_ environment _ _ _ -> do
+                        putMVar started environment.subId
+                        readMVar release
+                        pure (Left Loop.LoopNoResponseId)
+                    , store = config.store
+                        { persistRunning = \agent _ -> modifyIORef' admitted (<> [agent]) }
+                    }
+            (durableRuntimeHooks tested).initialize handle
+            timeout 1000000 (takeMVar started) `shouldReturn` Just (SubagentId "first")
+            getStatus handle.registry (SubagentId "second") `shouldReturn` Interrupted
+            readIORef admitted `shouldReturn` [SubagentId "first"]
+            persisted <- readIORef rows
+            map (.status) persisted `shouldBe` [Pending, Running]
+
+    it "resumes completed work with the host wake instruction" $
+        withHandle \handle -> do
+            let child = (snapshot "child" (Completed Nothing)) { wakeRequested = True }
+            (config, _) <- configuration [child]
+            admitted <- newEmptyMVar
+            release <- newEmptyMVar
+            let tested = config
+                    { runner = \_ _ _ message _ -> do
+                        putMVar admitted (renderInterAgentMessage message)
+                        readMVar release
+                        pure (Left Loop.LoopNoResponseId)
+                    }
+            (durableRuntimeHooks tested).initialize handle
+            result <- timeout 1000000 (takeMVar admitted)
+            result `shouldSatisfy` maybe False (Text.isInfixOf config.wakeMessage)
+
+    it "restores running work as interrupted without retaining a phantom worker" $
+        withHandle \handle -> do
+            (config, _) <- configuration [snapshot "child" Running]
+            restoreStoredSubagent config.store config.cwd handle (SubagentId "child") `shouldReturn` Right ()
+            getStatus handle.registry (SubagentId "child") `shouldReturn` Interrupted
+
+    it "refuses permanently closed persisted children" $
+        withHandle \handle -> do
+            (config, _) <- configuration [snapshot "child" Closed]
+            result <- restoreStoredSubagent config.store config.cwd handle (SubagentId "child")
+            result `shouldBe` Left "Unknown or permanently closed subagent"
+            getStatus handle.registry (SubagentId "child") `shouldReturn` NotFound
+
+    it "reconciles status and domain settlement transactionally before notifying" $
+        withHandle \handle -> do
+            (config, rows) <- configuration [snapshot "child" (Completed (Just "done"))]
+            restoreStoredSubagent config.store config.cwd handle (SubagentId "child") `shouldReturn` Right ()
+            writeIORef rows [snapshot "child" Running]
+            events <- newIORef ([] :: [Text])
+            let record event = modifyIORef' events (<> [event])
+                store = config.store
+                    { transaction = \action -> record "begin" >> action `finally` record "commit"
+                    , lockSnapshot = \_ -> record "lock"
+                    , persistStatus = \agent status -> record "status" >> config.store.persistStatus agent status
+                    }
+                tested = config
+                    { store
+                    , settle = \_ _ -> record "settle"
+                    , notify = \_ _ -> record "notify"
+                    }
+            reconcileStoredSubagents tested handle
+            readIORef events `shouldReturn` ["begin", "lock", "status", "settle", "commit", "notify"]
+            writeIORef events []
+            reconcileStoredSubagents tested handle
+            readIORef events `shouldReturn` ["begin", "lock", "settle", "commit"]
+
+    it "reads the status again after locking rather than notifying from stale inventory" $
+        withHandle \handle -> do
+            (config, rows) <- configuration [snapshot "child" (Completed Nothing)]
+            restoreStoredSubagent config.store config.cwd handle (SubagentId "child") `shouldReturn` Right ()
+            writeIORef rows [snapshot "child" Running]
+            notices <- newIORef (0 :: Int)
+            let tested = config
+                    { store = config.store
+                        { lockSnapshot = \_ -> writeIORef rows [snapshot "child" (Completed Nothing)] }
+                    , notify = \_ _ -> modifyIORef' notices (+ 1)
+                    }
+            reconcileStoredSubagents tested handle
+            readIORef notices `shouldReturn` 0
+
+    it "cancels dormant children on access loss and persists their terminal state" $
+        withHandle \handle -> do
+            (config, rows) <- configuration [snapshot "child" Interrupted]
+            let hooks = durableRuntimeHooks config
+            hooks.initialize handle
+            let disabled = durableRuntimeHooks config { executionAllowed = pure False }
+            disabled.pumpRunnable handle `shouldReturn` False
+            getStatus handle.registry (SubagentId "child") `shouldReturn` Closed
+            persisted <- readIORef rows
+            map (.status) persisted `shouldBe` [Closed]
+
+    it "rejects unauthorized initialization before restoring any identity" $
+        withHandle \handle -> do
+            (config, _) <- configuration [snapshot "child" Interrupted]
+            let hooks = durableRuntimeHooks config { executionAllowed = pure False }
+            hooks.initialize handle `shouldThrow` anyIOException
+            getStatus handle.registry (SubagentId "child") `shouldReturn` NotFound
+
+snapshot :: Text -> SubagentStatus -> SubagentSnapshot
+snapshot identifier status = SubagentSnapshot
+    { agentId = SubagentId identifier
+    , parentId = Nothing
+    , taskPath = either (error . Text.unpack) id (parseTaskPath ("/root/" <> identifier))
+    , depth = 1
+    , status
+    , initialMessage = "Recover this task"
+    , wakeRequested = False
+    }
+
+configuration :: [SubagentSnapshot] -> IO (RecoveryConfig, IORef [SubagentSnapshot])
+configuration initial = do
+    rows <- newIORef initial
+    let store = RecoveryStore
+            { loadSnapshots = readIORef rows
+            , loadSnapshot = \agent -> find (\row -> row.agentId == agent) <$> readIORef rows
+            , transaction = id
+            , lockSnapshot = \_ -> pure ()
+            , persistStatus = \agent status -> modifyIORef' rows $
+                map \row -> if row.agentId == agent then row { status } else row
+            , persistRunning = \_ _ -> pure ()
+            , persistSuspension = \_ _ _ -> pure (Right ())
+            , persistResume = \_ _ -> pure (Right ())
+            }
+    pure (RecoveryConfig
+        { store
+        , withOwnership = fmap Just
+        , executionAllowed = pure True
+        , runner = \_ _ _ _ _ -> pure (Left Loop.LoopNoResponseId)
+        , settle = \_ _ -> pure ()
+        , notify = \_ _ -> pure ()
+        , cwd = unsafeEncodeUtf "."
+        , wakeMessage = "Read pending input"
+        }, rows)
+
+withHandle :: (RuntimeHandle -> IO a) -> IO a
+withHandle action = bracket
+    (newSubagentRegistry (SubagentConfig 1 (Just 4) (Just 12)) (unsafeEncodeUtf ".")
+        (\_ _ _ _ -> pure (Left Loop.LoopNoResponseId)) (\_ _ -> pure ()))
+    closeSubagentRegistry
+    \registry -> newRootSubagents NoticesToLoop registry >>= action . RuntimeHandle registry

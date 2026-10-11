@@ -79,8 +79,11 @@ library
                     , Agent.Subagents.History
                     , Agent.Subagents.Loop
                     , Agent.Subagents.Native
+                    , Agent.Subagents.DurableTranscript
                     , Agent.Subagents.Registry
                     , Agent.Subagents.Runtime
+                    , Agent.Subagents.Runtime.Notifications
+                    , Agent.Subagents.Runtime.Recovery
                     , Agent.Subagents.Runtime.Internal
                     , Agent.Subagents.TaskPath
                     , Agent.Subagents.Types
@@ -283,6 +286,9 @@ test-suite agent-core-test
                     , Agent.Subagents.ChildSpec
                     , Agent.Subagents.SuspensionSpec
                     , Agent.Subagents.RuntimeSpec
+                    , Agent.Subagents.NotificationsSpec
+                    , Agent.Subagents.RecoverySpec
+                    , Agent.DurableTranscriptSpec
                     , Agent.Subagents.HistorySpec
                     , Agent.Subagents.LoopSpec
                     , Agent.Subagents.TaskPathSpec

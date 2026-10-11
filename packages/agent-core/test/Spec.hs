@@ -26,6 +26,9 @@ import qualified Agent.SubagentsSpec as SubagentsSpec
 import qualified Agent.Subagents.ChildSpec as SubagentChildSpec
 import qualified Agent.Subagents.SuspensionSpec as SubagentSuspensionSpec
 import qualified Agent.Subagents.RuntimeSpec as SubagentRuntimeSpec
+import qualified Agent.Subagents.NotificationsSpec as SubagentNotificationsSpec
+import qualified Agent.Subagents.RecoverySpec as SubagentRecoverySpec
+import qualified Agent.DurableTranscriptSpec as DurableTranscriptSpec
 import qualified Agent.Subagents.HistorySpec as SubagentHistorySpec
 import qualified Agent.Subagents.LoopSpec as SubagentLoopSpec
 import qualified Agent.Subagents.TaskPathSpec as TaskPathSpec
@@ -69,6 +72,9 @@ main = hspec do
     SubagentChildSpec.spec
     SubagentSuspensionSpec.spec
     SubagentRuntimeSpec.spec
+    SubagentNotificationsSpec.spec
+    SubagentRecoverySpec.spec
+    DurableTranscriptSpec.spec
     SubagentHistorySpec.spec
     SubagentLoopSpec.spec
     TaskPathSpec.spec
