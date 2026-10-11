@@ -1,4 +1,4 @@
-module Agent.Tools.MultiAgentsLoopSpec (spec) where
+module Agent.Codex.Dialect.MultiAgentsLoopSpec (spec) where
 
 import Agent.Cancel (newCancelFlag)
 import Agent.InterAgentMessage (interAgentMessagePayload)
@@ -24,12 +24,13 @@ import Agent.Subagents
     , defaultSubagentConfig
     , newRootSubagents
     , newSubagentRegistry
+    , rootMultiAgentContext
     , runChildTurn
     , setSubagentRunner
     , subagentLoop
     )
 import Agent.ToolDispatch (functionToolCall)
-import Agent.Tools.MultiAgents (multiAgentTools, rootMultiAgentContext)
+import Agent.Codex.Dialect.MultiAgents (multiAgentTools)
 import Agent.Tools.Types (AppTool, ToolApproval(..), ToolRegistry, mkToolRegistry)
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (bracket)
@@ -41,7 +42,7 @@ import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
 
 spec :: Spec
-spec = describe "Agent.Tools.MultiAgents in a root loop" do
+spec = describe "Agent.Codex.Dialect.MultiAgents in a root loop" do
     it "runs a spawned child and continues the root with its answer" do
         childPrompts <- newIORef ([] :: [Text])
         rootRequests <- newIORef ([] :: [[TurnInput]])

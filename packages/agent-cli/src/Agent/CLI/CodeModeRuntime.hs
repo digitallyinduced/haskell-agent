@@ -93,10 +93,7 @@ import Agent.Tools.CodeMode.Tool
     , ToolMode(..)
     , newCodeModeToolSetWithRepair
     )
-import Agent.Tools.MultiAgents
-    ( multiAgentNamespace
-    , multiAgentToolNames
-    )
+import Agent.Codex.Dialect.MultiAgents (multiAgentNamespace, multiAgentToolNames)
 import Agent.Tools.Types
     ( AppTool(..)
     , BackgroundTaskStatus

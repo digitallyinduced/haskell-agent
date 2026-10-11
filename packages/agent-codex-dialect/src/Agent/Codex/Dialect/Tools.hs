@@ -54,7 +54,8 @@ import Agent.Tools.IO
     , resolveUnderCwd
     , runShellCommandStreamingAuthorized
     )
-import Agent.Tools.MultiAgents (MultiAgentContext, multiAgentTools)
+import Agent.Codex.Dialect.MultiAgents (multiAgentTools)
+import Agent.Subagents.Spawn (MultiAgentContext)
 import Agent.Tools.PlanMode
     ( PlanModeEnv
     , askUserQuestionTool

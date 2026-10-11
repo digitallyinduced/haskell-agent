@@ -74,6 +74,7 @@ library
                     , Agent.Subagents.History
                     , Agent.Subagents.Loop
                     , Agent.Subagents.Registry
+                    , Agent.Subagents.Spawn
                     , Agent.Subagents.TaskPath
                     , Agent.Subagents.Types
                     , Agent.Telemetry

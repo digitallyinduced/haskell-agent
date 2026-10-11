@@ -48,7 +48,7 @@ import Agent.OpenAI.ToolDSL (buildGrokTool, buildTool)
 import Agent.ToolDSL (PropertySchema(..), parametersObjectLoose)
 import Agent.ToolDispatch (canonicalToolName)
 import Agent.Codex.Dialect.ApplyPatch (applyPatchGrammar)
-import Agent.Tools.MultiAgents (multiAgentNamespace, multiAgentToolNames)
+import Agent.Codex.Dialect.MultiAgents (multiAgentNamespace, multiAgentToolNames)
 import Agent.Tools.Types
     ( AppTool(..)
     , ToolSchema(..)

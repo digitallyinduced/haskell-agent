@@ -62,7 +62,6 @@ library
                     , Agent.Tools.Ghci.Runtime
                     , Agent.Tools.Ghci.Tool
                     , Agent.Tools.IO
-                    , Agent.Tools.MultiAgents
                     , Agent.Tools.OutputArtifact
                     , Agent.Tools.OutputArtifact.Retrieval
                     , Agent.Tools.PlanMode
@@ -227,8 +226,6 @@ test-suite agent-tools-test
                     , Agent.Tools.GhciSpec
                     , Agent.Tools.IOSpec
                     , Agent.Tools.LoopIntegrationSpec
-                    , Agent.Tools.MultiAgentsSpec
-                    , Agent.Tools.MultiAgentsLoopSpec
                     , Agent.Tools.OutputArtifactSpec
                     , Agent.Tools.OutputArtifactMemorySpec
                     , Agent.Tools.OutputArtifact.RetrievalSpec

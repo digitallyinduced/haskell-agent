@@ -63,7 +63,8 @@ import Agent.Codex.Dialect.Runtime
     ( CodexCodingTools(..)
     , newCodexCodingTools
     )
-import Agent.Tools.MultiAgents (MultiAgentContext(..), multiAgentTools)
+import Agent.Codex.Dialect.MultiAgents (multiAgentTools)
+import Agent.Subagents.Spawn (MultiAgentContext(..))
 import Agent.CLI.Subagents.Runtime (childToolGroups)
 import Agent.Runtime.Tools.Dialects
     ( CodingTools(..)

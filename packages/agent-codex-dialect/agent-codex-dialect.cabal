@@ -34,6 +34,7 @@ common common-opts
 library
     import:           common-opts
     exposed-modules:  Agent.Codex.Dialect.ApplyPatch
+                    , Agent.Codex.Dialect.MultiAgents
                     , Agent.Codex.Dialect.Prompt
                     , Agent.Codex.Dialect.ProjectInstructions
                     , Agent.Codex.Dialect.Runtime
@@ -44,6 +45,7 @@ library
     build-depends:    agent-core >= 0.1 && < 0.2
                     , agent-tools >= 0.1 && < 0.2
                     , agent-json >= 0.1 && < 0.2
+                    , aeson
                     , async
                     , base >= 4.14 && < 5
                     , containers
@@ -61,6 +63,8 @@ test-suite agent-codex-dialect-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.Codex.DialectSpec
+                    , Agent.Codex.Dialect.MultiAgentsSpec
+                    , Agent.Codex.Dialect.MultiAgentsLoopSpec
     build-depends:    agent-codex-dialect
                     , agent-core
                     , agent-tools

@@ -15,7 +15,7 @@ import Agent.ToolDispatch
     )
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Subagents.TaskPath (taskPathRoot)
-import Agent.Tools.MultiAgents
+import Agent.Subagents.Spawn
     ( CollaborationModelTarget(..)
     , CollaborationSpawnOptions(..)
     , MultiAgentContext(..)

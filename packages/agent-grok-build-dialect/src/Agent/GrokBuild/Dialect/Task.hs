@@ -47,11 +47,14 @@ import Agent.ToolDSL
     , PropertyType(..)
     )
 import Agent.ToolDispatch (typedTool)
-import Agent.Tools.MultiAgents
+import Agent.Subagents.Spawn
     ( CollaborationModelTarget
     , CollaborationSpawnOptions(..)
     , MultiAgentContext(..)
     , SubagentWorktree(..)
+    , cleanupFailedWorktree
+    , cleanupWorktreeQuietly
+    , makeIdempotentWorktree
     )
 import Agent.Tools.Types
     ( AppTool(..)
@@ -59,7 +62,6 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , jsonAppToolWithExecution
     )
-import Control.Concurrent.MVar (modifyMVar, newMVar)
 import Control.Exception.Safe (mask, onException)
 import Control.Monad (void)
 import Data.IORef
@@ -412,34 +414,6 @@ spawnFresh childCwd worktree ctx typesRef args resolvedModel = mask \restore -> 
                         waitSubagents ctx.multiRegistry [agentId] defaultWaitTimeoutMs
                     pure $ Right $ formatTaskCompleted agentId args worktreePath timedOut
                         (Map.lookup agentId statuses)
-
-makeIdempotentWorktree :: SubagentWorktree -> IO SubagentWorktree
-makeIdempotentWorktree worktree = do
-    resultVar <- newMVar Nothing
-    let cleanup = modifyMVar resultVar \case
-            Just result -> pure (Just result, result)
-            Nothing -> do
-                result <- worktree.subagentWorktreeCleanup
-                pure (Just result, result)
-    pure worktree { subagentWorktreeCleanup = cleanup }
-
-cleanupWorktreeQuietly :: Maybe SubagentWorktree -> IO ()
-cleanupWorktreeQuietly Nothing = pure ()
-cleanupWorktreeQuietly (Just worktree) = do
-    _ <- worktree.subagentWorktreeCleanup
-    pure ()
-
-cleanupFailedWorktree
-    :: Maybe SubagentWorktree
-    -> Text
-    -> IO (Either Text Text)
-cleanupFailedWorktree Nothing spawnError = pure (Left spawnError)
-cleanupFailedWorktree (Just worktree) spawnError =
-    worktree.subagentWorktreeCleanup >>= \case
-        Right () -> pure (Left spawnError)
-        Left cleanupError ->
-            pure $ Left $
-                spawnError <> "\nAdditionally, worktree cleanup failed: " <> cleanupError
 
 resolveTaskWorkspace
     :: OsPath

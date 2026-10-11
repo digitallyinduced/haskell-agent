@@ -1,5 +1,5 @@
-{ mkDerivation, agent-core, agent-json, agent-tools, async, base
-, containers, directory, filepath, hspec, lib, process
+{ mkDerivation, aeson, agent-core, agent-json, agent-tools, async
+, base, containers, directory, filepath, hspec, lib, process
 , safe-exceptions, stm, text, time, transformers, unix
 }:
 mkDerivation {
@@ -7,8 +7,8 @@ mkDerivation {
   version = "0.1.0.0";
   src = ./.;
   libraryHaskellDepends = [
-    agent-core agent-json agent-tools async base containers directory
-    filepath safe-exceptions text time transformers unix
+    aeson agent-core agent-json agent-tools async base containers
+    directory filepath safe-exceptions text time transformers unix
   ];
   testHaskellDepends = [
     agent-core agent-tools async base directory filepath hspec process

@@ -23,7 +23,7 @@ import Agent.Subagents
     )
 import Agent.Subagents.TaskPath (taskPathRoot)
 import Agent.ToolDispatch (noArgsTool)
-import Agent.Tools.MultiAgents (MultiAgentContext(..))
+import Agent.Subagents.Spawn (MultiAgentContext(..))
 import Agent.Tools.Secret (SecretPromptHooks(..))
 import Agent.Tools.ShowImage (ImageDisplayHooks(..))
 import Agent.Tools.Types

@@ -30,7 +30,7 @@ import Agent.GrokBuild.Dialect.Shell
     , readTaskSnapshot
     )
 import Agent.GrokBuild.Dialect.Task (isSubagentIdText)
-import Agent.Tools.MultiAgents (MultiAgentContext(..))
+import Agent.Subagents.Spawn (MultiAgentContext(..))
 import Agent.Tools.Types
     ( AppTool
     , ToolExecutionPolicy(..)

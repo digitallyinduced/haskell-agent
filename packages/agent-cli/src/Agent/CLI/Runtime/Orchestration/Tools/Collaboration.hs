@@ -43,8 +43,11 @@ import Agent.Subagents
     , formatCompletionNotice
     , setSubagentOnComplete, setSubagentOnSettled )
 import Agent.Subagents.TaskPath (taskPathRoot)
-import Agent.Tools.MultiAgents
-    ( CollaborationModelTarget(..), MultiAgentContext(..), SubagentWorktree(..) )
+import Agent.Subagents.Spawn
+    ( CollaborationModelTarget(..)
+    , MultiAgentContext(..)
+    , SubagentWorktree(..)
+    )
 import Control.Monad.IO.Class (liftIO)
 import Data.Acquire (Acquire)
 import Data.IORef (IORef, newIORef, readIORef)

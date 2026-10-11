@@ -32,7 +32,7 @@ import Agent.ToolDispatch
     , noArgsTool
     )
 import Agent.ToolDSL (PropertySchema(..))
-import Agent.Tools.MultiAgents (MultiAgentContext(..))
+import Agent.Subagents.Spawn (MultiAgentContext(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
