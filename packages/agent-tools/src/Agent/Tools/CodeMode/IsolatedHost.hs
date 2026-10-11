@@ -196,6 +196,7 @@ monitorWorker host tools worker callbacks result yields content =
             streamed <- drainQueue content
             void (tryPutTMVar result (Right (outcome streamed)))
         pure merged
+    invoke :: ToolInvocation -> IO ()
     invoke invocation = do
         response <- if invocation.invocationName `Set.notMember` allowed
             then pure (Left ("Tool is not available in this cell: " <> invocation.invocationName))

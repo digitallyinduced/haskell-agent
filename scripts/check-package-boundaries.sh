@@ -77,10 +77,11 @@ for name in agent-core agent-accounts agent-computer-use agent-tools agent-runti
   fi
 done
 
-# Core owns contracts, scheduling and output memory, not concrete tool handlers.
+# Core owns contracts, generic registration, scheduling and output memory,
+# not concrete tool handlers.
 while IFS= read -r file; do
   case "${file#"$core/src/"}" in
-    Agent/Tools/Types.hs|Agent/Tools/Scheduling.hs|Agent/Tools/ResourceArbiter.hs|Agent/Tools/OutputArtifact/Memory.hs) ;;
+    Agent/Tools/Types.hs|Agent/Tools/Registration.hs|Agent/Tools/Scheduling.hs|Agent/Tools/ResourceArbiter.hs|Agent/Tools/OutputArtifact/Memory.hs) ;;
     *) fail "concrete tool implementation returned to core: $file" ;;
   esac
 done < <(find "$core/src/Agent/Tools" -type f -name '*.hs')
