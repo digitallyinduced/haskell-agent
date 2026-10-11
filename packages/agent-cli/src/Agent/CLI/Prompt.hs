@@ -579,7 +579,7 @@ genericSystemPromptForTools available cwd today isNonInteractive =
         , ""
         , "Use the registered tools to work in the workspace."
         ]
-            <> toolLine "read_file" "- Use read_file to inspect files."
+            <> toolLine "read_file" "- Use read_file to inspect files, including WAV/MP3 speech recordings through integrated transcription."
             <> toolLine "grep" "- Use grep to search file contents."
             <> toolLine "list_dir" "- Use list_dir to list directories."
             <> toolLine "search_replace"

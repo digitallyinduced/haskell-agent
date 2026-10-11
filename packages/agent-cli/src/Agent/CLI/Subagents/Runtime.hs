@@ -1243,6 +1243,7 @@ prepareChild
             , toolSessionTmp = runtime.subagentSessionTmp
             , toolShellEnvironment = runtime.subagentShellEnvironment
             , toolShellEnvironmentLock = runtime.subagentShellEnvironmentLock
+            , toolTranscribeAudio = Just (runtime.subagentTranscribeAudio provider)
             }
     skillRoots <- readIORef runtime.subagentSkillRoots
     writeIORef childEnv.toolSkillRoots skillRoots

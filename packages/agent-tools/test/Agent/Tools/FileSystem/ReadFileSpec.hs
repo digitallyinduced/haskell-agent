@@ -15,7 +15,8 @@ import Agent.Tools.FileSystem.ReadFile
     , readFileTool
     , streamReadFile
     )
-import Agent.Tools.Types (AppTool(..), defaultToolEnv, setToolSessionTmp)
+import Agent.Tools.Types (AppTool(..), ToolEnv(..), defaultToolEnv, setToolSessionTmp)
+import Data.IORef (newIORef, modifyIORef', readIORef)
 import qualified Data.ByteString as BS
 import Data.Either (isLeft)
 import qualified Data.Text as Text
@@ -211,6 +212,50 @@ spec = describe "formatReadFile" do
                     result.output `shouldSatisfy` Text.isPrefixOf "ERR "
                     toolCallResultFiles result `shouldBe` []
 
+        it "transcribes extensionless WAV and MP3 bytes without attaching unsupported audio" do
+            calls <- newIORef []
+            let transcribe name mime bytes = do
+                    modifyIORef' calls (<> [(name, mime, bytes)])
+                    pure (Right "Hallo Welt")
+            withConfiguredTool (\env -> env {toolTranscribeAudio = Just transcribe}) \workspace tool -> do
+                BS.writeFile (workspace </> "recording") wavBytes
+                BS.writeFile (workspace </> "song") mp3Bytes
+                result <- runReadTool tool "{\"target_file\":\"recording\"}"
+                result.output `shouldBe` "Audio transcript: recording\n\nHallo Welt"
+                toolCallResultFiles result `shouldBe` []
+                result.toolResultImages `shouldBe` []
+                _ <- runReadTool tool "{\"target_file\":\"song\"}"
+                readIORef calls `shouldReturn`
+                    [("recording.wav", "audio/wav", wavBytes), ("song.mp3", "audio/mpeg", mp3Bytes)]
+
+        it "rejects audio ranges and oversized files before calling transcription" do
+            let transcribe _ _ _ = expectationFailure "Unexpected transcription" >> pure (Right "")
+            withConfiguredTool (\env -> env {toolTranscribeAudio = Just transcribe}) \workspace tool -> do
+                BS.writeFile (workspace </> "recording.wav") wavBytes
+                ranged <- runReadTool tool "{\"target_file\":\"recording.wav\",\"offset\":1}"
+                ranged.output `shouldSatisfy` Text.isInfixOf "loaded whole"
+                BS.writeFile (workspace </> "recording.wav") (wavBytes <> BS.replicate (20 * 1024 * 1024) 0)
+                oversized <- runReadTool tool "{\"target_file\":\"recording.wav\"}"
+                oversized.output `shouldSatisfy` Text.isInfixOf "maximum 20 MiB"
+
+        it "reports unavailable transcription and provider failures explicitly" do
+            withTool \workspace tool -> do
+                BS.writeFile (workspace </> "recording.wav") wavBytes
+                result <- runReadTool tool "{\"target_file\":\"recording.wav\"}"
+                result.output `shouldSatisfy` Text.isInfixOf "Audio transcription is unavailable"
+            withConfiguredTool (\env -> env {toolTranscribeAudio = Just (\_ _ _ -> pure (Left "Provider unavailable"))}) \workspace tool -> do
+                BS.writeFile (workspace </> "recording.wav") wavBytes
+                result <- runReadTool tool "{\"target_file\":\"recording.wav\"}"
+                result.output `shouldBe` "ERR Audio transcription failed: Provider unavailable"
+
+        it "does not mistake other RIFF containers or AAC headers for supported audio" do
+            withTool \workspace tool -> do
+                BS.writeFile (workspace </> "video.wav") "RIFF\0\0\0\0AVI "
+                BS.writeFile (workspace </> "aac.mp3") (BS.pack [255, 241, 80, 128])
+                mapM_ (\path -> do
+                    result <- runReadTool tool ("{\"target_file\":\"" <> path <> "\"}")
+                    result.output `shouldSatisfy` Text.isInfixOf "supported WAV or MP3 audio header") ["video.wav", "aac.mp3"]
+
         it "still rejects non-image binary files" do
             withTool \workspace tool -> do
                 BS.writeFile (workspace </> "blob.bin") "prefix\0suffix"
@@ -258,7 +303,10 @@ pngBytes = BS.pack
     ]
 
 withTool :: (FilePath -> AppTool -> IO a) -> IO a
-withTool action = do
+withTool = withConfiguredTool id
+
+withConfiguredTool :: (ToolEnv -> ToolEnv) -> (FilePath -> AppTool -> IO a) -> IO a
+withConfiguredTool configure action = do
     root <- getTemporaryDirectory
     bracket
         (mkdtemp (root </> "agent-read-file-tool-"))
@@ -267,7 +315,15 @@ withTool action = do
             temp <- mkdtemp (workspace </> "session-tmp-")
             env <- defaultToolEnv (unsafeEncodeUtf workspace)
             setToolSessionTmp env (Just (unsafeEncodeUtf temp))
-            action workspace (readFileTool env)
+            action workspace (readFileTool (configure env))
+
+wavBytes :: BS.ByteString
+wavBytes = "RIFF" <> BS.pack [38, 0, 0, 0] <> "WAVEfmt "
+    <> BS.pack [16, 0, 0, 0, 1, 0, 1, 0, 128, 62, 0, 0, 0, 125, 0, 0, 2, 0, 16, 0]
+    <> "data" <> BS.pack [2, 0, 0, 0, 0, 0]
+
+mp3Bytes :: BS.ByteString
+mp3Bytes = BS.pack [255, 251, 144, 0] <> BS.replicate 413 0
 
 runReadTool :: AppTool -> Text.Text -> IO ToolCallResult
 runReadTool tool arguments =

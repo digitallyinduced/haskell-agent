@@ -104,6 +104,7 @@ import Data.IORef
     )
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
+import qualified Data.ByteString as BS
 import Data.Time.Clock (UTCTime)
 import qualified Data.Text as Text
 import System.OsPath
@@ -277,6 +278,9 @@ data ShellEnvironment = ShellEnvironment
 
 data ToolEnv = ToolEnv
     { toolCwd :: !OsPath
+    , toolTranscribeAudio :: !(Maybe (Text -> Text -> BS.ByteString -> IO (Either Text Text)))
+      -- | Transcribe an authorized filename, MIME type and bounded bytes.
+      -- The callback must consume these bytes rather than reopen the source path.
     , toolResourceArbiter :: !ToolResourceArbiter
     , toolAllowedRoots :: !(IORef [OsPath])
       -- | Additional non-session filesystem roots. The current
@@ -334,6 +338,7 @@ defaultToolEnv cwd = do
     steeringWait <- newIORef retry
     pure ToolEnv
         { toolCwd = dropTrailingPathSeparator cwd
+        , toolTranscribeAudio = Nothing
         , toolResourceArbiter = arbiter
         , toolAllowedRoots = allowedRoots
         , toolRootAccessRequest = rootAccessRequest
