@@ -171,7 +171,6 @@ spec = describe "Agent.Codex.Dialect.MultiAgents" do
         let context = (rootContext registry Nothing)
                 { multiSpawnModelGuidance =
                     Just "Prefer `gpt-5.6-luna` for small tasks."
-                , multiPrepareSpawn = Just (\_ _ -> pure ())
                 }
             descriptions =
                 [ description
@@ -185,21 +184,25 @@ spec = describe "Agent.Codex.Dialect.MultiAgents" do
             any (Text.isInfixOf "Prefer `gpt-5.6-luna` for small tasks.")
         closeSubagentRegistry registry
 
-    it "offers model and history-fork options only to hosts that prepare spawns" do
+    it "offers spawn options as plain tools only to hosts that prepare spawns" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)
             (\_ _ -> pure ())
-        let spawnProperties context =
+        let spawnProperties tools context =
                 [ property.propertyName
-                | tool <- multiAgentTools context
+                | tool <- tools context
                 , tool.appToolName == "spawn_agent"
                 , property <- fromMaybe [] (jsonToolParameters tool)
                 ]
-            plain = rootContext registry Nothing
-            preparing = plain { multiPrepareSpawn = Just (\_ _ -> pure ()) }
-        spawnProperties plain `shouldBe` ["task_name", "message"]
-        spawnProperties preparing `shouldBe`
-            ["task_name", "message", "model", "reasoning_effort", "fork_turns"]
+            withoutHook = rootContext registry Nothing
+            preparing = withoutHook { multiPrepareSpawn = Just (\_ _ -> pure ()) }
+            allOptions =
+                ["task_name", "message", "model", "reasoning_effort", "fork_turns"]
+        spawnProperties plainMultiAgentTools withoutHook
+            `shouldBe` ["task_name", "message"]
+        spawnProperties plainMultiAgentTools preparing `shouldBe` allOptions
+        -- The reserved collaboration schemas stay exact.
+        spawnProperties multiAgentTools withoutHook `shouldBe` allOptions
         closeSubagentRegistry registry
 
     it "declares plain message fields for hosts without encrypted arguments" do

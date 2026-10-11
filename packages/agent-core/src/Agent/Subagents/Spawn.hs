@@ -84,8 +84,8 @@ data MultiAgentContext = MultiAgentContext
       -- | Optional host hook for isolated worktree children.
     , multiCreateWorktree :: !(Maybe (OsPath -> IO (Either Text SubagentWorktree)))
       -- | Record model/effort overrides and seed the child transcript before
-      -- its worker starts. Spawn tools offer model, effort and history-fork
-      -- options only when it is set.
+      -- its worker starts. Without it, model, effort and history-fork
+      -- options have no effect.
     , multiPrepareSpawn
         :: !(Maybe (SubagentId -> CollaborationSpawnOptions -> IO ()))
       -- | Deliver a child message to the root agent's next model turn.

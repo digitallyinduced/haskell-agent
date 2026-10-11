@@ -65,7 +65,7 @@ import Data.Aeson (object, (.=))
 import Data.List (sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -82,29 +82,32 @@ multiAgentToolNames =
     , "interrupt_agent"
     ]
 
--- | How the tools declare their message fields.
-data MessageFields
-    -- | Encrypted by the provider, as OpenAI's collaboration namespace
-    -- declares them.
-    = EncryptedMessages
-    -- | Plain strings.
-    | PlainMessages
+-- | How a host passes the tools to the model.
+data ToolSurface
+    -- | OpenAI's reserved collaboration namespace. The schemas stay exact,
+    -- with encrypted message fields.
+    = ReservedNamespace
+    -- | Ordinary function tools with plain-text message fields.
+    | PlainFunctions
 
+-- | The tools with the reserved collaboration namespace's schemas.
 multiAgentTools :: MultiAgentContext -> [AppTool]
-multiAgentTools = multiAgentToolsWith EncryptedMessages
+multiAgentTools = multiAgentToolsFor ReservedNamespace
 
--- | 'multiAgentTools' with plain-text message fields, for hosts that pass
--- them as ordinary function tools without encrypted arguments.
+-- | The tools as ordinary function tools, for hosts whose requests carry no
+-- encrypted arguments. Message fields are plain text, and @spawn_agent@
+-- offers model, effort and history-fork options only to hosts that prepare
+-- spawns ('multiPrepareSpawn'), which is what applies them.
 plainMultiAgentTools :: MultiAgentContext -> [AppTool]
-plainMultiAgentTools = multiAgentToolsWith PlainMessages
+plainMultiAgentTools = multiAgentToolsFor PlainFunctions
 
-multiAgentToolsWith :: MessageFields -> MultiAgentContext -> [AppTool]
-multiAgentToolsWith fields ctx =
-    [spawnAgentTool fields ctx]
-    <> maybe [] (const [spawnAgentInWorktreeTool ctx]) ctx.multiCreateWorktree
+multiAgentToolsFor :: ToolSurface -> MultiAgentContext -> [AppTool]
+multiAgentToolsFor surface ctx =
+    [spawnAgentTool surface ctx]
+    <> maybe [] (const [spawnAgentInWorktreeTool surface ctx]) ctx.multiCreateWorktree
     <> [ waitAgentTool ctx
-    , sendMessageTool fields ctx
-    , followupTaskTool fields ctx
+    , sendMessageTool surface ctx
+    , followupTaskTool surface ctx
     , listAgentsTool ctx
     , interruptAgentTool ctx
     ]
@@ -124,17 +127,19 @@ spawnAgentArgsDecoder = objectArgs \object_ -> do
             <*> optText object_ "reasoning_effort"
             <*> optText object_ "fork_turns"
 
-spawnAgentTool :: MessageFields -> MultiAgentContext -> AppTool
-spawnAgentTool fields ctx = jsonTool "spawn_agent" spawnAgentDescription
-    (spawnAgentParameters ctx fields)
+spawnAgentTool :: ToolSurface -> MultiAgentContext -> AppTool
+spawnAgentTool surface ctx = jsonTool "spawn_agent" spawnAgentDescription
+    (spawnAgentParameters ctx surface
+        (messageProperty surface "Initial plain-text task for the new agent."))
     True
     TurnSequential
     (typedToolWithCall "spawn_agent" spawnAgentArgsDecoder (spawnSubagentFromCall ctx SharedWorkspace))
 
-spawnAgentInWorktreeTool :: MultiAgentContext -> AppTool
-spawnAgentInWorktreeTool ctx =
+spawnAgentInWorktreeTool :: ToolSurface -> MultiAgentContext -> AppTool
+spawnAgentInWorktreeTool surface ctx =
     jsonTool "spawn_agent_in_worktree" spawnAgentInWorktreeDescription
-        (spawnAgentParameters ctx PlainMessages)
+        (spawnAgentParameters ctx surface
+            (messageProperty PlainFunctions "Initial plain-text task for the new agent."))
         True
         TurnSequential
         (typedToolWithCall
@@ -142,15 +147,18 @@ spawnAgentInWorktreeTool ctx =
             spawnAgentArgsDecoder
             (spawnSubagentFromCall ctx IsolatedWorktree))
 
-spawnAgentParameters :: MultiAgentContext -> MessageFields -> [PropertySchema]
-spawnAgentParameters ctx fields =
+spawnAgentParameters
+    :: MultiAgentContext -> ToolSurface -> PropertySchema -> [PropertySchema]
+spawnAgentParameters ctx surface messageField =
     [ PropertySchema "task_name" PropertyString True $ Just
         "Task name for the new agent. Use lowercase letters, digits, and underscores."
-    , messageProperty fields "Initial plain-text task for the new agent."
+    , messageField
     ]
-        -- The host's preparation hook applies overrides and history forks.
-        -- Without one, a child starts from its message alone.
-        <> if isJust ctx.multiPrepareSpawn then spawnOptionParameters ctx else []
+        <> case surface of
+            -- The host's preparation hook applies overrides and history
+            -- forks. Without one, a child starts from its message alone.
+            PlainFunctions | isNothing ctx.multiPrepareSpawn -> []
+            _ -> spawnOptionParameters ctx
 
 spawnOptionParameters :: MultiAgentContext -> [PropertySchema]
 spawnOptionParameters ctx =
@@ -167,11 +175,11 @@ spawnOptionParameters ctx =
         "Optional number of turns to fork. Defaults to `all`. Full-history forks (`all` or omitted) inherit the parent model and reasoning effort and do not accept overrides. Use `none` or a positive integer string such as `3` when setting `model` or `reasoning_effort`."
     ]
 
-messageProperty :: MessageFields -> Text -> PropertySchema
-messageProperty fields description = case fields of
-    EncryptedMessages ->
+messageProperty :: ToolSurface -> Text -> PropertySchema
+messageProperty surface description = case surface of
+    ReservedNamespace ->
         PropertySchema "message" (encryptedString description) True Nothing
-    PlainMessages ->
+    PlainFunctions ->
         PropertySchema "message" PropertyString True (Just description)
 
 spawnAgentDescription :: Text
@@ -305,11 +313,11 @@ messageArgsDecoder = objectArgs \object_ -> MessageArgs
         <$> reqText object_ "target"
         <*> reqText object_ "message"
 
-sendMessageTool :: MessageFields -> MultiAgentContext -> AppTool
-sendMessageTool fields ctx = jsonTool "send_message" sendMessageDescription
+sendMessageTool :: ToolSurface -> MultiAgentContext -> AppTool
+sendMessageTool surface ctx = jsonTool "send_message" sendMessageDescription
     [ PropertySchema "target" PropertyString True $ Just
         "Relative or canonical task name to message (from a spawn tool)."
-    , messageProperty fields "Message text to queue on the target agent."
+    , messageProperty surface "Message text to queue on the target agent."
     ]
     True
     TurnSequential
@@ -335,11 +343,11 @@ runSendMessage ctx call args
                             ctx.multiTaskPath agentId
                             (callMessageContent call args.message)
 
-followupTaskTool :: MessageFields -> MultiAgentContext -> AppTool
-followupTaskTool fields ctx = jsonTool "followup_task" followupDescription
+followupTaskTool :: ToolSurface -> MultiAgentContext -> AppTool
+followupTaskTool surface ctx = jsonTool "followup_task" followupDescription
     [ PropertySchema "target" PropertyString True $ Just
         "Agent id or canonical task name to follow up with (from a spawn tool)."
-    , messageProperty fields "Message text to send to the target agent."
+    , messageProperty surface "Message text to send to the target agent."
     ]
     True
     TurnSequential
