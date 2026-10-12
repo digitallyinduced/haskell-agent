@@ -51,6 +51,7 @@ data RecoveryStore = RecoveryStore
 data RecoveryConfig = RecoveryConfig
     { store :: RecoveryStore
     , withOwnership :: forall a. IO a -> IO (Maybe a)
+    , withOperation :: forall a. IO a -> IO a
     , executionAllowed :: IO Bool
     , runner :: RuntimeHandle -> RunSubagent
     , notify :: SubagentId -> SubagentStatus -> IO ()
@@ -59,8 +60,9 @@ data RecoveryConfig = RecoveryConfig
     }
 
 durableRuntimeHooks :: RecoveryConfig -> RuntimeHooks
-durableRuntimeHooks config@RecoveryConfig { withOwnership = ownership } = RuntimeHooks
+durableRuntimeHooks config@RecoveryConfig { withOwnership = ownership, withOperation = operation } = RuntimeHooks
     { withOwnership = ownership
+    , withOperation = operation
     , initialize = \handle -> do
         allowed <- config.executionAllowed
         unless allowed (fail "Cannot restore a stopped or unauthorized agent tree")

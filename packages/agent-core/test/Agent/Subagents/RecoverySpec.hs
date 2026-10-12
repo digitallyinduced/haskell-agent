@@ -237,6 +237,7 @@ configuration initial = do
     pure (RecoveryConfig
         { store
         , withOwnership = fmap Just
+        , withOperation = id
         , executionAllowed = pure True
         , runner = \_ _ _ _ _ -> pure (Left Loop.LoopNoResponseId)
         , notify = \_ _ -> pure ()
@@ -249,4 +250,6 @@ withHandle action = bracket
     (newSubagentRegistry (SubagentConfig 1 (Just 4) (Just 12)) (unsafeEncodeUtf ".")
         (\_ _ _ _ -> pure (Left Loop.LoopNoResponseId)) (\_ _ -> pure ()))
     closeSubagentRegistry
-    \registry -> newRootSubagents NoticesToLoop registry >>= action . RuntimeHandle registry
+    \registry -> do
+        root <- newRootSubagents NoticesToLoop registry
+        action RuntimeHandle { registry, root, withOperation = id }
