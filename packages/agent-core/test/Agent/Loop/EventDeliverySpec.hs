@@ -28,7 +28,7 @@ spec = do
             takeMVar entered
             withAsync (Exception.try @Exception.SomeException (Pump.flushEventPump pump)) \flushing -> do
                 cancel worker
-                outcome <- timeout 1_000_000 (wait flushing)
+                outcome <- timeout 1000000 (wait flushing)
                 case outcome of
                     Just (Left _) -> pure ()
                     Just (Right (Left _)) -> pure ()
