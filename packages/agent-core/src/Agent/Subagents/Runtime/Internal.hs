@@ -111,6 +111,7 @@ withSubagentRuntimeHandle runtime key hooks action =
                 entry <- startEntry runtime.config runtime.cwd hooks
                 let borrowed = entry { borrowers = 1 }
                 pure (current { entries = Map.insert key borrowed current.entries }, borrowed)
+    release :: Entry -> IO ()
     release entry = do
         now <- getCurrentTime
         modifyMVar_ runtime.state \current -> pure current
@@ -203,6 +204,7 @@ tickSubagentRuntimeAt runtime now onFailure = do
                     Just _ -> forgetFinished key entry
                     Nothing -> pure ()
   where
+    forgetFinished :: Text -> Entry -> IO ()
     forgetFinished key entry = modifyMVar_ runtime.state \current ->
         pure current { entries = case Map.lookup key current.entries of
             Just latest | latest.ready == entry.ready -> Map.delete key current.entries
