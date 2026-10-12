@@ -1462,9 +1462,9 @@ spec = do
                     , completion = TurnCompleted
                     }
 
-            it "proactively compacts GPT-6.1 Sol at Codex's 244800-token default" do
+            it "proactively compacts GPT-6.1 Sol at Codex's 335700-token default" do
                 contextState <- newIORef
-                    (Just (reportedOccupancy 244_800 (length history)))
+                    (Just (reportedOccupancy 335_700 (length history)))
                 compactCalls <- newIORef (0 :: Int)
                 let sender _request = do
                         modifyIORef' compactCalls (+ 1)
