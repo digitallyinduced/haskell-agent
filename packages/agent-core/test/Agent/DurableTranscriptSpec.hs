@@ -12,6 +12,29 @@ data Item = Checkpoint Text | Message Text | Output Text Text deriving (Eq, Show
 
 spec :: Spec
 spec = describe "durable native transcript" do
+    it "persists additional native input before a pause and replays it after restart" do
+        history <- newIORef []
+        (_, record, appendInput) <- newDurableTranscriptBackendWithInput (configuration history)
+        record (Agent.ToolFinished result)
+        appendInput [Message "image attachment"]
+        readIORef history `shouldReturn` [Output "call" "suspended", Message "image attachment"]
+        seen <- newIORef []
+        (backend, _) <- newDurableTranscriptBackend
+            ((configuration history) { submit = \_ items -> writeIORef seen items >> pure (Right []) })
+        _ <- backend.submitTurn Agent.emptyBackendSnapshot Nothing [] (const (pure ()))
+        readIORef seen `shouldReturn` [Output "call" "suspended", Message "image attachment"]
+
+    it "includes added input once on the next live continuation" do
+        history <- newIORef []
+        seen <- newIORef []
+        (backend, _, appendInput) <- newDurableTranscriptBackendWithInput
+            ((configuration history) { submit = \_ items -> modifyIORef' seen (<> [items]) >> pure (Right []) })
+        appendInput [Message "attachment"]
+        _ <- backend.submitTurn Agent.emptyBackendSnapshot (Just "first") [] (const (pure ()))
+        _ <- backend.submitTurn Agent.emptyBackendSnapshot (Just "second") [] (const (pure ()))
+        readIORef seen `shouldReturn` [[Message "attachment"], []]
+        readIORef history `shouldReturn` [Message "attachment"]
+
     it "fails before acknowledging an unsaved tool result" do
         history <- newIORef []
         (_, record) <- newDurableTranscriptBackend

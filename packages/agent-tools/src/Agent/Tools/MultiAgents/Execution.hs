@@ -7,11 +7,13 @@ module Agent.Tools.MultiAgents.Execution
     ) where
 
 import qualified Agent.Loop as Agent
+import Agent.Cancel (requestTurnYield)
 import Agent.Subagents
 import qualified Agent.Tools.MultiAgents as Multi
 import qualified Agent.Tools.Types as Tools
 import qualified Agent.ToolDispatch as Dispatch
 import Control.Monad (when)
+import Control.Exception.Safe (bracket)
 import Data.IORef (newIORef)
 import qualified Data.Text as Text
 
@@ -22,15 +24,21 @@ data ChildExecution = ChildExecution
     , withBackend :: forall a. [Tools.AppTool]
         -> ((Agent.Backend, Agent.LoopEvent -> IO ()) -> IO a) -> IO a
     , shouldStop :: IO Bool
+    -- | Checked after a persisted tool result. Yield releases the execution
+    -- slot without cancelling tools or inventing a provider completion.
+    , shouldYield :: IO Bool
     , approveTool :: Dispatch.ToolCall -> IO Agent.ToolApproval
     , maxTurns :: Int
     , finishTurn :: Either Agent.LoopError Agent.LoopResult -> IO ()
+    -- | Unconditional release, including preparation of the loop, exceptions
+    -- and asynchronous cancellation. Separate from result settlement.
+    , closeExecution :: IO ()
     }
 
 childExecutionRunner
     :: (SubagentSpawnEnv -> IO ChildExecution) -> SubagentRegistry -> RunSubagent
-childExecutionRunner prepare registry environment _previous message onEvent = do
-    execution@ChildExecution { withBackend } <- prepare environment
+childExecutionRunner prepare registry environment _previous message onEvent =
+  bracket (prepare environment) (.closeExecution) \execution@ChildExecution { withBackend } -> do
     tools <- either (fail . Text.unpack) pure $ Tools.mkToolRegistry
         (Tools.toolRegistryTools execution.domainTools
             <> Multi.multiAgentTools execution.collaborationContext)
@@ -50,6 +58,13 @@ childExecutionRunner prepare registry environment _previous message onEvent = do
             , childTranscript = transcript
             , childBackgroundTasks = Nothing
             }
-            \loop -> Agent.runLoopInputs loop Nothing [Agent.AgentMessage message]
+            \loop -> Agent.runLoopInputs loop
+                { Agent.loopOnEvent = \event -> do
+                    loop.loopOnEvent event
+                    case event of
+                        Agent.ToolFinished _ -> execution.shouldYield >>= \yield ->
+                            when yield (requestTurnYield loop.loopCancel)
+                        _ -> pure ()
+                } Nothing [Agent.AgentMessage message]
     execution.finishTurn result
     pure result
