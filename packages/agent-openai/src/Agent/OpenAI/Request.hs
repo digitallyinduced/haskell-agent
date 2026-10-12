@@ -10,6 +10,8 @@ import Agent.Responses.Request
     , stripReplayedInputStatus
     )
 import Agent.Responses.Types
+import Data.Text (Text)
+import qualified Data.Text as Text
 
 -- | Keep Codex-incompatible fields out of the serialized request.
 --
@@ -27,6 +29,19 @@ import Agent.Responses.Types
 -- other request rebuilds can flip that flag back to true, so restore the
 -- Lite contract here for both HTTP and WebSocket.
 --
+-- Responses Lite rejects every request whose @reasoning.context@ is not
+-- @all_turns@. Callers that assemble 'ResponseCreateParams' directly, rather
+-- than through the runtime's provider request builder, leave the context
+-- unset, so set it here for both transports too.
+--
+-- The Codex backend never stores responses and rejects a request whose
+-- @store@ is not @false@. The WebSocket envelope already forces it; set it in
+-- the shared request so the HTTP body carries it as well.
+--
+-- Codex only accepts message ids it issued itself (@msg…@). A caller may keep
+-- a local identifier for a persisted input message in the same slot; replaying
+-- it fails the whole request with @invalid_id_prefix@, so drop such ids.
+--
 -- Replayed transcript items must not carry their provider lifecycle @status@
 -- either: Codex never sends it, and Responses Lite rejects it as an unknown
 -- parameter on reasoning items. 'withRequestInput' already drops it for every
@@ -37,6 +52,7 @@ sanitizeCodexRequest ResponseCreateParams
         { promptCacheRetention = _
         , input
         , parallelToolCalls
+        , reasoning
         , ..
         } =
     stripLocalCompactionMarker $
@@ -49,15 +65,40 @@ sanitizeCodexRequest ResponseCreateParams
                         (stripReplayedInputStatus . stripContentItemKindsInput)
                         input
                 , parallelToolCalls =
-                    if maybe False isCodexResponsesLiteModel model
+                    if responsesLite
                         then Just False
                         else parallelToolCalls
+                , reasoning =
+                    if responsesLite
+                        then Just (withAllTurnsContext reasoning)
+                        else reasoning
+                , store = Just False
                 , ..
                 }
   where
+    responsesLite = maybe False isCodexResponsesLiteModel model
     keepOpenAiOrLegacyCheckpoint = \case
         Nothing -> True
         Just origin -> origin == "openai"
+
+withAllTurnsContext :: Maybe ReasoningConfig -> ReasoningConfig
+withAllTurnsContext = \case
+    Just ReasoningConfig{effort, generateSummary, reasoningMode, summary} ->
+        ReasoningConfig
+            { context = Just "all_turns"
+            , effort
+            , generateSummary
+            , reasoningMode
+            , summary
+            }
+    Nothing ->
+        ReasoningConfig
+            { context = Just "all_turns"
+            , effort = Nothing
+            , generateSummary = Nothing
+            , reasoningMode = Nothing
+            , summary = Nothing
+            }
 
 stripContentItemKindsInput :: ResponseInput -> ResponseInput
 stripContentItemKindsInput = \case
@@ -70,7 +111,7 @@ stripContentItemKindsItem = \case
     MessageItem (ResponseMessage itemId content role status phase passthrough) ->
         MessageItem
             (ResponseMessage
-                itemId
+                (providerMessageId itemId)
                 content
                 role
                 status
@@ -85,6 +126,11 @@ stripContentItemKindsItem = \case
                 content
                 (stripItemPassthrough passthrough))
     other -> other
+
+providerMessageId :: Maybe Text -> Maybe Text
+providerMessageId = \case
+    Just itemId | "msg" `Text.isPrefixOf` itemId -> Just itemId
+    _ -> Nothing
 
 stripItemPassthrough
     :: Maybe InternalChatMetadata
