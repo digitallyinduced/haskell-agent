@@ -182,6 +182,9 @@ formatAgentWait taskId timedOut mstatus = case mstatus of
         "subagent_id: " <> taskId <> "\nstatus: errored\nerror: " <> err
     Just Interrupted ->
         "subagent_id: " <> taskId <> "\nstatus: interrupted"
+    Just (Suspended until reason) ->
+        "subagent_id: " <> taskId <> "\nstatus: suspended\nresume_at: "
+            <> Text.pack (show until) <> "\nreason: " <> reason
     Just Closed ->
         "subagent_id: " <> taskId <> "\nstatus: shutdown"
     Just Running
