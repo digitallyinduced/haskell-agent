@@ -6,6 +6,7 @@ module Agent.CLI.TerminalStatus
     , withTerminalStatusSuspended
     , beginTerminalInputWait
     , endTerminalInputWait
+    , terminalInputWaitHooks
     , terminalStatusSequence
     , TerminalStatus(..)
     ) where
@@ -77,6 +78,13 @@ withTerminalWorking = bracket_ (change 1) (change (-1))
 beginTerminalInputWait, endTerminalInputWait :: IO ()
 beginTerminalInputWait = changeInputWait 1
 endTerminalInputWait = changeInputWait (-1)
+
+-- | Background sessions retain their own input-wait observations, but must not
+-- change the process-global status of the foreground terminal.
+terminalInputWaitHooks :: Bool -> (IO (), IO ())
+terminalInputWaitHooks background
+    | background = (pure (), pure ())
+    | otherwise = (beginTerminalInputWait, endTerminalInputWait)
 
 changeInputWait :: Int -> IO ()
 changeInputWait delta = modifyStatus \(StatusState enabled working blocked suspended) ->
