@@ -170,6 +170,7 @@ safeConfig backend = do
         , loopMaxTurns = 2
         , loopOnEvent = const (pure ())
         , loopApprove = const (pure ToolApprovalRejected)
+        , loopWithToolExecution = \_ action -> action
         , loopReadSteering = pure []
         , loopWaitSteering = \_ -> Monad.forever (Concurrent.threadDelay maxBound)
         , loopCommitSteering = const (pure ())

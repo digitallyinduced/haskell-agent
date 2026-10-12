@@ -136,6 +136,7 @@ runChildTurn registry env child start = withSuspensionSignal registry env.subId 
             , loopMaxTurns = child.childMaxTurns
             , loopOnEvent = child.childOnEvent
             , loopApprove = child.childApproval
+            , loopWithToolExecution = \_ action -> action
             , loopReadSteering = reserveSteeringInputs steering
             , loopWaitSteering = atomically . awaitUserSteeringAfter steering
             , loopCommitSteering = commitSteeringInputs steering

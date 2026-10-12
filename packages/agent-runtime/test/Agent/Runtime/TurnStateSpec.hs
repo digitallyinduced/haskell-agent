@@ -292,6 +292,7 @@ recoveryConfig backend tools items = do
         , loopMaxTurns = defaultLoopMaxTurns
         , loopOnEvent = const (pure ())
         , loopApprove = const (pure ToolApprovalGranted)
+        , loopWithToolExecution = \_ action -> action
         , loopReadSteering = pure []
         , loopWaitSteering = \_ -> Monad.forever (Concurrent.threadDelay maxBound)
         , loopCommitSteering = const (pure ())

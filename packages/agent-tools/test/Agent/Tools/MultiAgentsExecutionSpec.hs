@@ -153,6 +153,7 @@ fixture registry = do
         , shouldStop = pure False
         , shouldYield = pure False
         , approveTool = const (pure Tools.ToolApprovalGranted)
+        , withToolExecution = \_ action -> action
         , maxTurns = 4
         , finishTurn = const (pure ())
         , closeExecution = pure ()

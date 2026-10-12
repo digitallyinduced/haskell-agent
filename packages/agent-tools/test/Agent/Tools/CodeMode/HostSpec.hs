@@ -1475,6 +1475,7 @@ assertPreparedImageResult result = do
             , loopMaxTurns = defaultLoopMaxTurns
             , loopOnEvent = \_ -> pure ()
             , loopApprove = \_ -> pure ToolApprovalGranted
+            , loopWithToolExecution = \_ action -> action
             , loopReadSteering = pure []
             , loopWaitSteering = \_ -> Monad.forever (Concurrent.threadDelay maxBound)
             , loopCommitSteering = \_ -> pure ()

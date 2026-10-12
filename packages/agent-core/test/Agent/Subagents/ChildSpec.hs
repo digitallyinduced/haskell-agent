@@ -111,6 +111,7 @@ backgroundChildConfig steering requests = do
         , loopMaxTurns = 5
         , loopOnEvent = const (pure ())
         , loopApprove = const (fail "unexpected tool request")
+        , loopWithToolExecution = \_ action -> action
         , loopReadSteering = reserveSteeringInputs steering
         , loopWaitSteering = atomically . awaitUserSteeringAfter steering
         , loopCommitSteering = commitSteeringInputs steering

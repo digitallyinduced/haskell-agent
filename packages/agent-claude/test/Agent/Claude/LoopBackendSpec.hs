@@ -1530,6 +1530,7 @@ spec = do
                                             , Loop.loopMaxTurns = 2
                                             , Loop.loopOnEvent = \_ -> pure ()
                                             , Loop.loopApprove = \_ -> pure Loop.ToolApprovalGranted
+                                            , Loop.loopWithToolExecution = \_ action -> action
                                             , Loop.loopReadSteering = pure []
                                             , Loop.loopWaitSteering = \_ -> Monad.forever (Concurrent.threadDelay maxBound)
                                             , Loop.loopCommitSteering = \_ -> pure ()

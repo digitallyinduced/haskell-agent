@@ -79,6 +79,7 @@ testConfig backend = do
         , loopMaxTurns = defaultLoopMaxTurns
         , loopOnEvent = \_ -> pure ()
         , loopApprove = \_ -> pure ToolApprovalGranted
+        , loopWithToolExecution = \_ action -> action
         , loopReadSteering = pure []
         , loopWaitSteering = \_ -> forever (threadDelay maxBound)
         , loopCommitSteering = \_ -> pure ()

@@ -28,6 +28,8 @@ data ChildExecution = ChildExecution
     -- slot without cancelling tools or inventing a provider completion.
     , shouldYield :: IO Bool
     , approveTool :: Dispatch.ToolCall -> IO Agent.ToolApproval
+    -- | Includes synchronous durable ToolFinished delivery, not just dispatch.
+    , withToolExecution :: Dispatch.ToolCall -> IO Dispatch.ToolCallResult -> IO Dispatch.ToolCallResult
     , maxTurns :: Int
     , finishTurn :: Either Agent.LoopError Agent.LoopResult -> IO ()
     -- | Unconditional release, including preparation of the loop, exceptions
@@ -59,7 +61,8 @@ childExecutionRunner prepare registry environment _previous message onEvent =
             , childBackgroundTasks = Nothing
             }
             \loop -> Agent.runLoopInputs loop
-                { Agent.loopOnEvent = \event -> do
+                { Agent.loopWithToolExecution = execution.withToolExecution
+                , Agent.loopOnEvent = \event -> do
                     loop.loopOnEvent event
                     case event of
                         Agent.ToolFinished _ -> execution.shouldYield >>= \yield ->

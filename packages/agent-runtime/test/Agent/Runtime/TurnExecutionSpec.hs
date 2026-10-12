@@ -100,6 +100,7 @@ spec = describe "prepared turn execution" do
                 result <- runner prepared config
                     { loopTools = tools
                     , loopApprove = const (pure ToolApprovalGranted)
+                    , loopWithToolExecution = \_ action -> action
                     }
                 readIORef calls `shouldReturn` 1
                 pure result
@@ -246,6 +247,7 @@ configFor initial backend = do
         , loopMaxTurns = 3
         , loopOnEvent = const (pure ())
         , loopApprove = const (pure ToolApprovalRejected)
+        , loopWithToolExecution = \_ action -> action
         , loopReadSteering = pure []
         , loopWaitSteering = \_ -> Monad.forever (Concurrent.threadDelay maxBound)
         , loopCommitSteering = const (pure ())

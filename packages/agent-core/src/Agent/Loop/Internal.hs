@@ -124,6 +124,12 @@ data LoopConfig = LoopConfig
     , loopOnEvent :: !(LoopEvent -> IO ())
     -- | Check or request permission before running a tool.
     , loopApprove :: !(ToolCall -> IO ToolApproval)
+    -- | Scope one admitted tool through dispatch and synchronous ToolFinished
+    -- delivery. Durable hosts retain uncertain-effect reservations until that
+    -- delivery has persisted the result. Use @\_ action -> action@ otherwise.
+    -- Handler exceptions converted into tool results still require a raw
+    -- handler guard; this scope protects cancellation and acknowledgement gaps.
+    , loopWithToolExecution :: !(ToolCall -> IO ToolCallResult -> IO ToolCallResult)
     -- | Read pending user guidance submitted while this loop is active.
     -- Guidance is acknowledged only after the model response commits, so a
     -- failed submission can be retried without losing it.
@@ -405,7 +411,7 @@ initializeLoopRuntime config0 initialState previousResponseId firstInputs = do
         , emptyContinuations = 0
         }
     let config = config0
-            { loopOnEvent = \event ->
+            { loopOnEvent = \event -> do
                 -- Provider streaming and async host tools can publish at the
                 -- same time. Keep journal mutation and event-pump admission
                 -- in one total order. An atomic state update alone would not
@@ -414,6 +420,14 @@ initializeLoopRuntime config0 initialState previousResponseId firstInputs = do
                     atomicModifyIORef' visibleStateRef \state ->
                         (recordVisibleLoopEvent event state, ())
                     emitLoopEvent eventPump event
+                -- Queue admission is not durable acknowledgement. Keep
+                -- the tool's effect scope open until its sink has returned.
+                -- Do not hold the admission lock while awaiting the sink.
+                case event of
+                    ToolFinished _ -> flushEventPump eventPump >>= \case
+                        Left failure -> handleLoopEventFailure Exception.throwIO failure
+                        Right () -> pure ()
+                    _ -> pure ()
             }
     pure LoopRuntime
         { loopRuntimeConfig = config
@@ -1044,9 +1058,9 @@ toolRecoveryNote calls = Text.unlines
                     ]
 
 handleLoopEventFailure
-    :: (SomeException -> IO LoopExecution)
+    :: (SomeException -> IO a)
     -> EventPumpFailure
-    -> IO LoopExecution
+    -> IO a
 handleLoopEventFailure unexpected = \case
     EventPumpSyncFailure exception ->
         unexpected exception
@@ -1061,6 +1075,7 @@ toolExecutionConfig config = ToolExecution.ToolExecutionConfig
     { tools = config.loopTools
     , dispatch = config.loopDispatch
     , approve = config.loopApprove
+    , withExecution = config.loopWithToolExecution
     , cancel = config.loopCancel
     , onEvent = config.loopOnEvent
     }
