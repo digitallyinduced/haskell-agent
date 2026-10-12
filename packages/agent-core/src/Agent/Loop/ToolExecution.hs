@@ -69,6 +69,7 @@ data ToolExecutionConfig = ToolExecutionConfig
     { tools :: !ToolRegistry
     , dispatch :: !ToolDispatchConfig
     , approve :: !(ToolCall -> IO ToolApproval)
+    , withExecution :: !(ToolCall -> IO ToolCallResult -> IO ToolCallResult)
     , cancel :: !CancelFlag
     , onEvent :: !(LoopEvent -> IO ())
     }
@@ -432,7 +433,7 @@ runPreparedToolCallWithCompletion completed config (PreparedToolCall call approv
     cancelled <- isCancelled config.cancel
     if cancelled
         then pure Nothing
-        else do
+        else Just <$> config.withExecution call do
             config.onEvent (ToolStarted call)
             result <- case approval of
                 ToolApprovalDenied denial ->
@@ -454,7 +455,7 @@ runPreparedToolCallWithCompletion completed config (PreparedToolCall call approv
             -- not authoritative: its own scope can be cancelled first.
             completed result
             config.onEvent (ToolFinished result)
-            pure (Just result)
+            pure result
   where
     deniedResult message = ToolCallResult
         { callId = call.callId

@@ -8,6 +8,8 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (concurrently_, wait, withAsync)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception.Safe (throwIO)
+import qualified Control.Exception as Exception
+import Control.Monad (forM_)
 import Data.IORef
 import qualified Data.Text as Text
 import System.Timeout (timeout)
@@ -15,6 +17,46 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    forM_ ["success", "failure", "cancel"] \mode ->
+      it ("keeps the tool reservation through durable result delivery: " <> mode) do
+        active <- newIORef False
+        released <- newIORef False
+        uncertain <- newIORef False
+        persisted <- newIORef False
+        effects <- newIORef (0 :: Int)
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1" [functionToolCall "c1" "effect" "{}"] Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+            ]
+        config0 <- testConfig backend
+        let handler = noArgsTool "effect" do
+                readIORef active `shouldReturn` True
+                modifyIORef' effects (+ 1)
+                pure (Right "done")
+            config = config0
+                { loopTools = registryFromHandlers [handler]
+                , loopWithToolExecution = \_ action -> do
+                    writeIORef active True
+                    result <- action `Exception.onException` writeIORef uncertain True
+                    readIORef persisted `shouldReturn` True
+                    writeIORef released True
+                    writeIORef active False
+                    pure result
+                , loopOnEvent = \case
+                    ToolFinished _ -> do
+                        readIORef active `shouldReturn` True
+                        case mode of
+                            "failure" -> fail "durable write failed"
+                            "cancel" -> Exception.throwIO Exception.ThreadKilled
+                            _ -> writeIORef persisted True
+                    _ -> pure ()
+                }
+        _ <- Exception.try @Exception.SomeException (runLoop config Nothing "go")
+        readIORef effects `shouldReturn` 1
+        readIORef released `shouldReturn` (mode == "success")
+        readIORef uncertain `shouldReturn` (mode /= "success")
+
     it "retains concurrent publishers in the same order as event-pump delivery" do
         delivered <- newIORef []
         let publish onEvent prefix = mapM_ (\index -> do

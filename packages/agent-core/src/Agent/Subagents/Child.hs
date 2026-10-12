@@ -14,7 +14,8 @@ module Agent.Subagents.Child
     , runChildWithBackgroundTasks
     ) where
 
-import Agent.Cancel (waitCancel)
+import Agent.Cancel (isCancelled, isTurnYieldRequested, waitCancel)
+import Agent.Loop.InputItems (toolResultToItem)
 import Agent.Loop
     ( Backend
     , BackendSnapshot(..)
@@ -42,6 +43,7 @@ import Agent.Loop.SteeringInputs
     )
 import Agent.Subagents.History (trimDanglingToolSuffix)
 import Agent.Subagents.Registry (SubagentRegistry, setPreviousResponseId)
+import Agent.Subagents.Registry.Internal.Suspension (withSuspensionSignal)
 import Agent.Subagents.Types (SubagentSpawnEnv(..))
 import Agent.ToolDispatch (ToolCall, ToolDispatchConfig)
 import Agent.Tools.Types
@@ -95,7 +97,7 @@ runChildTurn
     -> ChildTurn
     -> (LoopConfig -> IO (Either LoopError LoopResult))
     -> IO (Either LoopError LoopResult)
-runChildTurn registry env child start = do
+runChildTurn registry env child start = withSuspensionSignal registry env.subId \suspensionSignal -> do
     steering <- newSteeringInputs
     for_ child.childBackgroundTasks \tasks ->
         tasks.installBackgroundTaskHooks BackgroundTaskHooks
@@ -134,27 +136,36 @@ runChildTurn registry env child start = do
             , loopMaxTurns = child.childMaxTurns
             , loopOnEvent = child.childOnEvent
             , loopApprove = child.childApproval
+            , loopWithToolExecution = \_ action -> action
             , loopReadSteering = reserveSteeringInputs steering
             , loopWaitSteering = atomically . awaitUserSteeringAfter steering
             , loopCommitSteering = commitSteeringInputs steering
             , loopCloseSteering = pure []
             , loopInterrupt = pure ()
-            , loopCancel = env.subCancel
+            , loopCancel = suspensionSignal
             , loopSubagents = Nothing
             }
-    result <-
-        runChildWithBackgroundTasks
-            child.childBackgroundTasks steering config start
+    alreadyCancelled <- isCancelled env.subCancel
+    result <- if alreadyCancelled then pure (Left (LoopCancelled [])) else race (waitCancel env.subCancel)
+        (runChildWithBackgroundTasks child.childBackgroundTasks steering config start)
+        >>= \case
+            Left () -> pure (Left (LoopCancelled []))
+            Right result -> pure result
     case result of
         Right loopResult ->
             setPreviousResponseId
                 registry
                 env.subId
                 loopResult.finalResponseId
-        Left _ ->
+        Left err -> do
+            yielded <- isTurnYieldRequested suspensionSignal
+            let outputs = case err of
+                    LoopCancelled results | yielded -> map toolResultToItem results
+                    _ -> []
             modifyIORef' child.childTranscript \snapshot ->
                 advanceBackendSnapshot snapshot
-                    (trimDanglingToolSuffix snapshot.backendItems)
+                    (trimDanglingToolSuffix (snapshot.backendItems
+                        <> filter (`notElem` snapshot.backendItems) outputs))
                     Nothing
     pure result
 

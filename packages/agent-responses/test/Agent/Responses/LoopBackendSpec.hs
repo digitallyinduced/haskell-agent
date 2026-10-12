@@ -1355,6 +1355,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                     ToolFinished _ -> putMVar finished ()
                     _ -> pure ()
                 , loopApprove = const (pure Loop.ToolApprovalGranted)
+                , loopWithToolExecution = \_ action -> action
                 , loopReadSteering = pure []
                 , loopWaitSteering = \_ -> Monad.forever (Concurrent.threadDelay maxBound)
                 , loopCommitSteering = const (pure ())

@@ -113,6 +113,7 @@ spec = describe "Agent.Tools.MultiAgents" do
             , collaborationResolvedModel = Nothing
             , collaborationReasoningEffort = Just "high"
             , collaborationForkTurns = Just "none"
+            , collaborationInitialMessage = plainInterAgentContent "inspect the artifact"
             }
         closeSubagentRegistry registry
 
@@ -147,6 +148,7 @@ spec = describe "Agent.Tools.MultiAgents" do
             , collaborationResolvedModel = Nothing
             , collaborationReasoningEffort = Nothing
             , collaborationForkTurns = Just "none"
+            , collaborationInitialMessage = plainInterAgentContent "inspect the artifact"
             }
         closeSubagentRegistry registry
 
@@ -435,6 +437,7 @@ spec = describe "Agent.Tools.MultiAgents" do
             , collaborationResolvedModel = Nothing
             , collaborationReasoningEffort = Just "high"
             , collaborationForkTurns = Just "3"
+            , collaborationInitialMessage = plainInterAgentContent "task"
             }
         closeSubagentRegistry registry
 
@@ -666,6 +669,28 @@ spec = describe "Agent.Tools.MultiAgents" do
                 "{\"path_prefix\":\"/root/missing\"}"
                 FunctionCallKind False)
         emptyListed.output `shouldBe` "(no live agents)"
+        closeSubagentRegistry registry
+
+    it "paginates agent lists and bounds final-result previews" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure (resultWithText (Text.replicate 2000 "x")))
+            (\_ _ -> pure ())
+        Right (firstId, _) <- spawnSubagentAt registry Nothing taskPathRoot 0 "first"
+            (plainInterAgentContent "work") Nothing
+        Right (secondId, _) <- spawnSubagentAt registry Nothing taskPathRoot 0 "second"
+            (plainInterAgentContent "work") Nothing
+        _ <- waitSubagents registry [firstId, secondId] 15000
+        let handlers = appToolHandlers (multiAgentTools (rootContext registry Nothing))
+        firstPage <- dispatchToolCall defaultLoopDispatch handlers
+            (ToolCall "page1" "collaboration.list_agents" "{\"limit\":1}" FunctionCallKind False)
+        firstPage.output `shouldSatisfy` Text.isInfixOf "Agent: /root/first"
+        firstPage.output `shouldNotSatisfy` Text.isInfixOf "Agent: /root/second"
+        firstPage.output `shouldSatisfy` Text.isInfixOf "offset=1"
+        Text.length firstPage.output `shouldSatisfy` (< 1000)
+        secondPage <- dispatchToolCall defaultLoopDispatch handlers
+            (ToolCall "page2" "collaboration.list_agents" "{\"offset\":1,\"limit\":1}" FunctionCallKind False)
+        secondPage.output `shouldSatisfy` Text.isInfixOf "Agent: /root/second"
+        secondPage.output `shouldNotSatisfy` Text.isInfixOf "More agents"
         closeSubagentRegistry registry
 
     it "accepts non-object input for optional-only collaboration tools" do

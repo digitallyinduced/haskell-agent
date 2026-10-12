@@ -5,6 +5,7 @@ module Agent.Subagents.Types
     , SubagentIdentity(..)
     , RootTurnId(..)
     , SubagentStatus(..)
+    , SuspensionPersistence(..)
     , SubagentConfig(..)
     , SubagentSpawnEnv(..)
     , RunSubagent
@@ -25,6 +26,7 @@ import System.OsPath (OsPath)
 import Agent.Subagents.TaskPath (TaskPath)
 import qualified Data.Aeson as Aeson
 import Data.Text (Text)
+import Data.Time.Clock (UTCTime)
 import Data.Word (Word64)
 
 newtype SubagentId = SubagentId { unSubagentId :: Text }
@@ -46,12 +48,24 @@ data SubagentIdentity = SubagentIdentity
     }
     deriving (Eq, Show)
 
+-- | Storage operations run after the runner checkpoints its transcript and
+-- before suspended status is published, or before resumption is acknowledged.
+-- The host must durably retain the agent identity and transcript, fence writes
+-- against cancellation, and atomically record a runnable handoff on resume.
+-- These callbacks must not call back into the registry.
+data SuspensionPersistence = SuspensionPersistence
+    { persistSuspension :: SubagentId -> UTCTime -> Text -> IO (Either Text ())
+    , persistSuspensionResume :: SubagentId -> InterAgentMessage -> IO (Either Text ())
+    , persistSuspensionCancellation :: SubagentId -> IO (Either Text ())
+    }
+
 data SubagentStatus
     = Pending
     | Running
     | Completed !(Maybe Text)
     | Errored !Text
     | Interrupted
+    | Suspended !UTCTime !Text
     | Closed
     | NotFound
     deriving (Eq, Show)

@@ -1,6 +1,8 @@
 module Agent.Subagents.ChildSpec (spec) where
 
-import Agent.Cancel (newCancelFlag, requestCancel)
+import Agent.Cancel (newCancelFlag, requestCancel, requestTurnYield)
+import Agent.Loop.Fixtures (functionResult)
+import Agent.Loop.InputItems (toolResultToItem)
 import Agent.Json (rawJsonFromEncoding)
 import Agent.Loop
     ( Backend(..)
@@ -109,6 +111,7 @@ backgroundChildConfig steering requests = do
         , loopMaxTurns = 5
         , loopOnEvent = const (pure ())
         , loopApprove = const (fail "unexpected tool request")
+        , loopWithToolExecution = \_ action -> action
         , loopReadSteering = reserveSteeringInputs steering
         , loopWaitSteering = atomically . awaitUserSteeringAfter steering
         , loopCommitSteering = commitSteeringInputs steering
@@ -164,6 +167,18 @@ withChild action =
 spec :: Spec
 spec = describe "Agent.Subagents.Child" do
     describe "runChildTurn" do
+        it "keeps the completed suspension call and its output in the child transcript" do
+            withChild \registry env -> do
+                let items = [userItem "wait", functionCallItem "suspend"]
+                    completed = functionResult "suspend" "persisted"
+                requests <- newIORef []
+                transcript <- newIORef (initialBackendSnapshot items)
+                child <- answeringChild requests transcript
+                _ <- runChildTurn registry env child \config -> do
+                    requestTurnYield config.loopCancel
+                    pure (Left (LoopCancelled [completed]))
+                (.backendItems) <$> readIORef transcript
+                    `shouldReturn` items <> [toolResultToItem completed]
         it "commits provider checkpoints across tool continuations and subsequent child turns" do
             withChild \registry env -> do
                 requests <- newIORef []

@@ -1420,6 +1420,7 @@ buildSessionLoopConfig
                 }
         , loopMaxTurns = options.optMaxTurns
         , loopOnEvent = eventRuntime.loopEventEmit
+        , loopWithToolExecution = \_ action -> action
         , loopApprove = \call ->
             shellRuntime.shellToolDisabledReason call >>= \case
                 Just reason -> pure (ToolApprovalDenied reason)

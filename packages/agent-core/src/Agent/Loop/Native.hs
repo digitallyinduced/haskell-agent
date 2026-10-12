@@ -272,6 +272,7 @@ runNativeLoop config initialResponseId initialItems = do
         , loopMaxTurns = config.maxTurns
         , loopOnEvent = const (pure ())
         , loopApprove = prepareTool
+        , loopWithToolExecution = \_ action -> action
         , loopReadSteering = readBatch
         -- agent-core races this against each model request (instant
         -- steering). The host's inbox knows which guidance it handed out, so

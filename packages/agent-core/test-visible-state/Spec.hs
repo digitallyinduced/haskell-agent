@@ -1,12 +1,34 @@
 module Main (main) where
 
 import Agent.Loop.Output
+import qualified Agent.Loop.EventPump as Pump
 import Agent.Loop.VisibleState
 import Agent.ToolDispatch (functionToolCall)
 import Test.Hspec
+import Control.Concurrent.Async (cancel, wait, withAsync)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import qualified Control.Exception as Exception
+import System.Timeout (timeout)
 
 main :: IO ()
 main = hspec $ describe "VisibleLoopState event sequences" do
+    it "wakes flush waiters when the pump is asynchronously cancelled" do
+        entered <- newEmptyMVar
+        never <- newEmptyMVar
+        pump <- Pump.newEventPump (\() -> putMVar entered () >> takeMVar never)
+            :: IO (Pump.EventPump () ())
+        withAsync (Pump.runEventPump pump) \worker -> do
+            Pump.emitEvent pump ()
+            takeMVar entered
+            withAsync (Exception.try @Exception.SomeException (Pump.flushEventPump pump)) \flushing -> do
+                cancel worker
+                outcome <- timeout 1000000 (wait flushing)
+                case outcome of
+                    Just (Left _) -> pure ()
+                    Just (Right (Left _)) -> pure ()
+                    Just (Right (Right ())) -> expectationFailure "cancelled sink was acknowledged"
+                    Nothing -> expectationFailure "flush remained blocked after pump cancellation"
+
     it "starts empty and ignores live-only events" do
         let state = events [ReasoningDelta "private", ResponseAttemptFailed]
         visibleAssistantText state `shouldBe` Nothing

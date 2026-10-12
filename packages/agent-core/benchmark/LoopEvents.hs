@@ -210,6 +210,7 @@ runWorkload workload eventCount sinkDelayMicros = do
             , loopMaxTurns = defaultLoopMaxTurns
             , loopOnEvent = sink
             , loopApprove = \_ -> pure ToolApprovalGranted
+            , loopWithToolExecution = \_ action -> action
             , loopReadSteering = pure []
             , loopWaitSteering = \_ -> forever (threadDelay maxBound)
             , loopCommitSteering = \_ -> pure ()

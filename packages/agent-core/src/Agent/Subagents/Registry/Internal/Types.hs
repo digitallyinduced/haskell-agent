@@ -10,6 +10,7 @@ import Agent.Subagents.Types
     , SubagentConfig
     , SubagentId
     , SubagentStatus(..)
+    , SuspensionPersistence
     )
 import Control.Concurrent.Async (Async)
 import Control.Concurrent.MVar (MVar)
@@ -19,6 +20,7 @@ import Data.IORef (IORef)
 import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Text (Text)
+import Data.Time.Clock (UTCTime)
 import Data.Word (Word64)
 import System.OsPath (OsPath)
 
@@ -114,4 +116,7 @@ data SubagentRegistry = SubagentRegistry
     , registryNextRootTurnId :: !(TVar Word64)
     , registryAbortedRootTurns :: !(TVar (Set RootTurnId))
     , registryLifecycle :: !(MVar ())
+    , registrySuspensions :: !(TVar (Map SubagentId (UTCTime, Text)))
+    , registrySuspensionSignals :: !(TVar (Map SubagentId CancelFlag))
+    , registrySuspensionPersistence :: !(IORef (Maybe SuspensionPersistence))
     }

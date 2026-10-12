@@ -80,7 +80,12 @@ library
                     , Agent.Subagents.History
                     , Agent.Subagents.Loop
                     , Agent.Subagents.Native
+                    , Agent.Subagents.DurableTranscript
                     , Agent.Subagents.Registry
+                    , Agent.Subagents.Runtime
+                    , Agent.Subagents.Runtime.Notifications
+                    , Agent.Subagents.Runtime.Recovery
+                    , Agent.Subagents.Runtime.Internal
                     , Agent.Subagents.TaskPath
                     , Agent.Subagents.Types
                     , Agent.Telemetry
@@ -108,6 +113,7 @@ library
                     , Agent.Loop.TokenUsage
                     , Agent.Subagents.Registry.Internal.Core
                     , Agent.Subagents.Registry.Internal.Operations
+                    , Agent.Subagents.Registry.Internal.Suspension
                     , Agent.Subagents.Registry.Internal.Types
                     , Paths_agent_core
     autogen-modules:  Paths_agent_core
@@ -280,6 +286,11 @@ test-suite agent-core-test
                     , Agent.Skills.ToolSearchSpec
                     , Agent.SubagentsSpec
                     , Agent.Subagents.ChildSpec
+                    , Agent.Subagents.SuspensionSpec
+                    , Agent.Subagents.RuntimeSpec
+                    , Agent.Subagents.NotificationsSpec
+                    , Agent.Subagents.RecoverySpec
+                    , Agent.DurableTranscriptSpec
                     , Agent.Subagents.HistorySpec
                     , Agent.Subagents.LoopSpec
                     , Agent.Subagents.TaskPathSpec

@@ -1,0 +1,73 @@
+{-# LANGUAGE RankNTypes #-}
+-- | Provider-independent child execution. A provider scopes its connection
+-- through withBackend; the library owns loop construction and collaboration.
+module Agent.Tools.MultiAgents.Execution
+    ( ChildExecution (..)
+    , childExecutionRunner
+    ) where
+
+import qualified Agent.Loop as Agent
+import Agent.Cancel (requestTurnYield)
+import Agent.Subagents
+import qualified Agent.Tools.MultiAgents as Multi
+import qualified Agent.Tools.Types as Tools
+import qualified Agent.ToolDispatch as Dispatch
+import Control.Monad (when)
+import Control.Exception.Safe (bracket)
+import Data.IORef (newIORef)
+import qualified Data.Text as Text
+
+data ChildExecution = ChildExecution
+    { domainTools :: Tools.ToolRegistry
+    , collaborationContext :: Multi.MultiAgentContext
+    -- | Receives the complete tool set to advertise to the provider.
+    , withBackend :: forall a. [Tools.AppTool]
+        -> ((Agent.Backend, Agent.LoopEvent -> IO ()) -> IO a) -> IO a
+    , shouldStop :: IO Bool
+    -- | Checked after a persisted tool result. Yield releases the execution
+    -- slot without cancelling tools or inventing a provider completion.
+    , shouldYield :: IO Bool
+    , approveTool :: Dispatch.ToolCall -> IO Agent.ToolApproval
+    -- | Includes synchronous durable ToolFinished delivery, not just dispatch.
+    , withToolExecution :: Dispatch.ToolCall -> IO Dispatch.ToolCallResult -> IO Dispatch.ToolCallResult
+    , maxTurns :: Int
+    , finishTurn :: Either Agent.LoopError Agent.LoopResult -> IO ()
+    -- | Unconditional release, including preparation of the loop, exceptions
+    -- and asynchronous cancellation. Separate from result settlement.
+    , closeExecution :: IO ()
+    }
+
+childExecutionRunner
+    :: (SubagentSpawnEnv -> IO ChildExecution) -> SubagentRegistry -> RunSubagent
+childExecutionRunner prepare registry environment _previous message onEvent =
+  bracket (prepare environment) (.closeExecution) \execution@ChildExecution { withBackend } -> do
+    tools <- either (fail . Text.unpack) pure $ Tools.mkToolRegistry
+        (Tools.toolRegistryTools execution.domainTools
+            <> Multi.multiAgentTools execution.collaborationContext)
+    transcript <- newIORef Agent.emptyBackendSnapshot
+    let checkStopped =
+            execution.shouldStop >>= \stopped ->
+                when stopped (fail "Subagent execution was stopped")
+    result <- withBackend (Tools.toolRegistryTools tools) \(backend, persistEvent) ->
+        runChildTurn registry environment ChildTurn
+            { childBackend = Agent.backendWithCallbacks \snapshot previous inputs pending ->
+                checkStopped >> backend.submitTurnWithCallbacks snapshot previous inputs pending
+            , childTools = tools
+            , childDispatch = Agent.defaultLoopDispatch
+            , childApproval = \call -> checkStopped >> execution.approveTool call
+            , childMaxTurns = execution.maxTurns
+            , childOnEvent = \event -> persistEvent event >> onEvent event
+            , childTranscript = transcript
+            , childBackgroundTasks = Nothing
+            }
+            \loop -> Agent.runLoopInputs loop
+                { Agent.loopWithToolExecution = execution.withToolExecution
+                , Agent.loopOnEvent = \event -> do
+                    loop.loopOnEvent event
+                    case event of
+                        Agent.ToolFinished _ -> execution.shouldYield >>= \yield ->
+                            when yield (requestTurnYield loop.loopCancel)
+                        _ -> pure ()
+                } Nothing [Agent.AgentMessage message]
+    execution.finishTurn result
+    pure result

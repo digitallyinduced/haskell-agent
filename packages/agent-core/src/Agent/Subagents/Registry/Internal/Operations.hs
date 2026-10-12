@@ -22,6 +22,7 @@ import Agent.Subagents.Types
     , SubagentId(..)
     , SubagentIdentity(..)
     , SubagentStatus(..)
+    , SubagentConfig(..)
     , maxWaitTimeoutMs
     , minWaitTimeoutMs
     )
@@ -29,7 +30,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (race)
 import Control.Concurrent.MVar (withMVar)
 import Control.Concurrent.STM
-import Control.Exception.Safe (finally)
+import Control.Exception.Safe (finally, onException)
 import Control.Monad (filterM, void)
 import Control.Monad.Extra (concatMapM)
 import Data.Map.Strict (Map)
@@ -38,6 +39,8 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Read as TextRead
+import Data.Time.Clock (UTCTime)
+import Agent.Subagents.Registry.Internal.Suspension (persistResume, cancelSuspension)
 import Agent.Subagents.TaskPath
     ( TaskPath
     , joinTaskPath
@@ -147,6 +150,7 @@ sendInputMessageForTurn registry rootTurnId senderPath agentId content interrupt
                             NotFound -> pure (Left "agent not found")
                             Running -> queue record work
                             Pending -> queue record work
+                            Suspended{} -> resumeSuspendedWork registry record work
                             _ -> restart record work
   where
     queue
@@ -178,6 +182,60 @@ sendInputMessageForTurn registry rootTurnId senderPath agentId content interrupt
         case admitted of
             Left err -> pure (Left err)
             Right () -> pure (Right "queued")
+
+-- | Admit due work under the same lifecycle lock and shared execution budget
+-- as explicit follow-ups. A repeated scheduler tick cannot admit it twice.
+-- Hosts restore persisted agents before calling this operation.
+resumeDueSubagents :: SubagentRegistry -> UTCTime -> IO [(SubagentId, Either Text Text)]
+resumeDueSubagents registry now = withMVar registry.registryLifecycle \_ -> do
+    records <- atomically $ Map.elems <$> readTVar registry.registryAgents
+    fmap concat $ mapM resume records
+  where
+    resume record = do
+        status <- atomically $ phaseStatus <$> readTVar record.recordPhase
+        case status of
+            Suspended deadline reason -> do
+                queued <- atomically $ tryReadTQueue record.recordMailbox
+                let scheduled = SubagentWork
+                        { workRootTurnId = Nothing
+                        , workMessage = InterAgentMessage
+                            { messageAuthor = taskPathText taskPathRoot
+                            , messageRecipient = taskPathText record.recordTaskPath
+                            , messageType = FollowUpMessage
+                            , messageContent = plainInterAgentContent
+                                ("Scheduled suspension has ended. Recheck current conditions before acting. Reason: " <> reason)
+                            }
+                        }
+                case queued of
+                    Just work -> do
+                        let restoreMessage = atomically $ unGetTQueue record.recordMailbox work
+                        result <- resumeSuspendedWork registry record work `onException` restoreMessage
+                        case result of
+                            Right _ -> pure ()
+                            Left _ -> restoreMessage
+                        pure [(record.recordId, result)]
+                    Nothing | deadline <= now -> do
+                        result <- resumeSuspendedWork registry record scheduled
+                        pure [(record.recordId, result)]
+                    Nothing -> pure []
+            _ -> pure []
+
+resumeSuspendedWork :: SubagentRegistry -> SubagentRecord -> SubagentWork -> IO (Either Text Text)
+resumeSuspendedWork registry record work = do
+    admission <- atomically do
+        closed <- readTVar registry.registryClosed
+        live <- readTVar registry.registryLiveCount
+        config <- readTVar registry.registryConfig
+        aborted <- isRootTurnAborted registry work.workRootTurnId
+        pure (not closed && not aborted && live < config.maxConcurrent)
+    if not admission
+        then pure (Left "Suspended agent remains queued: registry closed, turn aborted, or concurrency capacity exhausted.")
+        else persistResume registry record.recordId work.workMessage >>= \case
+            Left err -> pure (Left err)
+            Right () -> do
+                resetCancel record.recordCancel
+                result <- atomically $ scheduleIdleWork registry record work
+                pure ("queued" <$ result)
 
 closeSubagent
     :: SubagentRegistry
@@ -224,6 +282,7 @@ abortRootTurn registry rootTurnId =
 
 interruptRecordForTurn :: SubagentRegistry -> RootTurnId -> SubagentRecord -> IO Bool
 interruptRecordForTurn registry rootTurnId record = do
+    cancelSuspension registry record
     disposition <- atomically do
         phase <- readTVar record.recordPhase
         if phaseRootTurnId phase /= Just rootTurnId
@@ -665,9 +724,14 @@ interruptSubagent registry agentId =
         case mrecord of
             Nothing -> pure (Left ("unknown agent id: " <> agentId.unSubagentId))
             Just record -> do
+                cancelSuspension registry record
                 (previous, settledPending) <- atomically do
                     phase <- readTVar record.recordPhase
                     case phase of
+                        AgentIdle Suspended{} _ -> do
+                            writeTVar record.recordPhase (AgentIdle Interrupted Nothing)
+                            publishDirectUpdateSTM registry record Interrupted
+                            pure (phaseStatus phase, True)
                         AgentPending{} -> do
                             releaseSlotSTM registry record
                             tryReadTQueue record.recordMailbox >>= \case

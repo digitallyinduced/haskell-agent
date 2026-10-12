@@ -1,4 +1,5 @@
 module Agent.CLI.SubagentStoreSpec (spec) where
+import Agent.InterAgentMessage (plainInterAgentContent)
 
 import Agent.Runtime.Compaction.Provider (estimatedOccupancy)
 import Agent.Runtime.ModelConfig (organizationGatewayConnectionId)
@@ -147,6 +148,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                     , collaborationResolvedModel = Nothing
                     , collaborationReasoningEffort = Nothing
                     , collaborationForkTurns = Nothing
+                    , collaborationInitialMessage = plainInterAgentContent "test task"
                     }
             Just session <- Map.lookup agentId <$> readIORef sessionsRef
             lookupAgentReasoningEffort typesRef agentId
@@ -185,6 +187,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                     , collaborationResolvedModel = Nothing
                     , collaborationReasoningEffort = Nothing
                     , collaborationForkTurns = Just "3"
+                    , collaborationInitialMessage = plainInterAgentContent "test task"
                     }
             lookupAgentReasoningEffort typesRef agentId
                 `shouldReturn` Nothing
@@ -230,6 +233,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                             }
                     , collaborationReasoningEffort = Nothing
                     , collaborationForkTurns = Just "none"
+                    , collaborationInitialMessage = plainInterAgentContent "test task"
                     }
             Just session <- Map.lookup agentId <$> readIORef sessionsRef
             session.subSessionProvider `shouldBe` OpenAIProvider
