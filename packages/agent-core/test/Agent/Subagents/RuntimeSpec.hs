@@ -33,6 +33,7 @@ hooks :: RuntimeHooks
 hooks = RuntimeHooks
     { withOwnership = fmap Just
     , withOperation = id
+    , withExecution = id
     , initialize = const (pure ())
     , pumpRunnable = const (pure True)
     }
@@ -42,12 +43,18 @@ spec = describe "scoped subagent runtime" do
     it "keeps the original operation guard when later root turns borrow the tree" $
         bracket newRuntime closeSubagentRuntime \runtime -> do
             calls <- newIORef ([] :: [Text])
-            let original = hooks { withOperation = \action -> modifyIORef' calls (<> ["original"]) >> action } :: RuntimeHooks
-                replacement = hooks { withOperation = \action -> modifyIORef' calls (<> ["replacement"]) >> action } :: RuntimeHooks
-                runGuard RuntimeHandle { withOperation = operation } = operation (pure ())
+            let original = hooks
+                    { withOperation = \action -> modifyIORef' calls (<> ["original"]) >> action
+                    , withExecution = \action -> modifyIORef' calls (<> ["execution"]) >> action
+                    } :: RuntimeHooks
+                replacement = hooks
+                    { withOperation = \action -> modifyIORef' calls (<> ["replacement"]) >> action
+                    , withExecution = \_ -> fail "replacement execution guard"
+                    } :: RuntimeHooks
+                runGuard RuntimeHandle { withOperation = operation, withExecution = execution } = execution (operation (pure ()))
             withSubagentRuntimeHandle runtime "guarded" original runGuard `shouldReturn` Just ()
             withSubagentRuntimeHandle runtime "guarded" replacement runGuard `shouldReturn` Just ()
-            readIORef calls `shouldReturn` ["original", "original"]
+            readIORef calls `shouldReturn` ["execution", "original", "execution", "original"]
 
     it "retires a sleeping tree without persisting cancellation" $
         bracket newRuntime closeSubagentRuntime \runtime -> do

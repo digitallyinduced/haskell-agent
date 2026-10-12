@@ -23,6 +23,7 @@ spec = describe "durable tree recovery" do
     it "guards initialization, child execution, settlement and recovery with the cached scope" $
         withHandle \unscoped -> do
             active <- newIORef []
+            executing <- newIORef []
             observed <- newIORef ([] :: [Text])
             notified <- newEmptyMVar
             (config, _) <- configuration [snapshot "child" Pending]
@@ -30,12 +31,23 @@ spec = describe "durable tree recovery" do
                     (myThreadId >>= \thread -> atomicModifyIORef' active (\threads -> (thread : threads, thread)))
                     (\thread -> atomicModifyIORef' active (\threads -> (delete thread threads, ())))
                     (const action)
+                execution action = bracket
+                    (myThreadId >>= \thread -> atomicModifyIORef' executing (\threads -> (thread : threads, thread)))
+                    (\thread -> atomicModifyIORef' executing (\threads -> (delete thread threads, ())))
+                    (const action)
+                checkExecution label = do
+                    thread <- myThreadId
+                    threads <- readIORef executing
+                    thread `shouldSatisfy` (`elem` threads)
+                    operations <- readIORef active
+                    thread `shouldSatisfy` (`notElem` operations)
+                    atomicModifyIORef' observed (\labels -> (label : labels, ()))
                 checkGuard label = do
                     thread <- myThreadId
                     threads <- readIORef active
                     thread `shouldSatisfy` (`elem` threads)
                     atomicModifyIORef' observed (\labels -> (label : labels, ()))
-                handle = unscoped { withOperation = operation } :: RuntimeHandle
+                handle = unscoped { withOperation = operation, withExecution = execution } :: RuntimeHandle
                 store = config.store
                     { transaction = \action -> action store
                     , persistRunning = \_ _ -> checkGuard "running"
@@ -45,8 +57,9 @@ spec = describe "durable tree recovery" do
                 tested = config
                     { store
                     , withOperation = \_ -> fail "must use cached handle scope"
-                    , executionAllowed = checkGuard "allowed" >> pure True
-                    , runner = \_ _ _ _ _ -> checkGuard "runner" >> pure (Left Loop.LoopNoResponseId)
+                    , withExecution = \_ -> fail "must use cached execution scope"
+                    , executionAllowed = checkExecution "allowed" >> pure True
+                    , runner = \_ _ _ _ _ -> checkExecution "runner" >> pure (Left Loop.LoopNoResponseId)
                     , notify = \_ _ -> checkGuard "notify" >> tryPutMVar notified () >> pure ()
                     }
                 hooks = durableRuntimeHooks tested
@@ -58,12 +71,20 @@ spec = describe "durable tree recovery" do
                 ["allowed", "running", "runner", "status", "settle", "notify"]
 
     it "joins a running child before acknowledging its durable cancellation" $
-        withHandle \handle -> do
+        withHandle \unscoped -> do
             (config, rows) <- configuration [snapshot "child" Pending]
+            executions <- newIORef (0 :: Int)
+            uncertain <- newIORef (0 :: Int)
             started <- newEmptyMVar
             finished <- newEmptyMVar
             blocker <- newEmptyMVar
-            let tested = config
+            let execution action = bracket
+                    (atomicModifyIORef' executions (\n -> (n + 1, ())))
+                    (\_ -> atomicModifyIORef' executions (\n -> (n - 1, ())))
+                    (const action)
+                operation action = action `onException` atomicModifyIORef' uncertain (\n -> (n + 1, ()))
+                handle = unscoped { withExecution = execution, withOperation = operation } :: RuntimeHandle
+                tested = config
                     { runner = \_ _ _ _ _ ->
                         (putMVar started () >> readMVar blocker >> pure (Left Loop.LoopNoResponseId))
                             `finally` putMVar finished ()
@@ -74,6 +95,8 @@ spec = describe "durable tree recovery" do
             modifyIORef' rows (map \row -> row { cancellationRequested = True })
             timeout 1000000 (hooks.pumpRunnable handle) `shouldReturn` Just True
             tryTakeMVar finished `shouldReturn` Just ()
+            readIORef executions `shouldReturn` 0
+            readIORef uncertain `shouldReturn` 0
             getStatus handle.registry (SubagentId "child") `shouldReturn` Closed
             persisted <- readIORef rows
             map (\row -> (row.status, row.cancellationRequested)) persisted `shouldBe` [(Closed, False)]
@@ -276,6 +299,7 @@ configuration initial = do
         { store
         , withOwnership = fmap Just
         , withOperation = id
+        , withExecution = id
         , executionAllowed = pure True
         , runner = \_ _ _ _ _ -> pure (Left Loop.LoopNoResponseId)
         , notify = \_ _ -> pure ()
@@ -290,4 +314,4 @@ withHandle action = bracket
     closeSubagentRegistry
     \registry -> do
         root <- newRootSubagents NoticesToLoop registry
-        action RuntimeHandle { registry, root, withOperation = id }
+        action RuntimeHandle { registry, root, withOperation = id, withExecution = id }

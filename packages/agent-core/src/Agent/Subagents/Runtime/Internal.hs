@@ -32,6 +32,8 @@ data RuntimeHandle = RuntimeHandle
     , withOperation :: forall a. IO a -> IO a
     -- ^ The operation guard captured when this tree acquired ownership.
     -- Hosts must use this guard, not callbacks prepared for a later root turn.
+    , withExecution :: forall a. IO a -> IO a
+    -- ^ Cached lifetime reservation, released after local execution exits.
     }
 
 -- | Callbacks own their resources for the full tree lifetime. They must not
@@ -44,6 +46,9 @@ data RuntimeHooks = RuntimeHooks
     -- Calls may nest and overlap across children: do not hold an exclusive
     -- lock over the action. Durable recovery invokes this guard automatically;
     -- custom callbacks and root tools must use the cached handle guard.
+    , withExecution :: forall a. IO a -> IO a
+    -- ^ Reserve local execution lifetime, including cancellation cleanup.
+    -- Unlike an uncertain effect, a joined cancelled execution may release it.
     , initialize :: RuntimeHandle -> IO ()
     -- ^ Install runner/persistence callbacks and recover durable children.
     , pumpRunnable :: RuntimeHandle -> IO Bool
@@ -124,14 +129,14 @@ withSubagentRuntimeHandle runtime key hooks action =
 -- Insertion runs under modifyMVar's acquisition protection. The runtime
 -- retains every task handle and joins it before releasing external ownership.
 startEntry :: SubagentConfig -> OsPath -> RuntimeHooks -> IO Entry
-startEntry config cwd hooks@RuntimeHooks { withOwnership = own, withOperation = operation } = do
+startEntry config cwd hooks@RuntimeHooks { withOwnership = own, withOperation = operation, withExecution = execution } = do
     lastActive <- getCurrentTime
     ready <- newEmptyMVar
     stop <- newEmptyMVar
     owner <- async $ (do
         result <- Exception.tryAny $
             own $
-                Exception.bracket (newRuntimeHandle config cwd operation) shutdownRuntimeHandle \handle -> do
+                Exception.bracket (newRuntimeHandle config cwd operation execution) shutdownRuntimeHandle \handle -> do
                     hooks.initialize handle
                     putMVar ready (Right (Just handle))
                     readMVar stop
@@ -141,14 +146,14 @@ startEntry config cwd hooks@RuntimeHooks { withOwnership = own, withOperation = 
         `Exception.finally` void (tryPutMVar ready (Right Nothing))
     pure Entry { owner, ready, stop, pump = hooks.pumpRunnable, borrowers = 0, lastActive }
 
-newRuntimeHandle :: SubagentConfig -> OsPath -> (forall a. IO a -> IO a) -> IO RuntimeHandle
-newRuntimeHandle config cwd operation = do
+newRuntimeHandle :: SubagentConfig -> OsPath -> (forall a. IO a -> IO a) -> (forall a. IO a -> IO a) -> IO RuntimeHandle
+newRuntimeHandle config cwd operation execution = do
     registry <- newSubagentRegistry config cwd
         (\_ _ _ _ -> pure (Left LoopNoResponseId))
         (\_ _ -> pure ())
     root <- newRootSubagents NoticesToHost registry
         `Exception.onException` closeSubagentRegistry registry
-    pure RuntimeHandle { registry, root, withOperation = operation }
+    pure RuntimeHandle { registry, root, withOperation = operation, withExecution = execution }
 
 -- Runtime teardown is not user cancellation: preserve the last durable
 -- boundary rather than writing Closed/Interrupted for resumable children.
