@@ -19,6 +19,7 @@ import qualified Agent.OpenAI.CompactionEnvelopeSpec as CompactionEnvelopeSpec
 import qualified Agent.OpenAI.CompactionManagerSpec as CompactionManagerSpec
 import qualified Agent.OpenAI.CompactionNativeSpec as CompactionNativeSpec
 import qualified Agent.OpenAI.RequestIdentitySpec as RequestIdentitySpec
+import qualified Agent.OpenAI.RequestSpec as RequestSpec
 import qualified Agent.OpenAI.ToolDSLSpec as ToolDSLSpec
 import qualified Agent.OpenAI.ToolCatalogSpec as ToolCatalogSpec
 import qualified Agent.OpenAI.ToolCatalogRequestSpec as ToolCatalogRequestSpec
@@ -46,6 +47,7 @@ main = hspec do
     CompactionManagerSpec.spec
     CompactionNativeSpec.spec
     RequestIdentitySpec.spec
+    RequestSpec.spec
     ToolDSLSpec.spec
     ToolCatalogSpec.spec
     ToolCatalogRequestSpec.spec
