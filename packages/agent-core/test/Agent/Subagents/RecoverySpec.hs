@@ -8,9 +8,10 @@ import Agent.Subagents.TaskPath (parseTaskPath)
 import qualified Agent.Loop as Loop
 import Agent.InterAgentMessage (renderInterAgentMessage)
 import Control.Concurrent.MVar
+import Control.Concurrent (myThreadId)
 import Control.Exception (bracket, finally, onException)
 import Data.IORef
-import Data.List (find)
+import Data.List (find, delete)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.OsPath (unsafeEncodeUtf)
@@ -19,6 +20,43 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "durable tree recovery" do
+    it "guards initialization, child execution, settlement and recovery with the cached scope" $
+        withHandle \unscoped -> do
+            active <- newIORef []
+            observed <- newIORef ([] :: [Text])
+            notified <- newEmptyMVar
+            (config, _) <- configuration [snapshot "child" Pending]
+            let operation action = bracket
+                    (myThreadId >>= \thread -> atomicModifyIORef' active (\threads -> (thread : threads, thread)))
+                    (\thread -> atomicModifyIORef' active (\threads -> (delete thread threads, ())))
+                    (const action)
+                checkGuard label = do
+                    thread <- myThreadId
+                    threads <- readIORef active
+                    thread `shouldSatisfy` (`elem` threads)
+                    atomicModifyIORef' observed (\labels -> (label : labels, ()))
+                handle = unscoped { withOperation = operation } :: RuntimeHandle
+                store = config.store
+                    { transaction = \action -> action store
+                    , persistRunning = \_ _ -> checkGuard "running"
+                    , persistStatus = \_ _ -> checkGuard "status"
+                    , settle = \_ _ -> checkGuard "settle"
+                    }
+                tested = config
+                    { store
+                    , withOperation = \_ -> fail "must use cached handle scope"
+                    , executionAllowed = checkGuard "allowed" >> pure True
+                    , runner = \_ _ _ _ _ -> checkGuard "runner" >> pure (Left Loop.LoopNoResponseId)
+                    , notify = \_ _ -> checkGuard "notify" >> tryPutMVar notified () >> pure ()
+                    }
+                hooks = durableRuntimeHooks tested
+            hooks.initialize handle
+            timeout 1000000 (takeMVar notified) `shouldReturn` Just ()
+            hooks.pumpRunnable handle `shouldReturn` True
+            labels <- readIORef observed
+            mapM_ (\label -> labels `shouldSatisfy` elem label)
+                ["allowed", "running", "runner", "status", "settle", "notify"]
+
     it "joins a running child before acknowledging its durable cancellation" $
         withHandle \handle -> do
             (config, rows) <- configuration [snapshot "child" Pending]

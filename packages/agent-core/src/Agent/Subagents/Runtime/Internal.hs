@@ -41,6 +41,9 @@ data RuntimeHooks = RuntimeHooks
     , withOperation :: forall a. IO a -> IO a
     -- ^ Reserve ownership for an operation, including all its external writes.
     -- The host defines failure/quarantine semantics; this is not a transaction.
+    -- Calls may nest and overlap across children: do not hold an exclusive
+    -- lock over the action. Durable recovery invokes this guard automatically;
+    -- custom callbacks and root tools must use the cached handle guard.
     , initialize :: RuntimeHandle -> IO ()
     -- ^ Install runner/persistence callbacks and recover durable children.
     , pumpRunnable :: RuntimeHandle -> IO Bool

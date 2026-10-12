@@ -63,20 +63,22 @@ durableRuntimeHooks :: RecoveryConfig -> RuntimeHooks
 durableRuntimeHooks config@RecoveryConfig { withOwnership = ownership, withOperation = operation } = RuntimeHooks
     { withOwnership = ownership
     , withOperation = operation
-    , initialize = \handle -> do
+    , initialize = \handle -> withHandleOperation handle do
         allowed <- config.executionAllowed
         unless allowed (fail "Cannot restore a stopped or unauthorized agent tree")
-        setSubagentRunner handle.registry \environment previous message onEvent -> do
+        setSubagentRunner handle.registry \environment previous message onEvent -> withHandleOperation handle do
             config.store.persistRunning environment.subId message
             config.runner handle environment previous message onEvent
         setSubagentSuspensionPersistence handle.registry SuspensionPersistence
-            { persistSuspension = config.store.persistSuspension
-            , persistSuspensionResume = config.store.persistResume
-            , persistSuspensionCancellation = \agentId -> do
+            { persistSuspension = \agentId deadline reason ->
+                withHandleOperation handle (config.store.persistSuspension agentId deadline reason)
+            , persistSuspensionResume = \agentId message ->
+                withHandleOperation handle (config.store.persistResume agentId message)
+            , persistSuspensionCancellation = \agentId -> withHandleOperation handle do
                 commitStatus config agentId Closed
                 pure (Right ())
             }
-        setSubagentOnSettled handle.registry \agentId status -> do
+        setSubagentOnSettled handle.registry \agentId status -> withHandleOperation handle do
             commitStatus config agentId status
             config.notify agentId status
         snapshots <- config.store.loadSnapshots
@@ -84,7 +86,7 @@ durableRuntimeHooks config@RecoveryConfig { withOwnership = ownership, withOpera
             restoreSnapshot config.cwd handle snapshot >>= either (fail . Text.unpack) pure
         processCancellations config handle
         pumpStoredSubagents config handle
-    , pumpRunnable = \handle -> do
+    , pumpRunnable = \handle -> withHandleOperation handle do
         allowed <- config.executionAllowed
         if allowed
             then do
@@ -121,7 +123,7 @@ restoreSnapshot cwd handle snapshot =
 
 restoreStoredSubagent
     :: RecoveryStore -> OsPath -> RuntimeHandle -> SubagentId -> IO (Either Text ())
-restoreStoredSubagent store cwd handle agentId = do
+restoreStoredSubagent store cwd handle agentId = withHandleOperation handle do
     current <- getStatus handle.registry agentId
     if current /= NotFound then pure (Right ()) else do
         stored <- store.loadSnapshot agentId
@@ -134,7 +136,7 @@ restoreStoredSubagent store cwd handle agentId = do
 -- | Retry failed settlement without repeating model execution. Read durable
 -- status after acquiring its lock, not from a potentially stale inventory.
 reconcileStoredSubagents :: RecoveryConfig -> RuntimeHandle -> IO ()
-reconcileStoredSubagents config handle = do
+reconcileStoredSubagents config handle = withHandleOperation handle do
     inventory <- config.store.loadSnapshots
     forM_ inventory \snapshot -> do
         changed <- withStoreTransaction config.store \store -> do
@@ -160,7 +162,7 @@ reconcileStoredSubagents config handle = do
 -- | Admission pressure leaves inputs in durable storage for the next pass.
 -- Only persistRunning acknowledges the input actually admitted by the registry.
 pumpStoredSubagents :: RecoveryConfig -> RuntimeHandle -> IO ()
-pumpStoredSubagents config handle = do
+pumpStoredSubagents config handle = withHandleOperation handle do
     snapshots <- config.store.loadSnapshots
     forM_ snapshots \snapshot -> do
         current <- getStatus handle.registry snapshot.agentId
@@ -189,3 +191,10 @@ processCancellations config handle = do
 
 withStoreTransaction :: RecoveryStore -> (RecoveryStore -> IO a) -> IO a
 withStoreTransaction RecoveryStore { transaction = action } = action
+
+-- Guards can nest (initialization pumps stored work, runners persist sleep)
+-- and execute concurrently. Hosts must reserve rather than hold an exclusive
+-- lock across the action. Tool failures converted into values must be guarded
+-- at the tool boundary too; a returned LoopError is not an IO exception.
+withHandleOperation :: RuntimeHandle -> IO a -> IO a
+withHandleOperation RuntimeHandle { withOperation = operation } = operation
