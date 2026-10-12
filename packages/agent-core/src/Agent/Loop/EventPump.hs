@@ -105,7 +105,15 @@ newEventPump sink = do
         }
 
 runEventPump :: Eq key => EventPump key event -> IO ()
-runEventPump pump = go
+runEventPump pump = go `Exception.catch` \(exception :: SomeException) -> do
+    -- Cover termination outside the sink too (including cancellation while
+    -- waiting for a queue item), and custom asynchronous exceptions such as
+    -- AsyncCancelled. Every producer/flush waiter observes the same failure.
+    atomically $ recordEventPumpFailure pump $
+        case Exception.fromException exception of
+            Just asynchronous -> EventPumpAsyncFailure asynchronous
+            Nothing -> EventPumpSyncFailure exception
+    Exception.throwIO exception
   where
     go =
         atomically (readTBQueue pump.eventPumpQueue) >>= \case
