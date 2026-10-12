@@ -20,7 +20,8 @@ spec = describe "durable parent notifications" do
     it "uses durable pending state after rebuilding the delivery adapter" do
         (store, state) <- newStore
         notifyParentOfSettlement store (Completed Nothing)
-        let reconstructed = store { requestParentTurn = modifyIORef' state (\(items, count) -> (items, count + 1)) }
+        let reconstructed = mapTransactionStore
+                (\bound -> bound { requestParentTurn = modifyIORef' state (\(items, count) -> (items, count + 1)) }) store
         notifyParentOfSettlement reconstructed (Errored "failure")
         readIORef state `shouldReturn` ([ChildProgressAvailable], 2)
 
@@ -33,13 +34,24 @@ spec = describe "durable parent notifications" do
 
     it "rejects delivery without appending a message or scheduling a turn" do
         (store, state) <- newStore
-        queueParentNotification (store { authorizeDelivery = pure (Left "disabled") }) ChildProgressAvailable
+        queueParentNotification (mapTransactionStore (\bound -> bound { authorizeDelivery = pure (Left "disabled") }) store) ChildProgressAvailable
             `shouldReturn` Left "disabled"
         readIORef state `shouldReturn` ([], 0)
 
+    it "uses only the callbacks supplied by the delivery transaction" do
+        (store, state) <- newStore
+        let unbound = store
+                { authorizeDelivery = fail "unbound authorization"
+                , hasPendingProgress = fail "unbound pending read"
+                , appendNotification = \_ -> fail "unbound notification write"
+                , requestParentTurn = fail "unbound wake write"
+                }
+        queueParentNotification unbound ChildProgressAvailable `shouldReturn` Right ()
+        readIORef state `shouldReturn` ([ChildProgressAvailable], 1)
+
     it "propagates wake failures through the transaction so message and wake roll back together" do
         (store, state) <- newStore
-        let broken = store { requestParentTurn = ioError (userError "wake write failed") }
+        let broken = mapTransactionStore (\bound -> bound { requestParentTurn = ioError (userError "wake write failed") }) store
         queueParentNotification broken ChildProgressAvailable `shouldThrow` anyIOException
         readIORef state `shouldReturn` ([], 0)
         queueParentNotification store ChildProgressAvailable `shouldReturn` Right ()
@@ -50,17 +62,23 @@ spec = describe "durable parent notifications" do
         mapM_ (notifyParentOfSettlement store) [Pending, Running, Interrupted, Closed, NotFound]
         readIORef state `shouldReturn` ([], 0)
 
+mapTransactionStore :: (ParentNotificationStore -> ParentNotificationStore) -> ParentNotificationStore -> ParentNotificationStore
+mapTransactionStore transform store@ParentNotificationStore { withDeliveryTransaction = transact } =
+    store { withDeliveryTransaction = \action -> transact (action . transform) }
+
 newStore :: IO (ParentNotificationStore, IORef ([ParentNotification], Int))
 newStore = do
     state <- newIORef ([], 0)
     lock <- newMVar ()
-    let transaction action = withMVar lock \_ -> do
+    let transaction :: forall a. (ParentNotificationStore -> IO a) -> IO a
+        transaction action = withMVar lock \_ -> do
             previous <- readIORef state
-            action `onException` writeIORef state previous
-    pure (ParentNotificationStore
-        { withDeliveryTransaction = transaction
-        , authorizeDelivery = pure (Right ())
-        , hasPendingProgress = elem ChildProgressAvailable . fst <$> readIORef state
-        , appendNotification = \item -> modifyIORef' state (\(items, count) -> (items <> [item], count))
-        , requestParentTurn = modifyIORef' state (\(items, count) -> (items, count + 1))
-        }, state)
+            action store `onException` writeIORef state previous
+        store = ParentNotificationStore
+            { withDeliveryTransaction = transaction
+            , authorizeDelivery = pure (Right ())
+            , hasPendingProgress = elem ChildProgressAvailable . fst <$> readIORef state
+            , appendNotification = \item -> modifyIORef' state (\(items, count) -> (items <> [item], count))
+            , requestParentTurn = modifyIORef' state (\(items, count) -> (items, count + 1))
+            }
+    pure (store, state)

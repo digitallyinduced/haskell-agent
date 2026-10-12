@@ -23,8 +23,10 @@ data ParentNotification
 -- and roll back both on exceptions. Authorization must be checked under that
 -- same scope. Pending progress means an unconsumed durable notification, so
 -- coalescing remains correct across process restarts and multiple children.
+-- Supply callbacks freshly bound to the transaction's connection; wrapping
+-- already captured IO actions does not change their database connection.
 data ParentNotificationStore = ParentNotificationStore
-    { withDeliveryTransaction :: forall a. IO a -> IO a
+    { withDeliveryTransaction :: forall a. (ParentNotificationStore -> IO a) -> IO a
     , authorizeDelivery :: IO (Either Text ())
     , hasPendingProgress :: IO Bool
     , appendNotification :: ParentNotification -> IO ()
@@ -33,8 +35,8 @@ data ParentNotificationStore = ParentNotificationStore
 
 queueParentNotification
     :: ParentNotificationStore -> ParentNotification -> IO (Either Text ())
-queueParentNotification store@ParentNotificationStore { withDeliveryTransaction } notification =
-    withDeliveryTransaction $ store.authorizeDelivery >>= \case
+queueParentNotification ParentNotificationStore { withDeliveryTransaction } notification =
+    withDeliveryTransaction \store -> store.authorizeDelivery >>= \case
         Left failure -> pure (Left failure)
         Right () -> do
             pending <- case notification of

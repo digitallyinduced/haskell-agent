@@ -34,15 +34,18 @@ data SubagentSnapshot = SubagentSnapshot
 
 -- | Transactions must encompass the status write and domain settlement.
 -- Locking serializes reconciliation with the runner's admitted-input commit.
+-- The transaction supplies a fresh callback bundle bound to its connection;
+-- entering a transaction cannot rebind closures captured in the outer store.
 data RecoveryStore = RecoveryStore
     { loadSnapshots :: IO [SubagentSnapshot]
     , loadSnapshot :: SubagentId -> IO (Maybe SubagentSnapshot)
-    , transaction :: forall a. IO a -> IO a
+    , transaction :: forall a. (RecoveryStore -> IO a) -> IO a
     , lockSnapshot :: SubagentId -> IO ()
     , persistStatus :: SubagentId -> SubagentStatus -> IO ()
     , persistRunning :: SubagentId -> InterAgentMessage -> IO ()
     , persistSuspension :: SubagentId -> UTCTime -> Text -> IO (Either Text ())
     , persistResume :: SubagentId -> InterAgentMessage -> IO (Either Text ())
+    , settle :: SubagentId -> SubagentStatus -> IO ()
     }
 
 data RecoveryConfig = RecoveryConfig
@@ -50,7 +53,6 @@ data RecoveryConfig = RecoveryConfig
     , withOwnership :: forall a. IO a -> IO (Maybe a)
     , executionAllowed :: IO Bool
     , runner :: RuntimeHandle -> RunSubagent
-    , settle :: SubagentId -> SubagentStatus -> IO ()
     , notify :: SubagentId -> SubagentStatus -> IO ()
     , cwd :: OsPath
     , wakeMessage :: Text
@@ -98,9 +100,9 @@ durableRuntimeHooks config@RecoveryConfig { withOwnership = ownership } = Runtim
 
 commitStatus :: RecoveryConfig -> SubagentId -> SubagentStatus -> IO ()
 commitStatus config agentId status =
-    withStoreTransaction config.store do
-        config.store.persistStatus agentId status
-        config.settle agentId status
+    withStoreTransaction config.store \store -> do
+        store.persistStatus agentId status
+        store.settle agentId status
 
 -- | A persisted running attempt resumes as interrupted, never as a phantom
 -- live worker. Pending work follows the same admission path.
@@ -133,15 +135,15 @@ reconcileStoredSubagents :: RecoveryConfig -> RuntimeHandle -> IO ()
 reconcileStoredSubagents config handle = do
     inventory <- config.store.loadSnapshots
     forM_ inventory \snapshot -> do
-        changed <- withStoreTransaction config.store do
-            config.store.lockSnapshot snapshot.agentId
-            stored <- config.store.loadSnapshot snapshot.agentId
+        changed <- withStoreTransaction config.store \store -> do
+            store.lockSnapshot snapshot.agentId
+            stored <- store.loadSnapshot snapshot.agentId
             current <- getStatus handle.registry snapshot.agentId
             case stored of
                 Just stored | not stored.cancellationRequested && settledStatus current -> do
                     let changed = restoredStatus stored.status /= current
-                    when changed (config.store.persistStatus snapshot.agentId current)
-                    config.settle snapshot.agentId current
+                    when changed (store.persistStatus snapshot.agentId current)
+                    store.settle snapshot.agentId current
                     pure (if changed then Just current else Nothing)
                 _ -> pure Nothing
         forM_ changed (config.notify snapshot.agentId)
@@ -183,5 +185,5 @@ processCancellations config handle = do
             closeSubagent handle.registry snapshot.agentId >>= either (fail . Text.unpack) (const (pure ()))
         commitStatus config snapshot.agentId Closed
 
-withStoreTransaction :: RecoveryStore -> IO a -> IO a
+withStoreTransaction :: RecoveryStore -> (RecoveryStore -> IO a) -> IO a
 withStoreTransaction RecoveryStore { transaction = action } = action

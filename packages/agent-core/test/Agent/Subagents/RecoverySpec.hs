@@ -8,7 +8,7 @@ import Agent.Subagents.TaskPath (parseTaskPath)
 import qualified Agent.Loop as Loop
 import Agent.InterAgentMessage (renderInterAgentMessage)
 import Control.Concurrent.MVar
-import Control.Exception (bracket, finally)
+import Control.Exception (bracket, finally, onException)
 import Data.IORef
 import Data.List (find)
 import Data.Text (Text)
@@ -120,13 +120,13 @@ spec = describe "durable tree recovery" do
             events <- newIORef ([] :: [Text])
             let record event = modifyIORef' events (<> [event])
                 store = config.store
-                    { transaction = \action -> record "begin" >> action `finally` record "commit"
+                    { transaction = \action -> record "begin" >> action store `finally` record "commit"
                     , lockSnapshot = \_ -> record "lock"
                     , persistStatus = \agent status -> record "status" >> config.store.persistStatus agent status
+                    , settle = \_ _ -> record "settle"
                     }
                 tested = config
                     { store
-                    , settle = \_ _ -> record "settle"
                     , notify = \_ _ -> record "notify"
                     }
             reconcileStoredSubagents tested handle
@@ -141,12 +141,49 @@ spec = describe "durable tree recovery" do
             restoreStoredSubagent config.store config.cwd handle (SubagentId "child") `shouldReturn` Right ()
             writeIORef rows [snapshot "child" Running]
             notices <- newIORef (0 :: Int)
-            let tested = config
-                    { store = config.store
-                        { lockSnapshot = \_ -> writeIORef rows [snapshot "child" (Completed Nothing)] }
+            let store = config.store
+                    { transaction = \action -> action store
+                    , lockSnapshot = \_ -> writeIORef rows [snapshot "child" (Completed Nothing)] }
+                tested = config
+                    { store
                     , notify = \_ _ -> modifyIORef' notices (+ 1)
                     }
             reconcileStoredSubagents tested handle
+            readIORef notices `shouldReturn` 0
+
+    it "uses transaction-bound callbacks for reconciliation and cancellation commits" $
+        withHandle \handle -> do
+            (config, rows) <- configuration [snapshot "child" (Completed Nothing)]
+            restoreStoredSubagent config.store config.cwd handle (SubagentId "child") `shouldReturn` Right ()
+            writeIORef rows [snapshot "child" Running]
+            let unbound = config.store
+                    { lockSnapshot = \_ -> fail "unbound lock"
+                    , loadSnapshot = \_ -> fail "unbound snapshot read"
+                    , persistStatus = \_ _ -> fail "unbound status write"
+                    , settle = \_ _ -> fail "unbound settlement"
+                    }
+                tested = config { store = unbound }
+            reconcileStoredSubagents tested handle
+            map (.status) <$> readIORef rows `shouldReturn` [Completed Nothing]
+            modifyIORef' rows (map \row -> row { cancellationRequested = True })
+            (durableRuntimeHooks tested).pumpRunnable handle `shouldReturn` True
+            map (.status) <$> readIORef rows `shouldReturn` [Closed]
+
+    it "rolls back a status write when transaction-bound settlement fails" $
+        withHandle \handle -> do
+            (config, rows) <- configuration [snapshot "child" (Completed Nothing)]
+            restoreStoredSubagent config.store config.cwd handle (SubagentId "child") `shouldReturn` Right ()
+            writeIORef rows [snapshot "child" Running]
+            notices <- newIORef (0 :: Int)
+            let bound = config.store { settle = \_ _ -> fail "settlement failed" }
+                store = config.store
+                    { transaction = \action -> do
+                        previous <- readIORef rows
+                        action bound `onException` writeIORef rows previous
+                    }
+                tested = config { store, notify = \_ _ -> modifyIORef' notices (+ 1) }
+            reconcileStoredSubagents tested handle `shouldThrow` anyIOException
+            map (.status) <$> readIORef rows `shouldReturn` [Running]
             readIORef notices `shouldReturn` 0
 
     it "cancels dormant children on access loss and persists their terminal state" $
@@ -185,7 +222,7 @@ configuration initial = do
     let store = RecoveryStore
             { loadSnapshots = readIORef rows
             , loadSnapshot = \agent -> find (\row -> row.agentId == agent) <$> readIORef rows
-            , transaction = id
+            , transaction = \action -> action store
             , lockSnapshot = \_ -> pure ()
             , persistStatus = \agent status -> modifyIORef' rows $
                 map \row -> if row.agentId == agent then row
@@ -195,13 +232,13 @@ configuration initial = do
             , persistRunning = \_ _ -> pure ()
             , persistSuspension = \_ _ _ -> pure (Right ())
             , persistResume = \_ _ -> pure (Right ())
+            , settle = \_ _ -> pure ()
             }
     pure (RecoveryConfig
         { store
         , withOwnership = fmap Just
         , executionAllowed = pure True
         , runner = \_ _ _ _ _ -> pure (Left Loop.LoopNoResponseId)
-        , settle = \_ _ -> pure ()
         , notify = \_ _ -> pure ()
         , cwd = unsafeEncodeUtf "."
         , wakeMessage = "Read pending input"
