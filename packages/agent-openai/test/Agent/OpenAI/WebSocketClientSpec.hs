@@ -133,24 +133,7 @@ spec = do
         readCodexTurnState turnState `shouldReturn` Just "ts-first"
 
         finishCodexTurnStateResponse turnState
-            ((responseWithOutput
-                [ ReasoningItemValue ReasoningItem
-                    { itemId = Just "rs-1"
-                    , summary = []
-                    , content = Nothing
-                    , encryptedContent = Nothing
-                    , status = Just ItemCompleted
-                    }
-                ])
-                { status = ResponseIncomplete
-                , incompleteDetails = Just IncompleteDetails
-                    { reason = "max_output_tokens"
-                    }
-                })
-        readCodexTurnState turnState `shouldReturn` Just "ts-first"
-
-        finishCodexTurnStateResponse turnState
-            (responseWithOutput [])
+            (reasoningOnly "interrupted")
         readCodexTurnState turnState `shouldReturn` Just "ts-first"
 
         finishCodexTurnStateResponse turnState
@@ -169,6 +152,18 @@ spec = do
                     , passthrough = Nothing
                     }
                 ])
+        readCodexTurnState turnState `shouldReturn` Nothing
+
+    it "clears the token when a response ends the turn without text" do
+        turnState <- newCodexTurnState
+        recordCodexTurnState turnState "ts-first"
+        finishCodexTurnStateResponse turnState
+            (responseWithOutput [])
+        readCodexTurnState turnState `shouldReturn` Nothing
+
+        recordCodexTurnState turnState "ts-next"
+        finishCodexTurnStateResponse turnState
+            (reasoningOnly "max_output_tokens")
         readCodexTurnState turnState `shouldReturn` Nothing
 
   describe "buildCodexWsHeaders" do
@@ -995,6 +990,24 @@ testSteeringResponse steer reason intermediate = do
             readIORef observedOutput `shouldReturn` Just response.output
         _ -> pure ()
     pure result
+
+-- | An incomplete response whose only output is reasoning.
+reasoningOnly :: Text -> Response
+reasoningOnly reason =
+    (responseWithOutput
+        [ ReasoningItemValue ReasoningItem
+            { itemId = Just "rs-1"
+            , summary = []
+            , content = Nothing
+            , encryptedContent = Nothing
+            , status = Just ItemCompleted
+            }
+        ])
+        { status = ResponseIncomplete
+        , incompleteDetails = Just IncompleteDetails
+            { reason
+            }
+        }
 
 responseWithOutput :: [ResponseItem] -> Response
 responseWithOutput output =

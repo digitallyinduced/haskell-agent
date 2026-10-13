@@ -65,9 +65,6 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import System.Timeout (timeout)
 
-maxEmptyContinuations :: Int
-maxEmptyContinuations = 2
-
 normalizeBackendSnapshotImages :: BackendSnapshot -> BackendSnapshot
 normalizeBackendSnapshotImages snapshot =
     snapshot
@@ -200,14 +197,6 @@ data LoopError
     | LoopCancelled [ToolCallResult]
     deriving (Eq, Show)
 
-hasVisibleAssistantText :: Maybe Text -> Bool
-hasVisibleAssistantText =
-    maybe False (not . Text.null . Text.strip)
-
-emptyContinuationWarning :: Text
-emptyContinuationWarning =
-    "The model produced no assistant text or tool calls after reasoning; stopping."
-
 -- | The loop's last owned checkpoint and the work following it. The state
 -- store may publish a newer reset/compaction; recovery must still check ownership.
 -- Normal execution and failure recovery read the same runtime-owned value.
@@ -219,7 +208,6 @@ data LoopState = LoopState
     , turnsUsed :: !Int
     , lastOutput :: !(Maybe TurnOutput)
     , tokenUsage :: !TokenUsage
-    , emptyContinuations :: !Int
     }
 
 -- | A response can absorb its inputs before the caller's steering queue is
@@ -230,10 +218,13 @@ data PendingInputs = PendingInputs
     }
 
 data CompletedTurnDecision
-    = ContinueLoop { nextEmptyContinuations :: !Int }
+    = ContinueLoop
     | FinishLoop !LoopResult
-    | WarnAndFinishLoop !LoopResult
 
+-- | A response that leaves no tool results or guidance to submit ends the
+-- turn, with or without visible text. The model may have answered through a
+-- tool or have nothing to add; asking again without new input only repeats
+-- that decision.
 decideCompletedTurn
     :: LoopState
     -> TurnOutput
@@ -241,13 +232,9 @@ decideCompletedTurn
     -> CompletedTurnDecision
 decideCompletedTurn state turn continuation
     | not (null continuation) =
-        ContinueLoop 0
-    | hasVisibleAssistantText turn.assistantText =
-        FinishLoop result
-    | state.emptyContinuations >= maxEmptyContinuations =
-        WarnAndFinishLoop result
+        ContinueLoop
     | otherwise =
-        ContinueLoop (state.emptyContinuations + 1)
+        FinishLoop result
   where
     nextTurnsUsed = state.turnsUsed + 1
     usage = addTokenUsage state.tokenUsage turn.tokenUsage
@@ -259,15 +246,14 @@ decideCompletedTurn state turn continuation
         }
 
 -- | Advance only continuation bookkeeping; the owned checkpoint is untouched.
-advanceLoopState :: TurnOutput -> PendingInputs -> Int -> LoopState -> LoopState
-advanceLoopState turn pending emptyContinuations state =
+advanceLoopState :: TurnOutput -> PendingInputs -> LoopState -> LoopState
+advanceLoopState turn pending state =
     state
         { previousResponseId = Just turn.responseId
         , turnsUsed = state.turnsUsed + 1
         , lastOutput = Just turn
         , tokenUsage = addTokenUsage state.tokenUsage turn.tokenUsage
         , pending
-        , emptyContinuations
         }
 
 runLoop
@@ -408,7 +394,6 @@ initializeLoopRuntime config0 initialState previousResponseId firstInputs = do
         , turnsUsed = 0
         , lastOutput = Nothing
         , tokenUsage = emptyTokenUsage
-        , emptyContinuations = 0
         }
     let config = config0
             { loopOnEvent = \event -> do
@@ -772,7 +757,6 @@ continueSteeredLoop runtime calls = protectLoop runtime do
                         (current.pending.inputs
                             <> drop current.pending.steeringToAcknowledge steering)
                         (length steering)
-                    , emptyContinuations = 0
                     }
                 runLoopState runtime
 
@@ -853,18 +837,13 @@ advanceCompletedTurn runtime turn results = do
     let continuation = map CompletedTool results <> steering
     state <- readIORef runtime.loopRuntimeState
     case decideCompletedTurn state turn continuation of
-        ContinueLoop{nextEmptyContinuations} -> do
+        ContinueLoop -> do
             modifyIORef' runtime.loopRuntimeState $
                 advanceLoopState turn
                     (PendingInputs continuation (length steering))
-                    nextEmptyContinuations
             runLoopState runtime
         FinishLoop result ->
             finishUnlessSteered do
-                finishLoopExecution runtime (Right result)
-        WarnAndFinishLoop result ->
-            finishUnlessSteered do
-                config.loopOnEvent (WarningRaised emptyContinuationWarning)
                 finishLoopExecution runtime (Right result)
   where
     finishUnlessSteered finish = do
@@ -873,7 +852,7 @@ advanceCompletedTurn runtime turn results = do
             then finish
             else do
                 modifyIORef' runtime.loopRuntimeState $
-                    advanceLoopState turn (PendingInputs late (length late)) 0
+                    advanceLoopState turn (PendingInputs late (length late))
                 runLoopState runtime
 
 runLoopWithEventPump

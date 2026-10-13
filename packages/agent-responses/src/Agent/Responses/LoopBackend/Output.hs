@@ -1,9 +1,8 @@
 -- | Convert completed Responses output into provider-neutral loop values.
--- Continuation classification and sensitive tool-argument handling are shared
--- by the backend and streaming projector.
+-- Incomplete-output classification and sensitive tool-argument handling are
+-- shared by the backend and streaming projector.
 module Agent.Responses.LoopBackend.Output
     ( responseToTurnOutput
-    , responseNeedsLoopContinuation
     , hasRecoverableIncompleteOutput
     , responseTokenUsage
     , responseItemToToolCall
@@ -44,51 +43,36 @@ responseToTurnOutput response = TurnOutput
     , contextUsage = tokenUsageFromResponse . Just <$> response.usage
     , providerTelemetry = Nothing
     , completion = case response.status of
-        ResponseIncomplete
-            | hasContinuableReasoningOnlyOutput response -> TurnCompleted
-            | otherwise -> TurnIncomplete
-                { incompleteReason =
-                    maybe "unknown" (.reason) response.incompleteDetails
-                , incompleteReasoningTokens =
-                    response.usage
-                        >>= (.outputTokensDetails)
-                        >>= (.reasoningTokens)
-                }
+        ResponseIncomplete -> TurnIncomplete
+            { incompleteReason =
+                maybe "unknown" (.reason) response.incompleteDetails
+            , incompleteReasoningTokens =
+                response.usage
+                    >>= (.outputTokensDetails)
+                    >>= (.reasoningTokens)
+            }
         _ -> TurnCompleted
     }
 
--- | Whether this successful response requires an empty continuation on its
--- committed response chain.
-responseNeedsLoopContinuation :: Response -> Bool
-responseNeedsLoopContinuation response = case response.status of
-    ResponseCompleted ->
-        not (responseHasToolCalls response)
-            && not (responseHasVisibleAssistantText response)
-    ResponseIncomplete -> hasContinuableReasoningOnlyOutput response
-    _ -> False
-
 -- | Whether the transport should retain an incomplete response instead of
--- converting it to an @ApiError@. Partial tool/text output is retained so the
--- committed response can be reported without replaying it, but remains
--- 'TurnIncomplete'. A reasoning-only @max_output_tokens@ stop instead becomes
--- an empty completion so the loop can continue the response chain. Reasons
--- such as @content_filter@ stay transport failures, as do completely empty
--- incomplete responses, so a replay-safe fallback can still run.
+-- converting it to an @ApiError@. Partial tool/text output and reasoning cut
+-- off by @max_output_tokens@ are retained so the committed response can be
+-- reported without replaying it, but remain 'TurnIncomplete': executing or
+-- continuing either could act on a truncated response. Reasons such as
+-- @content_filter@ stay transport failures, as do completely empty incomplete
+-- responses, so a replay-safe fallback can still run.
 hasRecoverableIncompleteOutput :: Response -> Bool
 hasRecoverableIncompleteOutput response =
     responseHasToolCalls response
         || responseHasVisibleAssistantText response
-        || hasContinuableReasoningOnlyOutput response
+        || hasReasoningOnlyLengthStop response
 
--- A reasoning-only max-output stop is an intermediate model sample. Mark it
--- completed at the loop boundary so the core loop continues from its committed
--- response id. Partial text or tool calls remain terminal incomplete output:
--- executing either could act on a truncated response.
-hasContinuableReasoningOnlyOutput :: Response -> Bool
-hasContinuableReasoningOnlyOutput response =
+hasReasoningOnlyLengthStop :: Response -> Bool
+hasReasoningOnlyLengthStop response =
     not (null response.output)
         && all isReasoningOutput response.output
-        && isContinuableIncompleteReason response
+        && maybe False ((== "max_output_tokens") . (.reason))
+            response.incompleteDetails
 
 responseHasToolCalls :: Response -> Bool
 responseHasToolCalls =
@@ -102,17 +86,6 @@ isReasoningOutput :: ResponseItem -> Bool
 isReasoningOutput = \case
     ReasoningItemValue{} -> True
     _ -> False
-
-isContinuableIncompleteReason :: Response -> Bool
-isContinuableIncompleteReason response =
-    maybe False ((`elem` continuableIncompleteReasons) . (.reason))
-        response.incompleteDetails
-
--- | Incomplete reasons where the model can still produce tools or text on a
--- follow-up sample. Safety/filter stops are not continuable.
-continuableIncompleteReasons :: [Text]
-continuableIncompleteReasons =
-    ["max_output_tokens"]
 
 responseTokenUsage :: Response -> TokenUsage
 responseTokenUsage response =
