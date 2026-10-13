@@ -26,7 +26,6 @@ module Agent.Responses.LoopBackend
     , runawayToolArgumentWarningChars
     , streamOutputObserved
     , hasRecoverableIncompleteOutput
-    , responseNeedsLoopContinuation
     , assistantTextFromResponse
     , toolResultToItem
     , withRequestInput

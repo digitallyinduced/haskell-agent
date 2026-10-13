@@ -86,7 +86,6 @@ import Agent.Responses.StreamAssembly
     , finishStreamResponse
     , responseFailureFromState
     )
-import Agent.Responses.LoopBackend (responseNeedsLoopContinuation)
 import qualified Agent.Responses.Codec as ResponsesCodec
 import qualified Agent.Transport.WebSocket as WebSocket
 import Agent.Provider
@@ -815,7 +814,6 @@ responseKeepsTurnOpen :: Response -> Bool
 responseKeepsTurnOpen response =
     maybe False ((== "interrupted") . (.reason)) response.incompleteDetails
         || any isToolCall response.output
-        || responseNeedsLoopContinuation response
   where
     isToolCall = \case
         FunctionCallItem{} -> True

@@ -1,7 +1,7 @@
 {-# LANGUAGE PatternSynonyms #-}
 
 -- | Provider-neutral agent loop: submit a user turn, dispatch tool calls,
--- feed results back, and repeat until the model answers in visible text or
+-- feed results back, and repeat until a response calls no tools or the loop
 -- hits a cap.
 module Agent.Loop
     ( Backend(Backend, submitTurn, submitTurnWithCallbacks)
@@ -37,7 +37,6 @@ module Agent.Loop
     , clearBackendContinuation
     , isModelContextItem
     , defaultLoopMaxTurns
-    , defaultLoopMaxEmptyContinuations
     , defaultLoopDispatch
     , emptyTokenUsage
     , emptyBackendSnapshot
@@ -81,9 +80,6 @@ type BackendMiddleware = Backend -> Backend
 
 defaultLoopMaxTurns :: Int
 defaultLoopMaxTurns = 2000
-
-defaultLoopMaxEmptyContinuations :: Int
-defaultLoopMaxEmptyContinuations = 2
 
 defaultLoopDispatch :: ToolDispatchConfig
 defaultLoopDispatch = ToolDispatchConfig

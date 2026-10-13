@@ -276,7 +276,7 @@ spec = do
                 ]
 
     describe "openAiBackendWith" do
-        it "continues a reasoning-only incomplete response by response id" do
+        it "ends the loop on a reasoning-only incomplete response" do
             seenPrevious <- newIORef []
             remaining <- newIORef
                 [ reasoningIncompleteResponse
@@ -292,19 +292,16 @@ spec = do
 
             result <- runLoop config Nothing "investigate"
 
-            result `shouldBe` Right LoopResult
-                { finalResponseId = "resp-final"
-                , finalText = Just "done"
-                , turnsUsed = 2
-                , tokenUsage = TokenUsage
-                    { inputTokens = 64000
-                    , outputTokens = 128000
-                    , cachedTokens = 0
-                    }
-                }
-            readIORef seenPrevious `shouldReturn`
-                [Nothing, Just "resp-reasoning-incomplete"]
-            readIORef remaining `shouldReturn` []
+            case result of
+                Left (LoopIncomplete turn) -> do
+                    turn.responseId `shouldBe` "resp-reasoning-incomplete"
+                    turn.completion `shouldBe` TurnIncomplete
+                        { incompleteReason = "max_output_tokens"
+                        , incompleteReasoningTokens = Just 53
+                        }
+                other -> expectationFailure ("unexpected result: " <> show other)
+            readIORef seenPrevious `shouldReturn` [Nothing]
+            length <$> readIORef remaining `shouldReturn` 1
 
         it "shows raw reasoning only when explicitly enabled" do
             let send _request _previous onEvent = do

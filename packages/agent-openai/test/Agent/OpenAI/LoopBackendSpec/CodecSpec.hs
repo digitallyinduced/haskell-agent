@@ -4,8 +4,7 @@ import Agent.InterAgentMessage
 import Agent.Loop
 import Agent.OpenAI.LoopBackend
 import Agent.Responses.LoopBackend
-    ( responseNeedsLoopContinuation
-    , streamOutputObserved
+    ( streamOutputObserved
     )
 import Agent.Responses.Types
 import Agent.Responses.Types.Items (responseItemDecoder)
@@ -306,25 +305,15 @@ spec = do
                 }
             turn.tokenUsage.outputTokens `shouldBe` 32768
 
-        it "continues reasoning-only max-output stops on the response chain" do
+        it "keeps reasoning-only max-output stops terminal" do
             let turn = responseToTurnOutput reasoningIncompleteResponse
-            turn.completion `shouldBe` TurnCompleted
+            turn.completion `shouldBe` TurnIncomplete
+                { incompleteReason = "max_output_tokens"
+                , incompleteReasoningTokens = Just 53
+                }
             turn.toolCalls `shouldBe` []
             turn.assistantText `shouldBe` Nothing
             turn.tokenUsage.outputTokens `shouldBe` 128000
-
-        it "continues only successful empty response steps" do
-            let cancelled = testResponse "resp-cancelled" []
-            responseNeedsLoopContinuation reasoningIncompleteResponse
-                `shouldBe` True
-            responseNeedsLoopContinuation (testResponse "resp-empty" [])
-                `shouldBe` True
-            responseNeedsLoopContinuation
-                (cancelled
-                    { status = ResponseCancelled
-                    , incompleteDetails = Nothing
-                    })
-                `shouldBe` False
 
         it "keeps filtered or partially actionable incomplete output terminal" do
             let incomplete reason output =
