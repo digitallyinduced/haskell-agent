@@ -3,6 +3,7 @@ module Agent.OpenAI.WebSocketClient
     , withCodexWsWithProvider
     , withCodexWsWithProviderOrHttpFallback
     , withCodexWsCredential
+    , withCodexWsCredentialForSession
     , withCodexWsCredentialOrHttpFallback
     , withCodexWsCredentialUsingTurnState
     , withCodexWsRetrying
@@ -21,6 +22,7 @@ module Agent.OpenAI.WebSocketClient
     , addClientMetadataToPayload
     , buildCodexWsHeaders
     , buildCodexWsHandshakeHeaders
+    , buildCodexWsSessionHeaders
     , WebSocketEndpoint(..)
     , gatewayWebSocketEndpoint
     , isGatewayWebSocketCredential
@@ -65,6 +67,7 @@ import Agent.OpenAI.RequestIdentity
     ( CodexRequestKind(..)
     , codexClientMetadata
     , codexOriginator
+    , isHeaderSafeIdentifier
     )
 import Agent.OpenAI.TurnState
     ( CodexTurnState
@@ -268,6 +271,23 @@ withCodexWsCredential credential action =
         credential
         (\conn activeCredential -> Right <$> action conn activeCredential)
 
+-- | 'withCodexWsCredential' for a socket that serves one conversation,
+-- identified by the prompt cache key of its requests. The handshake carries
+-- 'buildCodexWsSessionHeaders', so a reconnect reaches the prompt cache that
+-- the conversation's earlier sockets wrote.
+withCodexWsCredentialForSession
+    :: Text
+    -> Credential
+    -> (CodexConn -> Credential -> IO a)
+    -> IO (Either ApiError a)
+withCodexWsCredentialForSession sessionKey credential action =
+    runConnectionAttemptWithHeaders
+        (buildCodexWsSessionHeaders sessionKey)
+        (limitRetries 2 <> exponentialBackoff 500000)
+        Nothing
+        credential
+        (\conn activeCredential -> Right <$> action conn activeCredential)
+
 -- | Exact-credential variant of
 -- 'withCodexWsWithProviderOrHttpFallback', used by interactive account
 -- switches.
@@ -395,25 +415,37 @@ runConnectionAttemptWithPolicyAndTurnState
     -> Credential
     -> (CodexConn -> Credential -> IO (Either ApiError a))
     -> IO (Either ApiError a)
-runConnectionAttemptWithPolicyAndTurnState _ _ credential _action
+runConnectionAttemptWithPolicyAndTurnState =
+    runConnectionAttemptWithHeaders []
+
+-- | Like 'runConnectionAttemptWithPolicyAndTurnState', with additional
+-- handshake headers.
+runConnectionAttemptWithHeaders
+    :: WS.Headers
+    -> RetryPolicyM IO
+    -> Maybe CodexTurnState
+    -> Credential
+    -> (CodexConn -> Credential -> IO (Either ApiError a))
+    -> IO (Either ApiError a)
+runConnectionAttemptWithHeaders _ _ _ credential _action
     | credential.provider == XAIProvider = pure $ Left $ ProviderError ApiErrorType
         "XAI credentials must be used through agent-xai"
         Nothing
-runConnectionAttemptWithPolicyAndTurnState _ _ credential _action
+runConnectionAttemptWithHeaders _ _ _ credential _action
     | credential.provider == OpenRouterProvider = pure $ Left $ ProviderError ApiErrorType
         "OpenRouter credentials must be used through agent-openrouter"
         Nothing
-runConnectionAttemptWithPolicyAndTurnState _ _ credential _action
+runConnectionAttemptWithHeaders _ _ _ credential _action
     | credential.provider == GeminiProvider = pure $ Left $ ProviderError ApiErrorType
         "Gemini credentials must be used through agent-gemini"
         Nothing
-runConnectionAttemptWithPolicyAndTurnState _ _ credential _action
+runConnectionAttemptWithHeaders _ _ _ credential _action
     | credential.provider == ClaudeCodeProvider = pure $ Left $ ProviderError ApiErrorType
         "Claude Code subscription sessions must use agent-claude"
         Nothing
-runConnectionAttemptWithPolicyAndTurnState retryPolicy sharedTurnState
+runConnectionAttemptWithHeaders extraHeaders retryPolicy sharedTurnState
         credential action = do
-    headers <- buildCodexWsHandshakeHeaders credential
+    headers <- (<> extraHeaders) <$> buildCodexWsHandshakeHeaders credential
     case gatewayWebSocketEndpoint credential of
         Left err -> pure (Left (ConnectionError err))
         Right endpoint ->
@@ -545,7 +577,8 @@ buildCodexWsHandshakeHeaders credential
 -- | Pure authentication-header builder exported for transport contract tests.
 --
 -- Per-turn attribution travels in each frame's @client_metadata@ because a
--- socket outlives turns; the handshake carries only the static originator.
+-- socket outlives turns; the handshake carries only the static originator. A
+-- socket that serves one conversation adds 'buildCodexWsSessionHeaders'.
 buildCodexWsHeaders :: Credential -> WS.Headers
 buildCodexWsHeaders credential =
     [ ("Authorization", "Bearer " <> Text.encodeUtf8 credential.accessToken)
@@ -558,6 +591,23 @@ buildCodexWsHeaders credential =
     <> [ ("OpenAI-Beta", "responses_websockets=2026-02-06")
        , ("x-codex-beta-features", Text.encodeUtf8 remoteCompactionV2Feature)
        ]
+
+-- | The conversation headers that Codex sends in a WebSocket handshake. The
+-- prompt cache key names the session and the thread, as in
+-- 'Agent.OpenAI.RequestIdentity.codexAttributionHeaders'. The backend routes
+-- the prompt cache by @session-id@; without it, each socket gets a random
+-- prompt cache key, and a conversation that reconnects starts uncached. A key
+-- that is not a valid header value is left out.
+buildCodexWsSessionHeaders :: Text -> WS.Headers
+buildCodexWsSessionHeaders sessionKey
+    | isHeaderSafeIdentifier sessionKey =
+        [ ("session-id", value)
+        , ("thread-id", value)
+        , ("x-client-request-id", value)
+        ]
+    | otherwise = []
+  where
+    value = Text.encodeUtf8 sessionKey
 
 -- | Wraps an 'ApiError' from 'getAccessToken' so it can propagate out of
 -- 'withCodexWs' as an exception. The agent-loop's failover layer unwraps it

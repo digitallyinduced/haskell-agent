@@ -3,8 +3,8 @@ module Agent.OpenAI.TranscriptionSpec (spec) where
 import Agent.Error (ApiError(..))
 import Agent.OpenAI.Transcription
 import Agent.OpenAI.TestSupport
-    ( requireLoopbackListener
-    , withLoopbackApplication
+    ( withLoopbackApplication
+    , withWebSocketServer
     )
 import Agent.Provider
     ( BillingMode(..)
@@ -28,7 +28,7 @@ import Control.Concurrent
     )
 import Control.Concurrent.Async (AsyncCancelled(..), cancel, wait, withAsync)
 import Control.Exception (MaskingState(Unmasked), getMaskingState)
-import Control.Exception.Safe (bracket, finally, throwString)
+import Control.Exception.Safe (finally, throwString)
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
@@ -46,7 +46,6 @@ import GHC.Clock (getMonotonicTimeNSec)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Network.HTTP.Types as HTTP
-import qualified Network.Socket as Socket
 import qualified Network.Wai as Wai
 import qualified Network.WebSockets as WS
 import qualified Network.WebSockets.Stream as WSStream
@@ -840,38 +839,6 @@ expectRealtimeClose connection =
     (WS.receiveData connection :: IO Text) `shouldThrow` \case
         WS.CloseRequest 1000 "done" -> True
         _ -> False
-
-withWebSocketServer
-    :: WS.ServerApp
-    -> (Int -> IO value)
-    -> IO value
-withWebSocketServer server action =
-    requireLoopbackListener >>
-    bracket
-        (WS.makeListenSocket "127.0.0.1" 0)
-        Socket.close
-        \listenSocket -> do
-            port <- socketAddressPort <$> Socket.getSocketName listenSocket
-            withAsync
-                (do
-                    (socket, _) <- Socket.accept listenSocket
-                    (WS.makePendingConnection
-                        socket
-                        WS.defaultConnectionOptions >>= server)
-                        `finally` Socket.close socket)
-                \serverThread -> do
-                    result <- action port
-                    wait serverThread
-                    pure result
-
-socketAddressPort :: Socket.SockAddr -> Int
-socketAddressPort = \case
-    Socket.SockAddrInet port _ ->
-        fromIntegral port
-    Socket.SockAddrInet6 port _ _ _ ->
-        fromIntegral port
-    address ->
-        error ("unexpected WebSocket test address: " <> show address)
 
 decodeValue :: LBS.ByteString -> Aeson.Value
 decodeValue =
