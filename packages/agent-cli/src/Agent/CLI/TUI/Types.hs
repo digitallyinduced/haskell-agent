@@ -457,6 +457,11 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeMotionTickQueued :: !(TVar Bool)
     , runtimeMotionMode :: !MotionMode
     , runtimeImagePreviews :: !(IORef [(ImageAttachment, TuiImagePreview)])
+    -- | Image previews for the user message that is about to be appended.
+    -- The submitted text is stored with them so a later, unrelated user row
+    -- cannot claim the bitmap. 'Nothing' means no submission is in flight.
+    , runtimePendingSubmittedPreviews
+        :: !(IORef (Maybe (Text, [TuiImagePreview])))
     , runtimeSubmittedImagePlacements
         :: !(IORef [NativePreviewPlacement])
     , runtimeImagePreviewRevision :: !(IORef Int)

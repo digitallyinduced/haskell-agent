@@ -213,6 +213,7 @@ handleUiEvents uiEvents = do
                 (initial, Nothing, False, False)
                 uiEvents
     put final
+    attachPendingUserImagePreviews uiEvents initial.appUi final.appUi
     when (any (== UiConversationCleared) uiEvents) $
         clearSubmittedImagePlacements final.appRuntime
     case nativeProgress of
@@ -731,6 +732,58 @@ isSubmittedPrompt :: UiEvent -> Bool
 isSubmittedPrompt = \case
     UiUserSubmitted _ -> True
     _ -> False
+
+-- | Place a pasted image on the user row that was just created for it.
+-- The preview is keyed by the submitted text, not by the next block id, so
+-- it cannot be claimed by the following tool row.
+attachPendingUserImagePreviews
+    :: NonEmpty UiEvent
+    -> UiState
+    -> UiState
+    -> EventM Name AppState ()
+attachPendingUserImagePreviews events before after = do
+    state <- get
+    pending <-
+        liftIO $
+            readIORef state.appRuntime.runtimePendingSubmittedPreviews
+    case pending of
+        Just (prompt, previews)
+            | any (submittedPrompt prompt) events -> do
+                liftIO $
+                    writeIORef
+                        state.appRuntime.runtimePendingSubmittedPreviews
+                        Nothing
+                case userBlockForPrompt prompt before after of
+                    Just blockId | not (null previews) -> do
+                        clearSubmittedImagePlacements state.appRuntime
+                        modify' \current ->
+                            current
+                                { appSubmittedImagePreviews =
+                                    retainSubmittedImagePreviews current $
+                                        Map.insert
+                                            blockId
+                                            previews
+                                            current.appSubmittedImagePreviews
+                                }
+                        invalidateCache
+                        queueConversationReflow
+                    _ -> pure ()
+        _ -> pure ()
+
+submittedPrompt :: Text -> UiEvent -> Bool
+submittedPrompt prompt = \case
+    UiUserSubmitted text -> text == prompt
+    _ -> False
+
+userBlockForPrompt :: Text -> UiState -> UiState -> Maybe BlockId
+userBlockForPrompt prompt before after =
+    (.blockId)
+        <$> find
+            (\block ->
+                block.blockKind == BlockUser
+                    && block.blockBody == prompt
+                    && Map.notMember block.blockId before.uiBlockIndices)
+            (toList after.uiBlocks)
 
 conversationBlocks :: AgentTarget -> AppState -> [UiBlock]
 conversationBlocks target state =

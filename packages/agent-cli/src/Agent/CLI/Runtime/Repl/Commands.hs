@@ -1038,7 +1038,7 @@ submitSkillInvocation handlerContext finishTurn invocations next color line invo
                         pendingImages <-
                             modifyLiveAttachments conversationRef \imgs -> ([], imgs)
                         forM_ fullscreen \runtime ->
-                            commitFullscreenImagePreviews runtime pendingImages
+                            commitFullscreenImagePreviews runtime line pendingImages
                         let userText =
                                 if Text.null arguments
                                     then "Use the "
@@ -1096,7 +1096,7 @@ submitExpandedPrompt handlerContext finishTurn pasted next color original expand
                 pendingImages <-
                     modifyLiveAttachments conversationRef \imgs -> ([], imgs)
                 forM_ fullscreen \runtime ->
-                    commitFullscreenImagePreviews runtime pendingImages
+                    commitFullscreenImagePreviews runtime original pendingImages
                 let turnInputs =
                         skillInputs <>
                             [ userMessageWithAttachments
@@ -1151,7 +1151,7 @@ submitPrompt handlerContext finishTurn pasted next color text = do
                         pendingImages <-
                             modifyLiveAttachments conversationRef \imgs -> ([], imgs)
                         forM_ fullscreen \runtime ->
-                            commitFullscreenImagePreviews runtime pendingImages
+                            commitFullscreenImagePreviews runtime text pendingImages
                         resetRenderPrintedText env.sessionRender
                         let turnInputs =
                                 skillInputs <>

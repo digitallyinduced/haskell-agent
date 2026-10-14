@@ -330,6 +330,7 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
         pullRequestPoll <- newTVarIO Nothing
         dictationJobs <- newTQueueIO
         imagePreviews <- newIORef []
+        pendingSubmittedPreviews <- newIORef Nothing
         submittedImagePlacements <- newIORef []
         imagePreviewRevision <- newIORef 0
         imagePreviewVisible <- newIORef True
@@ -393,6 +394,7 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
             , runtimeMotionTickQueued = motionTickQueued
             , runtimeMotionMode = motionMode
             , runtimeImagePreviews = imagePreviews
+            , runtimePendingSubmittedPreviews = pendingSubmittedPreviews
             , runtimeSubmittedImagePlacements = submittedImagePlacements
             , runtimeImagePreviewRevision = imagePreviewRevision
             , runtimeImagePreviewVisible = imagePreviewVisible
@@ -812,18 +814,25 @@ publishFullscreenImagePreviews event runtime images = do
             else prepareFullscreenImagePreviews runtime images
     enqueueAppEvent runtime (event prepared)
 
--- | Move pending composer previews into the next submitted user message.
+-- | Remember previews for the user row identified by the submitted text.
+-- The row is created by a later 'UiUserSubmitted' of that same text. Attaching
+-- here to 'uiNextBlockId' races with that event and drops the bitmap onto the
+-- following tool row, which a compact action line does not draw.
 commitFullscreenImagePreviews
     :: FullscreenRuntime
+    -> Text
     -> [ImageAttachment]
     -> IO ()
-commitFullscreenImagePreviews runtime images = do
+commitFullscreenImagePreviews runtime promptText images = do
     previous <- readIORef runtime.runtimeImagePreviews
     prepared <-
         if map fst previous == images
             then pure previous
             else prepareFullscreenImagePreviews runtime images
-    -- Unsupported terminals render only the compact image summary. Native
+    writeIORef
+        runtime.runtimePendingSubmittedPreviews
+        (Just (promptText, map snd prepared))
+    -- Unsupported terminals render the sampled bitmap on the user row. Native
     -- terminals retain the encoded attachment for a viewport-aware placement.
     enqueueAppEvent runtime (AppCommitImagePreviews prepared)
 

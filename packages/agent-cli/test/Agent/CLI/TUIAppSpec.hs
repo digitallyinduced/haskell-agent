@@ -4087,6 +4087,14 @@ spec = do
             timeout 2_000_000 committedPreviewKeys
                 `shouldReturn` Just [BlockId (-1)]
 
+        it "attaches a pasted image to the submitted user message" do
+            timeout 2_000_000 attachedUserImageBlockIds
+                `shouldReturn` Just True
+
+        it "keeps a pasted image when the live user block id differs from history" do
+            timeout 2_000_000 transferredUserImageKeys
+                `shouldReturn` Just True
+
         it "clears previews when history is reset" do
             timeout 2_000_000 resetPreviewState
                 `shouldReturn` Just ([], [], 1)
@@ -4500,6 +4508,91 @@ resetDoesNotRetainPriorSystemMessages = do
                 (toList finalState.appHistoryWindow.historyWindowTurns)
                 <> toList finalState.appUi.uiBlocks
 
+attachedUserImageBlockIds :: IO Bool
+attachedUserImageBlockIds = do
+    runtime <- newScriptRuntime initialUiState
+    writeIORef
+        runtime.runtimePendingSubmittedPreviews
+        (Just ("pls find the root cause", [drawablePreview]))
+    (_, finalState) <-
+        runFullscreenScriptWithState
+            (initialFullscreenAppState runtime [] AgentRoot [] 0)
+            [ FullscreenScriptApp
+                (AppUi (UiSystemMessage "agents.md: loaded 3 files"))
+            , FullscreenScriptApp
+                (AppUi (UiUserSubmitted "pls find the root cause"))
+            , FullscreenScriptHalt
+            ]
+    let userIds =
+            [ block.blockId
+            | block <- toList finalState.appUi.uiBlocks
+            , block.blockKind == BlockUser
+            ]
+    pending <- readIORef runtime.runtimePendingSubmittedPreviews
+    pure $
+        pending == Nothing
+            && userIds == Map.keys finalState.appSubmittedImagePreviews
+            && length userIds == 1
+
+transferredUserImageKeys :: IO Bool
+transferredUserImageKeys = do
+    runtime <- newScriptRuntime initialUiState
+    let systemBlock =
+            (markerBlock (BlockId 1) "agents.md")
+                { blockKind = BlockSystem
+                , blockTitle = "System"
+                }
+        userBlock =
+            (markerBlock (BlockId 2) "question")
+                { blockKind = BlockUser
+                , blockTitle = "You"
+                }
+        liveUi =
+            initialUiState
+                { uiBlocks = Seq.fromList [systemBlock, userBlock]
+                , uiNextBlockId = 3
+                , uiBlockIndices =
+                    Map.fromList [(BlockId 1, 0), (BlockId 2, 1)]
+                }
+        durableUser =
+            (markerBlock (BlockId 50) "question")
+                { blockKind = BlockUser
+                , blockTitle = "You"
+                }
+        durableTurn =
+            HistoryTurn
+                { historyTurnCursor = HistoryCursor 0
+                , historyTurnCharts = Map.empty
+                , historyTurnBlocks = Seq.singleton durableUser
+                }
+        initialState =
+            (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                { appUi = liveUi
+                , appHistoryLiveStart = Just 1
+                , appSubmittedImagePreviews =
+                    Map.singleton (BlockId 2) [drawablePreview]
+                }
+    (_, finalState) <-
+        runFullscreenScriptWithState
+            initialState
+            [ FullscreenScriptApp
+                (AppHistoryCommitted
+                    (HistoryGeneration 0)
+                    durableTurn
+                    HistoryCommitAppend)
+            , FullscreenScriptHalt
+            ]
+    let durableUserIds =
+            [ block.blockId
+            | turn <- toList finalState.appHistoryWindow.historyWindowTurns
+            , block <- toList turn.historyTurnBlocks
+            , block.blockKind == BlockUser
+            ]
+    pure $
+        length durableUserIds == 1
+            && Map.keys finalState.appSubmittedImagePreviews == durableUserIds
+            && BlockId 2 `notElem` durableUserIds
+
 committedPreviewKeys :: IO [BlockId]
 committedPreviewKeys = do
     runtime <- newScriptRuntime initialUiState
@@ -4625,6 +4718,11 @@ historyTestTurn cursor blockId =
             Seq.singleton
                 (markerBlock blockId ("turn " <> Text.pack (show cursor)))
         }
+
+drawablePreview :: TuiImagePreview
+drawablePreview =
+    (historyPreview 4)
+        { previewSample = generateImage (\_ _ -> PixelRGB8 0 0 0) 1 1 }
 
 historyPreview :: Int -> TuiImagePreview
 historyPreview bytes =
