@@ -341,10 +341,27 @@ commitLiveHistoryTurn durableTurn commit state =
                 _ ->
                     appendHistoryTurn remappedTurn baseWindow
         ui = truncateUiBlocks 0 state.appUi
+        liveTail = Seq.drop start state.appUi.uiBlocks
+        projectedCount = Seq.length durableTurn.historyTurnBlocks
+        durableRemapped =
+            Seq.drop (Seq.length remappedBlocks - projectedCount) remappedBlocks
+        -- Live block ids and the freshly projected history ids do not match.
+        -- Move pasted images onto the durable user rows before id remapping,
+        -- or retainSubmittedImagePreviews drops them with the live blocks.
+        transfers
+            | commit == HistoryCommitReset = []
+            | otherwise =
+                zip
+                    (userBlockIds liveTail)
+                    (userBlockIds durableRemapped)
+        movedPreviews =
+            foldl' moveSubmittedImagePreview
+                state.appSubmittedImagePreviews
+                transfers
         remappedPreviews =
             remapSubmittedImagePreviewBlocks
                 blockIdRemap
-                state.appSubmittedImagePreviews
+                movedPreviews
         nextState = state
             { appUi = ui
             , appHistoryWindow = window
@@ -570,6 +587,25 @@ conversationBlockIds state =
             (toList . (.historyTurnBlocks))
             (toList state.appHistoryWindow.historyWindowTurns)
             <> toList state.appUi.uiBlocks
+
+userBlockIds :: Seq UiBlock -> [BlockId]
+userBlockIds blocks =
+    [ block.blockId
+    | block <- toList blocks
+    , block.blockKind == BlockUser
+    ]
+
+moveSubmittedImagePreview
+    :: Map.Map BlockId [TuiImagePreview]
+    -> (BlockId, BlockId)
+    -> Map.Map BlockId [TuiImagePreview]
+moveSubmittedImagePreview previews (fromId, toId)
+    | fromId == toId = previews
+    | otherwise =
+        case Map.lookup fromId previews of
+            Nothing -> previews
+            Just images ->
+                Map.insert toId images (Map.delete fromId previews)
 
 remapSubmittedImagePreviewBlocks
     :: Map.Map BlockId BlockId

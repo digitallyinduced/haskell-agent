@@ -23,7 +23,10 @@ import Agent.CLI.SessionEnv ( SessionEnv(..) )
 import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.CLI.Style ( glyphOk, glyphSession, roleError, roleMuted )
 import Agent.CLI.TUI.App
-    ( emitUiEvent, setFullscreenImagePreviews )
+    ( commitFullscreenImagePreviews
+    , emitUiEvent
+    , setFullscreenImagePreviews
+    )
 import Agent.CLI.Terminal ( resolveColor )
 import Agent.CLI.Turn ( runOneTurn )
 import Agent.Loop
@@ -200,6 +203,11 @@ handleAttachmentAction
                                 (roleMuted color
                                     (glyphOk <> "pasted " <> sizes))
                         resetRenderPrintedText render
+                        forM_ fullscreen \runtime ->
+                            commitFullscreenImagePreviews
+                                runtime
+                                promptText
+                                images
                         fullscreenEvent
                             (UiUserSubmitted promptText)
                         let turnInputs =

@@ -213,6 +213,7 @@ handleUiEvents uiEvents = do
                 (initial, Nothing, False, False)
                 uiEvents
     put final
+    attachPendingUserImagePreviews uiEvents initial.appUi final.appUi
     when (any (== UiConversationCleared) uiEvents) $
         clearSubmittedImagePlacements final.appRuntime
     case nativeProgress of
@@ -731,6 +732,90 @@ isSubmittedPrompt :: UiEvent -> Bool
 isSubmittedPrompt = \case
     UiUserSubmitted _ -> True
     _ -> False
+
+-- | Place pasted images on the user rows just created for them.
+-- Entries stay in submission order. A later prompt, including one with no
+-- image, appends its own entry and cannot erase an earlier bitmap that Brick
+-- has not attached yet. Only the head entry is consumed, and only when its
+-- text is the user row being added.
+attachPendingUserImagePreviews
+    :: NonEmpty UiEvent
+    -> UiState
+    -> UiState
+    -> EventM Name AppState ()
+attachPendingUserImagePreviews events before after = do
+    state <- get
+    let prompts =
+            [ text
+            | UiUserSubmitted text <- toList events
+            ]
+    claimed <-
+        liftIO $
+            atomicModifyIORef'
+                state.appRuntime.runtimePendingSubmittedPreviews
+                (takeMatchingSubmittedPreviews prompts)
+    let attached =
+            [ (prompt, previews)
+            | (prompt, previews) <- claimed
+            , not (null previews)
+            ]
+    unless (null attached) $ do
+        clearSubmittedImagePlacements state.appRuntime
+        modify' \current ->
+            current
+                { appSubmittedImagePreviews =
+                    retainSubmittedImagePreviews current $
+                        Map.union
+                            (placeSubmittedPreviews before after attached)
+                            current.appSubmittedImagePreviews
+                }
+        invalidateCache
+        queueConversationReflow
+
+-- | Consume a prefix of the pending queue for user rows applied in this batch.
+-- A user row whose text is not the next queued prompt is left unmatched, so a
+-- replayed or unrelated row cannot take or block a pending bitmap.
+takeMatchingSubmittedPreviews
+    :: [Text]
+    -> Seq (Text, [TuiImagePreview])
+    -> (Seq (Text, [TuiImagePreview]), [(Text, [TuiImagePreview])])
+takeMatchingSubmittedPreviews prompts queue =
+    go prompts queue []
+  where
+    go [] remaining claimed = (remaining, reverse claimed)
+    go (prompt : rest) remaining claimed =
+        case Seq.viewl remaining of
+            (queuedPrompt, previews) :< tail
+                | queuedPrompt == prompt ->
+                    go rest tail ((prompt, previews) : claimed)
+            _ ->
+                go rest remaining claimed
+
+placeSubmittedPreviews
+    :: UiState
+    -> UiState
+    -> [(Text, [TuiImagePreview])]
+    -> Map.Map BlockId [TuiImagePreview]
+placeSubmittedPreviews before after claimed =
+    fst (foldl' place (Map.empty, []) claimed)
+  where
+    newBlocks =
+        [ block
+        | block <- toList after.uiBlocks
+        , block.blockKind == BlockUser
+        , Map.notMember block.blockId before.uiBlockIndices
+        ]
+    place (assigned, used) (prompt, previews) =
+        case find
+            (\block ->
+                block.blockBody == prompt
+                    && block.blockId `notElem` used)
+            newBlocks of
+            Nothing -> (assigned, used)
+            Just block ->
+                ( Map.insert block.blockId previews assigned
+                , block.blockId : used
+                )
 
 conversationBlocks :: AgentTarget -> AppState -> [UiBlock]
 conversationBlocks target state =

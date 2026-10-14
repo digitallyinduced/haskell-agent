@@ -432,21 +432,25 @@ submittedUserMessage state target block =
   where
     submittedImage index preview =
         padTop (Pad 1) $
-            vBox $
-                nativePlaceholder index preview
-                    <> [ withAttr Theme.userMutedAttr $
-                            terminalTxt (imagePreviewSummary preview)
-                       ]
+            vBox
+                [ imageWidget index preview
+                , withAttr Theme.userMutedAttr $
+                    terminalTxt (imagePreviewSummary preview)
+                ]
 
-    nativePlaceholder index preview
-        | not state.appRuntime.runtimeNativeImagePreviews = []
-        | otherwise =
+    imageWidget index preview
+        | state.appRuntime.runtimeNativeImagePreviews =
             let (columns, rows) =
                     previewCellSize
                         submittedPreviewMaxColumns
                         submittedPreviewMaxRows
                         preview
-            in [ nativeImagePlaceholder block.blockId index columns rows ]
+            in nativeImagePlaceholder block.blockId index columns rows
+        | otherwise =
+            renderTuiImagePreview
+                submittedPreviewMaxColumns
+                submittedPreviewMaxRows
+                preview
 
 imagePreviewSummary :: TuiImagePreview -> Text
 imagePreviewSummary preview =
