@@ -330,7 +330,7 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
         pullRequestPoll <- newTVarIO Nothing
         dictationJobs <- newTQueueIO
         imagePreviews <- newIORef []
-        pendingSubmittedPreviews <- newIORef Nothing
+        pendingSubmittedPreviews <- newIORef Seq.empty
         submittedImagePlacements <- newIORef []
         imagePreviewRevision <- newIORef 0
         imagePreviewVisible <- newIORef True
@@ -829,9 +829,11 @@ commitFullscreenImagePreviews runtime promptText images = do
         if map fst previous == images
             then pure previous
             else prepareFullscreenImagePreviews runtime images
-    writeIORef
+    -- Append. A second prompt can be committed before Brick has attached
+    -- the first, and replacing the single slot would drop that bitmap.
+    atomicModifyIORef'
         runtime.runtimePendingSubmittedPreviews
-        (Just (promptText, map snd prepared))
+        (\queue -> (queue |> (promptText, map snd prepared), ()))
     -- Unsupported terminals render the sampled bitmap on the user row. Native
     -- terminals retain the encoded attachment for a viewport-aware placement.
     enqueueAppEvent runtime (AppCommitImagePreviews prepared)

@@ -4091,6 +4091,10 @@ spec = do
             timeout 2_000_000 attachedUserImageBlockIds
                 `shouldReturn` Just True
 
+        it "keeps an earlier image when a later prompt is queued before the row is drawn" do
+            timeout 2_000_000 queuedSubmittedImageBytes
+                `shouldReturn` Just True
+
         it "keeps a pasted image when the live user block id differs from history" do
             timeout 2_000_000 transferredUserImageKeys
                 `shouldReturn` Just True
@@ -4513,7 +4517,7 @@ attachedUserImageBlockIds = do
     runtime <- newScriptRuntime initialUiState
     writeIORef
         runtime.runtimePendingSubmittedPreviews
-        (Just ("pls find the root cause", [drawablePreview]))
+        (Seq.singleton ("pls find the root cause", [drawablePreview]))
     (_, finalState) <-
         runFullscreenScriptWithState
             (initialFullscreenAppState runtime [] AgentRoot [] 0)
@@ -4530,9 +4534,50 @@ attachedUserImageBlockIds = do
             ]
     pending <- readIORef runtime.runtimePendingSubmittedPreviews
     pure $
-        pending == Nothing
+        Seq.null pending
             && userIds == Map.keys finalState.appSubmittedImagePreviews
             && length userIds == 1
+
+queuedSubmittedImageBytes :: IO Bool
+queuedSubmittedImageBytes = do
+    runtime <- newScriptRuntime initialUiState
+    let first = drawablePreview { previewBytes = 11 }
+        second = drawablePreview { previewBytes = 22 }
+        plain = "second prompt"
+    writeIORef runtime.runtimePendingSubmittedPreviews $
+        Seq.fromList
+            [ ("first prompt", [first])
+            , (plain, [])
+            , ("third prompt", [second])
+            ]
+    let initial = initialFullscreenAppState runtime [] AgentRoot [] 0
+        submit text =
+            [ FullscreenScriptApp (AppUi (UiUserSubmitted text))
+            , FullscreenScriptHalt
+            ]
+        bytesFor text state =
+            concat
+                [ map (.previewBytes) previews
+                | block <- toList state.appUi.uiBlocks
+                , block.blockKind == BlockUser
+                , block.blockBody == text
+                , Just previews <-
+                    [Map.lookup block.blockId state.appSubmittedImagePreviews]
+                ]
+    (_, afterFirst) <- runFullscreenScriptWithState initial (submit "first prompt")
+    pendingAfterFirst <- readIORef runtime.runtimePendingSubmittedPreviews
+    (_, afterPlain) <- runFullscreenScriptWithState afterFirst (submit plain)
+    pendingAfterPlain <- readIORef runtime.runtimePendingSubmittedPreviews
+    (_, afterThird) <- runFullscreenScriptWithState afterPlain (submit "third prompt")
+    pendingAfterThird <- readIORef runtime.runtimePendingSubmittedPreviews
+    pure $
+        bytesFor "first prompt" afterFirst == [11]
+            && fmap fst (toList pendingAfterFirst) == [plain, "third prompt"]
+            && bytesFor "first prompt" afterPlain == [11]
+            && bytesFor plain afterPlain == []
+            && fmap fst (toList pendingAfterPlain) == ["third prompt"]
+            && bytesFor "third prompt" afterThird == [22]
+            && Seq.null pendingAfterThird
 
 transferredUserImageKeys :: IO Bool
 transferredUserImageKeys = do

@@ -457,11 +457,11 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeMotionTickQueued :: !(TVar Bool)
     , runtimeMotionMode :: !MotionMode
     , runtimeImagePreviews :: !(IORef [(ImageAttachment, TuiImagePreview)])
-    -- | Image previews for the user message that is about to be appended.
-    -- The submitted text is stored with them so a later, unrelated user row
-    -- cannot claim the bitmap. 'Nothing' means no submission is in flight.
+    -- | Image previews waiting for their user row, in submission order.
+    -- A later prompt appends another entry. It must not replace an earlier
+    -- one that Brick has not attached yet.
     , runtimePendingSubmittedPreviews
-        :: !(IORef (Maybe (Text, [TuiImagePreview])))
+        :: !(IORef (Seq (Text, [TuiImagePreview])))
     , runtimeSubmittedImagePlacements
         :: !(IORef [NativePreviewPlacement])
     , runtimeImagePreviewRevision :: !(IORef Int)
