@@ -7,6 +7,7 @@ module Agent.CLI.WindowTitle
     ) where
 
 import Agent.CLI.Style (spinnerFrames)
+import Agent.CLI.Terminal (TerminalKind(..))
 import Agent.TUI.Motion
     ( MotionDemand(..)
     , MotionMode(..)
@@ -45,19 +46,23 @@ data WindowTitleState = WindowTitleState
 -- renderer-specific title writer, then scopes 'windowTitleWorker' with
 -- structured concurrency for the session lifetime.
 newWindowTitleController
-    :: MotionMode
+    :: TerminalKind
+    -> MotionMode
     -> Text
     -> (IO () -> IO ())
     -> (Text -> IO ())
     -> IO WindowTitleController
-newWindowTitleController motionMode initialTitle withOutputLock writeTitle = do
+newWindowTitleController terminalKind motionMode initialTitle withOutputLock writeTitle = do
     stateVar <- newTVarIO
         WindowTitleState
             { titleBase = initialTitle
             , titleBusyDepth = 0
             , titleInputWaitDepth = 0
             }
-    let frames = case spinnerFrames of
+    -- Rex renders OSC 7501 activity itself. Keep the title free of a second,
+    -- independently scoped indicator, including for background sessions.
+    let usesTitleSpinner = terminalKind /= TerminalRex
+        frames = case spinnerFrames of
             [] -> ["*"]
             available -> available
         firstFrame = case frames of
@@ -71,7 +76,7 @@ newWindowTitleController motionMode initialTitle withOutputLock writeTitle = do
                     writeTVar stateVar updated
                     pure updated
                 writeTitle
-                    (if titleIsBusy state
+                    (if usesTitleSpinner && titleIsBusy state
                         then busyWindowTitle firstFrame title
                         else title)
         changeActivity update =
@@ -81,7 +86,7 @@ newWindowTitleController motionMode initialTitle withOutputLock writeTitle = do
                     let updated = update current
                     writeTVar stateVar updated
                     pure (titleIsBusy current, updated)
-                when (wasBusy /= titleIsBusy state) $
+                when (usesTitleSpinner && wasBusy /= titleIsBusy state) $
                     writeTitle $
                         if titleIsBusy state
                             then busyWindowTitle firstFrame state.titleBase
@@ -100,7 +105,7 @@ newWindowTitleController motionMode initialTitle withOutputLock writeTitle = do
                     max 0 (current.titleInputWaitDepth - 1)
                 }
         worker =
-            when (motionMode == MotionFull) $
+            when (usesTitleSpinner && motionMode == MotionFull) $
                 forM_ (cycle frames) \frame -> do
                     atomically do
                         state <- readTVar stateVar

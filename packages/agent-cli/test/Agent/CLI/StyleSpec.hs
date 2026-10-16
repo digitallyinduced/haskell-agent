@@ -1,6 +1,7 @@
 module Agent.CLI.StyleSpec (spec) where
 
 import Agent.CLI.Style
+import Agent.CLI.Terminal (TerminalKind(..))
 import Agent.CLI.WindowTitle
     ( WindowTitleController(..)
     , busyWindowTitle
@@ -119,6 +120,7 @@ spec = do
                     frame : _ -> frame
                     [] -> "*"
             controller <- newWindowTitleController
+                TerminalOther
                 MotionOff
                 "initial"
                 id
@@ -140,6 +142,7 @@ spec = do
                     frame : _ -> frame
                     [] -> "*"
             controller <- newWindowTitleController
+                TerminalOther
                 MotionOff
                 "initial"
                 id
@@ -165,6 +168,7 @@ spec = do
                     frame : _ -> frame
                     [] -> "*"
             controller <- newWindowTitleController
+                TerminalOther
                 MotionOff
                 "initial"
                 id
@@ -189,6 +193,7 @@ spec = do
             started <- newEmptyMVar
             stopped <- newEmptyMVar
             controller <- newWindowTitleController
+                TerminalOther
                 MotionOff "initial" id
                 (\title -> modifyIORef' written (<> [title]))
             withAsync
@@ -213,6 +218,7 @@ spec = do
                     frame : _ -> frame
                     [] -> "*"
             controller <- newWindowTitleController
+                TerminalOther
                 MotionReduced
                 "initial"
                 id
@@ -221,3 +227,20 @@ spec = do
             controller.windowTitleWorker
             actual <- readIORef written
             actual `shouldBe` [firstFrame <> " initial"]
+
+        it "leaves Rex activity to its native indicator across overlapping scopes" do
+            written <- newIORef []
+            controller <- newWindowTitleController
+                TerminalRex MotionFull "initial" id
+                (\title -> modifyIORef' written (<> [title]))
+            controller.windowTitleBeginBusy
+            controller.windowTitleBeginBusy
+            controller.windowTitleWorker
+            controller.windowTitleSet "working"
+            controller.windowTitleBeginInputWait
+            controller.windowTitleSet "waiting"
+            controller.windowTitleEndInputWait
+            controller.windowTitleEndBusy
+            controller.windowTitleSet "background work"
+            controller.windowTitleEndBusy
+            readIORef written `shouldReturn` ["working", "waiting", "background work"]
