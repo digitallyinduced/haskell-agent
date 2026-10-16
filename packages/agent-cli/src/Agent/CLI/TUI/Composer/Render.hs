@@ -6,6 +6,7 @@ module Agent.CLI.TUI.Composer.Render
     , drawQueuedInputs
     , drawBackgroundTaskStatus
     , drawComposer
+    , drawAsyncQuestions
     , drawClipboardImageTip
     , controlAttr
     , controlInteractionAttr
@@ -30,7 +31,7 @@ import Agent.CLI.TUI.Motion (motionModeForTerminalFocus)
 import Agent.CLI.TUI.Types
 import Agent.TUI.Model
 import Agent.TUI.Motion (foregroundIndicator)
-import Agent.TUI.TextWidth (terminalTextImage)
+import Agent.TUI.TextWidth (displayTerminalText, terminalTextImage)
 import qualified Agent.TUI.Theme as Theme
 import Brick
 import qualified Brick.Types as B
@@ -40,6 +41,8 @@ import qualified Brick.Widgets.Border.Style as BorderStyle
 import Data.List (intersperse, mapAccumL)
 import Data.Sequence (ViewL(..))
 import qualified Data.Sequence as Seq
+import qualified Data.Foldable as Foldable
+import qualified Graphics.Vty as V
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -179,6 +182,36 @@ drawClipboardImageTip state =
                         , withAttr Theme.strongAttr (txt clipboardImageTipChord)
                         , withAttr Theme.mutedAttr (txt clipboardImageTipSuffix)
                         ]
+
+-- | This surface belongs to the composer, so conversation scrolling and
+-- continuing tool output cannot move outstanding questions out of view.
+drawAsyncQuestions :: UiState -> Widget Name
+drawAsyncQuestions state
+    | Seq.null state.uiAsyncQuestions = emptyWidget
+    | otherwise = Widget Greedy Fixed do
+        context <- getContext
+        let body = withAttr Theme.assistantAttr $
+                txtWrap (displayTerminalText
+                    (Text.intercalate "\n\n" (Foldable.toList state.uiAsyncQuestions)))
+            bodyWidth = max 1 (context.availWidth - 8)
+            maximumRows = max 1 (context.availHeight `div` 3 - 3)
+        measured <- render (hLimit bodyWidth body)
+        let rows = max 1 (min maximumRows (V.imageHeight measured.image))
+        render $ padLeftRight 2 $
+            withAttr Theme.borderActiveAttr $
+                withBorderStyle unicodeRounded $
+                    Border.borderWithLabel (txt " Questions for you ") $
+                        padLeftRight 1 $
+                            vBox
+                                [ vLimit rows $
+                                    clickable AsyncQuestionsViewport $
+                                        viewport AsyncQuestionsViewport Vertical body
+                                , hBox
+                                    [ withAttr Theme.mutedAttr (txt "Reply below · scroll to read ")
+                                    , clickable AsyncQuestionsDismiss $
+                                        withAttr Theme.controlLinkAttr (txt "[Dismiss]")
+                                    ]
+                                ]
 
 drawComposer :: AppState -> Widget Name
 drawComposer appState =

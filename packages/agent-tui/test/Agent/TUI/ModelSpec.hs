@@ -29,6 +29,46 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "fullscreen UI reducer" do
+    it "keeps asynchronous questions outside history without disturbing the composer" do
+        let draft = reduceUi (UiSetDraft "unfinished answer" 4) initialUiState
+            asked = reduceUi (UiAsyncQuestion "Which account?") draft
+            multiple = reduceUi (UiAsyncQuestion "Which region?") asked
+        Foldable.toList multiple.uiAsyncQuestions
+            `shouldBe` ["Which account?", "Which region?"]
+        multiple.uiBlocks `shouldBe` draft.uiBlocks
+        multiple.uiDraft `shouldBe` draft.uiDraft
+        multiple.uiCursor `shouldBe` draft.uiCursor
+        multiple.uiFocus `shouldBe` draft.uiFocus
+
+    it "retains pending questions across output, scrolling, notices, and completed turns" do
+        let asked = reduceUi (UiAsyncQuestion "Which account?") initialUiState
+            continued = applyFrom asked
+                [ UiLoop TurnStarted
+                , UiLoop (TextDelta "Continuing independent work.")
+                , UiSetFollow False
+                , UiSetNotice (Just (successNotice "Saved"))
+                , UiLoop (TurnFinished (emptyTurnOutput "r1" [] Nothing))
+                , UiTurnEnded BlockComplete
+                ]
+        continued.uiAsyncQuestions `shouldBe` asked.uiAsyncQuestions
+        (advanceUiTime 60000 continued).uiAsyncQuestions
+            `shouldBe` asked.uiAsyncQuestions
+
+    it "clears questions on a delivered reply or explicit dismissal, not draft editing or queueing" do
+        let asked = reduceUi (UiAsyncQuestion "Which account?") initialUiState
+        map (Foldable.toList . (.uiAsyncQuestions) . (`reduceUi` asked))
+            [ UiUserSubmitted "Test account"
+            , UiInputSteered "Test account"
+            , UiDismissAsyncQuestions
+            , UiConversationCleared
+            ] `shouldBe` replicate 4 []
+        map ((.uiAsyncQuestions) . (`reduceUi` asked))
+            [ UiSetDraft "Test" 4
+            , UiDraftSubmitted
+            , UiInputQueued "Test account"
+            , UiAsyncQuestion "   "
+            ] `shouldBe` replicate 4 asked.uiAsyncQuestions
+
     it "retains incremental assistant parsing across deltas and releases it at completion" do
         let fragments = ["First paragraph.\n", "\n```haskell\n", "value = 1\n", "```\n"]
             streaming = foldl' (flip (reduceUi . UiLoop . TextDelta)) initialUiState fragments

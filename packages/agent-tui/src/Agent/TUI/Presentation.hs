@@ -155,7 +155,9 @@ toolCallTitleRelative workspace call
 -- retain their complete title and have no separate header detail.
 toolCallHeaderRelative :: Text -> ToolCall -> (Text, Maybe Text)
 toolCallHeaderRelative workspace call =
-    case toolPathArgument call of
+    if canonicalToolName call.name == "request_user_input_async"
+    then ("Question for you", Just "")
+    else case toolPathArgument call of
         Just path ->
             ( toolVerb call.name
             , Just (workspaceRelativeDisplayPath workspace path)
