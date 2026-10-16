@@ -124,6 +124,11 @@ data Name
         !AgentTarget
         !BlockId
         !BlockId
+    | ConversationPaddedChunkCache
+        !Int
+        !AgentTarget
+        !BlockId
+        !BlockId
     | ConversationBlockCache
         !AgentTarget
         !BlockId
@@ -457,6 +462,11 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeMotionTickQueued :: !(TVar Bool)
     , runtimeMotionMode :: !MotionMode
     , runtimeImagePreviews :: !(IORef [(ImageAttachment, TuiImagePreview)])
+    -- | Image previews waiting for their user row, in submission order.
+    -- A later prompt appends another entry. It must not replace an earlier
+    -- one that Brick has not attached yet.
+    , runtimePendingSubmittedPreviews
+        :: !(IORef (Seq (Text, [TuiImagePreview])))
     , runtimeSubmittedImagePlacements
         :: !(IORef [NativePreviewPlacement])
     , runtimeImagePreviewRevision :: !(IORef Int)

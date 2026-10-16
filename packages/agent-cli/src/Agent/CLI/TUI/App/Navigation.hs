@@ -816,7 +816,8 @@ imageLayoutFromProbe imageBounds blockId index = do
 
 isUserMessageBlock :: AppState -> BlockId -> Bool
 isUserMessageBlock state blockId =
-    case historyWindowBlock blockId state.appHistoryWindow of
+    case historyWindowBlock blockId state.appHistoryWindow
+        <|> find ((== blockId) . (.blockId)) (toList state.appUi.uiBlocks) of
         Just block -> block.blockKind == BlockUser
         Nothing -> False
 

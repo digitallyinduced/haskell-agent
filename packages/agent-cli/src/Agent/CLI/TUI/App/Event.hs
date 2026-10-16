@@ -717,23 +717,11 @@ handleSetImagePreviewsEvent prepared = do
 handleCommitImagePreviewsEvent
     :: [(ImageAttachment, TuiImagePreview)]
     -> EventM Name AppState ()
-handleCommitImagePreviewsEvent prepared = do
+handleCommitImagePreviewsEvent _prepared = do
+    -- The bitmap is attached when the matching user row is appended.
+    -- Guessing 'uiNextBlockId' here lands it on the next tool row, and a
+    -- compact action line does not draw image sections.
     state <- get
-    let previews = map snd prepared
-        nextBlockId = BlockId state.appUi.uiNextBlockId
-        submitted =
-            if null previews
-                then Map.delete
-                    nextBlockId
-                    state.appSubmittedImagePreviews
-                else Map.insert
-                    nextBlockId
-                    previews
-                    state.appSubmittedImagePreviews
-        retained =
-            retainSubmittedImagePreviewsForBlocks
-                (nub (conversationBlockIds state <> [nextBlockId]))
-                submitted
     liftIO $ when (not state.appComposerOwnsImagePreviews) do
         writeIORef state.appRuntime.runtimeImagePreviews []
         modifyIORef'
@@ -746,7 +734,6 @@ handleCommitImagePreviewsEvent prepared = do
                 if current.appComposerOwnsImagePreviews
                     then current.appImagePreviews
                     else []
-            , appSubmittedImagePreviews = retained
             }
     queueConversationReflow
 

@@ -77,6 +77,7 @@ rawAttrs oldTerm =
 
 data TerminalKind
     = TerminalGhostty
+    | TerminalRex
     | TerminalKitty
     | TerminalWezTerm
     | TerminalITerm
@@ -109,6 +110,7 @@ detectTerminalCapabilities handle = do
     tmux <- isJust <$> lookupEnv "TMUX"
     let has needle haystack = Text.pack needle `Text.isInfixOf` Text.pack haystack
         kind
+            | program == "rex" = TerminalRex
             | program == "ghostty" || has "ghostty" term = TerminalGhostty
             | isJust kittyWindow || program == "kitty" || has "kitty" term =
                 TerminalKitty
@@ -125,7 +127,7 @@ detectTerminalCapabilities handle = do
         , terminalIsTty = tty
         , terminalInsideTmux = tmux
         , terminalInlineImages =
-            oneOf [TerminalGhostty, TerminalKitty, TerminalWezTerm, TerminalITerm]
+            oneOf [TerminalGhostty, TerminalRex, TerminalKitty, TerminalWezTerm, TerminalITerm]
         , terminalNativeProgress = oneOf [TerminalGhostty, TerminalWindows]
         , terminalNotifications = oneOf [TerminalGhostty, TerminalITerm]
         , terminalSemanticPrompts = oneOf [TerminalGhostty, TerminalITerm]
@@ -166,6 +168,7 @@ formatTerminalCapabilities capabilities =
     yesNo False = "no"
     terminalKindName = \case
         TerminalGhostty -> "ghostty"
+        TerminalRex -> "rex"
         TerminalKitty -> "kitty"
         TerminalWezTerm -> "wezterm"
         TerminalITerm -> "iterm"
