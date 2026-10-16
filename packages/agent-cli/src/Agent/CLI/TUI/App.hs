@@ -7,6 +7,7 @@ module Agent.CLI.TUI.App
     ( FullscreenInputBuffer
     , FullscreenRuntime
     , advanceCompletionFlashes
+    , awaitFullscreenDictationTarget
     , applyStoredMouseCapture
     , applyMouseCaptureToOutput
     , agentEntryWindow

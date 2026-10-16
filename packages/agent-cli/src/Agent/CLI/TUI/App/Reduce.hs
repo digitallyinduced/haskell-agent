@@ -236,7 +236,14 @@ handleUiEvents uiEvents = do
         timestamp
         renderedContentHeight
         (state, previousProgress, followed, invalidated)
-        uiEvent =
+        uiEvent
+        -- Startup continues in parallel with microphone capture. Its
+        -- progress and final clearing must not replace dictation controls.
+        | isJust state.appDictation
+        , UiSetNotice notice <- uiEvent
+        , maybe True ((== NoticeProgress) . (.noticeKind)) notice =
+            (state, previousProgress, followed, invalidated)
+        | otherwise =
             let
                 unstamped =
                     applyUiEvent uiEvent $

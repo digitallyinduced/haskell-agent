@@ -484,7 +484,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeSyntaxHighlighter
         :: !(IORef SyntaxHighlighterState)
     , runtimeInitial :: !UiState
-    , runtimeSessionActions :: !(IORef FullscreenSessionActions)
+    , runtimeSessionActions :: !(TVar FullscreenSessionActions)
     , runtimeHistoryRequests :: !(TQueue HistoryRequest)
     , runtimeHistoryChartRequests :: !(TVar [(HistoryGeneration, BlockId, Text)])
     , runtimeHistorySource :: !(IORef (Maybe FullscreenHistorySource))

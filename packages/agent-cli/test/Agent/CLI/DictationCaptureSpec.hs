@@ -1,7 +1,7 @@
 module Agent.CLI.DictationCaptureSpec (spec) where
 
 import Agent.CLI.Dictation.Capture (withBufferedCapture, withDictationCancellation)
-import Agent.CLI.Dictation (saveFailedDictationRecording)
+import Agent.CLI.Dictation (resampleDictationPcm, saveFailedDictationRecording)
 import Control.Concurrent.Async (cancel, withAsync)
 import Control.Concurrent.MVar
     ( newEmptyMVar, putMVar, readMVar, takeMVar, tryReadMVar )
@@ -10,7 +10,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.List (isSuffixOf)
-import System.Directory (listDirectory)
+import System.Directory (findExecutable, listDirectory)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Timeout (timeout)
@@ -18,6 +18,22 @@ import Test.Hspec
 
 spec :: Spec
 spec = around_ within $ describe "buffered dictation capture" do
+    it "preserves PCM chunks when the resolved provider uses the capture rate" do
+        let produce send = send "first" >> send "second"
+        collect (resampleDictationPcm 24_000 24_000 produce)
+            `shouldReturn` "firstsecond"
+
+    it "resamples startup audio for xAI and can replay it for retries" do
+        findExecutable "ffmpeg" >>= \case
+            Nothing -> pendingWith "ffmpeg is required for PCM conversion"
+            Just _ -> do
+                -- One second, split across an incomplete PCM16 sample.
+                let pcm = BS.replicate 48_000 0
+                    produce send = send (BS.take 1 pcm) >> send (BS.drop 1 pcm)
+                    converted = resampleDictationPcm 24_000 16_000 produce
+                collect converted `shouldReturn` BS.replicate 32_000 0
+                collect converted `shouldReturn` BS.replicate 32_000 0
+
     it "cancels blocked final transcription and joins both resources" do
         cancellation <- newEmptyMVar
         finalizing <- newEmptyMVar

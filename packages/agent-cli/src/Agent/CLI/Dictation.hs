@@ -10,12 +10,14 @@ module Agent.CLI.Dictation
     , dictateForTarget
     , dictateWith
     , dictateWithTarget
+    , dictateWithPendingTarget
     , dictationTargetForSession
     , dictationBackendsForProvider
     , dictationBackendUnavailable
     , insertDictation
     , loadDictationBackendAuth
     , saveFailedDictationRecording
+    , resampleDictationPcm
     , selectDictationBackend
     , transcribeAudio
     ) where
@@ -45,7 +47,8 @@ import Agent.XAI.Transcription
     ( transcribePcmWithXAI
     )
 import Control.Concurrent.Async
-    ( wait
+    ( concurrently_
+    , wait
     , waitEitherCatch
     , withAsync
     )
@@ -99,6 +102,7 @@ import System.Process
     , getPid
     , proc
     , waitForProcess
+    , withCreateProcess
     )
 
 data DictationControl = DictationControl
@@ -316,76 +320,79 @@ dictateWithTarget
     -> DictationControl
     -> IO DictationResult
 dictateWithTarget target control =
-    try run >>= \case
+    attemptDictation do
+        requireExecutable "ffmpeg"
+        transcribeDictation target control (captureDictation control)
+
+-- | The editable startup screen precedes provider and gateway resolution.
+-- Capture immediately, then use only the target installed by that session.
+-- Resample the replay when its backend requires a different PCM rate.
+dictateWithPendingTarget
+    :: IO DictationTarget
+    -> DictationControl
+    -> IO DictationResult
+dictateWithPendingTarget awaitTarget control =
+    attemptDictation do
+        requireExecutable "ffmpeg"
+        captureDictation control openAITranscriptionSampleRate \produceAudio -> do
+            target <- awaitTarget
+            transcribeDictation target control \rate consume ->
+                consume
+                    (resampleDictationPcm
+                        openAITranscriptionSampleRate rate produceAudio)
+
+attemptDictation :: IO DictationResult -> IO DictationResult
+attemptDictation action =
+    try action >>= \case
         Left (err :: SomeException) ->
             pure (DictationFailed (Text.pack (displayException err)))
         Right result ->
             pure result
+
+type DictationAudio = (BS.ByteString -> IO ()) -> IO ()
+
+transcribeDictation
+    :: DictationTarget
+    -> DictationControl
+    -> (Int -> (DictationAudio -> IO DictationResult) -> IO DictationResult)
+    -> IO DictationResult
+transcribeDictation target control capture =
+    case target of
+        DirectDictation provider ->
+            case dictationBackendsForProvider provider of
+                Left err ->
+                    pure (DictationFailed err)
+                Right (backend :| []) ->
+                    capture (sampleRate backend) \produceAudio ->
+                        loadDictationBackendAuth backend >>= \case
+                            Left err ->
+                                pure (DictationFailed (dictationAuthErrorText err))
+                            Right loaded ->
+                                runBackend backend loaded produceAudio
+                Right _ ->
+                    -- Borrowed backends use different PCM sample rates.
+                    -- Select the credential first, then start capture before
+                    -- token refresh and provider connection setup.
+                    selectDictationBackend provider loadDictationBackendAuth
+                        >>= \case
+                            Left err ->
+                                pure (DictationFailed err)
+                            Right (backend, loaded) ->
+                                capture (sampleRate backend)
+                                    (runBackend backend loaded)
+        GatewayDictation provider gateway ->
+            capture (if provider == XAIProvider then 16000 else openAITranscriptionSampleRate) \produceAudio ->
+                transcribeGatewayPcm
+                    gateway
+                    provider
+                    produceAudio
+                    control.dictationOnTranscript >>= \case
+                        Left err -> pure (DictationFailed err)
+                        Right transcript ->
+                            pure
+                                (DictationTranscript
+                                    (Text.strip transcript))
   where
-    run = do
-        requireExecutable "ffmpeg"
-        case target of
-            DirectDictation provider ->
-                case dictationBackendsForProvider provider of
-                    Left err ->
-                        pure (DictationFailed err)
-                    Right (backend :| []) ->
-                        capture (sampleRate backend) \produceAudio ->
-                            loadDictationBackendAuth backend >>= \case
-                                Left err ->
-                                    pure (DictationFailed (dictationAuthErrorText err))
-                                Right loaded ->
-                                    runBackend backend loaded produceAudio
-                    Right _ ->
-                        -- Borrowed backends use different PCM sample rates.
-                        -- Select the credential first, then start capture before
-                        -- token refresh and provider connection setup.
-                        selectDictationBackend provider loadDictationBackendAuth
-                            >>= \case
-                                Left err ->
-                                    pure (DictationFailed err)
-                                Right (backend, loaded) ->
-                                    capture (sampleRate backend)
-                                        (runBackend backend loaded)
-            GatewayDictation provider gateway ->
-                capture (if provider == XAIProvider then 16000 else openAITranscriptionSampleRate) \produceAudio ->
-                    transcribeGatewayPcm
-                        gateway
-                        provider
-                        produceAudio
-                        control.dictationOnTranscript >>= \case
-                            Left err -> pure (DictationFailed err)
-                            Right transcript ->
-                                pure
-                                    (DictationTranscript
-                                        (Text.strip transcript))
-    -- Retain up to 32 MiB for provider retries (~11 minutes of
-    -- 24 kHz mono PCM16), without unbounded startup buffering.
-    capture rate consume =
-        withBufferedCapture
-            (32 * 1024 * 1024)
-            control.dictationOnRecording
-            (streamMicrophone rate control.dictationWaitForStop)
-            \produceAudio -> do
-                result <- consume produceAudio
-                case result of
-                    DictationFailed err -> do
-                        saved <- tryAny do
-                            home <- getHomeDirectory
-                            saveFailedDictationRecording
-                                (home </> ".haskell-agent" </> "dictations")
-                                rate
-                                produceAudio
-                        pure $ case saved of
-                            Right (Just path) ->
-                                DictationRecordingSaved err (Text.pack path)
-                            Right Nothing -> result
-                            Left saveError ->
-                                DictationFailed
-                                    (err <> " (Could not save recording: "
-                                        <> Text.pack (displayException saveError)
-                                        <> ")")
-                    _ -> pure result
     sampleRate = \case
         OpenAIDictation -> openAITranscriptionSampleRate
         XAIDictation -> 16_000
@@ -407,6 +414,72 @@ dictateWithTarget target control =
             pure (DictationFailed (Text.pack (show err)))
         Right transcript ->
             pure (DictationTranscript (Text.strip transcript))
+
+-- Retain up to 32 MiB for provider retries (~11 minutes of
+-- 24 kHz mono PCM16), without unbounded startup buffering.
+captureDictation
+    :: DictationControl
+    -> Int
+    -> (DictationAudio -> IO DictationResult)
+    -> IO DictationResult
+captureDictation control rate consume =
+    withBufferedCapture
+        (32 * 1024 * 1024)
+        control.dictationOnRecording
+        (streamMicrophone rate control.dictationWaitForStop)
+        \produceAudio -> do
+            result <- consume produceAudio
+            case result of
+                DictationFailed err -> do
+                    saved <- tryAny do
+                        home <- getHomeDirectory
+                        saveFailedDictationRecording
+                            (home </> ".haskell-agent" </> "dictations")
+                            rate
+                            produceAudio
+                    pure $ case saved of
+                        Right (Just path) ->
+                            DictationRecordingSaved err (Text.pack path)
+                        Right Nothing -> result
+                        Left saveError ->
+                            DictationFailed
+                                (err <> " (Could not save recording: "
+                                    <> Text.pack (displayException saveError)
+                                    <> ")")
+                _ -> pure result
+
+-- | Convert a replayable PCM stream without reopening the microphone or
+-- collecting another complete copy. Equal rates preserve the original path.
+resampleDictationPcm :: Int -> Int -> DictationAudio -> DictationAudio
+resampleDictationPcm sourceRate targetRate produce send
+    | sourceRate == targetRate = produce send
+    | otherwise =
+        withCreateProcess configuration \input output _ process ->
+            case (input, output) of
+                (Just inputHandle, Just outputHandle) -> do
+                    let pump = do
+                            bytes <- BS.hGetSome outputHandle (targetRate * 2 `div` 10)
+                            unless (BS.null bytes) (send bytes >> pump)
+                    concurrently_
+                        (produce (BS.hPut inputHandle) `finally` hClose inputHandle)
+                        pump
+                    waitForProcess process >>= \case
+                        ExitSuccess -> pure ()
+                        ExitFailure code ->
+                            fail ("Dictation audio conversion failed (ffmpeg exit " <> show code <> ")")
+                _ -> fail "Could not open dictation audio conversion pipes"
+  where
+    configuration =
+        (proc "ffmpeg"
+            [ "-nostdin", "-v", "error"
+            , "-f", "s16le", "-ar", show sourceRate, "-ac", "1"
+            , "-i", "pipe:0"
+            , "-ar", show targetRate, "-ac", "1", "-f", "s16le", "pipe:1"
+            ])
+            { std_in = CreatePipe
+            , std_out = CreatePipe
+            , std_err = NoStream
+            }
 
 -- | Replay the captured PCM only after transcription has definitively failed.
 -- Do not put recordings in a temporary directory: its cleanup could discard
