@@ -5,10 +5,25 @@ import Control.Exception.Safe (bracket)
 import Control.Monad (forM_)
 import qualified Data.Text as Text
 import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.IO (stdout)
 import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "terminal capability detection" do
+        it "recognizes Rex and enables inline images only on a TTY" do
+            bracket
+                (lookupEnv "TERM_PROGRAM")
+                (maybe (unsetEnv "TERM_PROGRAM") (setEnv "TERM_PROGRAM"))
+                \_ -> do
+                    setEnv "TERM_PROGRAM" "rex"
+                    capabilities <- detectTerminalCapabilities stdout
+                    capabilities.terminalKind `shouldBe` TerminalRex
+                    capabilities.terminalInlineImages
+                        `shouldBe` capabilities.terminalIsTty
+                    formatTerminalCapabilities capabilities
+                        `shouldSatisfy` Text.isPrefixOf "terminal: rex\n"
+
     describe "SSH session detection" do
         it "does not classify a local terminal as SSH" do
             withSshEnvironment Nothing $

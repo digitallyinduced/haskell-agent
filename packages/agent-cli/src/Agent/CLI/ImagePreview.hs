@@ -1,7 +1,7 @@
 -- | In-terminal preview of clipboard images (Kitty graphics + iTerm2 OSC 1337).
 --
 -- Grok Build draws a thumbnail above the prompt when you paste an image.
--- We follow the same two protocols: Kitty/Ghostty/WezTerm via APC @_G@, and
+-- We follow the same two protocols: Kitty/Ghostty/Rex/WezTerm via APC @_G@, and
 -- iTerm2 via OSC 1337. tmux needs DCS passthrough. Unsupported terminals
 -- get a muted text fallback so the attachment still has a visible chip.
 module Agent.CLI.ImagePreview
@@ -55,7 +55,7 @@ data ImagePreviewProtocol
     | PreviewUnsupported
     deriving (Eq, Show)
 
--- | Kitty/Ghostty/WezTerm via @TERM@ / @TERM_PROGRAM@ / @KITTY_WINDOW_ID@.
+-- | Kitty/Ghostty/Rex/WezTerm via @TERM@ / @TERM_PROGRAM@ / @KITTY_WINDOW_ID@.
 -- iTerm2 via @ITERM_SESSION_ID@ / @TERM_PROGRAM=iTerm.app@.
 parseImagePreviewProtocol
     :: Maybe String
@@ -73,7 +73,7 @@ parseImagePreviewProtocol mTerm mTermProgram mKittyWindow mItermSession
     looksLikeKitty =
         not (null (fromMaybeEmpty mKittyWindow))
             || "kitty" `elem` termWords
-            || program `elem` ["kitty", "ghostty", "wezterm", "wezterm.app"]
+            || program `elem` ["kitty", "ghostty", "rex", "wezterm", "wezterm.app"]
             || "ghostty" `elem` termWords
             || "wezterm" `elem` termWords
     looksLikeITerm =
