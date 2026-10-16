@@ -1,3 +1,5 @@
+{-# LANGUAGE NumericUnderscores #-}
+
 module Agent.Transcription.ReceiveSpec (spec) where
 
 import Agent.Transcription.Receive
