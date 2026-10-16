@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Name the conversation on WebSocket handshakes, as the official client
+  does. `withCodexWsCredentialForSession` sends `session-id`, `thread-id`
+  and `x-client-request-id` (`buildCodexWsSessionHeaders`) with the prompt
+  cache key. The backend derives prompt-cache affinity from `session-id`:
+  without it, every socket got a random cache key, so a conversation that
+  reconnects and replays its history started uncached.
 - Attribute Codex requests the way the official client does. Every HTTP
   request and WebSocket frame now carries `originator`, `session-id`,
   `thread-id`, `x-client-request-id`, `x-codex-window-id`, and an

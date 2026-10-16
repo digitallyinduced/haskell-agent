@@ -15,7 +15,7 @@ import Agent.Runtime.Session.History (readLivePreviousResponseId, readLiveTransc
 import Agent.Provider (Provider(..), BillingMode(..), TokenProvider, tokenProvider)
 import Agent.Responses.Types (defaultResponseCreateParams)
 import Agent.OpenAI.Compaction (userTextItem, compactionTriggerItem)
-import qualified Agent.Responses.Types as Responses (ResponseCreateParams(model))
+import qualified Agent.Responses.Types as Responses (ResponseCreateParams(model, promptCacheKey))
 import Control.Concurrent.Async (cancel, withAsync, waitCatch)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception.Safe (finally, throwIO, throwString)
@@ -26,10 +26,48 @@ import Test.Hspec
 import qualified Agent.OpenRouter.Options as OpenRouter
 import qualified Network.Wai as Wai
 import qualified Network.Wai.Handler.Warp as Warp
-import Network.HTTP.Types (status200)
+import Network.HTTP.Types (status200, status400)
 
 spec :: Spec
 spec = describe "provider runtime composition" do
+    it "attributes the initial OpenAI WebSocket handshake to the session cache key" do
+        observed <- newIORef []
+        let application request respond = do
+                writeIORef observed (Wai.requestHeaders request)
+                respond $ Wai.responseLBS status400 [] "handshake rejected for test"
+        Warp.testWithApplication (pure application) \port -> do
+            let origin = "http://127.0.0.1:" <> Text.pack (show port)
+                gateway = GatewayCredential origin
+                    ("ws://127.0.0.1:" <> Text.pack (show port) <> "/v1/responses")
+                    "gateway-token"
+            loaded <- either (fail . Text.unpack) pure $
+                gatewayLoadedAuthForProvider (Just OpenAIProvider) gateway
+            host <- newHost
+            paramsRef <- newSessionRequestState PersistenceDisabled
+                defaultResponseCreateParams
+                    { Responses.model = Just "small"
+                    , Responses.promptCacheKey = Just "runtime-conversation"
+                    }
+                >>= either (fail . Text.unpack) pure
+            let config = OpenAiProviderConfig OpenAiConfig
+                    { tokenProvider = loaded.loadedTokenProvider
+                    , showRawReasoning = False
+                    , transportModel = id
+                    , accounts = OpenAiAccounts
+                        { selectablePool = Nothing
+                        , readActiveAccountId = pure ""
+                        , resolveAccountLabel = const (pure "gateway")
+                        , installAccount = \_ _ -> pure ()
+                        , preferAccount = const (pure ())
+                        }
+                    }
+                sessionHost = host { compaction = host.compaction { paramsRef } }
+            withProviderRuntime config sessionHost (const (pure ()))
+                `shouldThrow` anyException
+        headers <- readIORef observed
+        map (`lookup` headers) ["session-id", "thread-id", "x-client-request-id"]
+            `shouldBe` replicate 3 (Just "runtime-conversation")
+
     mapM_ checkProvider
         [ ("Gemini", GeminiProviderConfig noNetworkTokens)
         , ("xAI", XaiProviderConfig noNetworkTokens False Nothing)

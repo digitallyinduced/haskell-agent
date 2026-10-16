@@ -92,7 +92,7 @@ import Agent.OpenAI.LoopBackend
 import Agent.OpenAI.WebSocketClient
     ( newCodexTurnState
     , sendWsRequestWithEventsPreservingTurnState
-    , withCodexWsRetryingUsingTurnState
+    , withCodexWsRetryingUsingTurnStateForSession
     )
 import Agent.Provider (Provider(..), TokenProvider, providerSlug)
 import Agent.ReasoningEffort (reasoningEffortText)
@@ -986,7 +986,8 @@ runCodexChildBackend
         compactSender request =
             if gatewayOnly
                 then
-                    withCodexWsRetryingUsingTurnState
+                    withCodexWsRetryingUsingTurnStateForSession
+                        (maybe "" id request.promptCacheKey)
                         tokenProvider
                         turnState
                         \conn _credential ->

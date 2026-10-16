@@ -3,10 +3,13 @@ module Agent.OpenAI.WebSocketClientSpec (spec) where
 import Test.Hspec
 import Agent.Error
 import Agent.ClientIdentity (gatewayUserAgent)
-import Agent.Provider (Credential(..), Provider(..))
+import Agent.Provider
+    ( Credential(..), Provider(..), BillingMode(..), FailedCredential(..)
+    , AccountFailure(..), tokenProvider )
 import Agent.Responses.Types
 import qualified Agent.Responses.Codec as ResponsesCodec
 import Agent.OpenAI.RequestIdentity (CodexRequestKind(..))
+import Agent.OpenAI.TestSupport (withWebSocketServer)
 import Agent.OpenAI.WebSocketClient
 import Control.Concurrent.Async (withAsync, wait)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, readMVar)
@@ -20,6 +23,7 @@ import Data.Either (isLeft)
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Network.WebSockets as WS
 import System.Timeout (timeout)
 
 spec :: Spec
@@ -239,6 +243,93 @@ spec = do
             `shouldSatisfy` isLeft
         validateGatewayWebSocketUrl "https://gateway.example/v1/responses"
             `shouldSatisfy` isLeft
+
+  describe "buildCodexWsSessionHeaders" do
+    it "names the session and the thread by the prompt cache key, as Codex does" do
+        buildCodexWsSessionHeaders "conversation-1"
+            `shouldBe`
+                [ ("session-id", "conversation-1")
+                , ("thread-id", "conversation-1")
+                , ("x-client-request-id", "conversation-1")
+                ]
+
+    it "leaves out a key that is not a valid header value" do
+        buildCodexWsSessionHeaders "two words" `shouldBe` []
+        buildCodexWsSessionHeaders "" `shouldBe` []
+
+  describe "withCodexWsCredentialForSession" do
+    -- The backend routes the prompt cache by the handshake's session-id. A
+    -- socket without one gets a random cache key, so a conversation that
+    -- reconnects and replays its history cannot reuse its cache.
+    it "sends the session headers on the WebSocket handshake" do
+        headers <- handshakeHeaders \credential ->
+            withCodexWsCredentialForSession "conversation-1" credential \_ _ -> pure ()
+        filter ((`elem` ["session-id", "thread-id", "x-client-request-id"]) . fst) headers
+            `shouldBe` buildCodexWsSessionHeaders "conversation-1"
+
+    it "keeps the handshake of an unnamed connection unchanged" do
+        headers <- handshakeHeaders \credential ->
+            withCodexWsCredential credential \_ _ -> pure ()
+        lookup "session-id" headers `shouldBe` Nothing
+
+  describe "session-aware production connectors" do
+    it "names the initial persistent provider connection" do
+        headers <- handshakeHeaders \credential -> do
+            let provider = tokenProvider SubscriptionBilled (const (pure (Right credential)))
+            withCodexWsWithProviderOrHttpFallbackForSession
+                "conversation-1" provider \_ _ -> pure ()
+            pure (Right ())
+        sessionHeaders headers `shouldBe` buildCodexWsSessionHeaders "conversation-1"
+
+    it "names an exact-credential account-switch connection" do
+        headers <- handshakeHeaders \credential ->
+            withCodexWsCredentialOrHttpFallbackForSession
+                "conversation-1" credential \_ _ -> pure ()
+        sessionHeaders headers `shouldBe` buildCodexWsSessionHeaders "conversation-1"
+
+    it "retains the session key and logical turn on disposable reconnections" do
+        turnState <- newCodexTurnState
+        recordCodexTurnState turnState "logical-turn"
+        let connect credential =
+                withCodexWsCredentialUsingTurnStateForSession
+                    "conversation-1" credential turnState \conn _ -> do
+                        readCodexTurnState (codexConnTurnState conn)
+                            `shouldReturn` Just "logical-turn"
+                        pure (Right ())
+        firstHeaders <- handshakeHeaders connect
+        secondHeaders <- handshakeHeaders connect
+        map sessionHeaders [firstHeaders, secondHeaders]
+            `shouldBe` replicate 2 (buildCodexWsSessionHeaders "conversation-1")
+
+    it "retains the session key when account failover reacquires a connection" do
+        attempts <- newIORef (0 :: Int)
+        turnState <- newCodexTurnState
+        firstHeaders <- handshakeHeaders \firstCredential -> do
+            secondHeaders <- handshakeHeaders \secondCredential -> do
+                let provider = tokenProvider SubscriptionBilled \case
+                        Nothing -> pure (Right firstCredential)
+                        Just _ -> pure (Right secondCredential)
+                withCodexWsRetryingUsingTurnStateForSession
+                    "conversation-1" provider turnState \_ _ -> do
+                        attempt <- atomicModifyIORef' attempts (\count -> (count + 1, count))
+                        pure $ if attempt == 0
+                            then Left (HttpError 401 "expired credential")
+                            else Right ()
+            sessionHeaders secondHeaders `shouldBe` buildCodexWsSessionHeaders "conversation-1"
+            pure (Right ())
+        sessionHeaders firstHeaders `shouldBe` buildCodexWsSessionHeaders "conversation-1"
+
+    it "names a recovery connection after reporting its failed credential" do
+        headers <- handshakeHeaders \credential -> do
+            let failed = FailedCredential
+                    credential AccountAuthenticationRejected
+                    (ExhaustedByAuthentication Nothing (Just 401))
+                provider = tokenProvider SubscriptionBilled \reported -> do
+                    reported `shouldBe` Just failed
+                    pure (Right credential)
+            withCodexWsRetryingAfterForSession
+                "conversation-1" provider failed \_ _ -> pure (Right ())
+        sessionHeaders headers `shouldBe` buildCodexWsSessionHeaders "conversation-1"
 
   describe "shouldFallbackDirectCodexHandshakeToHttp" do
     let direct = Credential
@@ -1020,3 +1111,31 @@ responseWithOutput output =
             ] of
         Right response -> response
         Left err -> error (Text.unpack err)
+
+-- | The request headers of the handshake that @connect@ sends to a loopback
+-- gateway endpoint.
+handshakeHeaders
+    :: (Credential -> IO (Either ApiError ()))
+    -> IO WS.Headers
+handshakeHeaders connect = do
+    received <- newEmptyMVar
+    let server pending = do
+            putMVar received (WS.requestHeaders (WS.pendingRequest pending))
+            connection <- WS.acceptRequest pending
+            -- The client ends the connection after the handshake.
+            (WS.receiveData connection :: IO Text) `shouldThrow` \case
+                WS.CloseRequest {} -> True
+                WS.ConnectionClosed -> True
+                _ -> False
+    withWebSocketServer server \port ->
+        connect Credential
+            { accessToken = "token"
+            , accountId = "ws://127.0.0.1:" <> Text.pack (show port) <> "/v1/responses"
+            , leaseId = Nothing
+            , provider = OpenAIProvider
+            }
+            `shouldReturn` Right ()
+    takeMVar received
+
+sessionHeaders :: WS.Headers -> WS.Headers
+sessionHeaders = filter ((`elem` ["session-id", "thread-id", "x-client-request-id"]) . fst)

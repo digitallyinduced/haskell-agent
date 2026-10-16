@@ -41,14 +41,14 @@ import Agent.OpenAI.WebSocketClient
     , codexConnUsesHttpFallback
     , isGatewayWebSocketCredential
     , resetCodexTurnState
-    , withCodexWsCredentialOrHttpFallback
-    , withCodexWsWithProviderOrHttpFallback
+    , withCodexWsCredentialOrHttpFallbackForSession
+    , withCodexWsWithProviderOrHttpFallbackForSession
     )
 import Agent.Provider
     ( Credential(..)
     , Provider(OpenAIProvider)
     )
-import Agent.Responses.Types (ResponseCreateParams(model))
+import Agent.Responses.Types (ResponseCreateParams(model, promptCacheKey))
 import Control.Concurrent.Async (link, withAsync)
 import Control.Concurrent.Chan
     ( Chan
@@ -83,8 +83,10 @@ withOpenAiProvider
     -> ProviderHost
     -> (ProviderRuntime -> IO a)
     -> IO a
-withOpenAiProvider config@OpenAiConfig{tokenProvider} host use =
-    withCodexWsWithProviderOrHttpFallback tokenProvider \conn credential ->
+withOpenAiProvider config@OpenAiConfig{tokenProvider} host use = do
+    params <- readSessionRequestParams host.compaction.paramsRef
+    withCodexWsWithProviderOrHttpFallbackForSession
+        (maybe "" id params.promptCacheKey) tokenProvider \conn credential ->
         withConnectedOpenAiProvider config host conn credential use
 
 data AccountSwitchRequest
@@ -120,11 +122,12 @@ newOpenAiConnectionState conn credential = do
     pure OpenAiConnectionState{..}
 
 newOpenAiProviderRuntime
-    :: OpenAiAccounts
+    :: IO Text
+    -> OpenAiAccounts
     -> CodexConn
     -> Credential
     -> IO OpenAiProviderRuntime
-newOpenAiProviderRuntime OpenAiAccounts{..} conn credential = do
+newOpenAiProviderRuntime getSessionKey OpenAiAccounts{..} conn credential = do
     OpenAiConnectionState
         { openAiConnectionLock = wsLock
         , openAiConnectionRef =
@@ -209,8 +212,10 @@ newOpenAiProviderRuntime OpenAiAccounts{..} conn credential = do
                     writeIORef oldHealthy False
                     closeCodexConn oldConn
                     preferAccount selectedCredential.accountId
+                    sessionKey <- getSessionKey
                     let connectSelected =
-                            withCodexWsCredentialOrHttpFallback
+                            withCodexWsCredentialOrHttpFallbackForSession
+                                sessionKey
                                 selectedCredential
                                 \newConn newCredential -> do
                                     (newHealthy, label) <-
@@ -250,7 +255,8 @@ newOpenAiProviderRuntime OpenAiAccounts{..} conn credential = do
                                                             , provider =
                                                                 OpenAIProvider
                                                             }
-                                                (withCodexWsCredentialOrHttpFallback
+                                                (withCodexWsCredentialOrHttpFallbackForSession
+                                                    sessionKey
                                                     restoredCredential
                                                     \newConn newCredential -> do
                                                         (newHealthy, _) <-
@@ -337,6 +343,7 @@ withConnectedOpenAiProvider OpenAiConfig{..}
         , openAiSelectAccount = selectAccount
         , openAiSwitchLoop = switchLoop
         } <- newOpenAiProviderRuntime
+            (maybe "" id . (.promptCacheKey) <$> readSessionRequestParams paramsRef)
             accounts
             conn
             credential
