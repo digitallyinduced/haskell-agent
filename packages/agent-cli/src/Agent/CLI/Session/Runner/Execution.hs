@@ -327,6 +327,7 @@ newSessionHostRuntime SessionRequest{..} = do
                     putTextLn stderrHandle
                         (roleWarn color (glyphWarn <> message))
     windowTitle <- newWindowTitleController
+        terminal.terminalKind
         options.optMotionMode
         startupWindowTitle
         withIoLock
