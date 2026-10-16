@@ -19,21 +19,23 @@ import time
 
 
 ANSI = re.compile(rb"\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|[()][A-Z0-9])")
-READY = re.compile(rb"(?:startup: |\xc2\xb7\s*)ready ([0-9.]+)(ms|s)\b")
+READY = re.compile(rb"(?:startup: |\xc2\xb7\s*)ready\s+([0-9.]+)(ms|s)\b")
 FRAME_END = b"\x1b[?25h"
 PROBE = b"startup-probe"
 
 
 def sample(args, index):
-    env = dict(os.environ, HOME=str(args.home), TERM="xterm-256color",
+    env = dict(os.environ, TERM="xterm-256color",
                HASKELL_AGENT_STARTUP_TIMING="1")
-    for key, directory in (
-        ("XDG_CONFIG_HOME", ".config"),
-        ("XDG_CACHE_HOME", ".cache"),
-        ("XDG_DATA_HOME", ".local/share"),
-        ("XDG_STATE_HOME", ".local/state"),
-    ):
-        env[key] = str(args.home / directory)
+    if args.home:
+        env["HOME"] = str(args.home)
+        for key, directory in (
+            ("XDG_CONFIG_HOME", ".config"),
+            ("XDG_CACHE_HOME", ".cache"),
+            ("XDG_DATA_HOME", ".local/share"),
+            ("XDG_STATE_HOME", ".local/state"),
+        ):
+            env[key] = str(args.home / directory)
     # Do not inherit the outer harness's terminal/session identity.
     for key in ("TMUX", "STY"):
         env.pop(key, None)
@@ -124,8 +126,11 @@ def sample(args, index):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--home", type=Path, required=True,
-                        help="dedicated pre-initialized home; do not use your real HOME")
+    home_options = parser.add_mutually_exclusive_group(required=True)
+    home_options.add_argument("--home", type=Path,
+                              help="dedicated pre-initialized home; do not use your real HOME")
+    home_options.add_argument("--current-home", action="store_true",
+                              help="use existing configuration and credentials; sends no model turn")
     parser.add_argument("--cwd", type=Path, default=Path.cwd())
     parser.add_argument("--samples", type=int, default=7)
     parser.add_argument("--warmups", type=int, default=1)
@@ -139,11 +144,14 @@ def main():
         args.command.pop(0)
     if not args.command or args.samples < 1 or args.warmups < 0:
         parser.error("provide a command, positive samples, and nonnegative warmups")
-    args.home = args.home.resolve()
+    if args.current_home and args.cold_store:
+        parser.error("--cold-store requires a dedicated --home")
+    if args.home:
+        args.home = args.home.resolve()
     args.cwd = args.cwd.resolve()
     if args.home == Path.home().resolve():
         parser.error("--home must be a dedicated benchmark HOME, not your actual HOME")
-    if not args.home.is_dir():
+    if args.home and not args.home.is_dir():
         parser.error("--home must already exist")
     rows = []
     for index in range(-args.warmups, args.samples):
@@ -153,6 +161,7 @@ def main():
             rows.append(row)
     print(json.dumps({
         "command": args.command,
+        "current_home": args.current_home,
         "cold_store": args.cold_store,
         "samples": len(rows),
         "median_ms": {key: statistics.median(row[key] for row in rows)

@@ -3,13 +3,16 @@
 module Agent.CLI.IntegrationGateway
     ( gatewayIntegrationAuthority
     , sessionIntegrationAuthority
+    , prepareSessionIntegrationRuntime
     , gatewayIntegrationMcpConfig
     , availableIntegrationServerName
     , integrationEndpointServers
     ) where
 
 import Agent.Runtime.GatewayClient (GatewayCredential(..))
-import Agent.Integration.API (IntegrationAuthority(..), IntegrationEndpoint(..))
+import Agent.Integration.API
+    ( IntegrationAuthority(..), IntegrationEndpoint(..), IntegrationRuntime
+    , IntegrationSupervisor, acquireIntegrationRuntime )
 import Agent.MCP (McpServerConfig(..), McpProtocolPreference(..), McpToolServer)
 import qualified Data.Set as Set
 import qualified Data.Text as Text
@@ -26,6 +29,19 @@ sessionIntegrationAuthority :: Bool -> Maybe GatewayCredential -> Maybe Integrat
 sessionIntegrationAuthority gatewayIntegrations connected = case connected of
     Just _ | not gatewayIntegrations -> Nothing
     _ -> Just (gatewayIntegrationAuthority connected)
+
+-- | Process-owned integration acquisition is independent of a session's cwd.
+-- Startup may prepare it while Git is fetching, then borrow the same result
+-- after the workspace has been finalized. Warnings are presented by the owner.
+prepareSessionIntegrationRuntime
+    :: Bool
+    -> Maybe GatewayCredential
+    -> IntegrationSupervisor
+    -> IO (Either Text.Text (Maybe IntegrationRuntime))
+prepareSessionIntegrationRuntime enabled connected supervisor =
+    case sessionIntegrationAuthority enabled connected of
+        Nothing -> pure (Right Nothing)
+        Just authority -> fmap (fmap Just) (acquireIntegrationRuntime supervisor authority)
 
 gatewayIntegrationMcpConfig :: GatewayCredential -> McpServerConfig
 gatewayIntegrationMcpConfig credential = McpServerConfig

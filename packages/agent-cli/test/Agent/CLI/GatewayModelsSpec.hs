@@ -39,7 +39,7 @@ import Agent.ReasoningEffort (ReasoningEffort(EffortHigh))
 import Control.Concurrent.Async (withAsync, wait)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryTakeMVar)
 import Control.Concurrent.STM (atomically, putTMVar, readTVar, retry)
-import Control.Exception.Safe (finally)
+import Control.Exception.Safe (finally, throwIO, tryIO)
 import Data.Aeson qualified as Aeson
 import Data.Aeson ((.=))
 import Data.Either (isLeft)
@@ -149,6 +149,53 @@ pickerUsage = UsageSnapshot
 
 spec :: Spec
 spec = describe "Agent.CLI.GatewayModels" do
+    describe "prepared authoritative gateway startup" do
+        it "refreshes during workspace preparation and reuses the current routing result" do
+            let original = [pickerModel "company-a"]
+                updated = [GatewayModel "company-a" GatewayAnthropicProtocol GatewayAnthropicProvider]
+                select available =
+                    fmap (.modelTarget.targetProvider) $
+                        selectGatewayModelOption
+                            (modelOptionsForGatewayModels testCatalog available)
+                            (Just "company-a") Nothing []
+            fetch <- newIORef (pure (Right original))
+            started <- newEmptyMVar
+            gate <- newEmptyMVar
+            access <- newGatewayModelAccessWith (readIORef fetch >>= id)
+            refreshGatewayModels access `shouldReturn` Right original
+            writeIORef fetch (putMVar started () >> takeMVar gate)
+            withPreparedGatewayModelsForStartup access \awaitModels -> do
+                -- Workspace preparation proceeds while the refresh is blocked.
+                awaitPickerAction (takeMVar started)
+                cachedGatewayModels access `shouldReturn` Just original
+                putMVar gate (Right updated)
+                fmap (>>= select) awaitModels `shouldReturn` Right ClaudeCodeProvider
+                -- A second consumer receives the same result without fetching.
+                awaitModels `shouldReturn` Right updated
+            cachedGatewayModels access `shouldReturn` Just updated
+
+        it "propagates refresh failure instead of returning cached routing" do
+            let original = [pickerModel "company-a"]
+            fetch <- newIORef (pure (Right original))
+            access <- newGatewayModelAccessWith (readIORef fetch >>= id)
+            refreshGatewayModels access `shouldReturn` Right original
+            writeIORef fetch (pure (Left "gateway unavailable"))
+            withPreparedGatewayModelsForStartup access id
+                `shouldReturn` Left "gateway unavailable"
+
+        it "cancels and joins the refresh if workspace preparation fails" do
+            started <- newEmptyMVar
+            stopped <- newEmptyMVar
+            gate <- newEmptyMVar
+            access <- newGatewayModelAccessWith $
+                (putMVar started () >> takeMVar gate)
+                    `finally` putMVar stopped ()
+            result <- tryIO $ withPreparedGatewayModelsForStartup access \_ -> do
+                awaitPickerAction (takeMVar started)
+                throwIO (userError "workspace preparation failed") :: IO ()
+            result `shouldSatisfy` isLeft
+            tryTakeMVar stopped `shouldReturn` Just ()
+
     describe "authoritative gateway startup" do
         it "waits for warm refresh and routes a reassigned alias with its current provider and dialect" do
             let models = [pickerModel "company-a"]

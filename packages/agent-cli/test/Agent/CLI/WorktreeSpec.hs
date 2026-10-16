@@ -4,11 +4,15 @@ import Agent.Runtime.Config
 import Agent.CLI.Worktree
 import Agent.CLI.Worktree.Registry
 import qualified Agent.CLI.Worktree.Snapshot as Snapshot
-import Control.Concurrent.Async (mapConcurrently)
-import Control.Exception.Safe (bracket)
-import Control.Monad (void)
-import Data.IORef (modifyIORef', newIORef, readIORef)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (mapConcurrently, poll, wait, withAsync)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryTakeMVar)
+import Control.Exception.Safe (bracket, finally, throwIO, tryIO)
+import Control.Monad (void, forM_)
+import Data.Either (isLeft)
+import Data.IORef (atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (dropWhileEnd, isInfixOf)
+import Data.Maybe (isNothing)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -33,7 +37,9 @@ import System.OsPath
     , (</>)
     )
 import System.Posix.Temp (mkdtemp)
+import System.Posix.Files (createNamedPipe, setFileMode)
 import System.Process (CreateProcess(..), proc, readCreateProcessWithExitCode)
+import System.Timeout (timeout)
 import Test.Hspec
 
 fromFilePath = unsafeEncodeUtf
@@ -71,6 +77,180 @@ spec = describe "Agent.CLI.Worktree" do
             isUnderWorktreeRoot root (fromFilePath "/home/marc/src/haskell-agent")
                 `shouldBe` False
             isUnderWorktreeRoot root (root <> fromFilePath "-extra") `shouldBe` False
+
+    describe "prepared worktree startup" do
+        it "makes the local checkout available while fetch is blocked and gates consumers on the final revision" $
+            withTempRemoteRepo \repo updater ->
+            withTempDir "agent-home-" \home -> do
+                writeFile (toFilePath (updater </> fromFilePath "AGENTS.md")) "remote instructions\n"
+                _ <- git updater ["add", "AGENTS.md"]
+                _ <- git updater ["commit", "-m", "Add workspace instructions"]
+                _ <- git updater ["push", "origin", "master"]
+                local <- git repo ["rev-parse", "HEAD"]
+                latest <- git updater ["rev-parse", "HEAD"]
+                started <- newEmptyMVar
+                release <- newEmptyMVar
+                entered <- newEmptyMVar
+                let report = \case
+                        WorktreeFetchingRemote{} -> putMVar started () >> takeMVar release
+                        _ -> pure ()
+                withPreparedWorktree report True repo (worktreeRoot home) $
+                    either (fail . Text.unpack) \pending -> do
+                        awaitPreparation (takeMVar started)
+                        let path = pendingWorktreePath pending
+                        git path ["rev-parse", "HEAD"] `shouldReturn` local
+                        doesFileExist (path </> fromFilePath "LOCAL") `shouldReturn` True
+                        doesFileExist (path </> fromFilePath "AGENTS.md") `shouldReturn` False
+                        withAsync
+                            (do
+                                ready <- awaitPreparedWorktree pending >>= either (fail . Text.unpack) pure
+                                putMVar entered ()
+                                pure ready) \consumer -> do
+                                (isNothing <$> poll consumer) `shouldReturn` True
+                                tryTakeMVar entered `shouldReturn` Nothing
+                                putMVar release ()
+                                ready <- awaitPreparation (wait consumer)
+                                readyWorktreeCommit ready `shouldBe` Text.pack latest
+                                readyWorktreePath ready `shouldBe` path
+                                readFile (toFilePath (path </> fromFilePath "AGENTS.md"))
+                                    `shouldReturn` "remote instructions\n"
+                                doesFileExist (path </> fromFilePath "LOCAL") `shouldReturn` False
+                                temporaryFetchRefs repo `shouldReturn` ""
+                        git repo ["rev-parse", "HEAD"] `shouldReturn` local
+
+        it "does not check out an unchanged revision or update again after consumers begin" $
+            withTempGitRepo \repo ->
+            withTempDir "agent-home-" \home -> do
+                progress <- newIORef []
+                let report event = atomicModifyIORef' progress (\events -> (event : events, ()))
+                withPreparedWorktree report True repo (worktreeRoot home) $
+                    either (fail . Text.unpack) \pending -> do
+                        ready <- awaitPreparedWorktree pending >>= either (fail . Text.unpack) pure
+                        let readme = toFilePath (readyWorktreePath ready </> fromFilePath "README")
+                        writeFile readme "agent change\n"
+                        awaitPreparedWorktree pending `shouldReturn` Right ready
+                        readFile readme `shouldReturn` "agent change\n"
+                events <- readIORef progress
+                events `shouldNotContain` [WorktreeUpdating]
+
+        it "removes its unchanged provisional checkout when fetching fails" $
+            withTempGitRepo \repo ->
+            withTempDir "agent-home-" \home -> do
+                _ <- git repo ["remote", "add", "origin", toFilePath (repo </> fromFilePath "missing.git")]
+                branches <- git repo ["for-each-ref", "--format=%(refname)", "refs/heads/"]
+                path <- withPreparedWorktree (const (pure ())) True repo (worktreeRoot home) $
+                    either (fail . Text.unpack) \pending -> do
+                        awaitPreparedWorktree pending >>= (`shouldSatisfy` isLeft)
+                        pure (pendingWorktreePath pending)
+                doesDirectoryExist path `shouldReturn` False
+                git repo ["for-each-ref", "--format=%(refname)", "refs/heads/"] `shouldReturn` branches
+                temporaryFetchRefs repo `shouldReturn` ""
+
+        it "stops a blocked real Git transport before cancellation returns" $
+            withTempRemoteRepo \repo _ ->
+            withTempDir "agent-home-" \home -> do
+                let transport = toFilePath (home </> fromFilePath "upload-pack")
+                    started = toFilePath (home </> fromFilePath "started")
+                    stopped = toFilePath (home </> fromFilePath "stopped")
+                    gate = toFilePath (home </> fromFilePath "gate")
+                    waitForFile path = do
+                        exists <- Directory.doesFileExist path
+                        if exists then pure () else threadDelay 10_000 >> waitForFile path
+                createNamedPipe gate 0o600
+                writeFile transport $ unlines
+                    [ "#!/bin/sh"
+                    , "task_dir=$(dirname \"$0\")"
+                    , "trap 'printf stopped > \"$task_dir/stopped\"; exit 1' INT TERM"
+                    , "printf started > \"$task_dir/started\""
+                    , "cat \"$task_dir/gate\" > /dev/null"
+                    ]
+                setFileMode transport 0o700
+                _ <- git repo ["config", "remote.origin.uploadpack", "'" <> transport <> "'"]
+                pathRef <- newIORef Nothing
+                result <- tryIO $ withPreparedWorktree (const (pure ())) True repo (worktreeRoot home) $
+                    either (fail . Text.unpack) \pending -> do
+                        writeIORef pathRef (Just (pendingWorktreePath pending))
+                        awaitPreparation (waitForFile started)
+                        throwIO (userError "cancel during transport") :: IO ()
+                result `shouldSatisfy` isLeft
+                Directory.doesFileExist stopped `shouldReturn` True
+                readIORef pathRef >>= mapM_ (\path -> doesDirectoryExist path `shouldReturn` False)
+                temporaryFetchRefs repo `shouldReturn` ""
+
+        it "cancels and joins the fetch and removes its own checkout on startup failure" $
+            withTempRemoteRepo \repo _ ->
+            withTempDir "agent-home-" \home -> do
+                started <- newEmptyMVar
+                stopped <- newEmptyMVar
+                release <- newEmptyMVar
+                pathRef <- newIORef Nothing
+                let report = \case
+                        WorktreeFetchingRemote{} ->
+                            (putMVar started () >> takeMVar release) `finally` putMVar stopped ()
+                        _ -> pure ()
+                result <- tryIO $ withPreparedWorktree report True repo (worktreeRoot home) $
+                    either (fail . Text.unpack) \pending -> do
+                        writeIORef pathRef (Just (pendingWorktreePath pending))
+                        awaitPreparation (takeMVar started)
+                        throwIO (userError "startup cancelled") :: IO ()
+                result `shouldSatisfy` isLeft
+                tryTakeMVar stopped `shouldReturn` Just ()
+                readIORef pathRef >>= mapM_ (\path -> doesDirectoryExist path `shouldReturn` False)
+                temporaryFetchRefs repo `shouldReturn` ""
+
+        it "retains unexpected local files instead of overwriting or removing them" $
+            withTempRemoteRepo \repo _ ->
+            withTempDir "agent-home-" \home -> do
+                path <- withPreparedWorktree (const (pure ())) True repo (worktreeRoot home) $
+                    either (fail . Text.unpack) \pending -> do
+                        let path = pendingWorktreePath pending
+                        writeFile (toFilePath (path </> fromFilePath "user-note")) "keep this\n"
+                        awaitPreparedWorktree pending >>= (`shouldSatisfy` isLeft)
+                        pure path
+                readFile (toFilePath (path </> fromFilePath "user-note")) `shouldReturn` "keep this\n"
+                temporaryFetchRefs repo `shouldReturn` ""
+
+        it "rejects a changed branch and retains the user's checkout" $
+            withTempGitRepo \repo ->
+            withTempDir "agent-home-" \home -> do
+                path <- withPreparedWorktree (const (pure ())) False repo (worktreeRoot home) $
+                    either (fail . Text.unpack) \pending -> do
+                        let path = pendingWorktreePath pending
+                        _ <- git path ["checkout", "--detach"]
+                        awaitPreparedWorktree pending >>= (`shouldSatisfy` isLeft)
+                        pure path
+                doesDirectoryExist path `shouldReturn` True
+
+        it "keeps fetch references isolated across simultaneous preparations" $
+            withTempRemoteRepo \repo updater ->
+            withTempDir "agent-home-" \home -> do
+                latest <- git updater ["rev-parse", "HEAD"]
+                ready <- mapConcurrently
+                    (\_ -> withPreparedWorktree (const (pure ())) True repo (worktreeRoot home) $
+                        either (fail . Text.unpack) \pending ->
+                            awaitPreparedWorktree pending >>= either (fail . Text.unpack) pure)
+                    [1 :: Int .. 4]
+                forM_ ready \checkout -> readyWorktreeCommit checkout `shouldBe` Text.pack latest
+                temporaryFetchRefs repo `shouldReturn` ""
+
+        it "enrolls only the ready checkout and keeps the captured startup policy" $
+            withTempRemoteRepo \repo _ ->
+            withTempDir "agent-home-" \home -> do
+                local <- git repo ["rev-parse", "HEAD"]
+                let config = defaultHarnessConfig
+                        { configWorktree = defaultHarnessConfig.configWorktree
+                            { worktreeFetchLatestUpstream = False } }
+                saveHarnessConfig home defaultHarnessConfig `shouldReturn` Right ()
+                withPreparedManagedWorktreeFromConfig (const (pure ())) config home repo $
+                    either (fail . Text.unpack) \pending -> do
+                        let path = pendingWorktreePath pending
+                        before <- readRecord (worktreeRoot home) path >>= either (fail . Text.unpack) pure
+                        isNothing before `shouldBe` True
+                        ready <- awaitPreparedWorktree pending >>= either (fail . Text.unpack) pure
+                        readyWorktreeCommit ready `shouldBe` Text.pack local
+                        after <- readRecord (worktreeRoot home) path >>= either (fail . Text.unpack) pure
+                        isNothing after `shouldBe` False
+                        temporaryFetchRefs repo `shouldReturn` ""
 
     describe "createWorktree" do
         it "adds a worktree under the injected root on a new branch" $
@@ -1219,6 +1399,11 @@ withTempDir prefix action = do
         (mkdtemp (tmp FilePath.</> prefix <> "XXXXXX"))
         Directory.removeDirectoryRecursive
         (action . fromFilePath)
+
+awaitPreparation :: IO a -> IO a
+awaitPreparation action = timeout 5000000 action >>= \case
+    Nothing -> fail "worktree preparation did not reach the expected boundary"
+    Just value -> pure value
 
 git :: OsPath -> [String] -> IO String
 git dir args = do

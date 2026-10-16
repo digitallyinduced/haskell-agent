@@ -43,10 +43,9 @@ import Agent.CLI.LearnedSkills.Store
     )
 import Agent.Runtime.Lsp
     ( LspStartup(..), lspRuntimeTool )
-import Agent.CLI.IntegrationGateway (sessionIntegrationAuthority)
+import Agent.CLI.IntegrationGateway (prepareSessionIntegrationRuntime)
 import Agent.Integration.API
     ( IntegrationRuntime
-    , acquireIntegrationRuntime
     )
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Runtime.ModelConfig (builtinConnectionId)
@@ -308,18 +307,17 @@ acquireSessionIntegrationRuntime
     -> NativeRunCapabilities
     -> IO (Maybe IntegrationRuntime)
 acquireSessionIntegrationRuntime request capabilities =
-    case sessionIntegrationAuthority
+    maybe
+        (prepareSessionIntegrationRuntime
             capabilities.nativeGatewayIntegrations
-            request.connectedGateway of
-        Nothing -> pure Nothing
-        Just authority ->
-            acquireIntegrationRuntime
-                request.processRuntime.processIntegrationSupervisor
-                authority >>= \case
-                Left err -> do
-                    reportStartupWarning request.startup err
-                    pure Nothing
-                Right runtime -> pure (Just runtime)
+            request.connectedGateway
+            request.processRuntime.processIntegrationSupervisor)
+        id
+        request.preparedIntegration >>= \case
+            Left err -> do
+                reportStartupWarning request.startup err
+                pure Nothing
+            Right runtime -> pure runtime
 
 acquireLocalToolRuntime
     :: AgentToolsRequest windowTitleResult

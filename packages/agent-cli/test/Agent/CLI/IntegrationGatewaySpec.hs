@@ -6,13 +6,59 @@ import Agent.CLI.IntegrationGateway
     , gatewayIntegrationMcpConfig
     , integrationEndpointServers
     , sessionIntegrationAuthority
+    , prepareSessionIntegrationRuntime
     )
-import Agent.Integration.API (IntegrationAuthority(..), IntegrationEndpoint(..))
+import Agent.Integration.API
+    ( IntegrationAuthority(..), IntegrationEndpoint(..), IntegrationRuntime(..)
+    , newIntegrationSupervisor, closeIntegrationSupervisor, emptyIntegrationProvider )
 import Agent.MCP (McpServerConfig(..), McpToolServer(..))
+import Agent.Tools.Types (defaultToolEnv)
+import Control.Concurrent.Async (wait, withAsync)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Exception.Safe (bracket)
+import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.Maybe (isJust, isNothing)
+import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
 
 spec :: Spec
 spec = describe "generic gateway integrations" do
+    it "reuses an integration prepared during independent workspace startup" do
+        toolEnv <- defaultToolEnv (unsafeEncodeUtf ".")
+        started <- newEmptyMVar
+        release <- newEmptyMVar
+        acquired <- newIORef (0 :: Int)
+        closed <- newIORef (0 :: Int)
+        let provider env = do
+                modifyIORef' acquired (+ 1)
+                putMVar started ()
+                takeMVar release
+                fmap (fmap (\runtime -> runtime
+                    { closeIntegrationRuntime = modifyIORef' closed (+ 1) }))
+                    (emptyIntegrationProvider env)
+        bracket (newIntegrationSupervisor provider toolEnv) closeIntegrationSupervisor \supervisor ->
+            withAsync (prepareSessionIntegrationRuntime True Nothing supervisor) \worker -> do
+                takeMVar started
+                -- The host can prepare a workspace while acquisition is blocked.
+                readIORef acquired `shouldReturn` 1
+                putMVar release ()
+                (fmap (fmap isJust) (wait worker)) `shouldReturn` Right True
+                (fmap (fmap isJust) (prepareSessionIntegrationRuntime True Nothing supervisor))
+                    `shouldReturn` Right True
+                readIORef acquired `shouldReturn` 1
+                readIORef closed `shouldReturn` 0
+        readIORef closed `shouldReturn` 1
+
+    it "does not acquire a withheld integration during early preparation" do
+        toolEnv <- defaultToolEnv (unsafeEncodeUtf ".")
+        acquired <- newIORef (0 :: Int)
+        let provider env = modifyIORef' acquired (+ 1) >> emptyIntegrationProvider env
+            credential = GatewayCredential "https://gateway.example" "wss://gateway.example/ws" "token"
+        bracket (newIntegrationSupervisor provider toolEnv) closeIntegrationSupervisor \supervisor -> do
+            (fmap (fmap isNothing) (prepareSessionIntegrationRuntime False (Just credential) supervisor))
+                `shouldReturn` Right True
+            readIORef acquired `shouldReturn` 0
+
     it "withholds a connected gateway's integrations without falling back to local ones" do
         let credential =
                 GatewayCredential "https://gateway.example" "wss://gateway.example/ws" "token"

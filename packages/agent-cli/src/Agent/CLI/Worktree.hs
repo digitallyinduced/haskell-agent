@@ -5,6 +5,14 @@ module Agent.CLI.Worktree
     , createManagedWorktree
     , createManagedWorktreeWithProgress
     , createManagedWorktreeFromConfigWithProgress
+    , PendingWorktree
+    , ReadyWorktree
+    , pendingWorktreePath
+    , readyWorktreePath
+    , readyWorktreeCommit
+    , awaitPreparedWorktree
+    , withPreparedWorktree
+    , withPreparedManagedWorktreeFromConfig
     , removeWorktree
     , cleanupStaleWorktrees
     , gcWorktrees
@@ -31,14 +39,18 @@ import Agent.Runtime.Config
     , loadHarnessConfig
     )
 import Agent.OsPath (unsafeToFilePath)
+import Agent.Process (terminateProcessGroup)
 import Agent.CLI.Worktree.Registry
 import Agent.CLI.Worktree.ReadOnlyLock (withExistingReadOnlyLock)
 import qualified Agent.CLI.Worktree.Snapshot as Snapshot
 import qualified Agent.CLI.Worktree.Clean as Clean
 import Agent.CLI.Worktree.Incorporation (inspectIncorporation)
 import Control.Applicative ((<|>))
+import Control.Concurrent.Async (concurrently, wait, withAsync)
+import Control.Concurrent.MVar (modifyMVar, newMVar)
 import Control.Exception.Safe
     ( SomeException
+    , bracket
     , displayException
     , finally
     , mask
@@ -97,13 +109,17 @@ import System.OsPath
     , unsafeEncodeUtf
     , (</>)
     )
-import System.Process (CreateProcess(..), proc, readCreateProcessWithExitCode)
+import System.Process
+    ( CreateProcess(..), StdStream(..), getPid, proc
+    , waitForProcess, withCreateProcess )
 
 data WorktreeProgress
     = WorktreeInspectingRepository
     | WorktreeCheckingRemote !Text
     | WorktreeFetchingRemote !Text !Text
     | WorktreeCreating
+    | WorktreeUpdating
+    | WorktreeRetained !OsPath
     deriving (Eq, Show)
 
 worktreeProgressMessage :: WorktreeProgress -> Text
@@ -114,6 +130,9 @@ worktreeProgressMessage = \case
     WorktreeFetchingRemote remote remoteHead ->
         "Fetching latest from " <> remote <> "/" <> branchName remoteHead <> "…"
     WorktreeCreating -> "Creating worktree…"
+    WorktreeUpdating -> "Updating worktree to latest upstream…"
+    WorktreeRetained path ->
+        "Prepared worktree retained: " <> Text.pack (unsafeToFilePath path)
   where
     branchName ref =
         maybe ref id (Text.stripPrefix "refs/heads/" ref)
@@ -142,6 +161,24 @@ instance Monoid WorktreeCleanupReport where
     mempty = WorktreeCleanupReport [] [] [] [] [] []
 
 data WorktreeLease = WorktreeLease FileLock.FileLock (Maybe (OsPath, OsPath))
+
+-- Constructors are private: only synchronization can turn a pending checkout
+-- into the revision that workspace-dependent startup is allowed to consume.
+data PendingWorktree = PendingWorktree !OsPath !(IO (Either Text ReadyWorktree))
+data ReadyWorktree = ReadyWorktree !OsPath !Text
+    deriving (Eq, Show)
+
+pendingWorktreePath :: PendingWorktree -> OsPath
+pendingWorktreePath (PendingWorktree path _) = path
+
+readyWorktreePath :: ReadyWorktree -> OsPath
+readyWorktreePath (ReadyWorktree path _) = path
+
+readyWorktreeCommit :: ReadyWorktree -> Text
+readyWorktreeCommit (ReadyWorktree _ commit) = commit
+
+awaitPreparedWorktree :: PendingWorktree -> IO (Either Text ReadyWorktree)
+awaitPreparedWorktree (PendingWorktree _ await) = await
 
 -- | @~/.haskell-agent/worktrees@ given the user's home directory.
 worktreeRoot :: OsPath -> OsPath
@@ -194,6 +231,140 @@ createWorktreeWithFetchProgress report fetchLatest source root = runExceptT do
     lift (createDirectoryIfMissing True (root </> repoName))
     withGitWorktreeLock repo $
         addUnique repo root repoName day start base 0
+
+-- | Prepare a private local checkout concurrently with the upstream fetch.
+-- The callback may display the pending path, but workspace consumers must use
+-- 'awaitPreparedWorktree'. Its result is cached, so a later call can never
+-- update a checkout after the consumer has begun working in it.
+withPreparedWorktree
+    :: (WorktreeProgress -> IO ())
+    -> Bool
+    -> OsPath
+    -> OsPath
+    -> (Either Text PendingWorktree -> IO a)
+    -> IO a
+withPreparedWorktree report fetchLatest source root use = do
+    report WorktreeInspectingRepository
+    inspected <- runExceptT do
+        repo <- gitToplevel source
+        common <- gitCommonDir repo
+        let repoName = repositoryNameFromCommonDir common
+        initial <- Text.strip <$> ExceptT (git repo ["rev-parse", "--verify", "HEAD"])
+        pure (repo, repoName, common, initial)
+    case inspected of
+        Left err -> use (Left err)
+        Right (repo, repoName, common, initial) -> do
+            transferred <- newIORef False
+            expectedHeads <- newIORef [initial]
+            let create = do
+                    report WorktreeCreating
+                    now <- getCurrentTime
+                    createDirectoryIfMissing True (root </> repoName)
+                    withGitWorktreeLockAt common $ runExceptT $
+                        addUnique repo root repoName (utctDay now)
+                            (posixMicros now) (Just initial) 0
+                release = \case
+                    Left _ -> pure ()
+                    Right path -> do
+                        handedOff <- readIORef transferred
+                        unless handedOff do
+                            heads <- readIORef expectedHeads
+                            cleanup <- tryAny $ withGitWorktreeLockAt common $ runExceptT do
+                                current <- inspectPreparedWorktree common path heads
+                                void $ ExceptT $ git repo
+                                    ["worktree", "remove", "--", unsafeToFilePath path]
+                                void $ ExceptT $ git repo
+                                    [ "update-ref", "-d"
+                                    , "refs/heads/" <> unsafeToFilePath (takeFileName path)
+                                    , Text.unpack current
+                                    ]
+                            case cleanup of
+                                Right (Right ()) -> pure ()
+                                _ -> report (WorktreeRetained path)
+                prepare awaitBase releaseFetch = bracket create release \case
+                    Left err -> use (Left err)
+                    Right path -> do
+                        result <- newMVar Nothing
+                        let await = modifyMVar result \case
+                                Just ready -> pure (Just ready, ready)
+                                Nothing -> do
+                                    base <- awaitBase
+                                    ready <- case base of
+                                        Left err -> pure (Left err)
+                                        Right fetched -> do
+                                            let target = maybe initial id fetched
+                                            writeIORef expectedHeads [initial, target]
+                                            withGitWorktreeLockAt common $ runExceptT do
+                                                current <- inspectPreparedWorktree common path [initial]
+                                                unless (current == target) do
+                                                    lift (report WorktreeUpdating)
+                                                    void $ ExceptT $ git path
+                                                        ["reset", "--keep", Text.unpack target]
+                                                    _ <- inspectPreparedWorktree common path [target]
+                                                    pure ()
+                                                pure (ReadyWorktree path target)
+                                    void releaseFetch
+                                    case ready of
+                                        Right _ -> writeIORef transferred True
+                                        Left _ -> pure ()
+                                    pure (Just ready, ready)
+                        use (Right (PendingWorktree path await))
+            if fetchLatest
+                then bracket freshFetchRef (cleanupFetchRef repo) \localRef ->
+                    withAsync
+                        (runExceptT (fetchLatestUpstreamIntoRef report repo localRef))
+                        \worker -> prepare (wait worker) (cleanupFetchRef repo localRef)
+                else prepare (pure (Right Nothing)) (pure ())
+
+-- | Reject a changed, redirected or dirty pending checkout. In particular, a
+-- user's newly created file must not be overwritten by the upstream update.
+inspectPreparedWorktree :: OsPath -> OsPath -> [Text] -> ExceptT Text IO Text
+inspectPreparedWorktree common path expectedHeads = do
+    identity <- ExceptT $ git path
+        ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"]
+    status <- ExceptT $ git path
+        ["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all", "--ignored=matching"]
+    let entries = filter (not . Text.null) (Text.splitOn "\0" status)
+        current = listToMaybe [oid | entry <- entries, Just oid <- [Text.stripPrefix "# branch.oid " entry]]
+        branch = listToMaybe [name | entry <- entries, Just name <- [Text.stripPrefix "# branch.head " entry]]
+        sameRepository = case Text.lines identity of
+            [actualRoot, actualCommon] ->
+                equalFilePath (unsafeEncodeUtf (Text.unpack actualRoot)) path
+                    && equalFilePath (unsafeEncodeUtf (Text.unpack actualCommon)) common
+            _ -> False
+    unless
+        ( sameRepository
+            && branch == Just (Text.pack (unsafeToFilePath (takeFileName path)))
+            && maybe False (`elem` expectedHeads) current
+            && all (Text.isPrefixOf "# branch.") entries
+        ) $
+        throwE ("Prepared worktree changed before upstream synchronization; retained: "
+            <> Text.pack (unsafeToFilePath path))
+    maybe (throwE "Prepared worktree has no commit") pure current
+
+-- | Startup uses its validated configuration snapshot. Enrollment happens
+-- only after synchronization, before the ready checkout is handed over.
+withPreparedManagedWorktreeFromConfig
+    :: (WorktreeProgress -> IO ())
+    -> HarnessConfig
+    -> OsPath
+    -> OsPath
+    -> (Either Text PendingWorktree -> IO a)
+    -> IO a
+withPreparedManagedWorktreeFromConfig report config home source use =
+    withPreparedWorktree report
+        config.configWorktree.worktreeFetchLatestUpstream
+        source (worktreeRoot home) \case
+            Left err -> use (Left err)
+            Right pending ->
+                use $ Right $ PendingWorktree (pendingWorktreePath pending) do
+                    awaitPreparedWorktree pending >>= \case
+                        Left err -> pure (Left err)
+                        Right ready -> enrollWorktree (worktreeRoot home)
+                            (readyWorktreePath ready) >>= \case
+                                Left err -> pure (Left
+                                    ("Created checkout but enrollment failed; retained safely: " <> err))
+                                Right () -> pure (Right ready)
 
 -- | Create a worktree using the current machine-wide policy under the
 -- supplied home. Interactive and subagent creation use this fresh-read entry
@@ -783,10 +954,13 @@ gitToplevel source = do
 gitRepositoryName :: OsPath -> ExceptT Text IO OsPath
 gitRepositoryName repo = do
     path <- gitCommonDir repo
-    pure $
-        if takeFileName path == unsafeEncodeUtf ".git"
-            then takeFileName (takeDirectory path)
-            else takeFileName path
+    pure (repositoryNameFromCommonDir path)
+
+repositoryNameFromCommonDir :: OsPath -> OsPath
+repositoryNameFromCommonDir path =
+    if takeFileName path == unsafeEncodeUtf ".git"
+        then takeFileName (takeDirectory path)
+        else takeFileName path
 
 gitCommonDir :: OsPath -> ExceptT Text IO OsPath
 gitCommonDir repo = do
@@ -821,7 +995,16 @@ fetchLatestUpstream
     :: (WorktreeProgress -> IO ())
     -> OsPath
     -> ExceptT Text IO (Maybe Text)
-fetchLatestUpstream report repo = do
+fetchLatestUpstream report repo = ExceptT $
+    bracket freshFetchRef (cleanupFetchRef repo) $ \localRef ->
+        runExceptT (fetchLatestUpstreamIntoRef report repo localRef)
+
+fetchLatestUpstreamIntoRef
+    :: (WorktreeProgress -> IO ())
+    -> OsPath
+    -> Text
+    -> ExceptT Text IO (Maybe Text)
+fetchLatestUpstreamIntoRef report repo localRef = do
     selectUpstreamRemote repo >>= \case
         Nothing -> pure Nothing
         Just remote -> do
@@ -843,10 +1026,7 @@ fetchLatestUpstream report repo = do
   where
     fetchBranch remote remoteHead = do
         lift (report (WorktreeFetchingRemote remote remoteHead))
-        localRef <- lift freshFetchRef
-        ExceptT $
-            runExceptT (fetchIntoRef repo remote remoteHead localRef)
-                `finally` cleanupFetchRef repo localRef
+        fetchIntoRef repo remote remoteHead localRef
     discoverAndFetch remote = do
         lift (report (WorktreeCheckingRemote remote))
         remoteHead <- remoteDefaultBranch repo remote
@@ -1004,18 +1184,33 @@ git dir args = do
         then Just . (("LC_ALL", "C") :) . filter ((/= "LC_ALL") . fst) <$> getEnvironment
         else pure Nothing
     (code, out, err) <-
-        readCreateProcessWithExitCode
+        withCreateProcess
             (proc "git" args)
                 { cwd = Just (unsafeToFilePath dir)
                 , env = environment
+                , std_in = NoStream
+                , std_out = CreatePipe
+                , std_err = CreatePipe
+                , create_group = True
                 }
-            ""
+            \_ output errors process -> do
+                groupId <- getPid process
+                let capture = case (output, errors) of
+                        (Just stdoutHandle, Just stderrHandle) -> do
+                            ((out, err), code) <- concurrently
+                                (concurrently
+                                    (Text.hGetContents stdoutHandle)
+                                    (Text.hGetContents stderrHandle))
+                                (waitForProcess process)
+                            pure (code, out, err)
+                        _ -> fail "git did not provide stdout and stderr pipes"
+                capture `onException` terminateProcessGroup groupId process
     case code of
-        ExitSuccess -> pure (Right (Text.pack out))
+        ExitSuccess -> pure (Right out)
         ExitFailure _ ->
             pure $ Left $
-                let stderrText = Text.strip (Text.pack err)
-                    stdoutText = Text.strip (Text.pack out)
+                let stderrText = Text.strip err
+                    stdoutText = Text.strip out
                     message
                         | Text.null stderrText = stdoutText
                         | otherwise = stderrText
