@@ -49,7 +49,7 @@ import Agent.CLI.TUI.Motion
 import Agent.CLI.TUI.MeasuredViewport ( measuredViewportWithFooter )
 import Agent.CLI.TUI.Render.Transcript
     ( drawTranscript,
-      drawTranscriptChunks,
+      drawTranscriptChunksWithPadding,
       historyRangeWidgets,
       drawEmptyConversation,
       drawConversationBlocks )
@@ -299,8 +299,7 @@ drawConversationPane state =
                                     conversationScrollbarRenderer $
                                     withVScrollBars OnRight $
                                         conversationViewport state $
-                                            map (padLeftRight 2)
-                                                (drawTranscriptChunks state)
+                                            drawTranscriptChunksWithPadding 2 state
                            ]
 
 conversationViewport :: AppState -> [Widget Name] -> Widget Name

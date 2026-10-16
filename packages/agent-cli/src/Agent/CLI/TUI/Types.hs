@@ -124,6 +124,11 @@ data Name
         !AgentTarget
         !BlockId
         !BlockId
+    | ConversationPaddedChunkCache
+        !Int
+        !AgentTarget
+        !BlockId
+        !BlockId
     | ConversationBlockCache
         !AgentTarget
         !BlockId

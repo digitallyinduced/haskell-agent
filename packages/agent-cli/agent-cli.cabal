@@ -795,6 +795,24 @@ benchmark transcript-scrolling-bench
                     , text
                     , vty >= 6.4 && < 7
 
+benchmark conversation-scrolling-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          ConversationScrolling.hs
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-cli
+                    , agent-tui
+                    , base >= 4.17 && < 5
+                    , brick >= 2.9 && < 3
+                    , containers
+                    , deepseq
+                    , mtl
+                    , safe-exceptions
+                    , stm
+                    , text
+                    , vty >= 6.4 && < 7
+
 benchmark viewport-retention-bench
     import:           common-options
     type:             exitcode-stdio-1.0
