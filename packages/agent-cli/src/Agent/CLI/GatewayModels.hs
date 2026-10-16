@@ -7,6 +7,7 @@ module Agent.CLI.GatewayModels
     , modelOptionsForGatewayState
     , selectGatewayModelOption
     , withGatewayModelsForStartup
+    , withPreparedGatewayModelsForStartup
     ) where
 
 import Agent.Runtime.GatewayClient
@@ -28,6 +29,7 @@ import Agent.Runtime.Startup.Gateway
     , selectGatewayModelOption
     )
 import Data.Text (Text)
+import Control.Concurrent.Async (wait, withAsync)
 import System.OsPath (OsPath)
 
 -- | Resolve authoritative routing before initializing the provider runtime.
@@ -41,6 +43,17 @@ withGatewayModelsForStartup
     -> IO result
 withGatewayModelsForStartup access select continue =
     refreshGatewayModels access >>= continue . (>>= select)
+
+-- | Start the authoritative refresh while independent workspace preparation
+-- runs. The consumer must await this result before selecting a provider; the
+-- persisted display cache cannot establish routing. Cancellation joins the
+-- refresh worker when workspace preparation fails or the session closes.
+withPreparedGatewayModelsForStartup
+    :: GatewayModelAccess
+    -> (IO (Either Text [GatewayModel]) -> IO result)
+    -> IO result
+withPreparedGatewayModelsForStartup access continue =
+    withAsync (refreshGatewayModels access) (continue . wait)
 
 loadGatewayModelOptionsAt
     :: OsPath

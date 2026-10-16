@@ -7,7 +7,8 @@ import Agent.CLI.CancelWatch (newStdinControl)
 import Agent.CLI.AgentSessions ( signalManagedSessionReady )
 import Agent.CLI.AgentViewport ( AgentTarget(AgentRoot) )
 import Agent.Runtime.Config
-    ( HarnessConfig(configTheme)
+    ( HarnessConfig(configTheme, configWorktree)
+    , WorktreeConfig(worktreeFetchLatestUpstream)
     , loadHarnessConfig
     )
 import Agent.Runtime.Error ( formatApiErrorAt )
@@ -18,11 +19,13 @@ import Agent.Runtime.GatewayClient
     , loadGatewayCredential
     , loadGatewayCredentialAt
     , newGatewayModelAccess
+    , newGatewayModelAccessWithStore
     )
 import Agent.CLI.Interrupt
     ( newInterruptState,
       noteFullscreenCtrlC,
       CtrlCDecision(ForceExit) )
+import Agent.CLI.IntegrationGateway (prepareSessionIntegrationRuntime)
 import Agent.CLI.Login ( runLoginManager )
 import Agent.Runtime.ModelConfig ( loadModelCatalogAt )
 import Agent.Runtime.Models
@@ -64,9 +67,10 @@ import Agent.CLI.Runtime.Orchestration.Restart
     , runFullscreenRestartLoop
     )
 import Agent.CLI.Runtime.Orchestration.Startup
-    ( clearNativeProgress, setNativeProgress )
+    ( clearNativeProgress, setNativeProgress, setStartupRepository )
 import Agent.CLI.Runtime.Orchestration.Types
-    ( AgentProcessRuntime(processNetworkRecovery, processToolResourceArbiter)
+    ( AgentProcessRuntime(processNetworkRecovery, processToolResourceArbiter,
+                         processIntegrationSupervisor)
     , AgentRunMode
         ( runInBackground
         , runStdout
@@ -85,7 +89,7 @@ import Agent.CLI.Runtime.Orchestration.Types
         ( nativeDiscoveryCatalogRoot
         , nativeDiscoveryHome
         )
-    , NativeRunCapabilities(nativeProviderFallback)
+    , NativeRunCapabilities(nativeProviderFallback, nativeGatewayIntegrations)
     , fullNativeRunCapabilities
     , nativePreparedDiscovery
     )
@@ -143,7 +147,9 @@ import Agent.CLI.Terminal
       TerminalCapabilities(terminalNativeProgress) )
 import Agent.CLI.TUI.Types ( FullscreenRuntime(runtimeSetMouseCapture) )
 import Agent.CLI.Worktree
-    ( createManagedWorktreeFromConfigWithProgress, worktreeProgressMessage
+    ( createManagedWorktreeFromConfigWithProgress
+    , withPreparedManagedWorktreeFromConfig, pendingWorktreePath
+    , awaitPreparedWorktree, readyWorktreePath, worktreeProgressMessage
     , restoreManagedWorktree, worktreeRoot )
 import Agent.Cancel ( requestCancel )
 import Agent.OsPath ( toText )
@@ -1141,10 +1147,21 @@ prepareAgentIterationAction request resources interface resumeLock
     , isNothing resources.iterationResumed
     , isNothing request.iterationTransition = do
         let options = request.iterationOptions
-        -- Load credentials while workspace setup continues. Do not refresh
-        -- account usage here: that request must not delay session creation.
+            capabilities = maybe fullNativeRunCapabilities (.nativeCapabilities)
+                request.iterationRunMode.runNativeHooks
+        gatewayAccess <- traverse
+            (newGatewayModelAccessWithStore
+                (trustedPool resources.iterationDatabaseStore))
+            resources.iterationConnectedGateway
+        -- Load credentials and authoritative gateway routing while workspace
+        -- setup continues. Account usage remains outside this critical path.
         withPreparedStartupAuth
             options.optProvider
+            gatewayAccess
+            (prepareSessionIntegrationRuntime
+                capabilities.nativeGatewayIntegrations
+                resources.iterationConnectedGateway
+                request.iterationProcessRuntime.processIntegrationSupervisor)
             (runAction . Just)
     | otherwise = runAction Nothing
   where
@@ -1163,14 +1180,13 @@ runPreparedAgentIteration
     -> Maybe PreparedStartupAuthWorker
     -> IO RunResult
 runPreparedAgentIteration
-        request resources interface resumeLock preparedAuth = do
-    let runMode = request.iterationRunMode
-    cwd <-
-        resolveAgentIterationCwd
+        request resources interface resumeLock preparedAuth =
+    withAgentIterationCwd
             request
             resources
             interface
-            resumeLock
+            resumeLock \cwd -> do
+    let runMode = request.iterationRunMode
     unless runMode.runInBackground (setCurrentDirectory cwd)
     terminalCwd <- decodeFS cwd
     reportTerminalCwd
@@ -1204,30 +1220,62 @@ runPreparedAgentIteration
         resources.iterationConnectedGateway
         preparedAuth
 
-resolveAgentIterationCwd
+withAgentIterationCwd
     :: AgentIterationRequest
     -> AgentIterationResources
     -> AgentIterationInterface
     -> Maybe SessionLock
-    -> IO OsPath
-resolveAgentIterationCwd request resources interface resumeLock =
+    -> (OsPath -> IO a)
+    -> IO a
+withAgentIterationCwd request resources interface resumeLock use =
     case resources.iterationResumed of
-        Just _ -> pure resources.iterationSource
+        Just _ -> use resources.iterationSource
         Nothing
-            | request.iterationOptions.optWorktree -> do
+            | request.iterationOptions.optWorktree
+            , not resources.iterationBootstrap.iterationHarnessConfig.configWorktree.worktreeFetchLatestUpstream -> do
                 readMVar interface.iterationFirstFrameReady
                 createManagedWorktreeFromConfigWithProgress
                     reportWorktreeProgress
                     resources.iterationBootstrap.iterationHarnessConfig
                     resources.iterationBootstrap.iterationHome
+                    resources.iterationSource >>= either worktreeFailed \path -> do
+                        _ <- worktreeCreated path
+                        setStartupNotice fullscreen "Loading project…"
+                        use path
+            | request.iterationOptions.optWorktree -> do
+                readMVar interface.iterationFirstFrameReady
+                withPreparedManagedWorktreeFromConfig
+                    reportWorktreeProgress
+                    resources.iterationBootstrap.iterationHarnessConfig
+                    resources.iterationBootstrap.iterationHome
                     resources.iterationSource
-                    >>= either worktreeFailed worktreeCreated
-            | otherwise -> pure resources.iterationSource
+                    \case
+                        Left err -> worktreeFailed err
+                        Right pending -> do
+                            let path = pendingWorktreePath pending
+                                bootstrap = resources.iterationBootstrap
+                            _ <- worktreeCreated path
+                            setStartupRepository fullscreen bootstrap.iterationHome
+                                (toText (takeFileName path)) path
+                            setStartupNotice fullscreen "Updating upstream…"
+                            awaitPreparedWorktree pending >>= \case
+                                Left err -> worktreeFailed err
+                                Right ready -> do
+                                    setStartupNotice fullscreen "Loading project…"
+                                    -- No workspace discovery, tool runtime or model
+                                    -- request exists before this ready handoff.
+                                    use (readyWorktreePath ready)
+            | otherwise -> use resources.iterationSource
   where
     stderrHandle = request.iterationRunMode.runStderr
     fullscreen = interface.iterationFullscreen
     reportWorktreeProgress progress = do
         let message = worktreeProgressMessage progress
+            bootstrap = resources.iterationBootstrap
+        recordStartupTiming
+            bootstrap.iterationStartedAt
+            bootstrap.iterationStartupTimings
+            message
         case fullscreen of
             Nothing -> putTextLn stderrHandle message
             Just runtime ->
@@ -1249,7 +1297,6 @@ resolveAgentIterationCwd request resources interface resumeLock =
                 emitUiEvent runtime
                     (UiSystemMessage
                         (glyphSession <> "worktree: " <> toText path))
-        setStartupNotice fullscreen "Loading project…"
         pure path
 
 cleanupAgentIteration

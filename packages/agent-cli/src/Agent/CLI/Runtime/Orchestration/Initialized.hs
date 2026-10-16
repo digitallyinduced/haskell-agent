@@ -33,6 +33,7 @@ import Agent.Runtime.Database.Store
 import Agent.Runtime.GatewayClient
     ( GatewayCredential
     , GatewayModelAccess
+    , GatewayModel
     , gatewayCredentialIdentity
     , newGatewayModelAccess
     , newGatewayModelAccessWithStore
@@ -40,7 +41,7 @@ import Agent.Runtime.GatewayClient
     )
 import Agent.CLI.GatewayModels
     ( modelOptionsForGatewayModels, selectGatewayModelOption
-    , withGatewayModelsForStartup )
+    , withPreparedGatewayModelsForStartup )
 import Agent.Runtime.ModelConfig
     ( ModelCatalog
     , catalogConnection,
@@ -131,6 +132,7 @@ import Agent.Provider
       BillingMode(ApiBilled),
       FailedCredential(credential) )
 import Agent.Skills ( SkillCatalog(..) )
+import Agent.Integration.API (IntegrationRuntime)
 import Agent.Store.Postgres ( trustedPool )
 import Control.Applicative ( (<|>) )
 import Control.Concurrent.Async
@@ -162,6 +164,9 @@ data PreparedStartupAuth = PreparedStartupAuth
 data PreparedStartupAuthWorker = PreparedStartupAuthWorker
     { preparedStartupAsync :: !(Async PreparedStartupAuth)
     , retirePreparedStartup :: !(IO ())
+    , preparedGatewayModels :: Maybe
+        (GatewayModelAccess, IO (Either Text [GatewayModel]))
+    , preparedIntegration :: !(IO (Either Text (Maybe IntegrationRuntime)))
     }
 
 data InitializedRequest = InitializedRequest
@@ -238,21 +243,33 @@ prepareStartupAuth requestedProvider = do
 
 withPreparedStartupAuth
     :: Maybe Provider
+    -> Maybe GatewayModelAccess
+    -> IO (Either Text (Maybe IntegrationRuntime))
     -> (PreparedStartupAuthWorker -> IO a)
     -> IO a
-withPreparedStartupAuth requestedProvider action =
-    withAsync
-        (prepareStartupAuth requestedProvider)
-        \worker -> do
-            retire <- newEmptyMVar
-            withAsync
-                (takeMVar retire >> cancel worker)
-                \_ ->
-                    action PreparedStartupAuthWorker
-                        { preparedStartupAsync = worker
-                        , retirePreparedStartup =
-                            void (tryPutMVar retire ())
-                        }
+withPreparedStartupAuth requestedProvider gatewayAccess prepareIntegration action =
+    withPreparedModels \preparedGatewayModels ->
+      withAsync prepareIntegration \integrationWorker ->
+        withAsync
+            (prepareStartupAuth requestedProvider)
+            \worker -> do
+                retire <- newEmptyMVar
+                withAsync
+                    (takeMVar retire >> cancel worker)
+                    \_ ->
+                        action PreparedStartupAuthWorker
+                            { preparedStartupAsync = worker
+                            , retirePreparedStartup =
+                                void (tryPutMVar retire ())
+                            , preparedGatewayModels
+                            , preparedIntegration = wait integrationWorker
+                            }
+  where
+    withPreparedModels continue = case gatewayAccess of
+        Nothing -> continue Nothing
+        Just access ->
+            withPreparedGatewayModelsForStartup access $ \awaitModels ->
+                continue (Just (access, awaitModels))
 
 runAgentInitialized
     :: (AgentRunMode -> CliOptions -> IO DevResult)
@@ -407,7 +424,6 @@ prepareInitializedWorkspace request = do
         pure
         catalogResult
     setStartupRepository fullscreen home branch cwd
-    markStartupStage startup "Loading credentials…"
     pure InitializedWorkspace
         { initializedProjectRoot = projectRoot
         , initializedStateDirectory = stateDirectory
@@ -535,12 +551,19 @@ withInitializedTargets request workspace continue = do
         either (startupDie startup) pure resumedTargetResult
     projectTarget <-
         either (startupDie startup) pure projectTargetResult
+    when (isJust connectedGateway) $
+        markStartupStage startup "Refreshing gateway models…"
     let withGatewayTarget continueGateway = case connectedGateway of
             Nothing -> continueGateway (Nothing, Nothing)
             Just credential -> do
-                access <- newGatewayModelAccessWithStore
-                    (trustedPool startup.startupDatabaseStore)
-                    credential
+                (access, awaitModels) <-
+                    case request.initializedPreparedAuth >>= (.preparedGatewayModels) of
+                        Just prepared -> pure prepared
+                        Nothing -> do
+                            access <- newGatewayModelAccessWithStore
+                                (trustedPool startup.startupDatabaseStore)
+                                credential
+                            pure (access, refreshGatewayModels access)
                 let select models =
                         selectGatewayModelOption
                             (modelOptionsForGatewayModels catalog models)
@@ -550,9 +573,9 @@ withInitializedTargets request workspace continue = do
                                 [ transitionTarget, configuredOptionTarget
                                 , resumedTarget, projectTarget
                                 ])
-                withGatewayModelsForStartup access select \result -> do
-                    selected <- either (startupDie startup) pure result
-                    continueGateway (Just access, Just selected.modelTarget)
+                result <- awaitModels
+                selected <- either (startupDie startup) pure (result >>= select)
+                continueGateway (Just access, Just selected.modelTarget)
     withGatewayTarget \(gatewayModelAccess, gatewayTarget) -> do
         let targetHint =
                 gatewayTarget <|>
@@ -1097,6 +1120,7 @@ runInitializedWithTargets
     -> InitializedTargets
     -> IO RunResult
 runInitializedWithTargets request workspace targets = do
+    markStartupStage request.initializedStartup "Loading credentials…"
     routedAuth <- loadInitializedAuth request targets
     initializedAuth <-
         selectInitializedStartupAccount
@@ -1140,6 +1164,8 @@ launchInitializedTools request workspace targets auth refs httpRuntime =
         { runAgentChild = request.initializedRunAgentChild
         , loaded = auth.initializedLoaded
         , connectedGateway = request.initializedConnectedGateway
+        , preparedIntegration =
+            (.preparedIntegration) <$> request.initializedPreparedAuth
         , learnAboutUserRequested = auth.initializedLearnAboutUserRequested
         , customBearerToken = auth.initializedCustomBearerToken
         , activeAccountRef = refs.initializedActiveAccountRef

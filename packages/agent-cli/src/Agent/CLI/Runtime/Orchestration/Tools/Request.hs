@@ -21,6 +21,7 @@ import Agent.CLI.Session.Runtime.Types (StartupRuntime)
 import Agent.Runtime.SessionLock (SessionLock)
 import Agent.CLI.TUI.App (FullscreenRuntime)
 import Agent.Error (ApiError)
+import Agent.Integration.API (IntegrationRuntime)
 import qualified Agent.MCP as MCP
 import Agent.Provider (Credential, Provider, TokenProvider)
 import Agent.Skills (SkillCatalog)
@@ -35,6 +36,7 @@ data AgentToolsRequest windowTitleResult = AgentToolsRequest
     { runAgentChild :: AgentRunMode -> CliOptions -> IO DevResult
     , loaded :: LoadedAuth
     , connectedGateway :: Maybe GatewayCredential
+    , preparedIntegration :: Maybe (IO (Either Text (Maybe IntegrationRuntime)))
     , learnAboutUserRequested :: Bool
     , customBearerToken :: Maybe Text
     , activeAccountRef :: ActiveAccountRef
