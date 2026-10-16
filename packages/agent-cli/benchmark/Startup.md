@@ -133,7 +133,7 @@ optimized executable**, using the production `nix/cli-wrapper.nix` function.
 It checks resource defaults and overrides, empty/unset search paths, duplicate
 directories, argument forwarding, output and exit status. The shell's inert
 `/no-such-path` default is omitted by the compiled launcher when PATH is unset.
-It does not rebuild Haskell or send a model request.
+It does not rebuild the CLI or send a model request.
 
 The fixture takes `pkgs`, `executable`, `syntaxDirectory`, `postgresBin`,
 `runtimeTools` (package roots), `gstreamerPlugins` (package roots), and optional
@@ -151,11 +151,17 @@ comparison=$(nix build --impure --no-link --print-out-paths --expr '
       (builtins.readFile (builtins.getEnv "CLI_LAUNCHER_CONFIGURATION"));
   in import ./nix/benchmarks/cli-wrapper.nix (configuration // { inherit pkgs; })
 ')
-nix develop -c python3 scripts/benchmark-cli-launcher.py "$comparison" \
+mkdir -p "$TMPDIR/cli-launcher-benchmark"
+nix develop -c ghc -O2 -threaded -rtsopts scripts/BenchmarkCliLauncher.hs \
+  -outputdir "$TMPDIR/cli-launcher-benchmark" \
+  -o "$TMPDIR/cli-launcher-benchmark/benchmark-cli-launcher"
+nix develop -c "$TMPDIR/cli-launcher-benchmark/benchmark-cli-launcher" "$comparison" \
   --samples 7 --warmups 1 --output "$TMPDIR/launcher-samples.json"
 ```
 
-The benchmark alternates shell/native order, verifies identical version output,
+`scripts/BenchmarkCliLauncher.hs` also runs the fixture's environment and argument
+checks with `--check CONFIGURATION`. The benchmark alternates shell/native order,
+verifies identical version output,
 and covers 1, 64, 128 and 256 synthetic Nix-style search directories, the inherited
 environment, then a repeated 256-directory case. For interactive measurements,
 use `scripts/benchmark-startup.py` with `$comparison/shell/bin/agent-cli` and
