@@ -47,6 +47,11 @@ spec = do
             parseImagePreviewProtocol Nothing (Just "WezTerm") Nothing Nothing
                 `shouldBe` PreviewKitty
 
+        it "detects Rex with its default xterm TERM" do
+            forM_ ["rex", "Rex"] \program ->
+                parseImagePreviewProtocol (Just "xterm-256color") (Just program) Nothing Nothing
+                    `shouldBe` PreviewKitty
+
         it "detects iTerm2" do
             parseImagePreviewProtocol Nothing (Just "iTerm.app") Nothing (Just "w0t0")
                 `shouldBe` PreviewITerm
