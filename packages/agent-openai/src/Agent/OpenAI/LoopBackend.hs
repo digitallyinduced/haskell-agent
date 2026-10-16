@@ -70,8 +70,8 @@ import Agent.OpenAI.WebSocketClient
     , isCompletedOutputItem
     , sendWsRequestWithEventsPreservingTurnState
     , resetCodexTurnState
-    , withCodexWsRetrying
-    , withCodexWsRetryingAfter
+    , withCodexWsRetryingForSession
+    , withCodexWsRetryingAfterForSession
     )
 import Agent.Provider
     ( Credential
@@ -290,7 +290,8 @@ openAiResponseSenderReconnectingWhen sendOnConnection observed
                     (failure, accountFailureReason err failure))
                     <$> accountFailureFromApiError err of
             Just (failure, failureReason) ->
-                withCodexWsRetryingAfter provider
+                withCodexWsRetryingAfterForSession
+                    (maybe "" id request.promptCacheKey) provider
                     FailedCredential
                         { credential = currentCredential
                         , failure
@@ -298,7 +299,8 @@ openAiResponseSenderReconnectingWhen sendOnConnection observed
                         }
                     (sendOnFresh request previousResponseId onEvent)
             Nothing ->
-                withCodexWsRetrying provider
+                withCodexWsRetryingForSession
+                    (maybe "" id request.promptCacheKey) provider
                     (sendOnFresh request previousResponseId onEvent)
     sendOnFresh request previousResponseId onEvent freshConn _credential =
         do

@@ -2,12 +2,17 @@ module Agent.OpenAI.WebSocketClient
     ( withCodexWs
     , withCodexWsWithProvider
     , withCodexWsWithProviderOrHttpFallback
+    , withCodexWsWithProviderOrHttpFallbackForSession
     , withCodexWsCredential
     , withCodexWsCredentialForSession
     , withCodexWsCredentialOrHttpFallback
+    , withCodexWsCredentialOrHttpFallbackForSession
     , withCodexWsCredentialUsingTurnState
+    , withCodexWsCredentialUsingTurnStateForSession
     , withCodexWsRetrying
+    , withCodexWsRetryingForSession
     , withCodexWsRetryingAfter
+    , withCodexWsRetryingAfterForSession
     , sendWsRequest
     , sendWsRequestWithOptions
     , sendWsRequestWithEvents
@@ -40,6 +45,7 @@ module Agent.OpenAI.WebSocketClient
     , finishCodexTurnStateResponse
     , copyCodexTurnState
     , withCodexWsRetryingUsingTurnState
+    , withCodexWsRetryingUsingTurnStateForSession
     , StreamEventCallback
     , RawStreamEventCallback
     , WebSocketReceiveActions(..)
@@ -248,10 +254,21 @@ withCodexWsWithProviderOrHttpFallback
     :: TokenProvider
     -> (CodexConn -> Credential -> IO a)
     -> IO a
-withCodexWsWithProviderOrHttpFallback provider action =
+withCodexWsWithProviderOrHttpFallback =
+    withCodexWsWithProviderOrHttpFallbackForSession ""
+
+-- | Persistent acquisition retaining the conversation's cache affinity across
+-- connection retries and credential rotation.
+withCodexWsWithProviderOrHttpFallbackForSession
+    :: Text
+    -> TokenProvider
+    -> (CodexConn -> Credential -> IO a)
+    -> IO a
+withCodexWsWithProviderOrHttpFallbackForSession sessionKey provider action =
     runWithTokenProvider provider
         (\credential ->
             runPersistentConnectionAttempt
+                (buildCodexWsSessionHeaders sessionKey)
                 WebSocket.transientWsConnectRetryPolicy
                 credential
                 action)
@@ -295,20 +312,33 @@ withCodexWsCredentialOrHttpFallback
     :: Credential
     -> (CodexConn -> Credential -> IO a)
     -> IO (Either ApiError a)
-withCodexWsCredentialOrHttpFallback credential =
+withCodexWsCredentialOrHttpFallback =
+    withCodexWsCredentialOrHttpFallbackForSession ""
+
+-- | Exact-credential acquisition with conversation cache affinity.
+withCodexWsCredentialOrHttpFallbackForSession
+    :: Text
+    -> Credential
+    -> (CodexConn -> Credential -> IO a)
+    -> IO (Either ApiError a)
+withCodexWsCredentialOrHttpFallbackForSession sessionKey credential =
     runPersistentConnectionAttempt
+        (buildCodexWsSessionHeaders sessionKey)
         (limitRetries 2 <> exponentialBackoff 500000)
         credential
 
 runPersistentConnectionAttempt
-    :: RetryPolicyM IO
+    :: WS.Headers
+    -> RetryPolicyM IO
     -> Credential
     -> (CodexConn -> Credential -> IO a)
     -> IO (Either ApiError a)
-runPersistentConnectionAttempt retryPolicy credential action = do
+runPersistentConnectionAttempt extraHeaders retryPolicy credential action = do
     result <-
-        runConnectionAttemptWithPolicy
+        runConnectionAttemptWithHeaders
+            extraHeaders
             retryPolicy
+            Nothing
             credential
             (\conn activeCredential ->
                 Right <$> action conn activeCredential)
@@ -342,7 +372,22 @@ withCodexWsCredentialUsingTurnState
     -> (CodexConn -> Credential -> IO (Either ApiError a))
     -> IO (Either ApiError a)
 withCodexWsCredentialUsingTurnState =
-    runConnectionAttemptUsingTurnState
+    withCodexWsCredentialUsingTurnStateForSession ""
+
+-- | Disposable-connection acquisition retaining both logical turn state and
+-- conversation cache affinity.
+withCodexWsCredentialUsingTurnStateForSession
+    :: Text
+    -> Credential
+    -> CodexTurnState
+    -> (CodexConn -> Credential -> IO (Either ApiError a))
+    -> IO (Either ApiError a)
+withCodexWsCredentialUsingTurnStateForSession sessionKey credential turnState =
+    runConnectionAttemptWithHeaders
+        (buildCodexWsSessionHeaders sessionKey)
+        WebSocket.transientWsConnectRetryPolicy
+        (Just turnState)
+        credential
 
 -- | Run a replay-safe WebSocket action and automatically reacquire a
 -- credential after handshake or in-band account failures. The callback is
@@ -353,9 +398,22 @@ withCodexWsRetrying
     :: TokenProvider
     -> (CodexConn -> Credential -> IO (Either ApiError a))
     -> IO (Either ApiError a)
-withCodexWsRetrying provider action =
+withCodexWsRetrying = withCodexWsRetryingForSession ""
+
+-- | Reacquire credentials and connections with the same conversation identity.
+withCodexWsRetryingForSession
+    :: Text
+    -> TokenProvider
+    -> (CodexConn -> Credential -> IO (Either ApiError a))
+    -> IO (Either ApiError a)
+withCodexWsRetryingForSession sessionKey provider action =
     runWithTokenProvider provider \credential ->
-        runConnectionAttempt credential action
+        runConnectionAttemptWithHeaders
+            (buildCodexWsSessionHeaders sessionKey)
+            WebSocket.transientWsConnectRetryPolicy
+            Nothing
+            credential
+            action
 
 -- | Like 'withCodexWsRetrying', but attach every disposable physical
 -- connection to an existing logical turn. This is used by subagents whose
@@ -365,9 +423,21 @@ withCodexWsRetryingUsingTurnState
     -> CodexTurnState
     -> (CodexConn -> Credential -> IO (Either ApiError a))
     -> IO (Either ApiError a)
-withCodexWsRetryingUsingTurnState provider turnState action =
+withCodexWsRetryingUsingTurnState =
+    withCodexWsRetryingUsingTurnStateForSession ""
+
+-- | Credential-rotating acquisition retaining the conversation's cache
+-- affinity on every physical connection in the logical turn.
+withCodexWsRetryingUsingTurnStateForSession
+    :: Text
+    -> TokenProvider
+    -> CodexTurnState
+    -> (CodexConn -> Credential -> IO (Either ApiError a))
+    -> IO (Either ApiError a)
+withCodexWsRetryingUsingTurnStateForSession sessionKey provider turnState action =
     runWithTokenProvider provider \credential ->
-        runConnectionAttemptUsingTurnState credential turnState action
+        withCodexWsCredentialUsingTurnStateForSession
+            sessionKey credential turnState action
 
 -- | Like 'withCodexWsRetrying', but first reports a credential that failed on
 -- an already-open connection. This ensures an exhausted resumed-session
@@ -377,29 +447,24 @@ withCodexWsRetryingAfter
     -> FailedCredential
     -> (CodexConn -> Credential -> IO (Either ApiError a))
     -> IO (Either ApiError a)
-withCodexWsRetryingAfter provider failed action =
+withCodexWsRetryingAfter =
+    withCodexWsRetryingAfterForSession ""
+
+-- | Recovery after a failed credential retaining conversation cache affinity.
+withCodexWsRetryingAfterForSession
+    :: Text
+    -> TokenProvider
+    -> FailedCredential
+    -> (CodexConn -> Credential -> IO (Either ApiError a))
+    -> IO (Either ApiError a)
+withCodexWsRetryingAfterForSession sessionKey provider failed action =
     runWithTokenProviderAfter provider (Just failed) \credential ->
-        runConnectionAttempt credential action
-
-runConnectionAttempt
-    :: Credential
-    -> (CodexConn -> Credential -> IO (Either ApiError a))
-    -> IO (Either ApiError a)
-runConnectionAttempt =
-    runConnectionAttemptWithPolicyAndTurnState
-        WebSocket.transientWsConnectRetryPolicy
-        Nothing
-
-runConnectionAttemptUsingTurnState
-    :: Credential
-    -> CodexTurnState
-    -> (CodexConn -> Credential -> IO (Either ApiError a))
-    -> IO (Either ApiError a)
-runConnectionAttemptUsingTurnState credential turnState =
-    runConnectionAttemptWithPolicyAndTurnState
-        WebSocket.transientWsConnectRetryPolicy
-        (Just turnState)
-        credential
+        runConnectionAttemptWithHeaders
+            (buildCodexWsSessionHeaders sessionKey)
+            WebSocket.transientWsConnectRetryPolicy
+            Nothing
+            credential
+            action
 
 runConnectionAttemptWithPolicy
     :: RetryPolicyM IO
