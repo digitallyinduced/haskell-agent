@@ -2,11 +2,19 @@
 module Agent.CLI.TUI.MeasuredViewport
     ( measuredViewport
     , measuredViewportWithFooter
+    , measuredViewportWithFilteredFooter
     ) where
 
 import Brick
 import Control.Monad.Reader (local)
 import qualified Graphics.Vty as V
+
+data MeasuredChunk n = MeasuredChunk
+    { measuredChunkResult :: !(Result n)
+    , measuredChunkWidthLimit :: !Int
+    , measuredChunkHeightLimit :: !Int
+    , measuredChunkImage :: !V.Image
+    }
 
 -- | Measure fixed-height chunks, resolve scrolling using Brick's viewport,
 -- then compose only intersecting results. The reservation is the width of a
@@ -27,7 +35,22 @@ measuredViewportWithFooter
     -> Maybe (Int -> [Extent n] -> Widget n)
     -> [Widget n]
     -> Widget n
-measuredViewportWithFooter name scrollbarWidth footer chunks
+measuredViewportWithFooter name scrollbarWidth =
+    measuredViewportWithFilteredFooter name scrollbarWidth (const True)
+
+-- | Select the named extents needed by the footer before clipping and
+-- translating them. Measurements retain the cached result: full cursor,
+-- extent and border clipping is deferred until a chunk becomes visible.
+-- Visible hit targets are independent of this footer filter.
+measuredViewportWithFilteredFooter
+    :: (Ord n, Show n)
+    => n
+    -> Int
+    -> (n -> Bool)
+    -> Maybe (Int -> [Extent n] -> Widget n)
+    -> [Widget n]
+    -> Widget n
+measuredViewportWithFilteredFooter name scrollbarWidth footerExtent footer chunks
     | null chunks || any ((== Greedy) . vSize) chunks =
         viewport name Vertical (vBox chunks)
     | otherwise = Widget Greedy Greedy do
@@ -36,12 +59,15 @@ measuredViewportWithFooter name scrollbarWidth footer chunks
             , availWidth = max 0 (availWidth c - scrollbarWidth)
             }) $
             measureChunks 100000 chunks
-        let offsets = scanl (+) 0 (map (V.imageHeight . image) results)
+        let offsets = scanl (+) 0 (map (V.imageHeight . (.measuredChunkImage)) results)
             positioned = zip offsets results
-            totalHeight = sum (map (V.imageHeight . image) results)
-            totalWidth = maximum (0 : map (V.imageWidth . image) results)
+            totalHeight = sum (map (V.imageHeight . (.measuredChunkImage)) results)
+            totalWidth = maximum (0 : map (V.imageWidth . (.measuredChunkImage)) results)
             requests = concat
-                [ visibilityRequests (addResultOffset (Location (0, y)) result)
+                [ [ VR (Location (column, row + y)) size
+                  | VR (Location (column, row)) size <-
+                        visibilityRequests result.measuredChunkResult
+                  ]
                 | (y, result) <- positioned
                 ]
             geometry = emptyResult
@@ -66,14 +92,14 @@ measuredViewportWithFooter name scrollbarWidth footer chunks
                         -- Include touching neighbors so dynamic borders can
                         -- join across the edge of the visible region.
                         , y <= top + height
-                        , y + V.imageHeight (image result) >= top
+                        , y + V.imageHeight result.measuredChunkImage >= top
                         ]
                     firstY = case visibleChunks of
                         [] -> top
                         (y, _) : _ -> y
                 combined <- local (\c -> c { availHeight = 100000 }) $
                     render $ vBox
-                        [Widget Fixed Fixed (pure result) | (_, result) <- visibleChunks]
+                        [measuredChunkWidget result | (_, result) <- visibleChunks]
                 content <- render $
                     vLimit height $ hLimit width $
                     padBottom Max $ padRight Max $
@@ -94,19 +120,54 @@ measuredViewportWithFooter name scrollbarWidth footer chunks
                         render $ vBox
                             [ Widget Fixed Fixed (pure viewportResult)
                             , vLimit 1 $ drawFooter (top + height) $
-                                concat
-                                    [ extents (addResultOffset (Location (0, y)) result)
-                                    | (y, result) <- positioned
-                                    ]
+                                footerExtents footerExtent positioned
                             ]
                     _ -> pure viewportResult
 
 -- Match vBox's decreasing height budget, including Brick's release limit.
--- Measuring every child at 100000 would incorrectly expose content which an
--- ordinary viewport truncates when the combined transcript exceeds that cap.
-measureChunks :: Int -> [Widget n] -> RenderM n [Result n]
+-- Only image clipping is required to establish each chunk's geometry. The
+-- same context limits are retained for visible metadata and footer extents.
+-- Measuring every child at 100000 would expose content beyond Brick's cap.
+measureChunks :: Int -> [Widget n] -> RenderM n [MeasuredChunk n]
 measureChunks _ [] = pure []
 measureChunks remaining (chunk : rest) = do
-    result <- render (vLimit remaining chunk)
-    results <- measureChunks (remaining - V.imageHeight (image result)) rest
-    pure (result : results)
+    context <- getContext
+    let width = max 0 (availWidth context)
+        height = max 0 (min remaining (availHeight context))
+    result <- if height == 0
+        then pure emptyResult
+        else local (\c -> c { availHeight = height }) (render chunk)
+    let clippedImage = V.crop width height (image result)
+        measured = MeasuredChunk result width height clippedImage
+    results <- measureChunks (remaining - V.imageHeight clippedImage) rest
+    pure (measured : results)
+
+measuredChunkWidget :: MeasuredChunk n -> Widget n
+measuredChunkWidget chunk = Widget Fixed Fixed $
+    local (\c -> c
+        { availWidth = chunk.measuredChunkWidthLimit
+        , availHeight = chunk.measuredChunkHeightLimit
+        }) $
+        render $ vLimit chunk.measuredChunkHeightLimit $
+            Widget Fixed Fixed (pure chunk.measuredChunkResult)
+
+-- Match Brick's context clipping, including zero-width/height removal, before
+-- applying each chunk's content offset. Irrelevant extents remain untouched.
+footerExtents :: (n -> Bool) -> [(Int, MeasuredChunk n)] -> [Extent n]
+footerExtents relevant positioned =
+    [ Extent name (Location (left, offset + top)) (right - left, bottom - top)
+    | (offset, chunk) <- positioned
+    , extent <- extents chunk.measuredChunkResult
+    , let name = extentName extent
+    , relevant name
+    , let Location (column, row) = extentUpperLeft extent
+          (width, height) = extentSize extent
+          clipColumn = min chunk.measuredChunkWidthLimit . max 0
+          clipRow = min chunk.measuredChunkHeightLimit . max 0
+          left = clipColumn column
+          top = clipRow row
+          right = clipColumn (column + width)
+          bottom = clipRow (row + height)
+    , right > left
+    , bottom > top
+    ]

@@ -817,6 +817,7 @@ benchmark conversation-scrolling-bench
     type:             exitcode-stdio-1.0
     hs-source-dirs:   benchmark
     main-is:          ConversationScrolling.hs
+    other-modules:    MeasuredViewportBaseline
     ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
     build-depends:    agent-cli
                     , agent-tui

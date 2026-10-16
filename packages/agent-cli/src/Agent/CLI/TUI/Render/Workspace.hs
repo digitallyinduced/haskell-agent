@@ -46,7 +46,7 @@ import Agent.CLI.TUI.Motion
     , sidePaneMinScreenWidth
     , workspaceSidePaneVisible
     )
-import Agent.CLI.TUI.MeasuredViewport ( measuredViewportWithFooter )
+import Agent.CLI.TUI.MeasuredViewport ( measuredViewportWithFilteredFooter )
 import Agent.CLI.TUI.Render.Transcript
     ( drawTranscript,
       drawTranscriptChunksWithPadding,
@@ -304,8 +304,13 @@ drawConversationPane state =
 
 conversationViewport :: AppState -> [Widget Name] -> Widget Name
 conversationViewport state =
-    measuredViewportWithFooter ConversationViewport 1 footer
+    measuredViewportWithFilteredFooter ConversationViewport 1 footerExtent footer
   where
+    footerExtent = \case
+        ConversationMessage target _ -> target == state.appAgentSelected
+        ConversationBlock target _ -> target == state.appAgentSelected
+        ConversationNewerGap -> state.appAgentSelected == AgentRoot
+        _ -> False
     footer
         | state.appUi.uiFollow = Nothing
         | otherwise = Just \bottom measuredExtents ->

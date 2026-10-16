@@ -1,5 +1,9 @@
 # Conversation scrolling
 
+The latest comparison against the merged chunk renderer is documented in
+[Cached transcript layout](CachedTranscriptLayout.md). It retains the previous
+viewport and eager cache-sizing behavior as `extent-baseline`.
+
 `conversation-scrolling-bench` generates only the requested pages of a synthetic
 conversation for history traces. Increasing the total conversation size does not
 retain the full history fixture in memory. Live traces instead retain the whole
@@ -69,7 +73,8 @@ constant latency as stored history grows.
 
 The retained `baseline` applies horizontal padding outside each cached chunk,
 as the original root pane did. `production` caches that horizontal layout with
-the chunk. Both use the same viewport and transcript contents. Cross-chunk
+the chunk and now also defers cached widget construction and offscreen metadata
+clipping. Both use the same transcript contents. Cross-chunk
 vertical spacing remains outside the cache because paging can change the
 previous block. Padding is part of the cache name; selection and hover still
 bypass the affected chunk cache.

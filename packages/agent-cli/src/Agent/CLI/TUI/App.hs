@@ -29,6 +29,7 @@ module Agent.CLI.TUI.App
     , drawTranscript
     , drawTranscriptChunks
     , drawTranscriptChunksWithPadding
+    , drawTranscriptChunksWithCache
     , elapsedMillisSince
     , appEventLogicalBytes
     , closeAppEventMailbox
@@ -171,6 +172,7 @@ import Agent.CLI.TUI.Render.Transcript
     , drawTranscript
     , drawTranscriptChunks
     , drawTranscriptChunksWithPadding
+    , drawTranscriptChunksWithCache
     )
 import Agent.CLI.TUI.LambdaArt
 import Agent.CLI.TUI.App.Runtime
