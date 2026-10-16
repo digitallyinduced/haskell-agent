@@ -95,6 +95,7 @@ reduceUi event state = case event of
         appendBlock BlockUser "You" text "" BlockComplete Nothing
             state
                 { uiAwaitingInput = False
+                , uiAsyncQuestions = Seq.empty
                 , uiFollow = True
                 , uiNotice = Nothing
                 , uiNoticeElapsedMillis = 0
@@ -111,6 +112,7 @@ reduceUi event state = case event of
         appendBlock BlockUser "You" text "" BlockComplete Nothing
             state
                 { uiDraft = ""
+                , uiAsyncQuestions = Seq.empty
                 , uiCursor = 0
                 , uiFollow = True
                 , uiNotice =
@@ -177,6 +179,12 @@ reduceUi event state = case event of
         state { uiBranch = branch, uiCwd = cwd, uiWorkspaceRoot = workspace }
     UiSetNotice notice ->
         state { uiNotice = notice, uiNoticeElapsedMillis = 0 }
+    UiAsyncQuestion message
+        | Text.null (Text.strip message) -> state
+        | otherwise -> state
+            { uiAsyncQuestions = state.uiAsyncQuestions Seq.|> message }
+    UiDismissAsyncQuestions ->
+        state { uiAsyncQuestions = Seq.empty }
     UiSetBackgroundTaskStatus rows ->
         state { uiBackgroundTaskStatus = rows }
     UiMoveSelection delta ->
@@ -304,6 +312,7 @@ clearConversation state =
         , uiRetryCountdown = Nothing
         , uiTodos = []
         , uiBackgroundTaskStatus = []
+        , uiAsyncQuestions = Seq.empty
         , uiGenerating = False
         , uiGenerationChars = 0
         , uiGenerationMillis = 0

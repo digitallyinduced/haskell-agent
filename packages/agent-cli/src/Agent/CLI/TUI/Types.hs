@@ -144,6 +144,8 @@ data Name
     | CodeCopy !AgentTarget !BlockId !Int
     | MarkdownLink !Text
     | ComposerArea
+    | AsyncQuestionsViewport
+    | AsyncQuestionsDismiss
     | ComposerCursor
     | ComposerModel
     | ComposerEffort

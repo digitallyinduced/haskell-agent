@@ -163,6 +163,8 @@ data UiState = UiState
     , uiContextWindow :: !(Maybe Int)
     , uiPermission :: !(Maybe PermissionOverlay)
     , uiNotice :: !(Maybe UiNotice)
+    -- | Outstanding clarification requests, outside the scrolling transcript.
+    , uiAsyncQuestions :: !(Seq Text)
     -- | Live managed work, independent of the last model response.
     , uiBackgroundTaskStatus :: ![Text]
     , uiRetryCountdown :: !(Maybe RetryCountdown)
@@ -207,6 +209,8 @@ data UiEvent
     | UiSetAwaitingInput !Bool
     | UiSetRepository !Text !Text !Text
     | UiSetNotice !(Maybe UiNotice)
+    | UiAsyncQuestion !Text
+    | UiDismissAsyncQuestions
     | UiSetBackgroundTaskStatus ![Text]
     | UiMoveSelection !Int
     | UiSelectBlock !BlockId

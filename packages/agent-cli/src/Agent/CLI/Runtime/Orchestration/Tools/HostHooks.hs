@@ -7,9 +7,9 @@ module Agent.CLI.Runtime.Orchestration.Tools.HostHooks
 
 import Agent.CLI.CancelWatch (withStdinPaused)
 import Agent.CLI.Notification (AttentionRequest(InputRequested), notifyAttention)
-import Agent.CLI.Render (renderAssistantTextForHandle)
+import Agent.CLI.Render (renderAsyncQuestion)
 import Agent.CLI.TUI.App (emitUiEvent)
-import Agent.TUI.Model (UiEvent(UiAssistantHistory))
+import Agent.TUI.Model (UiEvent(UiAsyncQuestion))
 import Agent.Loop (LoopEvent(TextDelta))
 import Agent.CLI.Options (isOneShot)
 import Data.IORef (readIORef)
@@ -82,11 +82,12 @@ buildToolHostHooks AgentToolsRequest
         | otherwise = Just \message -> do
             notifyAttention stderrHandle InputRequested
             readIORef uiRuntimeRef >>= \case
-                Just runtime -> emitUiEvent runtime (UiAssistantHistory message)
+                Just runtime -> emitUiEvent runtime
+                    (UiAsyncQuestion message)
                 Nothing -> withStdinPaused stdinControl do
                     color <- resolveColor stderrHandle
-                    rendered <- renderAssistantTextForHandle stderrHandle color message
-                    Text.hPutStrLn stderrHandle ("\n" <> rendered)
+                    Text.hPutStrLn stderrHandle
+                        ("\n" <> renderAsyncQuestion color message <> "\n")
             pure (Right ())
     baseSecretHooks = SecretPromptHooks \request ->
         Right <$> promptSecretLine

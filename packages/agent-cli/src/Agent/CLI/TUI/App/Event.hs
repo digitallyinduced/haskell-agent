@@ -1326,6 +1326,12 @@ handleNormalMouseDown
     -> EventM Name AppState ()
 handleNormalMouseDown name button =
     case (name, button) of
+        (AsyncQuestionsDismiss, V.BLeft) ->
+            applyLocalUiEvent UiDismissAsyncQuestions
+        (AsyncQuestionsViewport, V.BScrollUp) ->
+            vScrollBy (viewportScroll AsyncQuestionsViewport) (-mouseScrollLines)
+        (AsyncQuestionsViewport, V.BScrollDown) ->
+            vScrollBy (viewportScroll AsyncQuestionsViewport) mouseScrollLines
         (ConversationLatest, V.BLeft) ->
             resumeConversationFollow
         (ComposerModel, V.BLeft) ->

@@ -163,6 +163,7 @@ import qualified Agent.CLI.TUI.Composer as Composer
       drawBackgroundTaskStatus,
       drawQueuedInputs,
       drawClipboardImageTip,
+      drawAsyncQuestions,
       drawComposer )
 import qualified Data.Map.Strict as Map ()
 import qualified Agent.CLI.TUI.Scroll as Scroll ()
@@ -277,6 +278,7 @@ drawMain state =
                         | choice.choicePresentation == ChoicePlanning ->
                             drawChoice state choice
                     _ -> emptyWidget
+                , Composer.drawAsyncQuestions state.appUi
                 , Composer.drawComposer state
                 , drawFooter state
                 ]

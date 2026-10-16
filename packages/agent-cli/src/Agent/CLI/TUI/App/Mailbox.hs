@@ -665,6 +665,8 @@ uiEventLogicalBytes = \case
         logicalTextsBytes [branch, cwd, root]
     UiSetNotice notice ->
         maybe 128 (logicalTextBytes . (.noticeText)) notice
+    UiAsyncQuestion text -> logicalTextBytes text
+    UiDismissAsyncQuestions -> 128
     UiSetBackgroundTaskStatus rows -> logicalTextsBytes rows
     UiMoveSelection _ -> 128
     UiSelectBlock _ -> 128
@@ -910,6 +912,7 @@ uiStateLogicalBytes ui =
             (logicalTextBytes . (.permissionSummary))
             ui.uiPermission
         , maybe 0 (logicalTextBytes . (.noticeText)) ui.uiNotice
+        , logicalTextsBytes ui.uiAsyncQuestions
         , maybe
             0
             (\retry ->

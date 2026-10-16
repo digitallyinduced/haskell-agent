@@ -43,6 +43,7 @@ module Agent.CLI.Render
     , formatTurnStatus
     , putTextLn
     , renderAssistantText
+    , renderAsyncQuestion
     , renderAssistantTextForHandle
     , renderEvent
     , renderPrintedText
@@ -183,7 +184,8 @@ import Agent.TUI.Motion
     , motionIntervalMicros
     , nativeProgressAnimationEnabled
     )
-import System.Console.ANSI (hGetTerminalSize)
+import Agent.TUI.TextWidth (displayTerminalText)
+import System.Console.ANSI (ConsoleIntensity(..), SGR(..), hGetTerminalSize)
 import System.Environment (lookupEnv)
 import System.IO (Handle, hFlush, hIsTerminalDevice)
 
@@ -760,6 +762,18 @@ renderAssistantText :: Bool -> Text -> Text
 renderAssistantText color text =
     paintBackgroundLines color agentBackground (renderMarkdown color text)
 
+-- | Questions need their own visual boundary: tool output can continue
+-- immediately after delivery. Keep the text bright even on muted themes.
+renderAsyncQuestion :: Bool -> Text -> Text
+renderAsyncQuestion color message =
+    Text.intercalate "\n" $
+        [roleWarn color "┌─ Question for you ─────────────"]
+            <> map renderLine (Text.lines (displayTerminalText message))
+            <> [roleWarn color "└──────────────────────────────"]
+  where
+    renderLine line = roleWarn color "│ "
+        <> style color [SetConsoleIntensity BoldIntensity] line
+
 renderAssistantTextAtWidth :: Bool -> Int -> Text -> Text
 renderAssistantTextAtWidth color width text =
     paintBackgroundLines color agentBackground
@@ -1111,7 +1125,7 @@ toolChrome call = case canonicalToolName call.name of
     "enter_plan_mode" -> ToolChrome "Entered" ToolDetailMuted
     "exit_plan_mode" -> ToolChrome "Exited" ToolDetailMuted
     "ask_user_question" -> ToolChrome "Asked" ToolDetailMuted
-    "request_user_input_async" -> ToolChrome "Asked asynchronously" ToolDetailMuted
+    "request_user_input_async" -> ToolChrome "Question for you" ToolDetailNone
     "skill_search" -> ToolChrome "Searched skills" ToolDetailMuted
     "view_skill" -> ToolChrome "Viewed skill" ToolDetailMuted
     "skill_create" -> ToolChrome "Learned" ToolDetailMuted

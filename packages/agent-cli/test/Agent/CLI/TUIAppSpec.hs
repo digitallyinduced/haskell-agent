@@ -1535,6 +1535,59 @@ spec = do
             backgroundActivityText [rootEntry, childEntry 1]
                 `shouldBe` "Background · agent-1"
 
+    describe "pinned asynchronous questions" do
+        it "keeps the question above the composer while the transcript scrolls" do
+            let ui = reduceUi (UiSetDraft "unfinished answer" 4) $
+                    reduceUi (UiAsyncQuestion "Which test account should I use?") $
+                    reduceUi (UiAssistantHistory
+                        (Text.unlines (replicate 100 "Independent work continues.")))
+                        initialUiState
+            runtime <- newScriptRuntime ui
+            let initial = (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    { appUi = ui }
+            (_, frames, scrolled) <- runFullscreenScriptDetailed initial
+                [ FullscreenScriptMouseDown ConversationViewport V.BScrollUp (B.Location (0, 0))
+                , FullscreenScriptApp (AppUi (UiLoop (TextDelta "More output.")))
+                , FullscreenScriptHalt
+                ]
+            map renderedPictureText frames `shouldSatisfy`
+                all (Text.isInfixOf "Which test account should I use?")
+            scrolled.appUi.uiFollow `shouldBe` False
+            scrolled.appUi.uiDraft `shouldBe` "unfinished answer"
+            let screen = renderedAppText (100, 36) scrolled
+            Text.length (fst (Text.breakOn "Which test account" screen))
+                `shouldSatisfy` (< Text.length (fst (Text.breakOn "unfinished answer" screen)))
+            map (.blockBody) (toList scrolled.appUi.uiBlocks)
+                `shouldNotContain` ["Which test account should I use?"]
+
+        it "scrolls long questions independently of the transcript" do
+            let message = Text.unlines
+                    (replicate 30 "Detailed question context." <> ["QUESTIONTAIL"])
+                ui = reduceUi (UiAsyncQuestion message) initialUiState
+            runtime <- newScriptRuntime ui
+            (_, frames, scrolled) <- runFullscreenScriptDetailed
+                ((initialFullscreenAppState runtime [] AgentRoot [] 0) { appUi = ui })
+                (replicate 30
+                    (FullscreenScriptMouseDown AsyncQuestionsViewport V.BScrollDown (B.Location (0, 0)))
+                    <> [FullscreenScriptHalt])
+            map renderedPictureText frames `shouldSatisfy`
+                any (Text.isInfixOf "QUESTIONTAIL")
+            scrolled.appUi.uiFollow `shouldBe` True
+            scrolled.appUi.uiAsyncQuestions `shouldBe` ui.uiAsyncQuestions
+
+        it "dismisses questions without changing the draft" do
+            let ui = reduceUi (UiSetDraft "unfinished answer" 4) $
+                    reduceUi (UiAsyncQuestion "Which account?") initialUiState
+            runtime <- newScriptRuntime ui
+            (_, dismissed) <- runFullscreenScriptWithState
+                ((initialFullscreenAppState runtime [] AgentRoot [] 0) { appUi = ui })
+                [ FullscreenScriptMouseDown AsyncQuestionsDismiss V.BLeft (B.Location (0, 0))
+                , FullscreenScriptHalt
+                ]
+            toList dismissed.appUi.uiAsyncQuestions `shouldBe` []
+            dismissed.appUi.uiDraft `shouldBe` ui.uiDraft
+            dismissed.appUi.uiCursor `shouldBe` ui.uiCursor
+
     describe "on-demand syntax loading" do
         it "requests grammars used by fenced file paths" do
             let conversation =

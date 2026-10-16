@@ -49,6 +49,7 @@ initialUiState = UiState
     , uiContextWindow = Nothing
     , uiPermission = Nothing
     , uiNotice = Nothing
+    , uiAsyncQuestions = Seq.empty
     , uiBackgroundTaskStatus = []
     , uiRetryCountdown = Nothing
     , uiNoticeElapsedMillis = 0
