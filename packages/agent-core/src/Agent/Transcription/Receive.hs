@@ -4,6 +4,8 @@ module Agent.Transcription.Receive
     ( ReceiveStep(..)
     , receiveEvent
     , awaitReady
+    , withConnectionTimeout
+    , sendWithTimeout
     , receiveTranscripts
     , receiveLoop
     , waitForCompletion
@@ -11,7 +13,9 @@ module Agent.Transcription.Receive
     ) where
 
 import qualified Agent.Json.Decode as Json
+import Control.Concurrent.Async (wait, waitSTM, withAsync)
 import Control.Concurrent.MVar (MVar, takeMVar, tryPutMVar)
+import qualified Control.Concurrent.STM as STM
 import Control.Exception.Safe (SomeException, throwIO, tryAny)
 import Control.Monad (void)
 import qualified Data.ByteString.Lazy as LBS
@@ -19,6 +23,35 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Network.WebSockets as WS
 import qualified System.Timeout as Timeout
+
+-- | Bound DNS, transport connection and WebSocket upgrade together. Once the
+-- connector enters the session, recording may continue for any duration.
+-- The scoped connection worker is cancelled and joined on timeout or abort.
+withConnectionTimeout
+    :: Int
+    -> String
+    -> ((connection -> IO result) -> IO result)
+    -> (connection -> IO result)
+    -> IO result
+withConnectionTimeout timeoutMicros timeoutMessage connect session = do
+    connected <- STM.newEmptyTMVarIO
+    withAsync
+        (connect \connection -> do
+            STM.atomically (STM.putTMVar connected ())
+            session connection)
+        \worker -> do
+            Timeout.timeout timeoutMicros
+                (STM.atomically $
+                    STM.readTMVar connected
+                        `STM.orElse` void (waitSTM worker)) >>= \case
+                            Nothing -> fail timeoutMessage
+                            Just () -> wait worker
+
+-- | Apply the deadline to an individual socket write, never to the audio
+-- producer: waiting for the user to speak or stop must remain unrestricted.
+sendWithTimeout :: Int -> String -> IO () -> IO ()
+sendWithTimeout timeoutMicros timeoutMessage send =
+    Timeout.timeout timeoutMicros send >>= maybe (fail timeoutMessage) pure
 
 -- | Updated provider state and an optional transcript notification. Completion
 -- includes provider errors, whose interpretation remains with the provider.

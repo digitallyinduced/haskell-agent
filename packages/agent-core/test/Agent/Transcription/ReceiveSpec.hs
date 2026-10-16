@@ -1,3 +1,5 @@
+{-# LANGUAGE NumericUnderscores #-}
+
 module Agent.Transcription.ReceiveSpec (spec) where
 
 import Agent.Transcription.Receive
@@ -13,6 +15,50 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "transcription receiver plumbing" do
+    it "bounds connection establishment and joins the blocked connector" do
+        blocked <- newEmptyMVar
+        released <- newEmptyMVar
+        let connect _ = takeMVar blocked `finally` putMVar released ()
+        Timeout.timeout 1_000_000
+            (withConnectionTimeout 10_000 "connection timeout" connect pure
+                `shouldThrow` message "connection timeout")
+            `shouldReturn` Just ()
+        tryTakeMVar released `shouldReturn` Just ()
+
+    it "preserves connection errors before the session starts" do
+        withConnectionTimeout 1_000_000 "connection timeout"
+            (\_ -> fail "connection rejected") pure
+            `shouldThrow` message "connection rejected"
+
+    it "allows a connected recording to outlast the connection deadline" do
+        withConnectionTimeout 10_000 "connection timeout" (\session -> session ())
+            (\() -> threadDelay 50_000 >> pure ("complete" :: Text))
+            `shouldReturn` "complete"
+
+    it "cancels and joins a connected session on parent cancellation" do
+        entered <- newEmptyMVar
+        blocked <- newEmptyMVar
+        released <- newEmptyMVar
+        let session () = (putMVar entered () >> takeMVar blocked)
+                `finally` putMVar released ()
+        withAsync (withConnectionTimeout 1_000_000 "connection timeout"
+            (\action -> action ()) session) \worker -> do
+            takeMVar entered
+            Timeout.timeout 1_000_000 (cancel worker) `shouldReturn` Just ()
+        tryTakeMVar released `shouldReturn` Just ()
+
+    it "bounds a blocked audio write and unwinds the writer" do
+        blocked <- newEmptyMVar
+        released <- newEmptyMVar
+        sendWithTimeout 10_000 "send timeout"
+            (takeMVar blocked `finally` putMVar released ())
+            `shouldThrow` message "send timeout"
+        tryTakeMVar released `shouldReturn` Just ()
+
+    it "preserves an audio write failure" do
+        sendWithTimeout 1_000_000 "send timeout" (fail "socket closed")
+            `shouldThrow` message "socket closed"
+
     it "ignores undecodable and unrelated events until readiness" do
         next <- events [Nothing, Just "unknown", Just "ready", Just "remaining"]
         awaitReady 1000000 "ready timeout" next ready

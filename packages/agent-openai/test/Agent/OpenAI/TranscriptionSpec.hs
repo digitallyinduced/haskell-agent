@@ -276,6 +276,66 @@ spec = describe "OpenAI transcription" do
                 `shouldReturn` Just (Right "retained speech")
         readIORef callbacks `shouldReturn` ["retained speech"]
 
+    it "rejects a partial ChatGPT transcript when the stream closes before capture ends" do
+        streamClosed <- newEmptyMVar
+        captureClosed <- newEmptyMVar
+        let server pending = do
+                connection <- WS.acceptRequest pending
+                _ <- WS.receiveData connection :: IO Text
+                sendEvent connection $ Aeson.object ["type" .= ("session.started" :: Text)]
+                _ <- WS.receiveData connection :: IO Text
+                sendEvent connection $ Aeson.object
+                    [ "type" .= ("transcript.final" :: Text)
+                    , "utterance_id" .= ("u1" :: Text)
+                    , "revision" .= (1 :: Int)
+                    , "text" .= ("opening words" :: Text)
+                    ]
+                WS.sendClose connection ("done" :: Text)
+                (WS.receiveData connection :: IO Text) `shouldThrow` \case
+                    WS.CloseRequest 1000 "done" -> True
+                    _ -> False
+                putMVar streamClosed ()
+            produce send =
+                (do
+                    send "\x01\x00"
+                    takeMVar streamClosed
+                    send "\x02\x00")
+                    `finally` putMVar captureClosed ()
+        withWebSocketServer server \port -> do
+            result <- Timeout.timeout 5_000_000 $
+                transcribePcmWithChatGPTStreamAt
+                    ("ws://127.0.0.1:" <> Text.pack (show port) <> "/")
+                    [] produce (const (pure ()))
+            result `shouldSatisfy` \case
+                Just (Left ChatGPTDictationStreamUnavailable{}) -> True
+                _ -> False
+        tryReadMVar captureClosed `shouldReturn` Just ()
+
+    it "bounds a blocked Realtime audio write and releases the writer" do
+        stoppedWrites <- newIORef (0 :: Int)
+        blockWrites <- newIORef False
+        let writer write bytes = do
+                shouldBlock <- readIORef blockWrites
+                case bytes of
+                    Just _ | shouldBlock ->
+                        threadDelay 20_000_000 `finally` modifyIORef' stoppedWrites (+ 1)
+                    _ -> write bytes
+            producer send = do
+                writeIORef blockWrites True
+                send "\x01\x00"
+        withChannelConnection writer \client server ->
+            withAsync (do
+                _ <- WS.receiveData server :: IO Text
+                sendEvent server $ Aeson.object ["type" .= ("session.updated" :: Text)]
+                -- The close write is intentionally blocked as well.
+                threadDelay 20_000_000) \_ ->
+                    Timeout.timeout 12_000_000
+                        (transcribeOnConnection client producer (const (pure ()))
+                            `shouldThrow` ((== "timed out sending OpenAI dictation audio")
+                                . ioeGetErrorString))
+                        `shouldReturn` Just ()
+        readIORef stoppedWrites `shouldReturn` 2
+
     it "decodes incremental and completed transcript events" do
         decodeTranscriptEvent
             "{\"type\":\"conversation.item.input_audio_transcription.delta\",\"delta\":\"hello \"}"

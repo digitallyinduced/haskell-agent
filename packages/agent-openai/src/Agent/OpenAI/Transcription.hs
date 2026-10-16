@@ -619,7 +619,7 @@ chatGPTStreamSession
     audio
     onTranscript
     connection = do
-        WS.sendTextData connection $
+        sendDictationText connection $
             chatGPTSessionStartMessage openAITranscriptionSampleRate
         Timeout.timeout
             (10 * 1_000_000)
@@ -643,66 +643,79 @@ chatGPTStreamSession
                                     closeTranscriptionConnection connection
   where
     runCapture finished = do
-        sendQueuedChatGPTAudio connection finished audio
-        sendChatGPTMessage
-            finished
-            connection
-            chatGPTSessionCloseMessage
-        Timeout.timeout
-            chatGPTCompletionTimeoutMicros
-            (takeMVar finished) >>= \case
-                Nothing ->
-                    pure $ ChatGPTStreamUnavailable
-                        "ChatGPT dictation stream timed out while closing"
-                Just (Left message) ->
-                    pure (ChatGPTStreamUnavailable message)
-                Just (Right current) -> do
-                    let transcript =
-                            Text.strip
-                                (renderChatGPTTranscript current)
-                    pure $
-                        if Text.null transcript
-                            then ChatGPTStreamUnavailable
-                                "ChatGPT dictation stream produced no text"
-                            else ChatGPTStreamSucceeded transcript
+        sentAllAudio <- sendQueuedChatGPTAudio connection finished audio
+        if not sentAllAudio
+            then pure $ ChatGPTStreamUnavailable
+                "ChatGPT dictation stream ended before all recorded audio was sent"
+            else do
+                void $ sendChatGPTMessage
+                    finished
+                    connection
+                    chatGPTSessionCloseMessage
+                Timeout.timeout
+                    chatGPTCompletionTimeoutMicros
+                    (takeMVar finished) >>= \case
+                        Nothing ->
+                            pure $ ChatGPTStreamUnavailable
+                                "ChatGPT dictation stream timed out while closing"
+                        Just (Left message) ->
+                            pure (ChatGPTStreamUnavailable message)
+                        Just (Right current) -> do
+                            let transcript =
+                                    Text.strip
+                                        (renderChatGPTTranscript current)
+                            pure $
+                                if Text.null transcript
+                                    then ChatGPTStreamUnavailable
+                                        "ChatGPT dictation stream produced no text"
+                                    else ChatGPTStreamSucceeded transcript
 
 sendQueuedChatGPTAudio
     :: WS.Connection
     -> MVar (Either Text ChatGPTStreamState)
     -> Chan (Maybe BS.ByteString)
-    -> IO ()
+    -> IO Bool
 sendQueuedChatGPTAudio connection finished audio =
     readChan audio >>= \case
         Nothing ->
-            pure ()
+            pure True
         Just bytes -> do
             tryReadMVar finished >>= \case
                 Just _ ->
-                    pure ()
-                Nothing ->
-                    sendChatGPTMessage
+                    pure False
+                Nothing -> do
+                    sent <- sendChatGPTMessage
                         finished
                         connection
                         (chatGPTAudioAppendMessage bytes)
-            sendQueuedChatGPTAudio connection finished audio
+                    if sent
+                        then sendQueuedChatGPTAudio connection finished audio
+                        else pure False
 
 sendChatGPTMessage
     :: MVar (Either Text ChatGPTStreamState)
     -> WS.Connection
     -> Text
-    -> IO ()
+    -> IO Bool
 sendChatGPTMessage finished connection message =
-    tryAny (WS.sendTextData connection message) >>= \case
+    tryAny (sendDictationText connection message) >>= \case
         Left err
-            | isSyncException err ->
+            | isSyncException err -> do
                 void $ tryPutMVar finished $
                     Left
                         ("ChatGPT dictation stream send failed: "
                             <> Text.pack (displayException err))
+                pure False
             | otherwise ->
                 throwIO err
         Right () ->
-            pure ()
+            pure True
+
+sendDictationText :: WS.Connection -> Text -> IO ()
+sendDictationText connection message =
+    Receive.sendWithTimeout (10 * 1_000_000)
+        "timed out sending OpenAI dictation audio"
+        (WS.sendTextData connection message)
 
 awaitChatGPTSessionStarted
     :: WS.Connection
@@ -934,7 +947,10 @@ runChatGPTWebSocketWith
     -> WS.ClientApp a
     -> IO a
 runChatGPTWebSocketWith endpoint headers client =
-    if endpoint.streamSecure
+    Receive.withConnectionTimeout (10 * 1_000_000)
+        "timed out connecting to ChatGPT dictation" connect client
+  where
+    connect = if endpoint.streamSecure
         then
             Wuss.runSecureClientWith
                 endpoint.streamHost
@@ -942,7 +958,6 @@ runChatGPTWebSocketWith endpoint headers client =
                 endpoint.streamPath
                 WS.defaultConnectionOptions
                 headers
-                client
         else
             WS.runClientWith
                 endpoint.streamHost
@@ -950,7 +965,6 @@ runChatGPTWebSocketWith endpoint headers client =
                 endpoint.streamPath
                 WS.defaultConnectionOptions
                 headers
-                client
 
 chatGPTStreamEndpoint :: Text -> Either Text ChatGPTStreamEndpoint
 chatGPTStreamEndpoint baseUrl = do
@@ -1169,14 +1183,16 @@ transcribe
     -> (Text -> IO ())
     -> IO Text
 transcribe credential produceAudio onTranscript =
-    Wuss.runSecureClientWith
+    Receive.withConnectionTimeout (10 * 1_000_000)
+        "timed out connecting to OpenAI Realtime transcription"
+        (Wuss.runSecureClientWith
         "api.openai.com"
         443
         "/v1/realtime"
         WS.defaultConnectionOptions
         [ ("Authorization"
           , "Bearer " <> Text.encodeUtf8 credential.accessToken)
-        ]
+        ])
         \connection -> transcribeOnConnection connection produceAudio onTranscript
 
 -- | Run transcription on an already authenticated WebSocket. The caller owns
@@ -1188,15 +1204,15 @@ transcribeOnConnection
     -> IO Text
 transcribeOnConnection connection produceAudio onTranscript =
     Json.withDecoderSession \decoderSession -> do
-        WS.sendTextData connection sessionUpdateMessage
+        sendDictationText connection sessionUpdateMessage
         awaitSessionUpdated decoderSession connection
         withAsync
             (receiveTranscripts decoderSession connection onTranscript)
             \receiver ->
                 (do
                     produceAudio \bytes ->
-                        WS.sendTextData connection (audioAppendMessage bytes)
-                    WS.sendTextData connection audioCommitMessage
+                        sendDictationText connection (audioAppendMessage bytes)
+                    sendDictationText connection audioCommitMessage
                     waitForTranscript receiver)
                     `finally` do
                         closeTranscriptionConnection connection

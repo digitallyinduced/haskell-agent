@@ -183,11 +183,13 @@ transcribePcmWithXAIAt url headers produceAudio onTranscript =
                         Just bytes -> send bytes >> consume send
                 session connection =
                     transcribeOnConnection connection consume onTranscript
-                connect
+                connect = Receive.withConnectionTimeout (10 * 1_000_000)
+                    "timed out connecting to xAI transcription" open session
+                open
                     | secure = Wuss.runSecureClientWith host (fromIntegral port)
-                        path WS.defaultConnectionOptions headers session
+                        path WS.defaultConnectionOptions headers
                     | otherwise = WS.runClientWith host port
-                        path WS.defaultConnectionOptions headers session
+                        path WS.defaultConnectionOptions headers
             withAsync capture \captureWorker ->
                 withAsync connect \streamWorker ->
                     waitEitherCatch captureWorker streamWorker >>= \case
@@ -259,7 +261,9 @@ transcribe credential produceAudio onTranscript = do
                 <> "&interim_results=true&language="
                 <> Text.unpack language
                 <> "&endpointing=400"
-    Wuss.runSecureClientWith
+    Receive.withConnectionTimeout (10 * 1_000_000)
+        "timed out connecting to xAI transcription"
+        (Wuss.runSecureClientWith
         "api.x.ai"
         443
         path
@@ -269,7 +273,7 @@ transcribe credential produceAudio onTranscript = do
         , ("x-grok-client-identifier", Text.encodeUtf8 grokClientIdentifier)
         , ("User-Agent"
           , Text.encodeUtf8 (grokUserAgent defaultGrokClientVersion))
-        ]
+        ])
         \connection -> transcribeOnConnection connection produceAudio onTranscript
 
 -- | Run transcription on an already authenticated WebSocket. The caller owns
@@ -287,13 +291,16 @@ transcribeOnConnection connection produceAudio onTranscript =
             (receiveTranscripts decoderSession connection finished onTranscript)
             \receiver ->
                 (do
-                    produceAudio (WS.sendBinaryData connection)
-                    WS.sendTextData connection
+                    produceAudio \bytes -> sendAudio (WS.sendBinaryData connection bytes)
+                    sendAudio $ WS.sendTextData connection
                         ("{\"type\":\"audio.done\"}" :: Text)
                     waitForTranscript finished)
                     `finally` do
                         closeTranscriptionConnection connection
                         cancel receiver
+  where
+    sendAudio = Receive.sendWithTimeout (10 * 1_000_000)
+        "timed out sending xAI dictation audio"
 
 -- Safe.finally masks cleanup uninterruptibly. Run the close write in a scoped,
 -- explicitly unmasked worker so a stalled socket cannot delay cancellation.
