@@ -1140,41 +1140,14 @@
                                     (old.disallowedRequisites or [ ]);
                             });
                 wrapAgentCli = { mediaHelper ? false, appleSessionTitle ? null }: package:
-                    package.overrideAttrs
-                        (old: {
-                            nativeBuildInputs =
-                                (old.nativeBuildInputs or [ ])
-                                ++ [ pkgs.makeWrapper ];
-                            postInstall =
-                                (old.postInstall or "")
-                                + ''
-                                    computerUseWrapperArgs=()
-                                ''
-                                + pkgs.lib.optionalString mediaHelper ''
-                                    computerUseWrapperArgs+=(--set AGENT_MEDIA_HELPER ${agentMediaHelper}/bin/agent-media-helper)
-                                ''
-                                + pkgs.lib.optionalString (appleSessionTitle != null) ''
-                                    computerUseWrapperArgs+=(--set HASKELL_AGENT_APPLE_SESSION_TITLE ${appleSessionTitle}/bin/apple-session-title)
-                                ''
-                                + ''
-                                        computerUseWrapperArgs+=(
-                                            --prefix GST_PLUGIN_SYSTEM_PATH_1_0 :
-                                            "${pkgs.lib.makeSearchPath
-                                                "lib/gstreamer-1.0"
-                                                agentCliGstreamerPlugins}"
-                                        )
-                                    ''
-                                + ''
-                                    wrapProgram "$out/bin/agent-cli" \
-                                        --set-default AGENT_SYNTAX_DIR \
-                                            "${skylightingSyntaxDirectory}" \
-                                        --set-default AGENT_POSTGRES_BIN \
-                                            "${pkgs.postgresql_18}/bin" \
-                                        --prefix PATH : \
-                                            "${pkgs.lib.makeBinPath agentCliRuntimeTools}" \
-                                        "''${computerUseWrapperArgs[@]}"
-                                '';
-                        });
+                    import ./nix/cli-wrapper.nix {
+                        inherit pkgs appleSessionTitle;
+                        syntaxDirectory = skylightingSyntaxDirectory;
+                        postgresBin = "${pkgs.postgresql_18}/bin";
+                        runtimeTools = agentCliRuntimeTools;
+                        gstreamerPlugins = agentCliGstreamerPlugins;
+                        mediaHelper = if mediaHelper then agentMediaHelper else null;
+                    } package;
                 agentCliBareExecutable =
                     prepareAgentCli
                         (pkgs.haskell.lib.justStaticExecutables agentCliPackage);
