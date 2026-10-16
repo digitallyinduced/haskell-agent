@@ -1,8 +1,9 @@
-# Scrolling a paged conversation
+# Conversation scrolling
 
 `conversation-scrolling-bench` generates only the requested pages of a synthetic
-conversation. Increasing the total conversation size does not retain the full
-fixture in memory. It uses the production page merge, block-ID remapping,
+conversation for history traces. Increasing the total conversation size does not
+retain the full history fixture in memory. Live traces instead retain the whole
+current conversation, as an uninterrupted turn does. It uses the production page merge, block-ID remapping,
 eviction budgets, transcript renderer, Brick scroll requests, scrollbar, and
 scrolled-away footer. `application` renders the full application chrome too.
 
@@ -30,7 +31,7 @@ for trace in local paging resize interaction; do
 done
 ```
 
-Arguments are renderer, trace, total persisted turns, body lines per block,
+Arguments are renderer, trace, total turns, body lines per block,
 scroll steps, and samples. Each turn has six blocks mixing user messages,
 assistant Markdown, inspection output, and tool output. Local scrolling moves
 three rows per step, reversing every 25 steps. The paging trace accepts another
@@ -95,6 +96,55 @@ done
 For a real terminal smoke test, run `"$B" smoke 20000 12` in tmux. This uses
 the production fullscreen event handlers with an offline fixture runtime.
 Scroll, resize the terminal, and press `q` to exit.
+
+## Long live conversations
+
+The `live`, `live-resize`, and `live-interaction` traces put all six blocks per
+turn in `appUi`, without a paged history window. They cover the growing active
+conversation, which does not have the history window's retention budget.
+`live-baseline` preserves the former live renderer: combine the entire live
+conversation, then apply horizontal padding, before viewport cropping.
+`production` passes individually padded cached chunks to the measured viewport,
+which composes only chunks intersecting the visible rows.
+
+```sh
+for turns in 1 80 320 1000; do
+  "$B" live-baseline live "$turns" 12 100 7 +RTS -N4 -T
+  "$B" production live "$turns" 12 100 7 +RTS -N4 -T
+done
+for trace in live live-resize live-interaction; do
+  "$B" verify live-baseline "$trace" 320 12 57 1 +RTS -N4 -T \
+    > "$TMPDIR/conversation-scroll-check/live-baseline.out" \
+    2> "$TMPDIR/conversation-scroll-check/live-baseline.extents"
+  "$B" verify production "$trace" 320 12 57 1 +RTS -N4 -T \
+    > "$TMPDIR/conversation-scroll-check/live-production.out" \
+    2> "$TMPDIR/conversation-scroll-check/live-production.extents"
+  diff -u "$TMPDIR/conversation-scroll-check/live-baseline.out" \
+    "$TMPDIR/conversation-scroll-check/live-production.out"
+  diff -u "$TMPDIR/conversation-scroll-check/live-baseline.extents" \
+    "$TMPDIR/conversation-scroll-check/live-production.extents"
+done
+```
+
+Use `"$B" application live 320 12 100 7 +RTS -N4 -T` to include the full
+application chrome, and `"$B" smoke-live 320 12` for a live tmux check with the
+production input handlers. Setup and first-frame measurements include cold
+chunk layout; steady-state results do not hide that cost.
+
+The live viewport still measures each retained chunk and examines message
+extents for its footer. This change reduces composition and padding work; it
+does not impose a retention budget on the active turn or make scrolling
+independent of its size.
+
+Validation for the live chunk change compares exact output and ordered extents
+for all seven traces above. The measured viewport, transcript cache, scroll
+policy, compact action layout, historical selection/expansion, message footer,
+and scrollbar checks pass 57 Hspec examples through GHCi. The action rendering
+fixtures use the root transcript chunk path, including the boundary from a
+historical action to the first live message. The message footer fixture scrolls
+through 65 live messages across cached chunks and resumes at the latest message.
+A real tmux run with 1,920 live blocks exercises PageUp, wheel input, PageDown,
+100×32 → 76×24 → 100×32 resizing, editable draft retention, and normal `q` exit.
 
 ## Measurements, 2026-10-15
 
@@ -166,3 +216,62 @@ The exact differential checks above passed for all four traces with 57 steps,
 passed all 64 examples. A real tmux smoke check exercised PageUp, PageDown,
 100×32 → 76×24 → 100×32 resize, the message footer and the prompt, then exited
 normally with `q`.
+
+## Live conversation measurements, 2026-10-16
+
+Measured on an Apple M3 Max with macOS 26.6.1 and GHC 9.10.3 inside
+`nix develop`. The benchmark uses `-O2 -threaded -rtsopts`; dependencies use
+the default Cabal `-O1` profile and existing per-module options. Each result
+is the median of seven samples, with `GHCRTS=-M8G`, `+RTS -N4 -T`, 12 body
+lines per block, a 100×32 terminal, and 100 scroll steps. Measurements run
+sequentially. Allocation below uses decimal MB.
+
+The live traces have no historical window: all blocks remain in the current
+UI state. `live-baseline` reproduces the previous combined live image;
+`production` retains its chunk boundaries through viewport composition.
+
+| Live blocks | Before wall ms | After wall ms | Before CPU ms | After CPU ms | Before allocated MB | After allocated MB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 480 | 725.466 | 391.399 | 883.190 | 473.263 | 3000.952 | 1518.615 |
+| 1,920 | 3323.471 | 1785.103 | 4104.255 | 2203.990 | 11303.149 | 5298.795 |
+| 6,000 | 11049.967 | 5424.778 | 13937.251 | 6877.141 | 34847.849 | 16038.438 |
+
+At 1,920 blocks, mean cost per step within the median trace falls from
+33.23 to 17.85 ms (46.3%), with 53.1% less allocation. At 6,000 blocks it
+falls from 110.50 to 54.25 ms (50.9%), with 54.0% less allocation. Each trace
+visits 26 distinct viewport positions.
+
+Cold setup and first render still measure every chunk. At 6,000 blocks their
+wall times are 1373.795 → 1373.938 ms, CPU times 1609.190 → 1608.616 ms,
+and allocations 4122.210 → 4017.173 MB. The scroll improvement does not move
+work into setup. Post-scroll retained memory is 129.307 → 129.582 MB, an
+increase of about 0.26 MiB for cached horizontal layout. At 1,920 blocks,
+setup wall time is 439.720 → 461.059 ms and allocation 1320.166 → 1286.741 MB;
+small startup timing differences should not be interpreted as a speedup.
+
+Resizing the 1,920-block live transcript every twelve steps gives
+7147.575 → 6386.287 ms wall, 8507.008 → 7190.159 ms CPU, and
+22458.933 → 16627.409 MB allocated across 100 steps. Its improvement is
+smaller because changed terminal dimensions rebuild the chunk caches.
+
+Selecting, deselecting, hovering, and pressing code-copy controls across chunks
+gives 3091.346 → 1934.859 ms wall, 3881.215 → 2334.509 ms CPU, and
+10350.378 → 5450.635 MB allocated. Both renderers visit 18 viewport positions.
+
+Repeating the 1,920-block local measurement with production first gives
+3722.076 → 1757.561 ms wall and 4368.746 → 2179.928 ms CPU, with unchanged
+allocation. The wall-time improvement remains 46–53% across the two runs.
+Setup wall times in this repeat are 475.732 → 459.236 ms; setup allocation
+remains lower in production, with no consistent startup timing regression.
+
+The full `application live 320 12 100 7` path takes 1934.567 ms wall,
+2322.547 ms CPU, and allocates 5317.303 MB for the scroll trace. This is a
+candidate-only integration measurement, including application chrome; the
+before/after comparisons above isolate the root conversation pane.
+
+The six-block case has no full chunk to cache. Its first run gave
+35.976 → 44.637 ms for 100 steps. Two repeats with production measured first
+gave 41.319 → 41.986 ms and 39.436 → 39.309 ms, with CPU times
+44.675 → 45.637 ms and 43.023 → 42.504 ms. Allocation is effectively unchanged
+at 271.562 → 271.615 MB (0.02%). Short-transcript timings vary around
+0.4 ms per step; the repeats show no consistent regression or improvement.

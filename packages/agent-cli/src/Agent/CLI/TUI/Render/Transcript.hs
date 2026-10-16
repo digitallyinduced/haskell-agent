@@ -189,22 +189,24 @@ drawTranscriptContentChunks :: Int -> AppState -> [Widget Name]
 drawTranscriptContentChunks padding state =
     map (horizontalPadding padding) olderGap
         <> drawTranscriptChunkSequence padding state AgentRoot state.appUi
+            Nothing
             state.appHistoryWindow.historyWindowTranscriptChunks
         <> map (horizontalPadding padding) newerGap
-        <> [ horizontalPadding padding $
-             (if state.appHistoryWindow.historyWindowHasNewer
-                then id
-                else actionBoundary lastHistoryBlock firstLiveBlock)
-                (drawConversationBlocks state AgentRoot state.appUi)
-           ]
+        -- Keep live chunks separate all the way to the measured viewport.
+        -- Combining them here rebuilds the complete current conversation's
+        -- image and shifts every extent on each scroll, even with warm caches.
+        <> drawTranscriptChunkSequence padding state AgentRoot state.appUi
+            (if state.appHistoryWindow.historyWindowHasNewer
+                then Nothing
+                else lastHistoryBlock)
+            (Transcript.transcriptChunks
+                (Transcript.coalesceInspectionBlocks state.appUi.uiBlocks))
   where
     lastHistoryBlock = do
         blocks <- case reverse state.appHistoryWindow.historyWindowTranscriptChunks of
             [] -> Nothing
             blockChunk : _ -> Just blockChunk
         Seq.lookup (Seq.length blocks - 1) blocks
-    firstLiveBlock =
-        Seq.lookup 0 (Transcript.coalesceInspectionBlocks state.appUi.uiBlocks)
     olderGap =
         historyGapWidget
             HistoryOlder
@@ -284,6 +286,7 @@ drawConversationBlocks
 drawConversationBlocks state target ui =
     vBox $
         drawTranscriptChunkSequence 0 state target ui
+            Nothing
             ( Transcript.transcriptChunks
                 (Transcript.coalesceInspectionBlocks ui.uiBlocks)
             )
@@ -291,13 +294,19 @@ drawConversationBlocks state target ui =
 -- Boundary padding lives outside the cached chunk: changing the preceding
 -- chunk must not leave its successor with a stale leading gap.
 drawTranscriptChunkSequence
-    :: Int -> AppState -> AgentTarget -> UiState -> [Seq UiBlock] -> [Widget Name]
-drawTranscriptChunkSequence padding state target ui chunks =
+    :: Int
+    -> AppState
+    -> AgentTarget
+    -> UiState
+    -> Maybe UiBlock
+    -> [Seq UiBlock]
+    -> [Widget Name]
+drawTranscriptChunkSequence padding state target ui previousBlock chunks =
     zipWith
         (\previous blocks ->
             actionBoundary previous (Seq.lookup 0 blocks)
                 (drawTranscriptChunk padding state target ui blocks))
-        (Nothing : map (\blocks -> Seq.lookup (Seq.length blocks - 1) blocks) chunks)
+        (previousBlock : map (\blocks -> Seq.lookup (Seq.length blocks - 1) blocks) chunks)
         chunks
 
 actionBoundary :: Maybe UiBlock -> Maybe UiBlock -> Widget Name -> Widget Name

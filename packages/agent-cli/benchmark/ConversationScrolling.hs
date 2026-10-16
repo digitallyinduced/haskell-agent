@@ -1,7 +1,8 @@
 {-# LANGUAGE BangPatterns #-}
 
 -- | Offline long-conversation scroll benchmark. Only cursor-derived pages are
--- materialized: the fixture never owns a complete transcript. PostgreSQL query
+-- materialized in history traces. Live traces retain the current conversation,
+-- as a long active turn can. PostgreSQL query
 -- latency and terminal I/O are deliberately outside this renderer benchmark.
 --
 -- The baseline/production modes isolate the root conversation viewport, with
@@ -17,6 +18,7 @@ import Agent.CLI.TUI.App
     ( applyLoadedHistoryPage
     , conversationScrollbarRenderer
     , drawApp
+    , drawConversationBlocks
     , drawTranscriptChunks
     , drawTranscriptChunksWithPadding
     , fullscreenApp
@@ -38,6 +40,7 @@ import Agent.CLI.TUI.History
     , historyWindowLoadedTurns
     )
 import Agent.CLI.TUI.MeasuredViewport (measuredViewportWithFooter)
+import Agent.CLI.TUI.Transcript (transcriptChunks)
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import Agent.CLI.TUI.Types (AppState(..), Name(..))
 import Agent.TUI.Model
@@ -123,8 +126,8 @@ import System.IO (BufferMode(LineBuffering), hSetBuffering, stdout)
 import System.Mem (performGC)
 import Text.Printf (printf)
 
-data Renderer = Baseline | Production | Application deriving (Eq, Show)
-data Trace = Local | Paging | Resize | Interaction deriving (Eq, Show)
+data Renderer = Baseline | Production | Application | LiveBaseline deriving (Eq, Show)
+data Trace = Local | Paging | Resize | Interaction | Live | LiveResize | LiveInteraction deriving (Eq, Show)
 data ScriptEvent = Begin | Step !Int | Complete
 
 data Configuration = Configuration
@@ -162,15 +165,22 @@ main = do
     case arguments of
         ["smoke", turns, body] -> do
             configuration <- parseConfiguration ["application", "local", turns, body, "1", "1"]
-            initial <- prepare configuration
-            _ <- defaultMain fullscreenApp
-                { appStartEvent = vScrollToEnd (viewportScroll ConversationViewport)
-                , appHandleEvent = \case
-                    VtyEvent (V.EvKey (V.KChar 'q') []) -> halt
-                    event -> appHandleEvent fullscreenApp event
-                } initial
-            pure ()
+            smoke configuration
+        ["smoke-live", turns, body] -> do
+            configuration <- parseConfiguration ["application", "live", turns, body, "1", "1"]
+            smoke configuration
         _ -> benchmark arguments
+
+smoke :: Configuration -> IO ()
+smoke configuration = do
+    initial <- prepare configuration
+    _ <- defaultMain fullscreenApp
+        { appStartEvent = vScrollToEnd (viewportScroll ConversationViewport)
+        , appHandleEvent = \case
+            VtyEvent (V.EvKey (V.KChar 'q') []) -> halt
+            event -> appHandleEvent fullscreenApp event
+        } initial
+    pure ()
 
 benchmark :: [String] -> IO ()
 benchmark arguments = do
@@ -180,7 +190,7 @@ benchmark arguments = do
     results <- forM [1 .. configuration.sampleCount] $
         const (runSample configuration)
     unless configuration.verify do
-        printf "renderer=%s trace=%s persisted_turns=%d body_lines=%d steps=%d samples=%d\n"
+        printf "renderer=%s trace=%s turns=%d body_lines=%d steps=%d samples=%d\n"
             (show configuration.renderer) (show configuration.trace)
             configuration.totalTurns configuration.bodyLines
             configuration.steps configuration.sampleCount
@@ -205,20 +215,27 @@ parseConfiguration arguments = do
                 "baseline" -> pure Baseline
                 "production" -> pure Production
                 "application" -> pure Application
-                _ -> die "renderer must be baseline, production or application"
+                "live-baseline" -> pure LiveBaseline
+                _ -> die "renderer must be baseline, production, application or live-baseline"
             selectedTrace <- case traceText of
                 "local" -> pure Local
                 "paging" -> pure Paging
                 "resize" -> pure Resize
                 "interaction" -> pure Interaction
-                _ -> die "trace must be local, paging, resize or interaction"
+                "live" -> pure Live
+                "live-resize" -> pure LiveResize
+                "live-interaction" -> pure LiveInteraction
+                _ -> die "trace must be local, paging, resize, interaction, live, live-resize or live-interaction"
+            when (selectedRenderer == LiveBaseline && not (isLiveTrace selectedTrace)) $
+                die "live-baseline requires a live trace"
             Configuration selectedRenderer selectedTrace
                 <$> positive turnsText <*> positive linesText
                 <*> positive stepsText <*> positive samplesText
                 <*> pure verification
         _ -> die $
             "usage: conversation-scrolling-bench [verify] "
-                <> "(baseline|production|application) (local|paging|resize|interaction) "
+                <> "(baseline|production|application|live-baseline) "
+                <> "(local|paging|resize|interaction|live|live-resize|live-interaction) "
                 <> "TOTAL_TURNS BODY_LINES STEPS SAMPLES"
   where
     positive raw = case reads raw of
@@ -301,9 +318,11 @@ handleScript configuration boundsRef countersRef setupStart startRef resultRef =
     AppEvent (Step frame) -> do
         observeFrame configuration countersRef frame
         case configuration.trace of
-            Interaction -> do
+            interaction | interaction `elem` [Interaction, LiveInteraction] -> do
                 state <- get
-                let chunks = state.appHistoryWindow.historyWindowTranscriptChunks
+                let chunks = if isLiveTrace configuration.trace
+                        then transcriptChunks state.appUi.uiBlocks
+                        else state.appHistoryWindow.historyWindowTranscriptChunks
                     chunkIndex = (frame `div` 6) `mod` max 1 (length chunks)
                     ident = case drop chunkIndex chunks of
                         chunk : _ -> case
@@ -314,7 +333,11 @@ handleScript configuration boundsRef countersRef setupStart startRef resultRef =
                     phase = frame `mod` 6
                     control = (\block -> CodeCopy AgentRoot block 1) <$> ident
                 modify' \current -> current
-                    { appHistorySelectedBlock = if phase == 1 then ident else Nothing
+                    { appHistorySelectedBlock = if phase == 1 && not (isLiveTrace configuration.trace)
+                        then ident else Nothing
+                    , appUi = current.appUi
+                        { uiSelectedBlock = if phase == 1 && isLiveTrace configuration.trace
+                            then ident else Nothing }
                     , appHoveredControl = if phase `elem` [3, 4] then control else Nothing
                     , appPressedControl = if phase == 4 then control else Nothing
                     }
@@ -322,7 +345,7 @@ handleScript configuration boundsRef countersRef setupStart startRef resultRef =
                     Just block -> makeVisible (ConversationBlock AgentRoot block)
                     Nothing -> scrollLocally frame
             Paging | frame `mod` 8 == 0 -> loadNextPage configuration countersRef frame
-            Resize | frame `mod` 12 == 0 -> do
+            resize | resize `elem` [Resize, LiveResize] && frame `mod` 12 == 0 -> do
                 let bounds = [(100,32),(76,24),(120,40),(92,28)]
                         !! ((frame `div` 12) `mod` 4)
                 liftIO (writeIORef boundsRef bounds)
@@ -372,6 +395,7 @@ observeFrame configuration countersRef frame = do
                 <> concat
                     [ [ConversationBlock AgentRoot ident, ConversationMessage AgentRoot ident]
                     | ident <- Map.keys state.appHistoryWindow.historyWindowBlocksById
+                        <> map (.blockId) (toList state.appUi.uiBlocks)
                     ]
         liftIO $ print
             ( "geometry" :: Text, frame, current
@@ -458,6 +482,9 @@ pageForWindow configuration direction window
 pageSize :: Int
 pageSize = 80
 
+isLiveTrace :: Trace -> Bool
+isLiveTrace selected = selected `elem` [Live, LiveResize, LiveInteraction]
+
 prepare :: Configuration -> IO AppState
 prepare configuration = do
     input <- newFullscreenInputBuffer
@@ -477,14 +504,24 @@ prepare configuration = do
         populated = if configuration.trace == Paging
             then initial
             else populate 2 initial
-        ui = populated.appUi
-        state = populated
+        conversation = if isLiveTrace configuration.trace
+            then base
+                { appUi = base.appUi
+                    { uiBlocks = foldMap
+                        ((.historyTurnBlocks) . fixtureTurn configuration)
+                        [0 .. configuration.totalTurns - 1] }
+                }
+            else populated
+        ui = conversation.appUi
+        state = conversation
             { appUi = ui { uiFollow = False, uiFocus = FocusScrollback } }
     validateWindow state.appHistoryWindow
     _ <- evaluate $ foldl'
         (\total turn -> total + foldl'
             (\size block -> size + Text.length block.blockBody) 0 turn.historyTurnBlocks)
         0 state.appHistoryWindow.historyWindowTurns
+    _ <- evaluate $ foldl'
+        (\size block -> size + Text.length block.blockBody) 0 state.appUi.uiBlocks
     pure state
   where
     populate :: Int -> AppState -> AppState
@@ -604,6 +641,10 @@ drawWidgets selected = \state ->
                     case selected of
                         Baseline -> map (padLeftRight 2) (drawTranscriptChunks state)
                         Production -> drawTranscriptChunksWithPadding 2 state
+                        -- Preserve the former live layout: all cached chunks
+                        -- are composed into one image before viewport cropping.
+                        LiveBaseline ->
+                            [padLeftRight 2 (drawConversationBlocks state AgentRoot state.appUi)]
     ]
 -- Same scrolled-away footer policy as Render.Workspace.conversationViewport.
 drawFooter :: AppState -> Int -> [Extent Name] -> Widget Name
