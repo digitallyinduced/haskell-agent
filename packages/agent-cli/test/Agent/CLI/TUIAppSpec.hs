@@ -1380,6 +1380,29 @@ spec = do
             readIORef invocations `shouldReturn` 1
 
     describe "dictation readiness" do
+        it "keeps dictation controls visible while startup progresses and finishes" do
+            stop <- newEmptyMVar
+            abort <- newIORef False
+            cancellation <- newEmptyMVar
+            let ui = reduceUi
+                    (UiSetNotice (Just Composer.dictationStartingNotice))
+                    initialUiState
+            runtime <- newScriptRuntime ui
+            let initialState =
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                        { appDictation = Just (DictationSession stop abort cancellation) }
+                script =
+                    [ FullscreenScriptApp
+                        (AppUi (UiSetNotice (Just (progressNotice "Creating worktree…"))))
+                    , FullscreenScriptApp (AppDictationRecording stop)
+                    , FullscreenScriptApp (AppUi (UiSetNotice Nothing))
+                    , FullscreenScriptApp (AppUi (UiSetAwaitingInput True))
+                    , FullscreenScriptHalt
+                    ]
+            (_, finalState) <- runFullscreenScriptWithState initialState script
+            finalState.appUi.uiNotice
+                `shouldBe` Just (Composer.dictationProgressNotice "")
+
         it "does not erase a transcript that arrives before the ready event" do
             stop <- newEmptyMVar
             abort <- newIORef False

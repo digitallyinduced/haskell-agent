@@ -8,10 +8,12 @@ import Agent.CLI.AgentViewport
     )
 import Agent.CLI.Command (ReplAction(ReplCopyPath))
 import Agent.CLI.Dictation (DictationTarget(..))
+import Agent.CLI.Dictation.Capture (withBufferedCapture)
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.Permission (PermissionChoice(..), approvalToolCallPromptOnceRelative)
 import Agent.CLI.TUI.App
     ( appEventLogicalBytes
+    , awaitFullscreenDictationTarget
     , closeAppEventMailbox
     , emitUiEvent
     , enqueueAppEvent
@@ -52,6 +54,7 @@ import Agent.Subagents (SubagentId(..))
 import Agent.ToolDispatch (ToolCall(..), ToolCallResult(..), ToolCallKind(..), ToolCallMode(..), ToolResultFile(..), functionToolCall)
 import Agent.TUI.Motion (MotionMode(..))
 import Control.Concurrent.Async (wait, withAsync)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.STM (atomically, readTVar, readTVarIO, retry, putTMVar)
 import Control.Exception (MaskingState(MaskedUninterruptible), getMaskingState)
 import Control.Exception.Safe (finally, throwString)
@@ -566,6 +569,38 @@ spec = describe "fullscreen TUI bridge" do
                 state.mailboxPendingBytes
                     `shouldSatisfy` (>= BS.length encoded)
 
+    it "retains speech recorded and stopped before the startup target is installed" do
+        runtime <- newBridgeTestRuntime
+        captured <- newEmptyMVar
+        stopped <- newEmptyMVar
+        let capture send = do
+                send "opening words"
+                putMVar captured ()
+                takeMVar stopped
+                send " ending"
+        result <- timeout 2_000_000 $
+            withAsync
+                (withBufferedCapture 1024 (pure ()) capture \produce -> do
+                    target <- awaitFullscreenDictationTarget runtime
+                    case target of
+                        DirectDictation XAIProvider -> pure ()
+                        _ -> expectationFailure "expected resolved session target"
+                    chunks <- newIORef []
+                    produce (\bytes -> modifyIORef' chunks (bytes :))
+                    BS.concat . reverse <$> readIORef chunks)
+                \recording -> do
+                    takeMVar captured
+                    putMVar stopped ()
+                    timeout 100_000 (wait recording) `shouldReturn` Nothing
+                    setFullscreenSessionActions runtime
+                        (Just (DirectDictation XAIProvider))
+                        (pure ()) (\_ _ -> pure (Right ()))
+                        (const (pure ())) (const (pure ())) (pure ())
+                        (const (pure ())) (pure WarnExit)
+                        (pure (AgentRoot, [])) (const (pure ()))
+                    wait recording
+        result `shouldBe` Just "opening words ending"
+
     it "rebinds provider actions and forwards steering paste provenance" do
         calls <- newIORef ([] :: [String])
         input <- newFullscreenInputBuffer
@@ -608,7 +643,7 @@ spec = describe "fullscreen TUI bridge" do
         runtime.runtimeRestartEffort "high"
         runtime.runtimeAgentSelect AgentRoot
         decision <- runtime.runtimeCtrlC
-        actions <- readIORef runtime.runtimeSessionActions
+        actions <- readTVarIO runtime.runtimeSessionActions
         case actions.sessionDictationTarget of
             Just (DirectDictation provider) ->
                 provider `shouldBe` XAIProvider

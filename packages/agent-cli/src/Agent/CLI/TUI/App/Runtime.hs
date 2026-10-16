@@ -159,7 +159,7 @@ import Control.Applicative ((<|>))
 import Control.Concurrent.Async (race, wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM, forever, unless, void, when, (>=>))
-import Control.Concurrent.STM ( STM , TMVar , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , writeTQueue , writeTVar )
+import Control.Concurrent.STM ( STM , TMVar , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTVarIO , readTMVar , readTQueue , registerDelay , retry , takeTMVar , writeTQueue , writeTVar )
 import Agent.CLI.Notification
     ( AttentionRequest(PermissionRequested, SecretRequested)
     , notifyAttention
@@ -342,7 +342,7 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
         windowTitle <- newIORef Nothing
         mouseCapture <- newIORef True
         routeFollowUp <- newIORef defaultFollowUpRoute
-        sessionActions <- newIORef FullscreenSessionActions
+        sessionActions <- newTVarIO FullscreenSessionActions
             { sessionDictationTarget = Nothing
             , sessionCancel = cancelAction
             , sessionSteer = \_ _ -> pure (Right ())
@@ -358,24 +358,24 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
             , runtimeMailbox = mailbox
             , runtimeInput = inputBuffer
             , runtimeCancel =
-                readIORef sessionActions >>= (.sessionCancel)
+                readTVarIO sessionActions >>= (.sessionCancel)
             , runtimeSteer = \pasted text ->
-                readIORef sessionActions >>= \actions ->
+                readTVarIO sessionActions >>= \actions ->
                     actions.sessionSteer pasted text
             , runtimeRouteFollowUp = routeFollowUp
             , runtimeBtw = \question ->
-                readIORef sessionActions >>= \actions ->
+                readTVarIO sessionActions >>= \actions ->
                     actions.sessionBtw question
             , runtimeImmediateCommand = \command ->
-                readIORef sessionActions >>= \actions ->
+                readTVarIO sessionActions >>= \actions ->
                     actions.sessionImmediateCommand command
             , runtimeRecap =
-                readIORef sessionActions >>= (.sessionRecap)
+                readTVarIO sessionActions >>= (.sessionRecap)
             , runtimeRestartEffort = \level ->
-                readIORef sessionActions >>= \actions ->
+                readTVarIO sessionActions >>= \actions ->
                     actions.sessionRestartEffort level
             , runtimeCtrlC =
-                readIORef sessionActions >>= (.sessionCtrlC)
+                readTVarIO sessionActions >>= (.sessionCtrlC)
             , runtimeCopy = copyAction
             , runtimeSetWindowTitle = setWindowTitle
             , runtimeWindowTitle = windowTitle
@@ -385,9 +385,9 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
                 enqueueAppEvent runtime (AppSetMouseCapture captured)
             , runtimeNativeProgress = nativeProgress
             , runtimeAgentSnapshot =
-                readIORef sessionActions >>= (.sessionAgentSnapshot)
+                readTVarIO sessionActions >>= (.sessionAgentSnapshot)
             , runtimeAgentSelect = \target ->
-                readIORef sessionActions >>= \actions ->
+                readTVarIO sessionActions >>= \actions ->
                     actions.sessionAgentSelect target
             , runtimeFirstFrame = firstFrame
             , runtimeMotionSchedule = motionSchedule
@@ -457,7 +457,7 @@ setFullscreenSessionActions
     ctrlCAction
     agentSnapshot
     agentSelect =
-        writeIORef runtime.runtimeSessionActions FullscreenSessionActions
+        atomically $ writeTVar runtime.runtimeSessionActions FullscreenSessionActions
             { sessionDictationTarget = dictationTarget
             , sessionCancel = cancelAction
             , sessionSteer = steerAction
@@ -469,6 +469,13 @@ setFullscreenSessionActions
             , sessionAgentSnapshot = agentSnapshot
             , sessionAgentSelect = agentSelect
             }
+
+-- | Startup dictation may record before the backend is installed. Waiting in
+-- STM also observes provider restarts without polling or stale credentials.
+awaitFullscreenDictationTarget :: FullscreenRuntime -> IO DictationTarget
+awaitFullscreenDictationTarget runtime = atomically do
+    actions <- readTVar runtime.runtimeSessionActions
+    maybe retry pure actions.sessionDictationTarget
 
 setFullscreenPullRequestURLs :: FullscreenRuntime -> [Text] -> IO ()
 setFullscreenPullRequestURLs runtime urls = do

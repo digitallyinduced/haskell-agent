@@ -9,6 +9,7 @@ import Agent.CLI.Dictation.Capture (withDictationCancellation)
 import Agent.CLI.Dictation ( DictationControl(..)
     , DictationResult(..)
     , dictateWithTarget
+    , dictateWithPendingTarget
     , insertDictation
     )
 import Agent.CLI.Secret (sanitizeSecretPromptText)
@@ -156,7 +157,7 @@ import Control.Concurrent.Async
     )
 import Control.Concurrent (threadDelay)
 import Control.Monad (forever, unless, void, when, (>=>))
-import Control.Concurrent.STM ( STM , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , writeTQueue , writeTVar )
+import Control.Concurrent.STM ( STM , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTVarIO , readTMVar , readTQueue , registerDelay , retry , takeTMVar , writeTQueue , writeTVar )
 import Agent.CLI.Recap ( autoRecapAwayThreshold , autoRecapIdleThreshold , autoRecapRetryInterval )
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
@@ -401,26 +402,23 @@ runFullscreen runtime workerAction = do
 
     dictationWorker = forever do
         job <- atomically (readTQueue runtime.runtimeDictationJobs)
-        actions <- readIORef runtime.runtimeSessionActions
-        result <- case actions.sessionDictationTarget of
-            Nothing ->
-                pure $ DictationFailed
-                    "Dictation is unavailable for the active session"
-            Just target ->
-                fmap (fromMaybe (DictationTranscript "")) $
-                withDictationCancellation job.dictationJobWaitForCancel $
-                dictateWithTarget
-                    target
-                    DictationControl
-                        { dictationWaitForStop =
-                            job.dictationJobWaitForStop
-                        , dictationOnRecording =
-                            enqueueAppEvent runtime $
-                                AppDictationRecording
-                                    job.dictationJobRecordingSession
-                        , dictationOnTranscript =
-                            enqueueAppEvent runtime . AppDictationPartial
-                        }
+        actions <- readTVarIO runtime.runtimeSessionActions
+        let record = case actions.sessionDictationTarget of
+                Nothing ->
+                    dictateWithPendingTarget (awaitFullscreenDictationTarget runtime)
+                Just target -> dictateWithTarget target
+        result <- fmap (fromMaybe (DictationTranscript "")) $
+            withDictationCancellation job.dictationJobWaitForCancel $
+                record DictationControl
+                    { dictationWaitForStop =
+                        job.dictationJobWaitForStop
+                    , dictationOnRecording =
+                        enqueueAppEvent runtime $
+                            AppDictationRecording
+                                job.dictationJobRecordingSession
+                    , dictationOnTranscript =
+                        enqueueAppEvent runtime . AppDictationPartial
+                    }
         enqueueAppEvent runtime (AppDictationFinished result)
 
 -- | Restore the terminal cursor before every fullscreen Vty lifecycle ends.
