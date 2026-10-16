@@ -89,6 +89,29 @@ spec = describe "xAI transcription events" do
             ["ws://user:secret@localhost/", "ws://localhost/#fragment",
              "https://localhost/", "ws://localhost:70000/"]
 
+    it "bounds a blocked audio write and releases the writer" do
+        stoppedWrites <- newIORef (0 :: Int)
+        blockWrites <- newIORef False
+        let writer write bytes = do
+                shouldBlock <- readIORef blockWrites
+                case bytes of
+                    Just _ | shouldBlock ->
+                        threadDelay 20_000_000 `finally` modifyIORef' stoppedWrites (+ 1)
+                    _ -> write bytes
+            producer send = do
+                writeIORef blockWrites True
+                send "\x01\x00"
+        withChannelConnection writer \client server ->
+            withAsync (do
+                WS.sendTextData server ("{\"type\":\"transcript.created\"}" :: Text)
+                threadDelay 20_000_000) \_ ->
+                    Timeout.timeout 12_000_000
+                        (transcribeOnConnection client producer (const (pure ()))
+                            `shouldThrow` ((== "timed out sending xAI dictation audio")
+                                . ioeGetErrorString))
+                        `shouldReturn` Just ()
+        readIORef stoppedWrites `shouldReturn` 2
+
     mapM_ (\cancelParent ->
         it (if cancelParent
             then "bounds a blocked transcription close during cancellation"
