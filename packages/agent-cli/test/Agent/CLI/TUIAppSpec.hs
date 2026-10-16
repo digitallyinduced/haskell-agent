@@ -173,6 +173,7 @@ import Brick
     , renderWidget
     , txt
     , vLimit
+    , vBox
     )
 import Brick.BChan (newBChan, writeBChan)
 import Codec.Picture (PixelRGB8(..), generateImage, writePng)
@@ -1772,6 +1773,31 @@ spec = do
                 ]
             let rendered = map (renderedPictureTextAt bounds) frames
             rendered `shouldSatisfy` any (Text.isInfixOf "1 Message")
+            last rendered `shouldSatisfy` Text.isInfixOf "LATEST_MESSAGE_MARKER"
+            last rendered `shouldSatisfy` (not . Text.isInfixOf "Click to resume")
+            finalState.appUi.uiFollow `shouldBe` True
+
+        it "counts live messages across cached chunks and returns to the latest message" do
+            let ui = initialUiState
+                    { uiBlocks = Seq.fromList
+                        [ markerBlock (BlockId ident)
+                            (if ident == 65 then "LATEST_MESSAGE_MARKER" else "earlier message")
+                        | ident <- [1 .. 65]
+                        ] }
+                bounds = (80, 24)
+            runtime <- newScriptRuntime ui
+            let initial = (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    { appUi = ui }
+            (_, frames, finalState) <- runFullscreenScriptDetailedAt bounds initial
+                (replicate 20
+                    (FullscreenScriptMouseDown ConversationViewport
+                        V.BScrollUp (B.Location (0, 0)))
+                    <> [ FullscreenScriptMouseDown ConversationLatest
+                            V.BLeft (B.Location (0, 0))
+                       , FullscreenScriptHalt
+                       ])
+            let rendered = map (renderedPictureTextAt bounds) frames
+            rendered `shouldSatisfy` any (Text.isInfixOf " Messages")
             last rendered `shouldSatisfy` Text.isInfixOf "LATEST_MESSAGE_MARKER"
             last rendered `shouldSatisfy` (not . Text.isInfixOf "Click to resume")
             finalState.appUi.uiFollow `shouldBe` True
@@ -4027,6 +4053,28 @@ spec = do
                 take 4 actionRows `shouldBe`
                     ["◆ first-action", "◆ second-action", "", "following-prose"]
 
+        it "separates a historical action from the first live message" do
+            runtime <- newScriptRuntime initialUiState
+            let action = (markerBlock (BlockId (-1)) "hidden-body")
+                    { blockKind = BlockTool
+                    , blockTitle = "historical-action"
+                    , blockExpanded = False
+                    }
+                base = initialFullscreenAppState runtime [] AgentRoot [] 0
+                state = base
+                    { appHistoryWindow = setHistoryWindowTurns
+                        (Seq.singleton (HistoryTurn (HistoryCursor 0)
+                            (Seq.singleton action) Map.empty))
+                        base.appHistoryWindow
+                    , appUi = initialUiState
+                        { uiBlocks = Seq.fromList
+                            [markerBlock (BlockId ident) "live-message" | ident <- [1 .. 33]] }
+                    }
+                rows = map Text.strip $
+                    Text.lines (renderedConversationText (100, 80) state)
+            take 3 (dropWhile (not . Text.isInfixOf "historical-action") rows)
+                `shouldBe` ["◆ historical-action", "", "live-message"]
+
     describe "background task prompt status" do
         it "renders idle work above the editable prompt and hides it during a turn" do
             runtime <- newScriptRuntime initialUiState
@@ -5383,7 +5431,7 @@ renderedConversationText :: (Int, Int) -> AppState -> Text
 renderedConversationText size state =
     renderedPictureTextAt size $
         renderWidget Nothing
-            [History.drawConversationBlocks state AgentRoot state.appUi] size
+            [vBox (History.drawTranscriptChunks state)] size
 
 renderedPictureText :: V.Picture -> Text
 renderedPictureText picture =
