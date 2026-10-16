@@ -3,6 +3,7 @@ module Agent.CLI.TUI.Render.Transcript
     ( drawTranscript
     , drawTranscriptChunks
     , drawTranscriptChunksWithPadding
+    , drawTranscriptChunksWithCache
     , historyRangeWidgets
     , stickyPromptLayers
     , drawEmptyConversation
@@ -126,7 +127,7 @@ import System.Info ()
 import System.Posix.Process ()
 import System.Process ()
 import qualified Brick.Types as B
-    ( getContext, Size(Greedy), Widget(Widget), render )
+    ( getContext, Size(Greedy, Fixed), Widget(Widget), render )
 import qualified Agent.CLI.TUI.Bridge as Bridge ()
 import qualified Agent.CLI.TUI.Composer as Composer
     ( controlInteractionAttr )
@@ -164,7 +165,7 @@ terminalTxtWrap = txtWrap . displayTerminalText
 drawTranscript :: AppState -> Widget Name
 drawTranscript state =
     vBox $
-        [vBox (drawTranscriptContentChunks 0 state)]
+        [vBox (drawTranscriptContentChunks cacheFixedTranscriptChunk 0 state)]
             <> conversationReserveWidgets state.appConversationAnchor
 
 -- | Retain chunk boundaries so the viewport can compose only visible results.
@@ -175,27 +176,41 @@ drawTranscriptChunks = drawTranscriptChunksWithPadding 0
 -- outside the cache traverses and shifts every retained extent on every frame,
 -- even when the chunk is far outside the visible viewport.
 drawTranscriptChunksWithPadding :: Int -> AppState -> [Widget Name]
-drawTranscriptChunksWithPadding padding state =
-    drawTranscriptContentChunks padding state
+drawTranscriptChunksWithPadding = drawTranscriptChunksWithCache cacheFixedTranscriptChunk
+
+type ChunkCacheRenderer = Name -> Widget Name -> Widget Name
+
+-- | Supply the cache combinator used for completed stable chunks. The
+-- longitudinal benchmark uses Brick's original eager sizing policy here.
+drawTranscriptChunksWithCache :: ChunkCacheRenderer -> Int -> AppState -> [Widget Name]
+drawTranscriptChunksWithCache cacheChunk padding state =
+    drawTranscriptContentChunks cacheChunk padding state
         <> map (horizontalPadding padding)
             (conversationReserveWidgets state.appConversationAnchor)
+
+cacheFixedTranscriptChunk :: ChunkCacheRenderer
+cacheFixedTranscriptChunk name contents =
+    -- Block rows fill their available width and use intrinsic height. Expose
+    -- that policy without constructing Markdown widgets merely to size a
+    -- cached chunk; its contents are needed only after a cache miss.
+    cached name (B.Widget B.Greedy B.Fixed (B.render contents))
 
 horizontalPadding :: Int -> Widget n -> Widget n
 horizontalPadding padding
     | padding == 0 = id
     | otherwise = padLeftRight padding
 
-drawTranscriptContentChunks :: Int -> AppState -> [Widget Name]
-drawTranscriptContentChunks padding state =
+drawTranscriptContentChunks :: ChunkCacheRenderer -> Int -> AppState -> [Widget Name]
+drawTranscriptContentChunks cacheChunk padding state =
     map (horizontalPadding padding) olderGap
-        <> drawTranscriptChunkSequence padding state AgentRoot state.appUi
+        <> drawTranscriptChunkSequence cacheChunk padding state AgentRoot state.appUi
             Nothing
             state.appHistoryWindow.historyWindowTranscriptChunks
         <> map (horizontalPadding padding) newerGap
         -- Keep live chunks separate all the way to the measured viewport.
         -- Combining them here rebuilds the complete current conversation's
         -- image and shifts every extent on each scroll, even with warm caches.
-        <> drawTranscriptChunkSequence padding state AgentRoot state.appUi
+        <> drawTranscriptChunkSequence cacheChunk padding state AgentRoot state.appUi
             (if state.appHistoryWindow.historyWindowHasNewer
                 then Nothing
                 else lastHistoryBlock)
@@ -229,20 +244,21 @@ drawTranscriptContentChunks padding state =
 -- last-block key for every append would retain all of those obsolete images.
 -- The final partial/live/animated group remains uncached.
 drawTranscriptChunk
-    :: Int
+    :: ChunkCacheRenderer
+    -> Int
     -> AppState
     -> AgentTarget
     -> UiState
     -> Seq UiBlock
     -> Widget Name
-drawTranscriptChunk padding state target ui blocks =
+drawTranscriptChunk cacheChunk padding state target ui blocks =
     case
         Transcript.transcriptChunkCacheKey
             (cacheableBlock state target ui)
             dynamicBlockIds
             blocks of
         Just (firstBlockId, lastBlockId) ->
-            cached
+            cacheChunk
                 ((if padding == 0
                     then ConversationChunkCache
                     else ConversationPaddedChunkCache padding)
@@ -285,7 +301,7 @@ drawConversationBlocks
     -> Widget Name
 drawConversationBlocks state target ui =
     vBox $
-        drawTranscriptChunkSequence 0 state target ui
+        drawTranscriptChunkSequence cacheFixedTranscriptChunk 0 state target ui
             Nothing
             ( Transcript.transcriptChunks
                 (Transcript.coalesceInspectionBlocks ui.uiBlocks)
@@ -294,18 +310,19 @@ drawConversationBlocks state target ui =
 -- Boundary padding lives outside the cached chunk: changing the preceding
 -- chunk must not leave its successor with a stale leading gap.
 drawTranscriptChunkSequence
-    :: Int
+    :: ChunkCacheRenderer
+    -> Int
     -> AppState
     -> AgentTarget
     -> UiState
     -> Maybe UiBlock
     -> [Seq UiBlock]
     -> [Widget Name]
-drawTranscriptChunkSequence padding state target ui previousBlock chunks =
+drawTranscriptChunkSequence cacheChunk padding state target ui previousBlock chunks =
     zipWith
         (\previous blocks ->
             actionBoundary previous (Seq.lookup 0 blocks)
-                (drawTranscriptChunk padding state target ui blocks))
+                (drawTranscriptChunk cacheChunk padding state target ui blocks))
         (previousBlock : map (\blocks -> Seq.lookup (Seq.length blocks - 1) blocks) chunks)
         chunks
 

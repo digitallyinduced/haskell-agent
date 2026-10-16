@@ -2,7 +2,11 @@
 
 module Agent.CLI.TUIMeasuredViewportSpec (spec) where
 
-import Agent.CLI.TUI.MeasuredViewport (measuredViewport, measuredViewportWithFooter)
+import Agent.CLI.TUI.MeasuredViewport
+    ( measuredViewport
+    , measuredViewportWithFooter
+    , measuredViewportWithFilteredFooter
+    )
 import Agent.CLI.TUI.Scroll (conversationMessagesBelow, conversationMessagesBelowLabel)
 import Brick
     ( App(..)
@@ -14,7 +18,10 @@ import Brick
     , Location(..)
     , VScrollbarRenderer(..)
     , ViewportType(Vertical)
-    , Widget
+    , Widget(..)
+    , Result(..)
+    , Size(Fixed)
+    , emptyResult
     , attrMap
     , attrName
     , cached
@@ -77,9 +84,10 @@ data Name
     | Chunk !Int
     | ChunkCache !Int
     | NewerGap
+    | Control !Int
     deriving (Eq, Ord, Show)
 
-data Renderer = Ordinary | Measured | OrdinaryScrollbar | MeasuredScrollbar | MeasuredFooter
+data Renderer = Ordinary | Measured | OrdinaryScrollbar | MeasuredScrollbar | MeasuredFooter | FilteredFooter
 
 data ScriptEvent
     = ScrollBy !Int
@@ -93,6 +101,34 @@ data ScriptEvent
 spec :: Spec
 spec =
     describe "measuredViewport" do
+        it "filters footer metadata while preserving visible controls through scroll and resize" do
+            let content =
+                    [ cached (ChunkCache index) $
+                        clickable (Control index) $
+                            reportExtent (Chunk index) $
+                                vBox (replicate 6 (txt "message with a control"))
+                    | index <- [0 .. 39]
+                    ]
+                script = [ScrollBy 13, Resize (17, 7), ScrollEnd, ScrollBy (-19), Stop]
+            ordinaryFooter <- runScript MeasuredFooter (42, 9) content script
+            filteredFooter <- runScript FilteredFooter (42, 9) content script
+            filteredFooter `shouldBe` ordinaryFooter
+
+        it "clips selected footer extents to the measurement context before counting them" do
+            let content = [Widget Fixed Fixed $ pure emptyResult
+                    { image = V.charFill V.defAttr 'x' 5 4
+                    , extents =
+                        [ Extent (Chunk 0) (Location (-2, -1)) (5, 5)
+                        , Extent (Chunk 1) (Location (20, 0)) (5, 30)
+                        , Extent (Chunk 2) (Location (0, 100000)) (5, 2)
+                        , Extent (Chunk 3) (Location (0, 99999)) (5, 2)
+                        , Extent (Control 0) (Location (0, 0)) (5, 30)
+                        ]
+                    }]
+            (frames, _) <- runScript FilteredFooter (12, 3) content [Stop]
+            snd (last frames) `shouldContain` "2 Messages"
+            snd (last frames) `shouldNotContain` "3 Messages"
+
         it "drops the lower-bound marker after scrolling past a newer-history gap" do
             let content =
                     [ reportExtent (Chunk 0) $ vBox (replicate 4 (txt "history"))
@@ -394,7 +430,9 @@ handleScript boundsRef observationsRef = \case
         liftIO (writeIORef boundsRef bounds)
     AppEvent Snapshot -> do
         currentViewport <- lookupViewport Transcript
-        currentExtents <- mapM lookupExtent [Chunk index | index <- [0 .. 39]]
+        currentExtents <- mapM lookupExtent $
+            [Chunk index | index <- [0 .. 39]]
+                <> [Control index | index <- [0 .. 39]]
         liftIO $
             modifyIORef' observationsRef
                 ((show currentViewport <> " " <> show currentExtents) :)
@@ -410,6 +448,8 @@ drawRenderer renderer content =
         Measured -> measuredViewport Transcript 0 content
         MeasuredFooter ->
             measuredViewportWithFooter Transcript 0 (Just drawFooter) content
+        FilteredFooter ->
+            measuredViewportWithFilteredFooter Transcript 0 relevant (Just drawFooter) content
         OrdinaryScrollbar ->
             withVScrollBarRenderer testScrollbarRenderer $
                 withVScrollBars OnRight $
@@ -419,6 +459,10 @@ drawRenderer renderer content =
                 withVScrollBars OnRight $
                     measuredViewport Transcript 1 content
   where
+    relevant = \case
+        Chunk _ -> True
+        NewerGap -> True
+        _ -> False
     drawFooter bottom measuredExtents =
         maybe (txt " ") txt $
             conversationMessagesBelowLabel

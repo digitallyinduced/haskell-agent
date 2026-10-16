@@ -4198,6 +4198,20 @@ spec = do
                 `shouldReturn` Just True
 
     describe "history transcript chunk cache" do
+        it "preserves the fixed-height layout policy of every stable block kind" do
+            runtime <- newScriptRuntime initialUiState
+            let kinds = [BlockUser, BlockAssistant, BlockThinking, BlockTool,
+                    BlockInspect, BlockTodo, BlockShell, BlockEdit, BlockSystem,
+                    BlockRecap, BlockError]
+                body = "Retained **Markdown**\n\n```haskell\nvalue = 1\n```"
+            forM_ kinds \kind -> do
+                let block = (markerBlock (BlockId 1) body)
+                        { blockKind = kind, blockExpanded = False }
+                    state = (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                        { appUi = initialUiState { uiBlocks = Seq.singleton block } }
+                    widget = Runtime.drawBlock state AgentRoot state.appUi block
+                (B.hSize widget, B.vSize widget) `shouldBe` (B.Greedy, B.Fixed)
+
         it "redraws and clears a historical selection after warming the cache" do
             timeout 2_000_000 cachedHistorySelectionRenders
                 `shouldReturn` Just True

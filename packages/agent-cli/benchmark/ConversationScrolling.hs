@@ -18,9 +18,8 @@ import Agent.CLI.TUI.App
     ( applyLoadedHistoryPage
     , conversationScrollbarRenderer
     , drawApp
-    , drawConversationBlocks
-    , drawTranscriptChunks
     , drawTranscriptChunksWithPadding
+    , drawTranscriptChunksWithCache
     , fullscreenApp
     , initialFullscreenAppState
     , newFullscreenInputBuffer
@@ -39,7 +38,7 @@ import Agent.CLI.TUI.History
     , historyWindowLoadedBytes
     , historyWindowLoadedTurns
     )
-import Agent.CLI.TUI.MeasuredViewport (measuredViewportWithFooter)
+import Agent.CLI.TUI.MeasuredViewport (measuredViewportWithFilteredFooter)
 import Agent.CLI.TUI.Transcript (transcriptChunks)
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import Agent.CLI.TUI.Types (AppState(..), Name(..))
@@ -64,6 +63,7 @@ import Brick
     , VScrollBarOrientation(..)
     , Viewport(..)
     , Widget(..)
+    , cached
     , clickable
     , continueWithoutRedraw
     , customMain
@@ -77,6 +77,7 @@ import Brick
     , padLeftRight
     , reportExtent
     , txt
+    , vBox
     , vScrollBy
     , vScrollToBeginning
     , vScrollToEnd
@@ -125,8 +126,18 @@ import System.Exit (die)
 import System.IO (BufferMode(LineBuffering), hSetBuffering, stdout)
 import System.Mem (performGC)
 import Text.Printf (printf)
+import MeasuredViewportBaseline (measuredViewportWithFooterBaseline)
 
-data Renderer = Baseline | Production | Application | LiveBaseline deriving (Eq, Show)
+data Renderer
+    = Baseline
+    | Production
+    | Application
+    | LiveBaseline
+    | ExtentBaseline
+    | SizingOnly
+    | MetadataOnly
+    | UncountedFooter
+    deriving (Eq, Show)
 data Trace = Local | Paging | Resize | Interaction | Live | LiveResize | LiveInteraction deriving (Eq, Show)
 data ScriptEvent = Begin | Step !Int | Complete
 
@@ -216,7 +227,11 @@ parseConfiguration arguments = do
                 "production" -> pure Production
                 "application" -> pure Application
                 "live-baseline" -> pure LiveBaseline
-                _ -> die "renderer must be baseline, production, application or live-baseline"
+                "uncounted-footer" -> pure UncountedFooter
+                "extent-baseline" -> pure ExtentBaseline
+                "sizing-only" -> pure SizingOnly
+                "metadata-only" -> pure MetadataOnly
+                _ -> die "renderer must be baseline, production, application, live-baseline, extent-baseline, sizing-only, metadata-only or uncounted-footer"
             selectedTrace <- case traceText of
                 "local" -> pure Local
                 "paging" -> pure Paging
@@ -234,7 +249,7 @@ parseConfiguration arguments = do
                 <*> pure verification
         _ -> die $
             "usage: conversation-scrolling-bench [verify] "
-                <> "(baseline|production|application|live-baseline) "
+                <> "(baseline|production|application|live-baseline|extent-baseline|sizing-only|metadata-only|uncounted-footer) "
                 <> "(local|paging|resize|interaction|live|live-resize|live-interaction) "
                 <> "TOTAL_TURNS BODY_LINES STEPS SAMPLES"
   where
@@ -632,20 +647,40 @@ recordWindow ref window =
         }
 
 drawWidgets :: Renderer -> AppState -> [Widget Name]
-drawWidgets Application = drawApp
-drawWidgets selected = \state ->
+drawWidgets Application state = drawApp state
+drawWidgets selected state =
     [ reportExtent ConversationViewportExtent $
         withVScrollBarRenderer conversationScrollbarRenderer $
             withVScrollBars OnRight $
-                measuredViewportWithFooter ConversationViewport 1 (Just (drawFooter state)) $
+                viewportRenderer ConversationViewport 1 (Just footer) $
                     case selected of
-                        Baseline -> map (padLeftRight 2) (drawTranscriptChunks state)
+                        Baseline -> map (padLeftRight 2) (drawTranscriptChunksWithCache cached 0 state)
                         Production -> drawTranscriptChunksWithPadding 2 state
+                        ExtentBaseline -> drawTranscriptChunksWithCache cached 2 state
+                        SizingOnly -> drawTranscriptChunksWithPadding 2 state
+                        MetadataOnly -> drawTranscriptChunksWithCache cached 2 state
+                        UncountedFooter -> drawTranscriptChunksWithPadding 2 state
                         -- Preserve the former live layout: all cached chunks
                         -- are composed into one image before viewport cropping.
                         LiveBaseline ->
-                            [padLeftRight 2 (drawConversationBlocks state AgentRoot state.appUi)]
+                            [padLeftRight 2 (vBox (drawTranscriptChunksWithCache cached 0 state))]
     ]
+  where
+    viewportRenderer
+        | selected `elem` [Baseline, LiveBaseline, ExtentBaseline, SizingOnly] =
+            measuredViewportWithFooterBaseline
+        | otherwise = \name width ->
+            measuredViewportWithFilteredFooter name width footerExtent
+    footerExtent = \case
+        ConversationMessage AgentRoot _ -> True
+        ConversationBlock AgentRoot _ -> True
+        ConversationNewerGap -> True
+        _ -> False
+    -- Diagnostic only: retain the footer row and production chunk geometry,
+    -- while omitting its traversal of offscreen message extents.
+    footer = if selected == UncountedFooter
+        then \_ _ -> txt " "
+        else drawFooter state
 -- Same scrolled-away footer policy as Render.Workspace.conversationViewport.
 drawFooter :: AppState -> Int -> [Extent Name] -> Widget Name
 drawFooter state bottom measuredExtents =
