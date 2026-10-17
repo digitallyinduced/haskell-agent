@@ -194,8 +194,11 @@ after one warmup per launcher and workload. Median PTY observations, millisecond
 | Empty directory | Shell | 490.0 | 513.2 | 1,299.9 |
 | Empty directory | Compiled | 43.0 | 64.5 | 818.5 |
 
-Repository startup reaches an editable composer 437 ms sooner (86%) and full
-readiness 425 ms sooner (32%). The internal ready timer is essentially unchanged
+In this long-PATH, computer-use-disabled workload, repository startup reaches an
+editable composer 437 ms sooner (86%) and full readiness 425 ms sooner (32%).
+These percentages do not describe ordinary installed-CLI startup; the
+[installed-build comparison](InstalledStartup.md) measures that separately.
+The internal ready timer is essentially unchanged
 (808 ms shell / 837 ms compiled in the repository), as expected for a change
 before Haskell main. Network timing still contributes variation. The effect is
 largest in long-path development environments; the short-path version workload
@@ -209,3 +212,56 @@ launch; echo is restored. Both run the same unmodified executable. That failure
 is outside this launcher change and is not counted as a passing cleanup check.
 The macOS CLI and Linux static CLI package definitions also evaluate successfully;
 the Linux executable was not built or run on this macOS host.
+
+## Paired tmux comparison
+
+`scripts/BenchmarkCliStartup.hs` compares two optimized executables in alternating
+order, through fresh 120×40 tmux terminals. It writes each sample and the final
+medians to `OUTPUT/samples.jsonl`, retaining the final plain pane for each launch.
+Warmup samples have negative indices and are excluded from medians. It never
+sends Enter; prompt and managed-turn file options are rejected.
+
+Use an unused output directory and a short, unused socket path. Resolve paths
+before entering `nix develop`, which can replace `TMPDIR`:
+
+```sh
+export STARTUP_BENCHMARK_ROOT="$TMPDIR/startup-comparison"
+export STARTUP_BENCHMARK_SOCKET="$TMPDIR/startup"
+mkdir -p "$STARTUP_BENCHMARK_ROOT/build"
+nix develop -c ghc -O2 -threaded -rtsopts -Wall scripts/BenchmarkCliStartup.hs \
+  -outputdir "$STARTUP_BENCHMARK_ROOT/build" \
+  -o "$STARTUP_BENCHMARK_ROOT/build/benchmark-cli-startup"
+GOOGLE_API_KEY=startup-benchmark nix develop -c \
+  "$STARTUP_BENCHMARK_ROOT/build/benchmark-cli-startup" \
+  "$BEFORE" "$AFTER" "$STARTUP_BENCHMARK_SOCKET" "$PROJECT" \
+  "$STARTUP_BENCHMARK_ROOT/results" --home "$BENCH_HOME" \
+  --samples 7 --warmups 1 --timeout 45 -- \
+  --provider gemini --model gemini-2.5-flash --no-computer-use --yolo
+```
+
+Use the dedicated, pre-provisioned HOME described above. `--home` also redirects
+the XDG configuration, data, cache and state directories. To compare ordinary
+installed-account startup, explicitly select `--current-home` instead and omit
+the dummy credentials and provider/model overrides. Keep computer-use settings
+representative of the scenario being measured. `--fullscreen` is always added.
+
+The runner observes the editor's `❯` marker, injects unsubmitted `startup-probe`
+text, and requires the standalone `startup: … · ready …` diagnostic. Its
+`first_frame_ms` is the first observed editor marker, rather than the direct-PTY
+script's cursor-restoration boundary. All external times include tmux process,
+capture and polling overhead. Compare paired measurements from the same runner;
+do not interpret differences between runners as application regressions.
+
+Each sample clears the probe and requests exit with Ctrl-D, allowing three
+seconds for normal shutdown before closing its private tmux session/server.
+Retained captures may include session text: inspect them before publishing.
+`--current-home` creates normal session metadata. Passing `--worktree` creates
+real managed checkouts and may fetch upstream; remove those diagnostic checkouts
+through the normal managed-worktree workflow after verifying their identity and
+cleanliness. The benchmark does not delete session records or worktrees.
+
+Run plain startup, representative resumed histories and worktree creation as
+separate workloads, with fresh output directories. Record revision identities,
+PATH size, model/provider, computer-use settings, store state and host load.
+First model response latency requires a separate successful request; this runner
+measures initialization only.
