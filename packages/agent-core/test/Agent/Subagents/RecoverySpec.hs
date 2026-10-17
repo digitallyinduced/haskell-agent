@@ -184,7 +184,7 @@ spec = describe "durable tree recovery" do
                     { transaction = \action -> record "begin" >> action store `finally` record "commit"
                     , lockSnapshot = \_ -> record "lock"
                     , persistStatus = \agent status -> record "status" >> config.store.persistStatus agent status
-                    , settle = \_ _ -> record "settle"
+                    , settle = \agent status -> record "settle" >> config.store.settle agent status
                     }
                 tested = config
                     { store
@@ -194,7 +194,20 @@ spec = describe "durable tree recovery" do
             readIORef events `shouldReturn` ["begin", "lock", "status", "settle", "commit", "notify"]
             writeIORef events []
             reconcileStoredSubagents tested handle
-            readIORef events `shouldReturn` ["begin", "lock", "settle", "commit"]
+            readIORef events `shouldReturn` []
+
+    it "settles a stored status once when its settlement has not committed" $
+        withHandle \handle -> do
+            (config, rows) <- configuration [snapshot "child" (Completed Nothing)]
+            restoreStoredSubagent config.store config.cwd handle (SubagentId "child") `shouldReturn` Right ()
+            transactions <- newIORef (0 :: Int)
+            let store = config.store
+                    { transaction = \action -> modifyIORef' transactions (+ 1) >> action store }
+                tested = config { store }
+            reconcileStoredSubagents tested handle
+            reconcileStoredSubagents tested handle
+            readIORef transactions `shouldReturn` 1
+            map (.settled) <$> readIORef rows `shouldReturn` [True]
 
     it "reads the status again after locking rather than notifying from stale inventory" $
         withHandle \handle -> do
@@ -275,6 +288,7 @@ snapshot identifier status = SubagentSnapshot
     , initialMessage = "Recover this task"
     , wakeRequested = False
     , cancellationRequested = False
+    , settled = False
     }
 
 configuration :: [SubagentSnapshot] -> IO (RecoveryConfig, IORef [SubagentSnapshot])
@@ -289,11 +303,13 @@ configuration initial = do
                 map \row -> if row.agentId == agent then row
                     { status
                     , cancellationRequested = status /= Closed && row.cancellationRequested
+                    , settled = False
                     } else row
             , persistRunning = \_ _ -> pure ()
             , persistSuspension = \_ _ _ -> pure (Right ())
             , persistResume = \_ _ -> pure (Right ())
-            , settle = \_ _ -> pure ()
+            , settle = \agent _ -> modifyIORef' rows $
+                map \row -> if row.agentId == agent then row { settled = True } else row
             }
     pure (RecoveryConfig
         { store
