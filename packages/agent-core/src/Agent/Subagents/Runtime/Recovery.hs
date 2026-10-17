@@ -30,12 +30,15 @@ data SubagentSnapshot = SubagentSnapshot
     , initialMessage :: !Text
     , wakeRequested :: !Bool
     , cancellationRequested :: !Bool
+    , settled :: !Bool
+    -- ^ 'settle' committed after the last write of this status.
     }
 
 -- | Transactions must encompass the status write and domain settlement.
 -- Locking serializes reconciliation with the runner's admitted-input commit.
 -- The transaction supplies a fresh callback bundle bound to its connection;
 -- entering a transaction cannot rebind closures captured in the outer store.
+-- Every status write clears a child's 'settled' mark; 'settle' sets it.
 data RecoveryStore = RecoveryStore
     { loadSnapshots :: IO [SubagentSnapshot]
     , loadSnapshot :: SubagentId -> IO (Maybe SubagentSnapshot)
@@ -137,29 +140,43 @@ restoreStoredSubagent store cwd handle agentId = withHandleExecution handle do
 
 -- | Retry failed settlement without repeating model execution. Read durable
 -- status after acquiring its lock, not from a potentially stale inventory.
+-- The inventory only rules work out: a finished child that a tree keeps for
+-- later replies costs no transaction once its settlement has committed.
 reconcileStoredSubagents :: RecoveryConfig -> RuntimeHandle -> IO ()
 reconcileStoredSubagents config handle = withHandleExecution handle do
     inventory <- config.store.loadSnapshots
     forM_ inventory \snapshot -> do
-        changed <- withHandleOperation handle $ withStoreTransaction config.store \store -> do
-            store.lockSnapshot snapshot.agentId
-            stored <- store.loadSnapshot snapshot.agentId
-            current <- getStatus handle.registry snapshot.agentId
-            case stored of
-                Just stored | not stored.cancellationRequested && settledStatus current -> do
-                    let changed = restoredStatus stored.status /= current
-                    when changed (store.persistStatus snapshot.agentId current)
-                    store.settle snapshot.agentId current
-                    pure (if changed then Just current else Nothing)
-                _ -> pure Nothing
-        forM_ changed (\status -> withHandleOperation handle (config.notify snapshot.agentId status))
-  where
-    settledStatus = \case
-        Completed {} -> True
-        Errored {} -> True
-        Closed -> True
-        Suspended {} -> True
-        _ -> False
+        observed <- getStatus handle.registry snapshot.agentId
+        when (mayNeedReconciliation snapshot observed) do
+            changed <- withHandleOperation handle $ withStoreTransaction config.store \store -> do
+                store.lockSnapshot snapshot.agentId
+                stored <- store.loadSnapshot snapshot.agentId
+                current <- getStatus handle.registry snapshot.agentId
+                case stored of
+                    Just stored | not stored.cancellationRequested && settledStatus current -> do
+                        let changed = restoredStatus stored.status /= current
+                        when changed (store.persistStatus snapshot.agentId current)
+                        store.settle snapshot.agentId current
+                        pure (if changed then Just current else Nothing)
+                    _ -> pure Nothing
+            forM_ changed (\status -> withHandleOperation handle (config.notify snapshot.agentId status))
+
+-- | False only where the locked transaction would at most repeat a committed
+-- settlement: the registry reports no settled status, 'processCancellations'
+-- owns the child, or the registry still reports its settled stored status.
+mayNeedReconciliation :: SubagentSnapshot -> SubagentStatus -> Bool
+mayNeedReconciliation snapshot observed =
+    not snapshot.cancellationRequested
+        && settledStatus observed
+        && not (snapshot.settled && restoredStatus snapshot.status == observed)
+
+settledStatus :: SubagentStatus -> Bool
+settledStatus = \case
+    Completed {} -> True
+    Errored {} -> True
+    Closed -> True
+    Suspended {} -> True
+    _ -> False
 
 -- | Admission pressure leaves inputs in durable storage for the next pass.
 -- Only persistRunning acknowledges the input actually admitted by the registry.
