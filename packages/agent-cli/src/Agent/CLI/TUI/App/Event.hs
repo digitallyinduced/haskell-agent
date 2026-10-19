@@ -61,6 +61,7 @@ import Agent.CLI.WindowTitle (oscWindowTitleBytes)
 import Agent.CLI.Status (formatTokenUsage)
 import Agent.CLI.Timestamp (currentShortMessageTimestamp)
 import Agent.CLI.Terminal ( TerminalCapabilities(..)
+    , TerminalKind(..)
     , detectTerminalCapabilities
     , kittyAltCsiBodies
     , kittyCtrlCsiBodies
@@ -1335,15 +1336,17 @@ handleNormalMouseDown name button =
         (ConversationLatest, V.BLeft) ->
             resumeConversationFollow
         (ComposerModel, V.BLeft) ->
-            Composer.handleControlMouseDown ComposerModel
+            handleSelectorMouseDown ComposerModel
         (ComposerEffort, V.BLeft) ->
-            Composer.handleControlMouseDown ComposerEffort
+            handleSelectorMouseDown ComposerEffort
         (ComposerMode, V.BLeft) ->
-            Composer.handleControlMouseDown ComposerMode
+            handleSelectorMouseDown ComposerMode
         (ComposerAccount, V.BLeft) ->
-            Composer.handleControlMouseDown ComposerAccount
+            handleSelectorMouseDown ComposerAccount
         (name'@ComposerImageRemove{}, V.BLeft) ->
             Composer.handleControlMouseDown name'
+        (QuickStartModel, V.BLeft) ->
+            handleSelectorMouseDown QuickStartModel
         (name', V.BLeft)
             | isQuickStartControl name' ->
                 Composer.handleControlMouseDown name'
@@ -1378,6 +1381,16 @@ handleNormalMouseDown name button =
             Composer.handleControlMouseDown link
         _ -> handleMouseDown name button
 
+-- | Rex can deliver mouse presses without the corresponding releases in the
+-- retained UI. Open selectors and choose their rows on press there, clearing
+-- the retained press so a later release cannot activate the selector twice.
+handleSelectorMouseDown :: Name -> EventM Name AppState ()
+handleSelectorMouseDown name = do
+    Composer.handleControlMouseDown name
+    terminal <- liftIO (detectTerminalCapabilities stdout)
+    when (terminal.terminalKind == TerminalRex) $
+        Composer.handleControlMouseUp name (activateControl name)
+
 -- | Wheel events belong to the surface under the pointer. A question must
 -- not intercept scrolling intended for the explanation above it.
 handlePlanningMouseDown :: Name -> V.Button -> EventM Name AppState ()
@@ -1407,7 +1420,7 @@ handleChoiceMouseDown name button =
         (link@MarkdownLink{}, V.BLeft) ->
             Composer.handleControlMouseDown link
         (ChoiceRow index, V.BLeft) ->
-            Composer.handleControlMouseDown (ChoiceRow index)
+            handleSelectorMouseDown (ChoiceRow index)
         (ChoiceRow _, V.BScrollUp) ->
             handleChoiceKey (V.EvKey V.KUp [])
         (ChoiceRow _, V.BScrollDown) ->

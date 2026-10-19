@@ -206,6 +206,8 @@ import Control.Concurrent.STM
     , newEmptyTMVarIO
     , putTMVar
     , newTChanIO
+    , readTChan
+    , writeTChan
     , retry
     , tryReadTMVar
     )
@@ -287,6 +289,100 @@ spec = do
                     <> map (`FullscreenScriptCachePresent` False) names
                     <> [FullscreenScriptHalt]
                 pure ()
+    describe "fullscreen terminal configuration clicks" do
+        forM_
+            [ (bounds, label, control, expected, program, releases)
+            | bounds <- [(80, 24), (300, 68)]
+            , (label, control, expected) <-
+                [ ("gpt-6-sol", ComposerModel, ReplChooseModel "")
+                , ("(medium)", ComposerEffort, ReplChooseEffort "")
+                , ("ask", ComposerMode, ReplCycleMode "")
+                , ("account@invalid.test", ComposerAccount, ReplChooseAccount "")
+                , ("Manage models", QuickStartModel, ReplChooseModel "")
+                ]
+            , program <- ["ghostty", "rex"]
+            , releases <- [False, True]
+            ] \(bounds, label, control, expected, program, releases) ->
+                it ("routes " <> program <> " mouse reports for " <> Text.unpack label
+                        <> " at " <> show bounds <> " (release=" <> show releases <> ")") $
+                    bracket
+                        (lookupEnv "TERM_PROGRAM")
+                        (maybe (unsetEnv "TERM_PROGRAM") (setEnv "TERM_PROGRAM")) $ \_ -> do
+                        setEnv "TERM_PROGRAM" program
+                        let ui = reduceUi (UiSetAwaitingInput True) $
+                                reduceUi (UiSetPrompt initialUiState.uiPrompt
+                                    { promptModel = "gpt-6-sol"
+                                    , promptEffort = "medium"
+                                    , promptMode = "ask"
+                                    , promptAccount = "account@invalid.test"
+                                    , promptAccountSelectable = True
+                                    }) initialUiState
+                        runtime <- newScriptRuntime ui
+                        let initial = initialFullscreenAppState runtime [] AgentRoot [] 0
+                            rows = Text.lines (renderedAppText bounds initial)
+                            positions =
+                                [ (Text.length before, row)
+                                | (row, line) <- zip [0 :: Int ..] rows
+                                , control == QuickStartModel
+                                    || "account@invalid.test" `Text.isInfixOf` line
+                                , let (before, rest) = Text.breakOn label line
+                                , not (Text.null rest)
+                                ]
+                        case positions of
+                            [(column, row)] -> do
+                                let report code final = encoded $
+                                        "\ESC[<" <> code <> ";"
+                                            <> Text.pack (show (column + 1)) <> ";"
+                                            <> Text.pack (show (row + 1)) <> final
+                                events <- keyboardEventsForReads $
+                                    [ pure (report "0" "M")
+                                    , pure (report "32" "M")
+                                    , pure "\ESC[I"
+                                    ]
+                                    <> [pure (report "0" "m") | releases]
+                                final <- runFullscreenTerminalEvents bounds initial events
+                                inputs <- toList <$> atomically
+                                    (Composer.readFullscreenInputs runtime.runtimeInput)
+                                let activates = program == "rex" || releases
+                                map (.fullscreenInputLine) inputs `shouldBe`
+                                    [expected | activates]
+                                final.appPressedControl `shouldBe`
+                                    if activates then Nothing else Just control
+                            _ -> expectationFailure
+                                ("Expected one visible control: " <> show positions)
+        forM_ [("ghostty", True), ("rex", False), ("rex", True)] \(program, releases) ->
+            it ("chooses a running turn's effort in " <> program
+                    <> " (release=" <> show releases <> ")") $
+                bracket
+                    (lookupEnv "TERM_PROGRAM")
+                    (maybe (unsetEnv "TERM_PROGRAM") (setEnv "TERM_PROGRAM")) $ \_ -> do
+                    setEnv "TERM_PROGRAM" program
+                    selected <- newIORef []
+                    let ui = (reduceUi (UiLoop TurnStarted) initialUiState)
+                            { uiPrompt = initialUiState.uiPrompt
+                                { promptEffort = "medium"
+                                , promptEffortOptions = ["low", "medium", "high"]
+                                }
+                            }
+                    runtime <- newScriptRuntime ui
+                    let runtimeWithRestart = runtime
+                            { runtimeRestartEffort = \effort ->
+                                modifyIORef' selected (<> [effort])
+                            }
+                        click name =
+                            [FullscreenScriptMouseDown name V.BLeft (B.Location (0, 0))]
+                                <> [FullscreenScriptMouseRelease name V.BLeft (B.Location (0, 0))
+                                   | releases]
+                        initial = initialFullscreenAppState runtimeWithRestart [] AgentRoot [] 0
+                    (_, opened) <- runFullscreenScriptWithState initial
+                        (click ComposerEffort <> [FullscreenScriptHalt])
+                    fmap (.dialogOverlay.choiceTitle) opened.appChoice
+                        `shouldBe` Just "Reasoning effort"
+                    (_, chosen) <- runFullscreenScriptWithState opened
+                        (click (ChoiceRow 2) <> [FullscreenScriptHalt])
+                    readIORef selected `shouldReturn` ["high"]
+                    isNothing chosen.appChoice `shouldBe` True
+                    chosen.appPressedControl `shouldBe` Nothing
     describe "fullscreen configuration draft ownership" do
         forM_
             [ (False, "", "preserves an unsubmitted draft after configuration")
@@ -5154,6 +5250,29 @@ newScriptRuntime ui = do
         MotionFull
         False
         ui
+
+runFullscreenTerminalEvents
+    :: (Int, Int)
+    -> AppState
+    -> [V.Event]
+    -> IO AppState
+runFullscreenTerminalEvents bounds initial events = do
+    (_, output) <- VMock.mockTerminal bounds
+    context <- V.mkDisplayContext output output bounds
+    input <- newTChanIO
+    mapM_ (atomically . writeTChan input)
+        (events <> [V.EvKey (V.KFun 0) []])
+    vty <- mockVty output (pure ()) (pure False)
+    let terminal = vty
+            { V.update = V.outputPicture context
+            , V.nextEvent = atomically (readTChan input)
+            }
+        app = fullscreenApp
+            { appHandleEvent = \case
+                VtyEvent (V.EvKey (V.KFun 0) []) -> halt
+                event -> fullscreenApp.appHandleEvent event
+            }
+    customMain terminal (pure terminal) Nothing app initial
 
 runFullscreenScript
     :: AppState
