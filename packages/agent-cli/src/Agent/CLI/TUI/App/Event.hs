@@ -1345,6 +1345,8 @@ handleNormalMouseDown name button =
             handleSelectorMouseDown ComposerAccount
         (name'@ComposerImageRemove{}, V.BLeft) ->
             Composer.handleControlMouseDown name'
+        (QuickStartModel, V.BLeft) ->
+            handleSelectorMouseDown QuickStartModel
         (name', V.BLeft)
             | isQuickStartControl name' ->
                 Composer.handleControlMouseDown name'

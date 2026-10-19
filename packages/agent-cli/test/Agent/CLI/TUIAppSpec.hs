@@ -298,6 +298,7 @@ spec = do
                 , ("(medium)", ComposerEffort, ReplChooseEffort "")
                 , ("ask", ComposerMode, ReplCycleMode "")
                 , ("account@invalid.test", ComposerAccount, ReplChooseAccount "")
+                , ("Manage models", QuickStartModel, ReplChooseModel "")
                 ]
             , program <- ["ghostty", "rex"]
             , releases <- [False, True]
@@ -322,7 +323,8 @@ spec = do
                             positions =
                                 [ (Text.length before, row)
                                 | (row, line) <- zip [0 :: Int ..] rows
-                                , "account@invalid.test" `Text.isInfixOf` line
+                                , control == QuickStartModel
+                                    || "account@invalid.test" `Text.isInfixOf` line
                                 , let (before, rest) = Text.breakOn label line
                                 , not (Text.null rest)
                                 ]
