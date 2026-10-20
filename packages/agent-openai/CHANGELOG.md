@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Replace the retained-resource request worker with `ResourceScope` ownership
+  and caller-thread requests. Add `acquireTurnConnection` and native scoped
+  acquisition while preserving the callback-based connection interfaces.
+
 - Add `Agent.OpenAI.Turn` for complete model responses with automatic waiting,
   bounded retries, rejected-socket replacement, transcript replay and shared
   turn attribution. The HTTP client now uses `Agent.Turn` from `agent-core`

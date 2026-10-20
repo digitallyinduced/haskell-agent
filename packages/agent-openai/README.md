@@ -23,6 +23,11 @@ turn attribution survive connection replacement. Execute tools and persist
 the successful response after the call returns; those effects are never
 part of its retry scope.
 
+Hosts that already own a `ResourceScope` can use `acquireTurnConnection` to
+attach the conversation directly to that lifetime. The native socket owner is
+an `Acquire` registered with the scope; requests run directly in the caller's
+thread and failed connections are released before retrying.
+
 `Agent.Turn.runTurn` supplies the same provider-neutral bounded retry policy
 to non-streaming transports using `Control.Retry`. The HTTP client uses it
 automatically. There are

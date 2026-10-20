@@ -7,6 +7,7 @@ module Agent.Transport.WebSocket
     , defaultWebSocketSessionOptions
     , withWebSocketSession
     , withOwnedWebSocketSession
+    , acquireOwnedWebSocketSession
     , closeWebSocketSession
     , withWebSocketRequest
     , withWebSocketRequestWithTimeout
@@ -28,10 +29,13 @@ import Agent.Retry
     ( ExceptionRetry(..)
     , retryingBeforeCommit
     )
-import Control.Concurrent.Async (waitCatchSTM, withAsync)
+import Control.Concurrent.Async (asyncWithUnmask, cancel, waitCatchSTM, withAsync)
 import Control.Concurrent.STM
 import qualified Control.Exception as Exception
 import qualified Control.Exception.Safe as Safe
+import Control.Monad.IO.Class (liftIO)
+import Data.Acquire (Acquire)
+import qualified Data.Acquire as Acquire
 import Control.Retry
     ( RetryPolicyM
     , capDelay
@@ -137,8 +141,17 @@ withOwnedWebSocketSession
     -> ((WS.Connection -> IO ()) -> IO ())
     -> (WebSocketSession -> IO value)
     -> IO value
-withOwnedWebSocketSession options connect action = do
-    published <- newEmptyTMVarIO
+withOwnedWebSocketSession options connect =
+    Acquire.with (acquireOwnedWebSocketSession options connect)
+
+-- | A physical connection and its pumps as one managed acquisition. Scope
+-- allocation can retain it across calls and release it before reconnecting.
+acquireOwnedWebSocketSession
+    :: WebSocketSessionOptions
+    -> ((WS.Connection -> IO ()) -> IO ())
+    -> Acquire WebSocketSession
+acquireOwnedWebSocketSession options connect = do
+    published <- liftIO newEmptyTMVarIO
     let ownConnection =
             connect (\connection ->
                 withWebSocketSession options connection \session -> do
@@ -155,15 +168,19 @@ withOwnedWebSocketSession options connect action = do
                         Just session -> closeSession session
                             (ConnectionError "WebSocket connection owner stopped")
                         Nothing -> pure ()
-    withAsync ownConnection \owner -> do
-        ready <- atomically $
-            (Right <$> readTMVar published)
-                `orElse` (Left <$> waitCatchSTM owner)
-        case ready of
-            Right session -> action session
-            Left (Left exception) -> Exception.throwIO exception
-            Left (Right ()) -> Safe.throwIO $
-                userError "WebSocket connector returned without a connection"
+    -- Acquire registers cancellation and joining with the resource lifetime.
+    -- The connection owner must remain interruptible even during allocation.
+    owner <- Acquire.mkAcquire
+        (asyncWithUnmask (\unmask -> unmask ownConnection))
+        cancel
+    ready <- liftIO $ atomically $
+        (Right <$> readTMVar published)
+            `orElse` (Left <$> waitCatchSTM owner)
+    case ready of
+        Right session -> pure session
+        Left (Left exception) -> liftIO (Exception.throwIO exception)
+        Left (Right ()) -> liftIO $ Safe.throwIO $
+            userError "WebSocket connector returned without a connection"
 
 -- | Close an idle reusable session and ask the writer pump to close the
 -- underlying WebSocket. Active requests observe the supplied connection error.

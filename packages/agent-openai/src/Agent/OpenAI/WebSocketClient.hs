@@ -9,6 +9,7 @@ module Agent.OpenAI.WebSocketClient
     , withCodexWsCredentialOrHttpFallbackForSession
     , withCodexWsCredentialUsingTurnState
     , withCodexWsCredentialUsingTurnStateForSession
+    , acquireCodexWsCredentialUsingTurnStateForSession
     , withCodexWsRetrying
     , withCodexWsRetryingForSession
     , withCodexWsRetryingAfter
@@ -63,6 +64,7 @@ module Agent.OpenAI.WebSocketClient
 import Agent.OpenAI.Auth (Pool)
 import Agent.OpenAI.Credential (poolTokenProvider)
 import Agent.Error
+import Agent.ResourceScope (ResourceScope, allocateAcquire, withResourceScope)
 import Agent.ClientIdentity (gatewayUserAgent)
 import Agent.Http.Header (parseRetryAfterSeconds)
 import Agent.OpenAI.Error (isPreviousResponseIdError, mkOpenAIError)
@@ -390,6 +392,21 @@ withCodexWsCredentialUsingTurnStateForSession sessionKey credential turnState =
         (Just turnState)
         credential
 
+-- | Allocate a connection in the supplied resource scope. Requests use it
+-- directly; releasing the scope closes the physical transport and joins its pumps.
+acquireCodexWsCredentialUsingTurnStateForSession
+    :: ResourceScope
+    -> Text
+    -> Credential
+    -> CodexTurnState
+    -> IO (Either ApiError CodexConn)
+acquireCodexWsCredentialUsingTurnStateForSession scope sessionKey credential turnState =
+    acquireConnectionWithHeaders scope
+        (buildCodexWsSessionHeaders sessionKey)
+        WebSocket.transientWsConnectRetryPolicy
+        (Just turnState)
+        credential
+
 -- | Run a replay-safe WebSocket action and automatically reacquire a
 -- credential after handshake or in-band account failures. The callback is
 -- executed again from the beginning after a 401, an explicitly typed
@@ -493,38 +510,49 @@ runConnectionAttemptWithHeaders
     -> Credential
     -> (CodexConn -> Credential -> IO (Either ApiError a))
     -> IO (Either ApiError a)
-runConnectionAttemptWithHeaders _ _ _ credential _action
+runConnectionAttemptWithHeaders extraHeaders retryPolicy sharedTurnState credential action =
+    withResourceScope \scope -> do
+        acquired <- acquireConnectionWithHeaders scope extraHeaders retryPolicy sharedTurnState credential
+        case acquired of
+            Left err -> pure (Left err)
+            Right connection -> action connection credential
+
+acquireConnectionWithHeaders
+    :: ResourceScope
+    -> WS.Headers
+    -> RetryPolicyM IO
+    -> Maybe CodexTurnState
+    -> Credential
+    -> IO (Either ApiError CodexConn)
+acquireConnectionWithHeaders _ _ _ _ credential
     | credential.provider == XAIProvider = pure $ Left $ ProviderError ApiErrorType
         "XAI credentials must be used through agent-xai"
         Nothing
-runConnectionAttemptWithHeaders _ _ _ credential _action
+acquireConnectionWithHeaders _ _ _ _ credential
     | credential.provider == OpenRouterProvider = pure $ Left $ ProviderError ApiErrorType
         "OpenRouter credentials must be used through agent-openrouter"
         Nothing
-runConnectionAttemptWithHeaders _ _ _ credential _action
+acquireConnectionWithHeaders _ _ _ _ credential
     | credential.provider == GeminiProvider = pure $ Left $ ProviderError ApiErrorType
         "Gemini credentials must be used through agent-gemini"
         Nothing
-runConnectionAttemptWithHeaders _ _ _ credential _action
+acquireConnectionWithHeaders _ _ _ _ credential
     | credential.provider == ClaudeCodeProvider = pure $ Left $ ProviderError ApiErrorType
         "Claude Code subscription sessions must use agent-claude"
         Nothing
-runConnectionAttemptWithHeaders extraHeaders retryPolicy sharedTurnState
-        credential action = do
+acquireConnectionWithHeaders scope extraHeaders retryPolicy sharedTurnState credential = do
     headers <- (<> extraHeaders) <$> buildCodexWsHandshakeHeaders credential
     case gatewayWebSocketEndpoint credential of
         Left err -> pure (Left (ConnectionError err))
         Right endpoint ->
-            WebSocket.retryTransientWsConnectWithPolicy
-                retryPolicy
-                \connected ->
-                    WebSocket.withOwnedWebSocketSession
+            WebSocket.retryTransientWsConnectWithPolicy retryPolicy \connected -> do
+                (_, session) <- allocateAcquire scope $
+                    WebSocket.acquireOwnedWebSocketSession
                         WebSocket.defaultWebSocketSessionOptions
                         (runCredentialWebSocket endpoint headers)
-                        \session -> do
-                        connected
-                        turnState <- maybe newCodexTurnState pure sharedTurnState
-                        action (CodexWsConn session turnState) credential
+                connected
+                turnState <- maybe newCodexTurnState pure sharedTurnState
+                pure (Right (CodexWsConn session turnState))
 
 data WebSocketEndpoint = WebSocketEndpoint
     { endpointSecure :: !Bool

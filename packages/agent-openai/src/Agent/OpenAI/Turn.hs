@@ -1,10 +1,10 @@
-{-# LANGUAGE RankNTypes #-}
 -- | Complete non-streaming model turns with automatic waiting, bounded retries
 -- and connection replacement. Callers execute tools only after this returns.
 -- Streaming hosts that commit partial output use 'Agent.OpenAI.LoopBackend'.
 module Agent.OpenAI.Turn
     ( TurnConnection
     , withTurnConnection
+    , acquireTurnConnection
     , closeTurnConnection
     , sendTurn
     , sendTurnWithOptions
@@ -13,6 +13,7 @@ module Agent.OpenAI.Turn
 import Agent.Error (ApiError)
 import Agent.History (replayFromLatestCheckpoint)
 import Agent.Provider (Credential)
+import Agent.ResourceScope (ResourceScope, withResourceScope)
 import Agent.Responses.Types
 import qualified Agent.Responses.Types as Responses (ResponseCreateParams(..))
 import Agent.Transport.SessionResource
@@ -43,21 +44,34 @@ withTurnConnection
     -> Credential
     -> (TurnConnection -> Credential -> IO (Either ApiError result))
     -> IO (Either ApiError result)
-withTurnConnection sessionKey selected action = do
+withTurnConnection sessionKey selected action = withResourceScope \scope -> do
+    acquired <- acquireTurnConnection scope sessionKey selected
+    case acquired of
+        Left err -> pure (Left err)
+        Right connection -> action connection selected
+
+-- | Attach a conversation to an existing owner, such as a retained chat session.
+acquireTurnConnection
+    :: ResourceScope
+    -> Maybe Text
+    -> Credential
+    -> IO (Either ApiError TurnConnection)
+acquireTurnConnection scope sessionKey selected = do
     turnState <- WebSocket.newCodexTurnState
     let acquire
-            :: Credential
-            -> (WebSocket.CodexConn -> Credential -> IO (Either ApiError value))
-            -> IO (Either ApiError value)
-        acquire current use = WebSocket.withCodexWsCredentialUsingTurnStateForSession
-            (fromMaybe "" sessionKey) current turnState use
-    withSessionResource acquire \resource -> do
-        ready <- runSessionResource resource selected (\_ active _ -> pure (Right active))
-        case ready of
-            Left err -> pure (Left err)
-            Right credential -> do
-                transcript <- newIORef Nothing
-                action TurnConnection { credential, resource, transcript } credential
+            :: ResourceScope -> Credential
+            -> IO (Either ApiError (WebSocket.CodexConn, Credential))
+        acquire connectionScope current = do
+            acquired <- WebSocket.acquireCodexWsCredentialUsingTurnStateForSession
+                connectionScope (fromMaybe "" sessionKey) current turnState
+            pure (fmap (\connection -> (connection, current)) acquired)
+    resource <- newSessionResource scope acquire
+    ready <- runSessionResource resource selected (\_ active _ -> pure (Right active))
+    case ready of
+        Left err -> pure (Left err)
+        Right credential -> do
+            transcript <- newIORef Nothing
+            pure (Right TurnConnection { credential, resource, transcript })
 
 closeTurnConnection :: TurnConnection -> IO ()
 closeTurnConnection connection = resetSessionResource connection.resource
