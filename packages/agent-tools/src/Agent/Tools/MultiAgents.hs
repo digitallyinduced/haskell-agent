@@ -21,16 +21,16 @@ import Agent.Subagents
     , RootSubagents
     , currentRootTurn
     , rootSubagentsRegistry
-    , RootTurnId
+    , RootTurnId(..)
     , SubagentStatus(..)
     , defaultWaitTimeoutMs
     , interruptSubagent
     , requestSubagentSuspension
     , listAgents
-    , queueMessageFromForTurn
+    , queueMessageFromForTurnWithOrigin
     , resolveAgentTarget
-    , sendInputMessageForTurn
-    , spawnSubagentAtWithCwdPreparedForTurn
+    , sendInputMessageForTurnWithOrigin
+    , spawnSubagentAtWithCwdPreparedForTurnWithOrigin
     , subagentLease
     , waitAnyLive
     , waitSubagentsFrom
@@ -45,7 +45,9 @@ import Agent.InterAgentMessage
     ( InterAgentMessage(..)
     , InterAgentMessageContent
     , InterAgentMessageType(..)
+    , InterAgentMessageMetadata
     , encryptedInterAgentContent
+    , newInterAgentMessageMetadata
     , plainInterAgentContent
     )
 import Agent.OsPath (toText)
@@ -127,7 +129,7 @@ data MultiAgentContext = MultiAgentContext
       -- | Durable hosts persist guidance before acknowledging it. The Bool
       -- permits starting an idle target for followup_task only; ToolCall
       -- carries the trusted delivery identity for deduplicating retries.
-    , multiSendToAgent :: !(Maybe (ToolCall -> SubagentId -> InterAgentMessageContent -> Bool -> IO (Either Text Text)))
+    , multiSendToAgent :: !(Maybe (ToolCall -> SubagentId -> InterAgentMessageMetadata -> InterAgentMessageContent -> Bool -> IO (Either Text Text)))
       -- | Optional provider/billing-specific guidance for model overrides.
     , multiSpawnModelGuidance :: !(Maybe Text)
       -- | When set, spawn_subagent may only use these model slugs (or inherit).
@@ -389,9 +391,10 @@ spawnInWorkspace ctx call args resolvedModel childCwd worktree = mask \restore -
                 Just lease ->
                     subagentLease (void lease.subagentWorktreeCleanup)
     result <- restore
-        (spawnSubagentAtWithCwdPreparedForTurn
+        (spawnSubagentAtWithCwdPreparedForTurnWithOrigin
             ctx.multiRegistry
             rootTurnId
+            (Just call.callId)
             childCwd
             prepare
             ctx.multiSelfId
@@ -621,6 +624,7 @@ renderWaitStatus (agentId, status) =
 waitSummary :: Bool -> Map SubagentId SubagentStatus -> Text
 waitSummary timedOut statuses
     | timedOut = "timed out waiting for agent updates"
+    | Map.null statuses = "mailbox messages are pending"
     | otherwise =
         let finals =
                 [ agentId.unSubagentId <> "=" <> shortStatus status
@@ -677,13 +681,16 @@ runSendMessage ctx call args
             withMessageTarget ctx args.target \target ->
                 case target of
                     RootMessageTarget ->
-                        sendToRoot ctx (messageContent call args.message)
+                        sendToRoot ctx call (messageContent call args.message)
                     AgentMessageTarget agentId rootTurnId ->
-                        maybe (queueMessageFromForTurn
-                            ctx.multiRegistry rootTurnId
+                        maybe (queueMessageFromForTurnWithOrigin
+                            ctx.multiRegistry rootTurnId (Just call.callId)
                             ctx.multiTaskPath agentId
                             (messageContent call args.message))
-                            (\deliver -> deliver call agentId (messageContent call args.message) False)
+                            (\deliver -> do
+                                metadata <- newInterAgentMessageMetadata (Just call.callId)
+                                    (Text.pack . show . (.unRootTurnId) <$> rootTurnId)
+                                deliver call agentId metadata (messageContent call args.message) False)
                             ctx.multiSendToAgent
 
 followupTaskTool :: MultiAgentContext -> AppTool
@@ -713,11 +720,14 @@ runFollowup ctx call args
                     RootMessageTarget ->
                         pure (Left "followup_task cannot target the root agent; use send_message")
                     AgentMessageTarget agentId rootTurnId ->
-                        maybe (sendInputMessageForTurn
-                            ctx.multiRegistry rootTurnId
+                        maybe (sendInputMessageForTurnWithOrigin
+                            ctx.multiRegistry rootTurnId (Just call.callId)
                             ctx.multiTaskPath agentId
                             (messageContent call args.message) False)
-                            (\deliver -> deliver call agentId (messageContent call args.message) True)
+                            (\deliver -> do
+                                metadata <- newInterAgentMessageMetadata (Just call.callId)
+                                    (Text.pack . show . (.unRootTurnId) <$> rootTurnId)
+                                deliver call agentId metadata (messageContent call args.message) True)
                             ctx.multiSendToAgent
 
 validateMessage :: Text -> Text -> Either Text ()
@@ -753,21 +763,26 @@ withMessageTarget ctx target action =
                             rootTurnId <- ctx.multiRootTurnId
                             action (AgentMessageTarget agentId rootTurnId)
 
-sendToRoot :: MultiAgentContext -> InterAgentMessageContent -> IO (Either Text Text)
-sendToRoot ctx content =
+sendToRoot :: MultiAgentContext -> ToolCall -> InterAgentMessageContent -> IO (Either Text Text)
+sendToRoot ctx call content =
     if ctx.multiTaskPath == taskPathRoot
         then pure (Left "root agent cannot send_message to itself")
         else case ctx.multiSendToRoot of
             Nothing -> pure (Left "root agent mailbox is unavailable")
-            Just deliver -> deliver (rootMessage ctx content)
+            Just deliver -> rootMessage ctx call content >>= deliver
 
-rootMessage :: MultiAgentContext -> InterAgentMessageContent -> InterAgentMessage
-rootMessage ctx content = InterAgentMessage
-    { messageAuthor = taskPathText ctx.multiTaskPath
-    , messageRecipient = taskPathText taskPathRoot
-    , messageType = QueuedMessage
-    , messageContent = content
-    }
+rootMessage :: MultiAgentContext -> ToolCall -> InterAgentMessageContent -> IO InterAgentMessage
+rootMessage ctx call content = do
+    rootTurnId <- ctx.multiRootTurnId
+    metadata <- newInterAgentMessageMetadata (Just call.callId)
+        (Text.pack . show . (.unRootTurnId) <$> rootTurnId)
+    pure InterAgentMessage
+        { messageAuthor = taskPathText ctx.multiTaskPath
+        , messageRecipient = taskPathText taskPathRoot
+        , messageType = QueuedMessage
+        , messageContent = content
+        , messageMetadata = Just metadata
+        }
 
 messageContent :: ToolCall -> Text -> InterAgentMessageContent
 messageContent call

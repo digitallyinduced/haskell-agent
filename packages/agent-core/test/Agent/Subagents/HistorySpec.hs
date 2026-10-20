@@ -2,9 +2,11 @@ module Agent.Subagents.HistorySpec (spec) where
 
 import Agent.Responses.Types
     ( ResponseRole(..), ResponseItem(..), ResponseMessage(..)
+    , InterAgentMessageMetadata(..)
     , MessageContent(..), ResponseContentPart(..), InternalChatMetadata(..)
     )
 import Agent.Subagents.History
+import qualified Agent.Responses.Types as Responses
 import Agent.Subagents.TestItems
 import Test.Hspec
 
@@ -85,6 +87,17 @@ spec = describe "Agent.Subagents.History" do
             trimDanglingToolSuffix items `shouldBe` [userItem "continued later"]
 
     describe "forkSubagentTranscript" do
+        it "retains local inter-agent identity and origin in a full fork" do
+            let message = AgentMessageItem Responses.ResponseAgentMessage
+                    { Responses.messageId = Nothing
+                    , Responses.author = Just "/root/worker"
+                    , Responses.recipient = Just "/root"
+                    , Responses.content = [InputTextPart "result" Nothing]
+                    , Responses.passthrough = Nothing
+                    , Responses.localMetadata = Just (InterAgentMessageMetadata "amsg_stable" (Just "call") (Just "3"))
+                    }
+            forkSubagentTranscript (Just "all") [message] `shouldBe` [message]
+
         it "forks all or none and treats legacy positive counts as full history" do
             let items =
                     [ messageItem RoleUser "one"

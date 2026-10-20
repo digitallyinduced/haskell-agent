@@ -149,6 +149,7 @@ stripLocalCompactionMarker ResponseCreateParams { input, .. } =
         AgentMessageItem ResponseAgentMessage { passthrough, .. } ->
             AgentMessageItem ResponseAgentMessage
                 { passthrough = stripMetadata passthrough
+                , localMetadata = Nothing
                 , ..
                 }
         other -> other

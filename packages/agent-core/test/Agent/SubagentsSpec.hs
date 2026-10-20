@@ -91,6 +91,41 @@ spec = describe "Agent.Subagents" do
         it "keeps pending and running agents non-final" do
             map isFinalStatus [Pending, Running] `shouldBe` [False, False]
 
+    it "assigns distinct message identities and retains tool-call and root-turn origin" do
+        received <- newTQueueIO
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath ".")
+            (\_ _ message _ -> do
+                atomically (writeTQueue received message)
+                pure (completedResult "done"))
+            (\_ _ -> pure ())
+        flip finally (closeSubagentRegistry registry) do
+            rootTurn <- beginRootTurn registry
+            Right (agentId, _) <- spawnSubagentAtWithCwdPreparedForTurnWithOrigin
+                registry (Just rootTurn) (Just "spawn-call") (fromFilePath ".")
+                (const (pure mempty)) Nothing taskPathRoot 0 "identity_worker"
+                (plainInterAgentContent "same text") Nothing
+            first <- timeout 2000000 (atomically (readTQueue received))
+            _ <- waitSubagents registry [agentId] 15000
+            queueMessageFromForTurnWithOrigin registry (Just rootTurn) (Just "send-call")
+                taskPathRoot agentId (plainInterAgentContent "same text")
+                `shouldReturn` Right "queued"
+            sendInputMessageForTurnWithOrigin registry (Just rootTurn) (Just "follow-call")
+                taskPathRoot agentId (plainInterAgentContent "same text") False
+                `shouldReturn` Right "queued"
+            rest <- timeout 2000000 (atomically (sequence [readTQueue received, readTQueue received]))
+            case (first, rest) of
+                (Just initial, Just later) -> do
+                    let messages = initial : later
+                        metadata = [value | message <- messages, Just value <- [message.messageMetadata]]
+                        ids = map (.localMessageId) metadata
+                    length metadata `shouldBe` 3
+                    map (.originToolCallId) metadata `shouldMatchList`
+                        map Just ["spawn-call", "send-call", "follow-call"]
+                    map (.originRootTurnId) metadata `shouldBe`
+                        replicate 3 (Just (Text.pack (show rootTurn.unRootTurnId)))
+                    ids `shouldSatisfy` (\values -> length (Map.fromList (zip values values)) == 3)
+                _ -> expectationFailure "messages did not reach the worker"
+
     it "spawns a child, waits for completion, and returns final text" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ prompt _ -> pure $ Right LoopResult

@@ -50,6 +50,7 @@ spec = describe "Agent.Tools.MultiAgents" do
                 , messageRecipient = "/root/worker"
                 , messageType = NewTaskMessage
                 , messageContent = EncryptedInterAgentContent secret
+                , messageMetadata = Nothing
                 }
             rendered = show message
         rendered `shouldContain` "/root/worker"
@@ -663,8 +664,8 @@ spec = describe "Agent.Tools.MultiAgents" do
         _ <- waitSubagents registry [agentId] 15000
         delivered <- newIORef []
         let context = (rootContext registry Nothing)
-                { multiSendToAgent = Just \call target content start -> do
-                    modifyIORef' delivered (<> [(call.callId, target, content, start)])
+                { multiSendToAgent = Just \call target metadata content start -> do
+                    modifyIORef' delivered (<> [(call.callId, target, metadata, content, start)])
                     pure (Right "durably queued")
                 }
             handlers = appToolHandlers (multiAgentTools context)
@@ -676,9 +677,15 @@ spec = describe "Agent.Tools.MultiAgents" do
                 "{\"target\":\"reviewer\",\"message\":\"check the result\"}" FunctionCallKind False)
         queued.output `shouldBe` "durably queued"
         followed.output `shouldBe` "durably queued"
-        readIORef delivered `shouldReturn`
+        recorded <- readIORef delivered
+        [(callId, target, content, start) | (callId, target, _, content, start) <- recorded] `shouldBe`
             [("guidance", agentId, plainInterAgentContent "only May", False)
             ,("follow-up", agentId, plainInterAgentContent "check the result", True)]
+        [metadata.originToolCallId | (_, _, metadata, _, _) <- recorded]
+            `shouldBe` [Just "guidance", Just "follow-up"]
+        case [metadata.localMessageId | (_, _, metadata, _, _) <- recorded] of
+            [first, second] -> first `shouldNotBe` second
+            _ -> expectationFailure "expected metadata for both deliveries"
         getStatus registry agentId `shouldReturn` Completed (Just "review done")
         closeSubagentRegistry registry
 

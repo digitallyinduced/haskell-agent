@@ -29,6 +29,7 @@ module Agent.Responses.Types.Items
     , reasoningSummaryPartDecoder
     , ItemReference(..)
     , ResponseAgentMessage(..)
+    , InterAgentMessageMetadata(..)
     , InternalChatMetadata(..)
     , AdditionalToolsItem(..)
     , LocalShellCall(..)
@@ -101,6 +102,28 @@ instance ToJSON ResponseMessage where
                     passthrough
                 ]
 
+-- | Host identity and causality, persisted with the prepared message. These
+-- fields are removed at provider wire boundaries; 'localMessageId' is never
+-- a provider-issued Responses item identifier.
+data InterAgentMessageMetadata = InterAgentMessageMetadata
+    { localMessageId :: !Text
+    , originToolCallId :: !(Maybe Text)
+    , originRootTurnId :: !(Maybe Text)
+    } deriving stock (Eq, Show)
+
+instance ToJSON InterAgentMessageMetadata where
+    toJSON InterAgentMessageMetadata{..} = objectWith
+        [ Just (field "message_id" localMessageId)
+        , optionalField "origin_tool_call_id" originToolCallId
+        , optionalField "origin_root_turn_id" originRootTurnId
+        ]
+
+interAgentMessageMetadataDecoder :: Hermes.Decoder InterAgentMessageMetadata
+interAgentMessageMetadataDecoder = Hermes.object $
+    InterAgentMessageMetadata
+        <$> Hermes.atKey "message_id" Hermes.text
+        <*> optionalAtKey "origin_tool_call_id" Hermes.text
+        <*> optionalAtKey "origin_root_turn_id" Hermes.text
 
 data FunctionCall = FunctionCall
     { itemId                 :: !(Maybe Text)
@@ -464,12 +487,13 @@ data ResponseAgentMessage = ResponseAgentMessage
     , recipient   :: !(Maybe Text)
     , content     :: ![ResponseContentPart]
     , passthrough :: !(Maybe InternalChatMetadata)
+    , localMetadata :: !(Maybe InterAgentMessageMetadata)
 
     } deriving stock (Eq, Show)
 
 instance ToJSON ResponseAgentMessage where
     toJSON ResponseAgentMessage
-        { messageId, author, recipient, content, passthrough } =
+        { messageId, author, recipient, content, passthrough, localMetadata } =
             objectWith
                 [ Just (field "type" ("agent_message" :: Text))
                 , optionalField "id" messageId
@@ -479,6 +503,7 @@ instance ToJSON ResponseAgentMessage where
                 , optionalField
                     "internal_chat_message_metadata_passthrough"
                     passthrough
+                , optionalField "haskell_agent_message_metadata" localMetadata
                 ]
 
 
@@ -1037,6 +1062,9 @@ responseAgentMessageDecoder = Hermes.object $
         <*> optionalAtKey
             "internal_chat_message_metadata_passthrough"
             internalChatMetadataDecoder
+        <*> optionalAtKey
+            "haskell_agent_message_metadata"
+            interAgentMessageMetadataDecoder
 
 additionalToolsItemDecoder :: Hermes.Decoder AdditionalToolsItem
 additionalToolsItemDecoder = Hermes.object $

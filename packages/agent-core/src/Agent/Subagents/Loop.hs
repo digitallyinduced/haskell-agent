@@ -35,6 +35,7 @@ import Agent.Subagents.Registry
     , activeSubagentsForTurnSTM
     , beginRootTurn
     , setSubagentOnComplete
+    , setRootMessageWaiter
     )
 import Agent.Subagents.Types
     ( RootTurnId
@@ -100,6 +101,9 @@ newRootSubagents notices registry = do
         setSubagentOnComplete registry \agentId status ->
             void (deliverToLoop session agentId.unSubagentId
                 (UserMessage (formatCompletionNotice agentId status)))
+    setRootMessageWaiter registry $ case notices of
+        NoticesToLoop -> awaitSteeringInputReady inputs
+        NoticesToHost -> retry
     pure session
 
 rootSubagentsRegistry :: RootSubagents -> SubagentRegistry

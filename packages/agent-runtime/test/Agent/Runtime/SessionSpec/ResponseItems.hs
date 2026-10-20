@@ -119,6 +119,7 @@ genResponseAgentMessage =
             <*> genMaybe genText
             <*> genSmallList genContentPart
             <*> pure Nothing
+            <*> genMaybe (InterAgentMessageMetadata <$> genText <*> genMaybe genText <*> genMaybe genText)
 
 jsonRoundTrip :: a -> Maybe a
 jsonRoundTrip = Just

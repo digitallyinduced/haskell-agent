@@ -186,6 +186,7 @@ spec = do
                             "opaque-provider-payload"
                         ]
                     , passthrough = Nothing
+                    , localMetadata = Just (InterAgentMessageMetadata "amsg_local" (Just "call") (Just "turn"))
                     }
                 request = setInstructions Nothing $
                     setInput

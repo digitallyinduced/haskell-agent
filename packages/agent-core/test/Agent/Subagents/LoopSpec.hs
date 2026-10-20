@@ -2,13 +2,17 @@ module Agent.Subagents.LoopSpec (spec) where
 
 import Agent.Cancel (waitCancel)
 import Agent.Error (ApiError(..))
-import Agent.InterAgentMessage (plainInterAgentContent)
+import Agent.InterAgentMessage
+    ( InterAgentMessage(..), InterAgentMessageType(..)
+    , newInterAgentMessageMetadata, plainInterAgentContent
+    )
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
     , LoopConfig(..)
     , LoopError(..)
     , LoopResult(..)
+    , LoopSubagents(..)
     , TurnInput(..)
     , emptyTokenUsage
     , emptyTurnOutput
@@ -37,6 +41,8 @@ import Agent.Subagents
     , newSubagentRegistry
     , spawnSubagentAtForTurn
     , subagentLoop
+    , sendToRootLoop
+    , waitAnyLive
     )
 import Agent.Subagents.TaskPath (taskPathRoot)
 import Control.Concurrent (forkIO, threadDelay)
@@ -45,6 +51,7 @@ import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, readMVar)
 import Control.Exception.Safe (bracket)
 import Control.Monad (void)
 import Data.IORef
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.OsPath (unsafeEncodeUtf)
@@ -128,6 +135,19 @@ awaitStatus registry agentId expected = do
 
 spec :: Spec
 spec = describe "Agent.Subagents.Loop" do
+    it "observes root mail queued before waiting and stops waking after acknowledgement" do
+        withRoot NoticesToLoop \registry root _ -> do
+            metadata <- newInterAgentMessageMetadata (Just "send-call") (Just "1")
+            let message = InterAgentMessage "/root/worker" "/root" QueuedMessage
+                    (plainInterAgentContent "ready") (Just metadata)
+                hooks = subagentLoop KeepChildrenRunning root
+            sendToRootLoop root message `shouldReturn` Right "queued"
+            timeout 1000000 (waitAnyLive registry Nothing 10000)
+                `shouldReturn` Just (Map.empty, False)
+            hooks.subagentsReadInputs `shouldReturn` [AgentMessage message]
+            hooks.subagentsCommitInputs 1
+            timeout 20000 (waitAnyLive registry Nothing 10000) `shouldReturn` Nothing
+
     it "keeps children running after the root answers and reports them in the next turn" do
         withRoot NoticesToLoop \registry root release -> do
             requests <- newIORef []

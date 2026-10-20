@@ -8,6 +8,8 @@ module Agent.InterAgentMessage
     ( InterAgentMessage(..)
     , InterAgentMessageContent(..)
     , InterAgentMessageType(..)
+    , InterAgentMessageMetadata(..)
+    , newInterAgentMessageMetadata
     , encryptedInterAgentContent
     , interAgentMessagePayload
     , plainInterAgentContent
@@ -15,6 +17,8 @@ module Agent.InterAgentMessage
     , renderInterAgentMessageHeader
     ) where
 
+import Agent.Responses.Types (InterAgentMessageMetadata(..))
+import Agent.Uuid (generateUuidV7)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -41,6 +45,7 @@ data InterAgentMessage = InterAgentMessage
     , messageRecipient :: !Text
     , messageType :: !InterAgentMessageType
     , messageContent :: !InterAgentMessageContent
+    , messageMetadata :: !(Maybe InterAgentMessageMetadata)
     } deriving (Eq)
 
 instance Show InterAgentMessage where
@@ -49,7 +54,20 @@ instance Show InterAgentMessage where
             <> ", messageRecipient = " <> show message.messageRecipient
             <> ", messageType = " <> show message.messageType
             <> ", messageContent = " <> show message.messageContent
+            <> ", messageMetadata = " <> show message.messageMetadata
             <> " }"
+
+-- | Allocate once when constructing new work. Queue retries and history
+-- projection carry this value unchanged. Legacy messages may have no metadata.
+newInterAgentMessageMetadata
+    :: Maybe Text -> Maybe Text -> IO InterAgentMessageMetadata
+newInterAgentMessageMetadata originToolCallId originRootTurnId = do
+    identifier <- generateUuidV7
+    pure InterAgentMessageMetadata
+        { localMessageId = "amsg_" <> identifier
+        , originToolCallId
+        , originRootTurnId
+        }
 
 plainInterAgentContent :: Text -> InterAgentMessageContent
 plainInterAgentContent = PlainInterAgentContent

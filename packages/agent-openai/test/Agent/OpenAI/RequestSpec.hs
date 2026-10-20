@@ -27,6 +27,20 @@ spec = describe "Codex wire contract" do
 
 transportSpec :: (String, ResponseCreateParams -> Aeson.Value) -> Spec
 transportSpec (transport, payloadFor) = describe transport do
+    it "keeps local agent identity out of provider requests while retaining provider item ids" do
+        let message = ResponseAgentMessage
+                { messageId = Just "amsg_provider_issued"
+                , author = Just "/root/worker"
+                , recipient = Just "/root"
+                , content = [InputTextPart "result" Nothing]
+                , passthrough = Nothing
+                , localMetadata = Just (InterAgentMessageMetadata "amsg_local" (Just "call") (Just "3"))
+                }
+            actual = payloadFor (withInputItems [AgentMessageItem message] sampleRequest) `at` "input"
+        actual `shouldBe` Just (Aeson.toJSON
+            [AgentMessageItem (message { localMetadata = Nothing })])
+        message.localMetadata `shouldNotBe` Nothing
+
     it "sends recovery as assistant output text without local attribution metadata" do
         let request :: ResponseCreateParams
             request = sampleRequest

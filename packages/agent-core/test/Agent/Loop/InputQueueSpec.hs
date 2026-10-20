@@ -1,6 +1,7 @@
 module Agent.Loop.InputQueueSpec (spec) where
 
 import Agent.Loop.InputBudget (logicalTextBytes, logicalTurnInputBytes)
+import Agent.InterAgentMessage
 import Agent.Loop.InputQueue
 import qualified Agent.Loop.InputQueue.Model as Model
 import Agent.Loop
@@ -17,6 +18,7 @@ import Control.Concurrent.STM (atomically, orElse, retry)
 import Control.Exception.Safe (tryAny)
 import qualified Data.ByteString as ByteString
 import Data.Either (isLeft)
+import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Timeout (timeout)
 import Test.Hspec
@@ -24,6 +26,33 @@ import Test.Hspec
 spec :: Spec
 spec = do
   describe "pending input pure lifecycle" do
+    it "redelivers the same message identity until its pending batch is acknowledged" do
+        metadata <- newInterAgentMessageMetadata (Just "send-call") (Just "3")
+        let input = AgentMessage (InterAgentMessage "worker" "root" QueuedMessage
+                (plainInterAgentContent "result") (Just metadata))
+        pending <- newPendingInputs
+        enqueuePendingInput pending input `shouldReturn` Right ()
+        withPendingInputBatch pending (\items -> do
+            items `shouldBe` [input]
+            pure (Left "retry" :: Either Text ())) `shouldReturn` Left "retry"
+        withPendingInputBatch pending (\items -> pure (Right items :: Either Text [TurnInput]))
+            `shouldReturn` Right [input]
+        withPendingInputBatch pending (\items -> pure (Right items :: Either Text [TurnInput]))
+            `shouldReturn` Right []
+
+    it "observes already queued agent guidance once before acknowledgement" do
+        metadata <- newInterAgentMessageMetadata (Just "send-call") (Just "3")
+        let input = AgentMessage (InterAgentMessage "worker" "root" QueuedMessage
+                (plainInterAgentContent "result") (Just metadata))
+        steering <- newInputQueue
+        enqueueSteeringInputs steering [input] `shouldReturn` Right ()
+        atomically ((awaitUserSteeringAfter steering 0 >> pure True) `orElse` pure False)
+            `shouldReturn` True
+        readSteeringInputs steering `shouldReturn` [input]
+        commitSteeringInputs steering 1
+        atomically ((awaitUserSteeringAfter steering 0 >> pure True) `orElse` pure False)
+            `shouldReturn` False
+
     it "retains the count budget through drain and retry, releasing it on commit" do
         let full = foldl (\s _ -> fst (Model.enqueueInput (UserMessage "x") s))
                 Model.emptyPendingState [1 .. pendingInputCountLimit]
@@ -119,6 +148,12 @@ spec = do
         Model.retainedBytes committed `shouldBe` 3
 
   describe "logicalTurnInputBytes" do
+    it "counts local message identity and origin against the retained budget" do
+        let metadata = InterAgentMessageMetadata "identifier" (Just "call") (Just "turn")
+            message = InterAgentMessage "a" "b" QueuedMessage
+                (plainInterAgentContent "c") (Just metadata)
+        logicalTurnInputBytes (AgentMessage message) `shouldBe` 21
+
     it "bounds recovery context by the same retained input budget" do
         let oversized = RecoveryMessage (Text.replicate (pendingInputByteLimit + 1) "x")
         snd (Model.enqueueInput oversized Model.emptyPendingState) `shouldSatisfy` isLeft

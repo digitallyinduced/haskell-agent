@@ -63,6 +63,7 @@ spec = do
                     , messageRecipient = "/root/worker"
                     , messageType = NewTaskMessage
                     , messageContent = EncryptedInterAgentContent "gAAAAA-ciphertext"
+                    , messageMetadata = Nothing
                     }
             case turnInputsToItems [AgentMessage message] of
                 [item@(AgentMessageItem encoded)] -> do

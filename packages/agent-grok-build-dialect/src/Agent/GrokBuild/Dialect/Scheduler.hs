@@ -24,6 +24,7 @@ import Agent.GrokBuild.Dialect.Common (jsonTool)
 import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.InterAgentMessage
     ( InterAgentMessage(..)
+    , newInterAgentMessageMetadata
     , InterAgentMessageType(QueuedMessage)
     , plainInterAgentContent
     )
@@ -157,6 +158,7 @@ newSchedulerRuntime cwd multi specs =
                         <> fire.scheduledFireTaskId))
             case (result, multi.multiSendToRoot) of
                 (Left err, Just sendToRoot) -> do
+                    metadata <- newInterAgentMessageMetadata Nothing Nothing
                     _ <- sendToRoot InterAgentMessage
                         { messageAuthor =
                             "scheduler:" <> fire.scheduledFireTaskId
@@ -165,6 +167,7 @@ newSchedulerRuntime cwd multi specs =
                         , messageContent =
                             plainInterAgentContent
                                 ("Scheduled task failed to launch: " <> err)
+                        , messageMetadata = Just metadata
                         }
                     pure ()
                 _ -> pure ()

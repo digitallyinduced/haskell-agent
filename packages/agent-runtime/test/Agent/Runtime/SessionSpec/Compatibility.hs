@@ -509,6 +509,7 @@ spec = do
                                 }
                             ]
                         , passthrough = Nothing
+                        , localMetadata = Just (InterAgentMessageMetadata "amsg_persisted" (Just "call-1") (Just "7"))
                         }
                     , CompactionTriggerItemValue CompactionTriggerItem
                     , UnknownResponseItem (TaggedObject "provider_item")

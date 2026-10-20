@@ -27,7 +27,7 @@ spec = describe "durable parent notifications" do
 
     it "does not coalesce explicit messages" do
         (store, state) <- newStore
-        let message = ChildMessageAvailable (InterAgentMessage "worker" "root" QueuedMessage (PlainInterAgentContent "result"))
+        let message = ChildMessageAvailable (InterAgentMessage "worker" "root" QueuedMessage (PlainInterAgentContent "result") Nothing)
         queueParentNotification store message `shouldReturn` Right ()
         queueParentNotification store message `shouldReturn` Right ()
         readIORef state `shouldReturn` ([message, message], 2)
