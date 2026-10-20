@@ -9,6 +9,7 @@ module Agent.Loop.InputBudget
 
 import Agent.InterAgentMessage
     ( InterAgentMessage(..)
+    , InterAgentMessageMetadata(..)
     , interAgentMessagePayload
     )
 import Agent.Loop.Input
@@ -58,6 +59,12 @@ logicalToolResultImageBytes image =
     logicalTextBytes image.imageUrl
         `saturatingAdd` maybe 0 logicalTextBytes image.imageDetail
 
+messageMetadataBytes :: InterAgentMessageMetadata -> Int
+messageMetadataBytes metadata =
+    logicalTextBytes metadata.localMessageId
+        `saturatingAdd` maybe 0 logicalTextBytes metadata.originToolCallId
+        `saturatingAdd` maybe 0 logicalTextBytes metadata.originRootTurnId
+
 logicalTurnInputBytes :: TurnInput -> Int
 logicalTurnInputBytes = \case
     UserMessage text -> logicalTextBytes text
@@ -66,6 +73,7 @@ logicalTurnInputBytes = \case
         logicalTextBytes message.messageAuthor
             `saturatingAdd` logicalTextBytes message.messageRecipient
             `saturatingAdd` logicalTextBytes (interAgentMessagePayload message)
+            `saturatingAdd` maybe 0 messageMetadataBytes message.messageMetadata
     UserMessageWithAttachments text attachments ->
         logicalTextBytes text
             `saturatingAdd` foldBytes logicalAttachmentBytes

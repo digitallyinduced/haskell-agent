@@ -153,7 +153,7 @@ import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Concurrent.MVar
     ( MVar, modifyMVar_, newEmptyMVar, newMVar, takeMVar, tryPutMVar, withMVar )
 import Control.Concurrent.STM
-    ( STM, atomically, newEmptyTMVarIO, putTMVar )
+    ( STM, atomically, newEmptyTMVarIO, putTMVar, orElse )
 import Control.Exception.Safe
     ( catchAny
     , mask_
@@ -506,6 +506,10 @@ newSessionControlRuntime host SessionRequest{..} = do
     toolRegistry <- requireToolRegistry allTools
     currentToolRegistry <- newIORef toolRegistry
     steeringInputs <- newInputQueue
+    forM_ multiCtx \ctx ->
+        setRootMessageWaiter ctx.multiRegistry $
+            awaitPendingInputReady pendingNotices
+                `orElse` awaitUserSteeringAfter steeringInputs 0
     installBackgroundTaskSteering toolEnv steeringInputs
     forM_ (startup.startupNativeHooks >>= (.nativeRegisterSteering)) \register ->
         register \text -> enqueueSteeringInputsSTM steeringInputs [UserMessage text]

@@ -588,6 +588,7 @@ agentMessageItem text =
         , recipient = Nothing
         , content = [InputTextPart text Nothing]
         , passthrough = Nothing
+        , localMetadata = Nothing
         }
 
 reasoningItem :: Text -> Text -> ResponseItem

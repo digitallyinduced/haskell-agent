@@ -15,6 +15,7 @@ module Agent.Loop.InputQueue
     , pendingInputCountLimit
     , awaitSteeringInput
     , awaitSteeringInputReady
+    , awaitPendingInputReady
     , awaitUserSteering
     , awaitUserSteeringAfter
     , clearSteeringInputs
@@ -85,6 +86,10 @@ newPendingInputs = PendingInputs . InputQueue <$> newTVarIO Model.emptyPendingSt
 
 clearPendingInputs :: PendingInputs -> IO ()
 clearPendingInputs (PendingInputs inputs) = clearSteeringInputs inputs
+
+-- | Observe root messages queued after the current leased batch.
+awaitPendingInputReady :: PendingInputs -> STM ()
+awaitPendingInputReady (PendingInputs inputs) = awaitSteeringInputReady inputs
 
 enqueuePendingInput :: PendingInputs -> TurnInput -> IO (Either Text ())
 enqueuePendingInput (PendingInputs (InputQueue ref)) input =

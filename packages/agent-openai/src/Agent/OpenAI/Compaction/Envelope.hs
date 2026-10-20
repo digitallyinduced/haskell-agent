@@ -33,6 +33,7 @@ nativeCompactionRequestBody model request = case Aeson.toJSON request of
     sanitizeField _ value = value
     sanitizeItem (Aeson.Object fields) = Aeson.Object $
         KeyMap.mapWithKey (\key value -> if key == "passthrough" then sanitizeMetadata value else value) $
+        KeyMap.delete "haskell_agent_message_metadata" $
         KeyMap.delete "content_item_kinds" $ KeyMap.delete "status" fields
     sanitizeItem other = other
     sanitizeMetadata (Aeson.Object fields) =

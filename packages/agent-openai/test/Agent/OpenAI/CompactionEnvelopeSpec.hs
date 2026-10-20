@@ -32,6 +32,7 @@ spec = describe "native compaction envelope" do
             item = Aeson.object
                 [ "type" .= ("future_item" :: Text), "status" .= ("completed" :: Text)
                 , "payload" .= payload, "content_item_kinds" .= ["local" :: Text]
+                , "haskell_agent_message_metadata" .= Aeson.object ["message_id" .= ("amsg_local" :: Text)]
                 , "passthrough" .= Aeson.object ["content_item_kinds" .= ["local" :: Text], "turn_id" .= ("turn" :: Text)]
                 ]
             expected = Aeson.object

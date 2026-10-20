@@ -1468,6 +1468,7 @@ spec = do
             , recipient = Just recipient
             , content = [InputTextPart text Nothing]
             , passthrough = Nothing
+            , localMetadata = Nothing
             }
     checkpoint name = CompactionItemValue CompactionItem
         { itemId = Nothing

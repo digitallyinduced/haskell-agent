@@ -4,6 +4,7 @@ import Agent.Json (RawJson, rawJsonBytes, rawJsonDecoder)
 import qualified Agent.Json.Decode as Json
 import Agent.Cancel (newCancelFlag, requestCancel)
 import Agent.Error (ApiError(..))
+import Agent.InterAgentMessage
 import Agent.Loop
 import Agent.Loop.InputItems (turnInputsToItems, toolResultToItem)
 import Agent.Loop.Fixtures
@@ -17,6 +18,7 @@ import Agent.Responses.Types
     , ResponseContentPart(..)
     , ResponseItem(..)
     , ResponseMessage(..)
+    , ResponseAgentMessage(..)
     , ResponseRole(..)
     , ToolSearchOutput(..)
     )
@@ -93,6 +95,29 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "runLoop" do
+    describe "inter-agent message identity" do
+        it "retains local identity and origin through canonical history serialization" do
+            metadata <- newInterAgentMessageMetadata (Just "send-call") (Just "root-turn")
+            other <- newInterAgentMessageMetadata (Just "send-call") (Just "root-turn")
+            metadata.localMessageId `shouldNotBe` other.localMessageId
+            let message = InterAgentMessage "/root/worker" "/root" QueuedMessage
+                    (EncryptedInterAgentContent "opaque-payload") (Just metadata)
+                items = turnInputsToItems [AgentMessage message]
+                encoded = LazyByteString.toStrict (Aeson.encode items)
+            Json.decodeEither (Json.list responseItemDecoder) encoded `shouldBe` Right items
+            case items of
+                [AgentMessageItem item] -> do
+                    item.messageId `shouldBe` Nothing
+                    item.localMetadata `shouldBe` Just metadata
+                    item.content `shouldContain` [EncryptedContentPart "opaque-payload"]
+                _ -> expectationFailure "expected one agent message"
+
+        it "loads legacy agent messages without inventing identity" do
+            let encoded = "{\"type\":\"agent_message\",\"author\":\"worker\",\"recipient\":\"root\",\"content\":[]}"
+            case Json.decodeEither responseItemDecoder encoded of
+                Right (AgentMessageItem item) -> item.localMetadata `shouldBe` Nothing
+                _ -> expectationFailure "expected legacy agent message"
+
     describe "recovery attribution" do
         it "persists recovery as attributed assistant context and preserves user-authored examples" do
             let text = "<turn_aborted>Verify existing effects.</turn_aborted>"

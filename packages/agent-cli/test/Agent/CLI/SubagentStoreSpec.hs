@@ -347,14 +347,26 @@ spec = describe "Agent.CLI.SubagentStore" do
             usesOpenAiChildTransport Nothing Nothing Nothing
                 `shouldBe` False
 
-        it "restores an inherited Luna descendant under a Grok parent" do
+        it "restores an inherited Luna descendant and its message identity under a Grok parent" do
             withTempDir \dir -> do
                 let agentId = SubagentId "agent-luna-descendant"
+                    items =
+                        [ messageItem RoleUser "inherited"
+                        , AgentMessageItem ResponseAgentMessage
+                            { messageId = Nothing
+                            , author = Just "/root"
+                            , recipient = Just "/root/worker"
+                            , content = [EncryptedContentPart "opaque-assignment"]
+                            , passthrough = Nothing
+                            , localMetadata = Just (InterAgentMessageMetadata
+                                "amsg_stored" (Just "spawn-call") (Just "7"))
+                            }
+                        ]
                 saveSubagentState
                     dir
                     agentId
                     (testSnapshot
-                        [messageItem RoleUser "inherited"]
+                        items
                         (Completed (Just "OK"))
                         OpenAIProvider
                         "openai"
@@ -391,6 +403,8 @@ spec = describe "Agent.CLI.SubagentStore" do
                         session.subSessionEffectiveModel
                             `shouldBe` "gpt-5.6-luna"
                         session.subSessionDialect `shouldBe` CodexDialect
+                        (.backendItems) <$> readIORef session.subSessionTranscript
+                            `shouldReturn` items
 
         it "restores gateway child metadata through the live resolver" do
             withTempDir \dir -> do

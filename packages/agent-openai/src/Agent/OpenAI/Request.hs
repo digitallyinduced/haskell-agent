@@ -117,14 +117,9 @@ stripContentItemKindsItem = \case
                 status
                 phase
                 (stripItemPassthrough passthrough))
-    AgentMessageItem (ResponseAgentMessage itemId author recipient content passthrough) ->
-        AgentMessageItem
-            (ResponseAgentMessage
-                itemId
-                author
-                recipient
-                content
-                (stripItemPassthrough passthrough))
+    AgentMessageItem message ->
+        AgentMessageItem message
+            { passthrough = stripItemPassthrough message.passthrough }
     other -> other
 
 providerMessageId :: Maybe Text -> Maybe Text

@@ -14,6 +14,8 @@ import Agent.InterAgentMessage
     ( InterAgentMessage(..)
     , InterAgentMessageContent
     , InterAgentMessageType(..)
+    , InterAgentMessageMetadata(..)
+    , newInterAgentMessageMetadata
     , plainInterAgentContent
     )
 import Agent.Loop (LoopError(..), LoopEvent, LoopResult(..))
@@ -79,6 +81,7 @@ newSubagentRegistry config cwd run onEvent = do
     nextUpdateSeq <- newTVarIO 0
     waitCursors <- newTVarIO Map.empty
     activeWaits <- newTVarIO Map.empty
+    rootMessageWaiter <- newTVarIO retry
     closed <- newTVarIO False
     nextSubagentId <- newTVarIO 0
     nextRootTurnId <- newTVarIO 0
@@ -102,6 +105,7 @@ newSubagentRegistry config cwd run onEvent = do
         , registryNextUpdateSeq = nextUpdateSeq
         , registryWaitCursors = waitCursors
         , registryActiveWaits = activeWaits
+        , registryRootMessageWaiter = rootMessageWaiter
         , registryConfig = configVar
         , registryRunRef = runRef
         , registryOnEvent = onEvent
@@ -152,6 +156,12 @@ setSubagentOnSettled
     -> (SubagentId -> SubagentStatus -> IO ())
     -> IO ()
 setSubagentOnSettled registry = writeIORef registry.registryOnSettledRef
+
+-- | Observe a host-owned root mailbox without consuming its input. Replace
+-- the source when rebuilding the host session so old queues are not retained.
+setRootMessageWaiter :: SubagentRegistry -> STM () -> IO ()
+setRootMessageWaiter registry ready =
+    atomically (writeTVar registry.registryRootMessageWaiter ready)
 
 beginRootTurn :: SubagentRegistry -> IO RootTurnId
 beginRootTurn registry = atomically do
@@ -268,7 +278,7 @@ spawnSubagentWithCwdPreparedForTurn
     agentId <- newSubagentId registry
     fmap (fmap fst) $
         spawnSubagentAtWithIdPreparedForTurn
-            registry rootTurnId childCwd beforeStart agentId
+            registry rootTurnId Nothing childCwd beforeStart agentId
             parentId taskPathRoot parentDepth (taskNameForAgentId agentId)
                 (plainInterAgentContent message) nickname
 
@@ -341,15 +351,36 @@ spawnSubagentAtWithCwdPreparedForTurn
     -> IO (Either Text (SubagentId, TaskPath))
 spawnSubagentAtWithCwdPreparedForTurn
         registry rootTurnId childCwd beforeStart
+        parentId parentPath parentDepth taskName content nickname =
+    spawnSubagentAtWithCwdPreparedForTurnWithOrigin
+        registry rootTurnId Nothing childCwd beforeStart
+        parentId parentPath parentDepth taskName content nickname
+
+spawnSubagentAtWithCwdPreparedForTurnWithOrigin
+    :: SubagentRegistry
+    -> Maybe RootTurnId
+    -> Maybe Text
+    -> OsPath
+    -> (SubagentId -> IO SubagentLease)
+    -> Maybe SubagentId
+    -> TaskPath
+    -> Int
+    -> Text
+    -> InterAgentMessageContent
+    -> Maybe Text
+    -> IO (Either Text (SubagentId, TaskPath))
+spawnSubagentAtWithCwdPreparedForTurnWithOrigin
+        registry rootTurnId originToolCallId childCwd beforeStart
         parentId parentPath parentDepth taskName content nickname = do
     agentId <- newSubagentId registry
     spawnSubagentAtWithIdPreparedForTurn
-        registry rootTurnId childCwd beforeStart agentId
+        registry rootTurnId originToolCallId childCwd beforeStart agentId
         parentId parentPath parentDepth taskName content nickname
 
 spawnSubagentAtWithIdPreparedForTurn
     :: SubagentRegistry
     -> Maybe RootTurnId
+    -> Maybe Text
     -> OsPath
     -> (SubagentId -> IO SubagentLease)
     -> SubagentId
@@ -361,8 +392,10 @@ spawnSubagentAtWithIdPreparedForTurn
     -> Maybe Text
     -> IO (Either Text (SubagentId, TaskPath))
 spawnSubagentAtWithIdPreparedForTurn
-        registry rootTurnId childCwd beforeStart agentId
+        registry rootTurnId originToolCallId childCwd beforeStart agentId
         parentId requestedParentPath requestedParentDepth taskName content nickname = do
+    metadata <- newInterAgentMessageMetadata originToolCallId
+        (Text.pack . show . (.unRootTurnId) <$> rootTurnId)
     cancelFlag <- newCancelFlag
     mailbox <- newTQueueIO
     steeringVar <- newTVarIO Nothing
@@ -430,6 +463,7 @@ spawnSubagentAtWithIdPreparedForTurn
                                                                         taskPathText childPath
                                                                     , messageType = NewTaskMessage
                                                                     , messageContent = content
+                                                                    , messageMetadata = Just metadata
                                                                     }
                                                                 }
                                                         phaseVar <- newTVar
@@ -540,7 +574,12 @@ runSupervisor registry record = awaitWork
                 runWork work
 
     runWork work = do
-        let onEvent = registry.registryOnEvent record.recordId
+        let completionMetadata =
+                (\metadata -> metadata
+                    { localMessageId = metadata.localMessageId <> ":completion"
+                    , originToolCallId = Nothing
+                    }) <$> work.workMessage.messageMetadata
+            onEvent = registry.registryOnEvent record.recordId
             env = SubagentSpawnEnv
                 { subId = record.recordId
                 , subDepth = record.recordDepth
@@ -596,7 +635,7 @@ runSupervisor registry record = awaitWork
                 runWork nextWork
             SupervisorComplete -> do
                 notifyRoot <- atomically $
-                    publishCompletionSTM registry record status
+                    publishCompletionSTM registry record status completionMetadata
                 whenIO notifyRoot do
                     _ <- tryAny $
                         notifyComplete
@@ -624,13 +663,13 @@ takeStartedWork record = do
         AgentRunning{} -> retry
         AgentInterrupting{} -> retry
 
-publishCompletionSTM :: SubagentRegistry -> SubagentRecord -> SubagentStatus -> STM Bool
-publishCompletionSTM registry record status = do
+publishCompletionSTM :: SubagentRegistry -> SubagentRecord -> SubagentStatus -> Maybe InterAgentMessageMetadata -> STM Bool
+publishCompletionSTM registry record status metadata = do
     nextSeq <- readTVar registry.registryNextUpdateSeq
     let updateSeq = nextSeq + 1
     writeTVar registry.registryNextUpdateSeq updateSeq
     writeTVar record.recordLastUpdate (Just (updateSeq, status))
-    routeCompletionSTM registry record status
+    routeCompletionSTM registry record status metadata
 
 -- | Publish a status for a turn settled administratively before its
 -- supervisor starts.  This wakes untargeted waiters just like a normal
@@ -647,8 +686,8 @@ publishDirectUpdateSTM registry record status = do
     writeTVar registry.registryNextUpdateSeq updateSeq
     writeTVar record.recordLastUpdate (Just (updateSeq, status))
 
-routeCompletionSTM :: SubagentRegistry -> SubagentRecord -> SubagentStatus -> STM Bool
-routeCompletionSTM registry record status =
+routeCompletionSTM :: SubagentRegistry -> SubagentRecord -> SubagentStatus -> Maybe InterAgentMessageMetadata -> STM Bool
+routeCompletionSTM registry record status metadata =
     case record.recordParent of
         Nothing -> pure True
         Just parentId -> do
@@ -669,7 +708,7 @@ routeCompletionSTM registry record status =
                 enqueueSubagentWorkSTM parent
                     SubagentWork
                         { workRootTurnId = rootTurnId
-                        , workMessage = completionMessage record parent status
+                        , workMessage = completionMessage record parent status metadata
                         }
                 pure False
             else pure True
@@ -686,13 +725,14 @@ completionIsAwaitedSTM registry caller childId = do
         Just [] -> True
         Just targets -> childId `elem` targets
 
-completionMessage :: SubagentRecord -> SubagentRecord -> SubagentStatus -> InterAgentMessage
-completionMessage child parent status =
+completionMessage :: SubagentRecord -> SubagentRecord -> SubagentStatus -> Maybe InterAgentMessageMetadata -> InterAgentMessage
+completionMessage child parent status metadata =
     InterAgentMessage
         (taskPathText child.recordTaskPath)
         (taskPathText parent.recordTaskPath)
         QueuedMessage
         (plainInterAgentContent (formatCompletionNotice child.recordId status))
+        metadata
 
 startRecordSupervisor
     :: SubagentRegistry

@@ -115,6 +115,7 @@ agentMessageItem message = AgentMessageItem ResponseAgentMessage
     , recipient = Just message.messageRecipient
     , content = agentMessageContent message
     , passthrough = Nothing
+    , localMetadata = message.messageMetadata
     }
 
 agentMessageContent :: InterAgentMessage -> [ResponseContentPart]

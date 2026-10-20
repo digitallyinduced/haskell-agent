@@ -27,6 +27,7 @@ module Agent.Subagents.Registry
     , spawnSubagentAtPreparedForTurn
     , spawnSubagentAtWithCwdPrepared
     , spawnSubagentAtWithCwdPreparedForTurn
+    , spawnSubagentAtWithCwdPreparedForTurnWithOrigin
     , restoreSubagent
     , restoreSubagentAt
     , restoreSubagentAtStatus
@@ -36,12 +37,15 @@ module Agent.Subagents.Registry
     , waitSubagents
     , waitSubagentsFrom
     , waitAnyLive
+    , setRootMessageWaiter
     , sendInput
     , sendInputMessage
     , sendInputMessageForTurn
+    , sendInputMessageForTurnWithOrigin
     , queueMessage
     , queueMessageFrom
     , queueMessageFromForTurn
+    , queueMessageFromForTurnWithOrigin
     , closeSubagent
     , interruptSubagent
     , getStatus

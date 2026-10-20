@@ -9,10 +9,12 @@ import Agent.Cancel
     )
 import Agent.Concurrent
     ( mapConcurrentlyBounded )
+import Agent.Loop.InputQueue (awaitUserSteeringAfter)
 import Agent.InterAgentMessage
     ( InterAgentMessage(..)
     , InterAgentMessageContent
     , InterAgentMessageType(..)
+    , newInterAgentMessageMetadata
     , plainInterAgentContent
     )
 import System.OsPath (OsPath)
@@ -123,6 +125,21 @@ sendInputMessageForTurn
     -> Bool
     -> IO (Either Text Text)
 sendInputMessageForTurn registry rootTurnId senderPath agentId content interrupt =
+    sendInputMessageForTurnWithOrigin registry rootTurnId Nothing
+        senderPath agentId content interrupt
+
+sendInputMessageForTurnWithOrigin
+    :: SubagentRegistry
+    -> Maybe RootTurnId
+    -> Maybe Text
+    -> TaskPath
+    -> SubagentId
+    -> InterAgentMessageContent
+    -> Bool
+    -> IO (Either Text Text)
+sendInputMessageForTurnWithOrigin registry rootTurnId originToolCallId senderPath agentId content interrupt = do
+    metadata <- newInterAgentMessageMetadata originToolCallId
+        (Text.pack . show . (.unRootTurnId) <$> rootTurnId)
     withMVar registry.registryLifecycle \_ -> do
         closed <- atomically $ readTVar registry.registryClosed
         if closed
@@ -144,6 +161,7 @@ sendInputMessageForTurn registry rootTurnId senderPath agentId content interrupt
                                         taskPathText record.recordTaskPath
                                     , messageType = FollowUpMessage
                                     , messageContent = content
+                                    , messageMetadata = Just metadata
                                     }
                                 }
                         case status of
@@ -197,7 +215,7 @@ resumeDueSubagents registry now = withMVar registry.registryLifecycle \_ -> do
         case status of
             Suspended deadline reason -> do
                 queued <- atomically $ tryReadTQueue record.recordMailbox
-                let scheduled = SubagentWork
+                let scheduled metadata = SubagentWork
                         { workRootTurnId = Nothing
                         , workMessage = InterAgentMessage
                             { messageAuthor = taskPathText taskPathRoot
@@ -205,6 +223,7 @@ resumeDueSubagents registry now = withMVar registry.registryLifecycle \_ -> do
                             , messageType = FollowUpMessage
                             , messageContent = plainInterAgentContent
                                 ("Scheduled suspension has ended. Recheck current conditions before acting. Reason: " <> reason)
+                            , messageMetadata = Just metadata
                             }
                         }
                 case queued of
@@ -216,7 +235,8 @@ resumeDueSubagents registry now = withMVar registry.registryLifecycle \_ -> do
                             Left _ -> restoreMessage
                         pure [(record.recordId, result)]
                     Nothing | deadline <= now -> do
-                        result <- resumeSuspendedWork registry record scheduled
+                        metadata <- newInterAgentMessageMetadata Nothing Nothing
+                        result <- resumeSuspendedWork registry record (scheduled metadata)
                         pure [(record.recordId, result)]
                     Nothing -> pure []
             _ -> pure []
@@ -781,6 +801,20 @@ queueMessageFromForTurn
     -> InterAgentMessageContent
     -> IO (Either Text Text)
 queueMessageFromForTurn registry rootTurnId senderPath agentId content =
+    queueMessageFromForTurnWithOrigin registry rootTurnId Nothing
+        senderPath agentId content
+
+queueMessageFromForTurnWithOrigin
+    :: SubagentRegistry
+    -> Maybe RootTurnId
+    -> Maybe Text
+    -> TaskPath
+    -> SubagentId
+    -> InterAgentMessageContent
+    -> IO (Either Text Text)
+queueMessageFromForTurnWithOrigin registry rootTurnId originToolCallId senderPath agentId content = do
+    metadata <- newInterAgentMessageMetadata originToolCallId
+        (Text.pack . show . (.unRootTurnId) <$> rootTurnId)
     withMVar registry.registryLifecycle \_ ->
         atomically do
             closed <- readTVar registry.registryClosed
@@ -810,12 +844,14 @@ queueMessageFromForTurn registry rootTurnId senderPath agentId content =
                                                             record.recordTaskPath
                                                     , messageType = QueuedMessage
                                                     , messageContent = content
+                                                    , messageMetadata = Just metadata
                                                     }
                                                 }
                                         enqueueSubagentWorkSTM record work
                                         pure (Right "queued")
 
--- | Wait until any live non-final agent reaches a final status (or timeout).
+-- | Wait for an unseen agent update or pending mail for the caller. Observing
+-- mail does not consume it or advance the status cursor.
 waitAnyLive
     :: SubagentRegistry
     -> Maybe SubagentId
@@ -828,7 +864,13 @@ waitAnyLive registry caller timeoutMs = do
                 modifyTVar' registry.registryActiveWaits
                     (Map.insert caller [])
             race
-                (atomically (takeAgentUpdatesSTM registry caller))
+                (atomically do
+                    statuses <- takeAgentUpdatesSTM registry caller
+                        `orElse` (Map.empty <$ pendingMessagesSTM registry caller)
+                    -- Later completions must route to the mailbox rather than
+                    -- assume this already-selected result will contain them.
+                    modifyTVar' registry.registryActiveWaits (Map.delete caller)
+                    pure statuses)
                 (threadDelay (clamped * 1000))
                 >>= \case
                     Left statuses -> pure (statuses, False)
@@ -837,6 +879,21 @@ waitAnyLive registry caller timeoutMs = do
             atomically $
                 modifyTVar' registry.registryActiveWaits (Map.delete caller)
     finally wait unregister
+
+pendingMessagesSTM :: SubagentRegistry -> Maybe SubagentId -> STM ()
+pendingMessagesSTM registry = \case
+    Nothing -> readTVar registry.registryRootMessageWaiter >>= id
+    Just agentId -> do
+        agents <- readTVar registry.registryAgents
+        case Map.lookup agentId agents of
+            Nothing -> retry
+            Just record ->
+                (isEmptyTQueue record.recordMailbox >>= check . not)
+                    `orElse` do
+                        active <- readTVar record.recordSteering
+                        case active of
+                            Nothing -> retry
+                            Just steering -> awaitUserSteeringAfter steering.steeringInputs 0
 
 takeAgentUpdatesSTM
     :: SubagentRegistry
