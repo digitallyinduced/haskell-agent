@@ -19,6 +19,7 @@ import Agent.CLI.MacOS.ComputerBridge
     ( ComputerHost, computerToolSessionForAttachment )
 import Agent.CLI.MacOS.EngineCallbacks
     ( IntegrationResultCallback
+    , TaskSnapshotCallback
     , invokeIntegrationResultCallback
     , invokeTaskSnapshotCallback
     )
@@ -88,7 +89,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Word (Word8, Word64)
-import Foreign.C.Types (CSize)
+import Foreign.C.Types (CInt, CSize)
 import Foreign.Ptr (FunPtr, Ptr, castPtr, nullPtr)
 import System.Directory.OsPath (getHomeDirectory)
 import System.OsPath (OsPath)
@@ -309,181 +310,9 @@ supervisorLoop
         EngineRequest request ->
             handleEngineRequest supervisor request >>= go
 
-    handleEngineRequest supervisor request
-        | request.requestMethod == "turn.start" =
-            enqueueTurn supervisor request
-        | request.requestMethod == "turn.cancel" =
-            case (parseParams request :: Either Text TurnReference) of
-                Left err -> do
-                    sendEvent callback context
-                        (failureEvent request.requestId err)
-                    pure supervisor
-                Right reference -> do
-                    let active =
-                            Map.member
-                                reference.turnReferenceId
-                                supervisor.supervisorRunning
-                        queued = any
-                            ((== reference.turnReferenceId)
-                                . (.turnStartId)
-                                . (.pendingTurnStart))
-                            supervisor.supervisorPending
-                    next <- cancelTaskById
-                        supervisor
-                        reference.turnReferenceId
-                    sendEvent callback context $
-                        if active || queued
-                            then successEvent request.requestId True
-                            else failureEvent
-                                request.requestId
-                                "turn id is not active"
-                    pure next
-        | request.requestMethod == "approval.resolve" =
-            case (parseParams request :: Either Text ApprovalResolution) of
-                Left err -> do
-                    sendEvent callback context
-                        (failureEvent request.requestId err)
-                    pure supervisor
-                Right resolution -> do
-                    matching <- filterM
-                        (approvalIsActive resolution.approvalResolutionId
-                            . (.runningTurnControl))
-                        (Map.elems supervisor.supervisorRunning)
-                    case matching of
-                        [running] ->
-                            resolveApproval running.runningTurnControl request
-                                >>= sendEvent callback context
-                        _ ->
-                            sendEvent callback context $
-                                failureEvent
-                                    request.requestId
-                                    "approval request is no longer active"
-                    pure supervisor
-        | request.requestMethod == "turn.agents" =
-            selectRunningTurn request.requestParams supervisor >>= \case
-                Left err -> do
-                    sendEvent callback context
-                        (failureEvent request.requestId err)
-                    pure supervisor
-                Right Nothing -> do
-                    sendEvent callback context $
-                        successEvent request.requestId ([] :: [Aeson.Value])
-                    pure supervisor
-                Right (Just running) ->
-                    do
-                        _ <- emitForNativeGatewayBoundary
-                            running.runningTurnControl.turnControlGatewayIdentity
-                            (activeAgentSnapshot
-                                running.runningTurnControl
-                                request
-                                >>= sendEvent callback context)
-                        pure supervisor
-        | otherwise = do
-            let respond = do
-                    event <- handleRequest config store root request
-                    sendEvent callback context event
-            if nativeRequestRequiresGatewayLock request.requestMethod
-                then withGatewayCredentialLease respond
-                else respond
-            pure supervisor
-
-    selectRunningTurn params supervisor =
-        case Aeson.parseEither
-            (Aeson.withObject "turn reference" (.:? "turnId"))
-            params of
-            Left err -> pure (Left (Text.pack err))
-            Right (Just taskId) ->
-                pure $ maybe
-                    (Left "turn id is not active")
-                    (Right . Just)
-                    (Map.lookup taskId supervisor.supervisorRunning)
-            Right Nothing ->
-                pure $ case Map.elems supervisor.supervisorRunning of
-                    [running] -> Right (Just running)
-                    [] -> Right Nothing
-                    _ -> Left "turnId is required while multiple turns run"
-
-    approvalIsActive approvalId control =
-        Map.member approvalId
-            <$> readTVarIO control.turnControlApprovals
-
-    enqueueTurn supervisor request =
-        case (parseParams request :: Either Text TurnStart) of
-            Left err -> do
-                atomically $ discardStagedTurn
-                    request.requestId
-                    request.requestParams
-                    stagedImages
-                    stagedTurnOptions
-                sendEvent callback context
-                    (failureEvent request.requestId err)
-                pure supervisor
-            Right start
-                | taskExists start.turnStartId supervisor -> do
-                    atomically $ discardStagedTurnById
-                        start.turnStartId
-                        stagedImages
-                        stagedTurnOptions
-                    sendEvent callback context $
-                        failureEvent request.requestId "turn id already exists"
-                    pure supervisor
-                | otherwise ->
-                    withGatewayCredentialLease $
-                        loadNativeGatewayIdentity >>= \case
-                            Left err -> do
-                                atomically $ discardStagedTurnById
-                                    start.turnStartId
-                                    stagedImages
-                                    stagedTurnOptions
-                                sendEvent callback context $
-                                    failureEvent request.requestId err
-                                pure supervisor
-                            Right gatewayIdentity -> do
-                                (images, turnOptions) <- atomically $ do
-                                    staged <- readTVar stagedImages
-                                    writeTVar stagedImages
-                                        (Map.delete start.turnStartId staged)
-                                    options <- readTVar stagedTurnOptions
-                                    writeTVar stagedTurnOptions
-                                        (Map.delete start.turnStartId options)
-                                    pure
-                                        ( Map.findWithDefault
-                                            []
-                                            start.turnStartId
-                                            staged
-                                        , Map.findWithDefault
-                                            defaultNativeTurnOptions
-                                            start.turnStartId
-                                            options
-                                        )
-                                sendEvent callback context $
-                                    successEvent request.requestId $
-                                        Aeson.object
-                                            [ "turnId" Aeson..=
-                                                start.turnStartId
-                                            , "state" Aeson..=
-                                                ("queued" :: Text)
-                                            ]
-                                sendTaskState
-                                    start.turnStartId
-                                    start.turnStartSessionId
-                                    "queued"
-                                pure supervisor
-                                    { supervisorPending =
-                                        supervisor.supervisorPending
-                                            Seq.|> PendingTurn
-                                                { pendingTurnStart = start
-                                                , pendingTurnGatewayIdentity =
-                                                    gatewayIdentity
-                                                , pendingTurnImages = images
-                                                , pendingTurnOptions =
-                                                    turnOptions
-                                                }
-                                    , supervisorKnownTaskIds =
-                                        Set.insert
-                                            start.turnStartId
-                                            supervisor.supervisorKnownTaskIds
-                                    }
+    handleEngineRequest =
+        handleNativeSupervisorRequest callback context config store root
+            enqueueTurn cancelTaskById
 
     startRunnableTasks supervisor = do
         sessionIds <- activeSessionIds supervisor
@@ -510,223 +339,452 @@ supervisorLoop
             , supervisorRunning = running
             }
 
-    startTask
-        :: Map Text RunningTurn
-        -> PendingTurn
-        -> IO (Map Text RunningTurn)
-    startTask running pending = do
-        let start = pending.pendingTurnStart
-        control <- newTurnControl
-            start.turnStartId
-            pending.pendingTurnGatewayIdentity
-            start.turnStartSessionId
-            interactions
-        nativeBrowserTools <- browserToolsWhenEnabled browser start.turnStartId
-        chartsEnabled <- readTVarIO chartRenderingEnabled
-        let nativePresentationTools = [renderChartTool | chartsEnabled]
-        worker <- launchTrackedWorker start.turnStartId $
-            bracket
-                (if start.turnStartComputerUse
-                        || pending.pendingTurnOptions.nativeTurnPromptContext.attachedWindowToken /= 0
-                    then computerToolSessionForAttachment computer
-                        pending.pendingTurnOptions.nativeTurnPromptContext.attachedWindowToken
-                    else pure (Right Nothing))
-                (\case
-                    Right (Just (_, _, _, close)) -> close
-                    _ -> pure ())
-                (\case
-                    Left err -> pure TurnOutcome
-                        { turnOutcomeSessionId = start.turnStartSessionId
-                        , turnOutcomeError = Just err
-                        , turnOutcomeUsage = emptyTokenUsage
-                        , turnOutcomeProviderCostUSD = Nothing
-                        }
-                    Right nativeComputerTool ->
-                        withGatewayCredentialTurnLease $
-                            ensureNativeGatewayIdentity
-                                pending.pendingTurnGatewayIdentity >>= \case
-                                    Left err ->
-                                        pure
-                                            TurnOutcome
-                                                { turnOutcomeSessionId =
-                                                    start.turnStartSessionId
-                                                , turnOutcomeError = Just err
-                                                , turnOutcomeUsage =
-                                                    emptyTokenUsage
-                                                , turnOutcomeProviderCostUSD =
-                                                    Nothing
-                                                }
-                                    Right () ->
-                                        do
-                                            sendTaskState
-                                                start.turnStartId
-                                                start.turnStartSessionId
-                                                "running"
-                                            sendTurnStatus
-                                                callback
-                                                context
-                                                start.turnStartId
-                                                (if start.turnStartWorktree
-                                                    then "Creating worktree…"
-                                                    else "Starting…")
-                                            runNativeTurn
-                                                callback
-                                                context
-                                                commands
-                                                processRuntime
-                                                control
-                                                (nativeBrowserTools <> nativePresentationTools)
-                                                nativeComputerTool
-                                                start
-                                                pending.pendingTurnImages
-                                                pending.pendingTurnOptions
-                                                interactions)
-        let runningTurn =
-                RunningTurn
-                    { runningTurnControl = control
-                    , runningTurnWorker = worker
-                    }
-        atomically $ modifyTVar' workerRegistry $
-            Map.insert start.turnStartId runningTurn
-        pure $ Map.insert
-            start.turnStartId
-            runningTurn
-            running
-
-    launchTrackedWorker taskId action =
-        mask \_ -> do
-            gate <- newEmptyMVar
-            worker <- asyncWithUnmask \unmask -> do
-                takeMVar gate
-                outcome <- newIORef (TaskFailure "turn cancelled")
-                (tryAny (unmask action) >>= \case
-                    Left exception ->
-                        writeIORef outcome
-                            (TaskFailure (Text.pack (show exception)))
-                    Right value ->
-                        writeIORef outcome (TaskOutcome value))
-                    `finally` do
-                        result <- readIORef outcome
-                        void $ atomically $ acceptEngineCommand
-                            commands
-                            (EngineTaskFinished taskId result)
-            putMVar gate ()
-            pure worker
-
-    activeSessionIds supervisor = do
-        sessions <- mapM
-            (readTVarIO . (.turnControlSessionId) . (.runningTurnControl))
-            (Map.elems supervisor.supervisorRunning)
-        pure (Set.fromList [session | Just session <- sessions])
-
-    cancelTaskById supervisor taskId =
-        case Map.lookup taskId supervisor.supervisorRunning of
-            Just running -> do
-                cancelTurn running.runningTurnControl
-                cancel running.runningTurnWorker
-                pure supervisor
-            Nothing -> do
-                let (cancelled, retained) = partition
-                        ((== taskId)
-                            . (.turnStartId)
-                            . (.pendingTurnStart))
-                        (toList supervisor.supervisorPending)
-                forM_ cancelled \pending ->
-                    let start = pending.pendingTurnStart
-                    in do
-                        _ <- emitForNativeGatewayBoundary
-                            pending.pendingTurnGatewayIdentity do
-                                sendTaskState
-                                    start.turnStartId
-                                    start.turnStartSessionId
-                                    "cancelled"
-                                sendEvent callback context $
-                                    turnFailedEvent
-                                        start.turnStartId
-                                        "turn cancelled"
-                        pure ()
-                pure supervisor
-                    { supervisorPending = Seq.fromList retained }
-
-    taskExists taskId supervisor =
-        Set.member taskId supervisor.supervisorKnownTaskIds
-
     shutdownSupervisor _ =
         shutdownRunningTurns workerRegistry
             `finally` shutdownIntegrationWorkers integrationWorkers
 
-    sendTaskState :: Text -> Maybe Text -> Text -> IO ()
-    sendTaskState taskId sessionId state =
-        sendEvent callback context $
-            Aeson.object
-                [ "event" Aeson..= ("task.state" :: Text)
-                , "taskId" Aeson..= taskId
-                , "sessionId" Aeson..= sessionId
-                , "state" Aeson..= state
-                ]
+    enqueueTurn = enqueueNativeTurn callback context stagedImages stagedTurnOptions
+    startTask =
+        startNativeTask callback context commands processRuntime
+            browser computer chartRenderingEnabled interactions workerRegistry
+    cancelTaskById = cancelNativeTaskById callback context
+    sendTaskState = sendNativeTaskState callback context
 
-    sendTaskSnapshot snapshotCallback snapshotContext supervisor = do
-        delivered <- tryAny $
-            withGatewayCredentialLease $
-                loadNativeGatewayIdentity >>= \case
-                    Left err ->
-                        sendSnapshotFailure snapshotCallback snapshotContext err
-                    Right gatewayIdentity -> do
-                        forM_ supervisor.supervisorPending \pending ->
-                            when
-                                (nativeTurnRouteMatchesBoundary
-                                    pending.pendingTurnGatewayIdentity
-                                    gatewayIdentity) $
-                                    sendSnapshotItem
-                                        snapshotCallback
-                                        snapshotContext
-                                        pending.pendingTurnStart.turnStartId
-                                        pending.pendingTurnStart.turnStartSessionId
-                                        0
-                        forM_
-                            (filter
-                                (\running ->
-                                    let control = running.runningTurnControl
-                                    in nativeTurnRouteMatchesBoundary
-                                        control.turnControlGatewayIdentity
-                                        gatewayIdentity)
-                                (Map.elems supervisor.supervisorRunning))
-                            \running -> do
-                                sessionId <- readTVarIO
-                                    running.runningTurnControl.turnControlSessionId
+handleNativeSupervisorRequest
+    :: FunPtr EventCallback
+    -> Ptr ()
+    -> ManagedPostgresConfig
+    -> MVar (Maybe Store)
+    -> OsPath
+    -> (TaskSupervisor -> BridgeRequest -> IO TaskSupervisor)
+    -> (TaskSupervisor -> Text -> IO TaskSupervisor)
+    -> TaskSupervisor
+    -> BridgeRequest
+    -> IO TaskSupervisor
+handleNativeSupervisorRequest callback context config store root
+        enqueueTurn cancelTaskById supervisor request
+    | request.requestMethod == "turn.start" =
+        enqueueTurn supervisor request
+    | request.requestMethod == "turn.cancel" =
+        case (parseParams request :: Either Text TurnReference) of
+            Left err -> do
+                sendEvent callback context
+                    (failureEvent request.requestId err)
+                pure supervisor
+            Right reference -> do
+                let active =
+                        Map.member
+                            reference.turnReferenceId
+                            supervisor.supervisorRunning
+                    queued = any
+                        ((== reference.turnReferenceId)
+                            . (.turnStartId)
+                            . (.pendingTurnStart))
+                        supervisor.supervisorPending
+                next <- cancelTaskById
+                    supervisor
+                    reference.turnReferenceId
+                sendEvent callback context $
+                    if active || queued
+                        then successEvent request.requestId True
+                        else failureEvent
+                            request.requestId
+                            "turn id is not active"
+                pure next
+    | request.requestMethod == "approval.resolve" =
+        case (parseParams request :: Either Text ApprovalResolution) of
+            Left err -> do
+                sendEvent callback context
+                    (failureEvent request.requestId err)
+                pure supervisor
+            Right resolution -> do
+                matching <- filterM
+                    (approvalIsActive resolution.approvalResolutionId
+                        . (.runningTurnControl))
+                    (Map.elems supervisor.supervisorRunning)
+                case matching of
+                    [running] ->
+                        resolveApproval running.runningTurnControl request
+                            >>= sendEvent callback context
+                    _ ->
+                        sendEvent callback context $
+                            failureEvent
+                                request.requestId
+                                "approval request is no longer active"
+                pure supervisor
+    | request.requestMethod == "turn.agents" =
+        selectRunningTurn request.requestParams supervisor >>= \case
+            Left err -> do
+                sendEvent callback context
+                    (failureEvent request.requestId err)
+                pure supervisor
+            Right Nothing -> do
+                sendEvent callback context $
+                    successEvent request.requestId ([] :: [Aeson.Value])
+                pure supervisor
+            Right (Just running) ->
+                do
+                    _ <- emitForNativeGatewayBoundary
+                        running.runningTurnControl.turnControlGatewayIdentity
+                        (activeAgentSnapshot
+                            running.runningTurnControl
+                            request
+                            >>= sendEvent callback context)
+                    pure supervisor
+    | otherwise = do
+        let respond = do
+                event <- handleRequest config store root request
+                sendEvent callback context event
+        if nativeRequestRequiresGatewayLock request.requestMethod
+            then withGatewayCredentialLease respond
+            else respond
+        pure supervisor
+
+selectRunningTurn
+    :: Aeson.Value -> TaskSupervisor -> IO (Either Text (Maybe RunningTurn))
+selectRunningTurn params supervisor =
+    case Aeson.parseEither
+        (Aeson.withObject "turn reference" (.:? "turnId"))
+        params of
+        Left err -> pure (Left (Text.pack err))
+        Right (Just taskId) ->
+            pure $ maybe
+                (Left "turn id is not active")
+                (Right . Just)
+                (Map.lookup taskId supervisor.supervisorRunning)
+        Right Nothing ->
+            pure $ case Map.elems supervisor.supervisorRunning of
+                [running] -> Right (Just running)
+                [] -> Right Nothing
+                _ -> Left "turnId is required while multiple turns run"
+
+approvalIsActive :: Text -> TurnControl -> IO Bool
+approvalIsActive approvalId control =
+    Map.member approvalId
+        <$> readTVarIO control.turnControlApprovals
+
+enqueueNativeTurn
+    :: FunPtr EventCallback
+    -> Ptr ()
+    -> TVar (Map Text [ImageAttachment])
+    -> TVar (Map Text NativeTurnOptions)
+    -> TaskSupervisor
+    -> BridgeRequest
+    -> IO TaskSupervisor
+enqueueNativeTurn callback context stagedImages stagedTurnOptions supervisor request =
+    case (parseParams request :: Either Text TurnStart) of
+        Left err -> do
+            atomically $ discardStagedTurn
+                request.requestId
+                request.requestParams
+                stagedImages
+                stagedTurnOptions
+            sendEvent callback context
+                (failureEvent request.requestId err)
+            pure supervisor
+        Right start
+            | taskExists start.turnStartId supervisor -> do
+                atomically $ discardStagedTurnById
+                    start.turnStartId
+                    stagedImages
+                    stagedTurnOptions
+                sendEvent callback context $
+                    failureEvent request.requestId "turn id already exists"
+                pure supervisor
+            | otherwise ->
+                withGatewayCredentialLease $
+                    loadNativeGatewayIdentity >>= \case
+                        Left err -> do
+                            atomically $ discardStagedTurnById
+                                start.turnStartId
+                                stagedImages
+                                stagedTurnOptions
+                            sendEvent callback context $
+                                failureEvent request.requestId err
+                            pure supervisor
+                        Right gatewayIdentity -> do
+                            (images, turnOptions) <- atomically $ do
+                                staged <- readTVar stagedImages
+                                writeTVar stagedImages
+                                    (Map.delete start.turnStartId staged)
+                                options <- readTVar stagedTurnOptions
+                                writeTVar stagedTurnOptions
+                                    (Map.delete start.turnStartId options)
+                                pure
+                                    ( Map.findWithDefault
+                                        []
+                                        start.turnStartId
+                                        staged
+                                    , Map.findWithDefault
+                                        defaultNativeTurnOptions
+                                        start.turnStartId
+                                        options
+                                    )
+                            sendEvent callback context $
+                                successEvent request.requestId $
+                                    Aeson.object
+                                        [ "turnId" Aeson..=
+                                            start.turnStartId
+                                        , "state" Aeson..=
+                                            ("queued" :: Text)
+                                        ]
+                            sendNativeTaskState callback context
+                                start.turnStartId
+                                start.turnStartSessionId
+                                "queued"
+                            pure supervisor
+                                { supervisorPending =
+                                    supervisor.supervisorPending
+                                        Seq.|> PendingTurn
+                                            { pendingTurnStart = start
+                                            , pendingTurnGatewayIdentity =
+                                                gatewayIdentity
+                                            , pendingTurnImages = images
+                                            , pendingTurnOptions =
+                                                turnOptions
+                                            }
+                                , supervisorKnownTaskIds =
+                                    Set.insert
+                                        start.turnStartId
+                                        supervisor.supervisorKnownTaskIds
+                                }
+
+startNativeTask
+    :: FunPtr EventCallback
+    -> Ptr ()
+    -> EngineMailbox EngineCommand
+    -> NativeProcessRuntime
+    -> BrowserHost
+    -> ComputerHost
+    -> TVar Bool
+    -> InteractionRuntime
+    -> TVar (Map Text RunningTurn)
+    -> Map Text RunningTurn
+    -> PendingTurn
+    -> IO (Map Text RunningTurn)
+startNativeTask callback context commands processRuntime
+        browser computer chartRenderingEnabled interactions workerRegistry
+        running pending = do
+    let start = pending.pendingTurnStart
+    control <- newTurnControl
+        start.turnStartId
+        pending.pendingTurnGatewayIdentity
+        start.turnStartSessionId
+        interactions
+    nativeBrowserTools <- browserToolsWhenEnabled browser start.turnStartId
+    chartsEnabled <- readTVarIO chartRenderingEnabled
+    let nativePresentationTools = [renderChartTool | chartsEnabled]
+    worker <- launchTrackedWorker commands start.turnStartId $
+        bracket
+            (if start.turnStartComputerUse
+                    || pending.pendingTurnOptions.nativeTurnPromptContext.attachedWindowToken /= 0
+                then computerToolSessionForAttachment computer
+                    pending.pendingTurnOptions.nativeTurnPromptContext.attachedWindowToken
+                else pure (Right Nothing))
+            (\case
+                Right (Just (_, _, _, close)) -> close
+                _ -> pure ())
+            (\case
+                Left err -> pure TurnOutcome
+                    { turnOutcomeSessionId = start.turnStartSessionId
+                    , turnOutcomeError = Just err
+                    , turnOutcomeUsage = emptyTokenUsage
+                    , turnOutcomeProviderCostUSD = Nothing
+                    }
+                Right nativeComputerTool ->
+                    withGatewayCredentialTurnLease $
+                        ensureNativeGatewayIdentity
+                            pending.pendingTurnGatewayIdentity >>= \case
+                                Left err ->
+                                    pure
+                                        TurnOutcome
+                                            { turnOutcomeSessionId =
+                                                start.turnStartSessionId
+                                            , turnOutcomeError = Just err
+                                            , turnOutcomeUsage =
+                                                emptyTokenUsage
+                                            , turnOutcomeProviderCostUSD =
+                                                Nothing
+                                            }
+                                Right () ->
+                                    do
+                                        sendNativeTaskState callback context
+                                            start.turnStartId
+                                            start.turnStartSessionId
+                                            "running"
+                                        sendTurnStatus
+                                            callback
+                                            context
+                                            start.turnStartId
+                                            (if start.turnStartWorktree
+                                                then "Creating worktree…"
+                                                else "Starting…")
+                                        runNativeTurn
+                                            callback
+                                            context
+                                            commands
+                                            processRuntime
+                                            control
+                                            (nativeBrowserTools <> nativePresentationTools)
+                                            nativeComputerTool
+                                            start
+                                            pending.pendingTurnImages
+                                            pending.pendingTurnOptions
+                                            interactions)
+    let runningTurn =
+            RunningTurn
+                { runningTurnControl = control
+                , runningTurnWorker = worker
+                }
+    atomically $ modifyTVar' workerRegistry $
+        Map.insert start.turnStartId runningTurn
+    pure $ Map.insert
+        start.turnStartId
+        runningTurn
+        running
+
+launchTrackedWorker
+    :: EngineMailbox EngineCommand -> Text -> IO TurnOutcome -> IO (Async ())
+launchTrackedWorker commands taskId action =
+    mask \_ -> do
+        gate <- newEmptyMVar
+        worker <- asyncWithUnmask \unmask -> do
+            takeMVar gate
+            outcome <- newIORef (TaskFailure "turn cancelled")
+            (tryAny (unmask action) >>= \case
+                Left exception ->
+                    writeIORef outcome
+                        (TaskFailure (Text.pack (show exception)))
+                Right value ->
+                    writeIORef outcome (TaskOutcome value))
+                `finally` do
+                    result <- readIORef outcome
+                    void $ atomically $ acceptEngineCommand
+                        commands
+                        (EngineTaskFinished taskId result)
+        putMVar gate ()
+        pure worker
+
+activeSessionIds :: TaskSupervisor -> IO (Set.Set Text)
+activeSessionIds supervisor = do
+    sessions <- mapM
+        (readTVarIO . (.turnControlSessionId) . (.runningTurnControl))
+        (Map.elems supervisor.supervisorRunning)
+    pure (Set.fromList [session | Just session <- sessions])
+
+cancelNativeTaskById
+    :: FunPtr EventCallback -> Ptr () -> TaskSupervisor -> Text -> IO TaskSupervisor
+cancelNativeTaskById callback context supervisor taskId =
+    case Map.lookup taskId supervisor.supervisorRunning of
+        Just running -> do
+            cancelTurn running.runningTurnControl
+            cancel running.runningTurnWorker
+            pure supervisor
+        Nothing -> do
+            let (cancelled, retained) = partition
+                    ((== taskId)
+                        . (.turnStartId)
+                        . (.pendingTurnStart))
+                    (toList supervisor.supervisorPending)
+            forM_ cancelled \pending ->
+                let start = pending.pendingTurnStart
+                in do
+                    _ <- emitForNativeGatewayBoundary
+                        pending.pendingTurnGatewayIdentity do
+                            sendNativeTaskState callback context
+                                start.turnStartId
+                                start.turnStartSessionId
+                                "cancelled"
+                            sendEvent callback context $
+                                turnFailedEvent
+                                    start.turnStartId
+                                    "turn cancelled"
+                    pure ()
+            pure supervisor
+                { supervisorPending = Seq.fromList retained }
+
+taskExists :: Text -> TaskSupervisor -> Bool
+taskExists taskId supervisor =
+    Set.member taskId supervisor.supervisorKnownTaskIds
+
+sendNativeTaskState
+    :: FunPtr EventCallback -> Ptr () -> Text -> Maybe Text -> Text -> IO ()
+sendNativeTaskState callback context taskId sessionId state =
+    sendEvent callback context $
+        Aeson.object
+            [ "event" Aeson..= ("task.state" :: Text)
+            , "taskId" Aeson..= taskId
+            , "sessionId" Aeson..= sessionId
+            , "state" Aeson..= state
+            ]
+
+sendTaskSnapshot
+    :: FunPtr TaskSnapshotCallback -> Ptr () -> TaskSupervisor -> IO ()
+sendTaskSnapshot snapshotCallback snapshotContext supervisor = do
+    delivered <- tryAny $
+        withGatewayCredentialLease $
+            loadNativeGatewayIdentity >>= \case
+                Left err ->
+                    sendSnapshotFailure snapshotCallback snapshotContext err
+                Right gatewayIdentity -> do
+                    forM_ supervisor.supervisorPending \pending ->
+                        when
+                            (nativeTurnRouteMatchesBoundary
+                                pending.pendingTurnGatewayIdentity
+                                gatewayIdentity) $
                                 sendSnapshotItem
                                     snapshotCallback
                                     snapshotContext
-                                    running.runningTurnControl.turnControlId
-                                    sessionId
-                                    1
-                        invokeTaskSnapshotCallback
-                            snapshotCallback snapshotContext
-                            1 nullPtr 0 nullPtr 0 0 nullPtr 0
-        case delivered of
-            Right () -> pure ()
-            Left exception ->
-                void $ tryAny $
-                    sendSnapshotFailure
-                        snapshotCallback
-                        snapshotContext
-                        (Text.pack (show exception))
+                                    pending.pendingTurnStart.turnStartId
+                                    pending.pendingTurnStart.turnStartSessionId
+                                    0
+                    forM_
+                        (filter
+                            (\running ->
+                                let control = running.runningTurnControl
+                                in nativeTurnRouteMatchesBoundary
+                                    control.turnControlGatewayIdentity
+                                    gatewayIdentity)
+                            (Map.elems supervisor.supervisorRunning))
+                        \running -> do
+                            sessionId <- readTVarIO
+                                running.runningTurnControl.turnControlSessionId
+                            sendSnapshotItem
+                                snapshotCallback
+                                snapshotContext
+                                running.runningTurnControl.turnControlId
+                                sessionId
+                                1
+                    invokeTaskSnapshotCallback
+                        snapshotCallback snapshotContext
+                        1 nullPtr 0 nullPtr 0 0 nullPtr 0
+    case delivered of
+        Right () -> pure ()
+        Left exception ->
+            void $ tryAny $
+                sendSnapshotFailure
+                    snapshotCallback
+                    snapshotContext
+                    (Text.pack (show exception))
 
-    sendSnapshotFailure snapshotCallback snapshotContext err =
-        withTextBytes err \errorPointer errorLength ->
-            invokeTaskSnapshotCallback
-                snapshotCallback
-                snapshotContext
-                (-1)
-                nullPtr 0 nullPtr 0 0
-                errorPointer errorLength
+sendSnapshotFailure :: FunPtr TaskSnapshotCallback -> Ptr () -> Text -> IO ()
+sendSnapshotFailure snapshotCallback snapshotContext err =
+    withTextBytes err \errorPointer errorLength ->
+        invokeTaskSnapshotCallback
+            snapshotCallback
+            snapshotContext
+            (-1)
+            nullPtr 0 nullPtr 0 0
+            errorPointer errorLength
 
-    sendSnapshotItem snapshotCallback snapshotContext taskId sessionId state =
-        withTextBytes taskId \taskPointer taskLength ->
-        withMaybeTextBytes sessionId \sessionPointer sessionLength ->
-            invokeTaskSnapshotCallback snapshotCallback snapshotContext
-                0 taskPointer taskLength sessionPointer sessionLength
-                state nullPtr 0
+sendSnapshotItem
+    :: FunPtr TaskSnapshotCallback -> Ptr () -> Text -> Maybe Text -> CInt -> IO ()
+sendSnapshotItem snapshotCallback snapshotContext taskId sessionId state =
+    withTextBytes taskId \taskPointer taskLength ->
+    withMaybeTextBytes sessionId \sessionPointer sessionLength ->
+        invokeTaskSnapshotCallback snapshotCallback snapshotContext
+            0 taskPointer taskLength sessionPointer sessionLength
+            state nullPtr 0
 
 shutdownRunningTurns :: TVar (Map Text RunningTurn) -> IO ()
 shutdownRunningTurns workerRegistry = do
