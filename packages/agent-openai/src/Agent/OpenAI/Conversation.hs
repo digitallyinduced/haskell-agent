@@ -37,6 +37,11 @@ data ConversationRecovery = ConversationRecovery
     -- | Prepare complete replay input, for example repairing interrupted tools
     -- from durable history. Runs only when a full transcript is available.
     , prepareReplay :: [ResponseItem] -> [ResponseItem]
+    -- | An authoritative complete transcript, loaded after acquiring a
+    -- replacement connection. It includes the failed request's pending inputs;
+    -- the runner does not append those inputs again. Supplying this also permits
+    -- recovery of a stored continuation whose earlier history is not in memory.
+    , loadReplay :: Maybe (IO [ResponseItem])
     }
 
 defaultConversationRecovery :: ConversationRecovery
@@ -45,6 +50,7 @@ defaultConversationRecovery = ConversationRecovery
     , beforeReplacement = \attempt err -> threadDelay (requestRetryDelayMicros err attempt)
     , accountFailure = isJust . accountFailureFromApiError
     , prepareReplay = replayFromLatestCheckpoint isCheckpoint
+    , loadReplay = Nothing
     }
 
 -- | Production connector for a native Responses conversation. Send hooks use
@@ -75,7 +81,8 @@ runConversationWith
 runConversationWith config nativeResponse withConnection mkHooks initialState = do
     replay <- Recovery.newReplayState initialState
     iterationRef <- newIORef initialState.agentLoopIteration
-    let ownsConversation = isNothing initialState.agentLoopPreviousResponseId
+    reloadRef <- newIORef False
+    let ownsConversation = isNothing initialState.agentLoopPreviousResponseId || isJust config.loadReplay
         resumeStateFor request previous fullInput iteration = AgentLoopState
             { agentLoopIteration = iteration
             , agentLoopInput = if ownsConversation then config.prepareReplay fullInput else requestItems request
@@ -100,7 +107,7 @@ runConversationWith config nativeResponse withConnection mkHooks initialState = 
                 pure result
             , agentLoopOnError = \state request err ->
                 if ownsConversation && config.accountFailure err
-                    then pure (AgentLoopFinish (AccountFailed err))
+                    then writeIORef reloadRef True >> pure (AgentLoopFinish (AccountFailed err))
                     else if replaceable ownsConversation err
                         then do
                             permitted <- available
@@ -118,11 +125,19 @@ runConversationWith config nativeResponse withConnection mkHooks initialState = 
             AgentLoopContinue input previous -> AgentLoopContinue input previous
             AgentLoopFinish result -> AgentLoopFinish (Finished result)
         attempt available connection = do
-            resume <- Recovery.readResumeState replay
             -- Only acquisition and submission failures permit replay. Keep
             -- exceptions from host effects as data until the connection closes,
             -- so an IOException in a tool cannot restart its successful response.
-            Exception.tryAny (runAgenticLoop (wrap available connection) resume) >>= \case
+            execution <- Exception.tryAny do
+                saved <- Recovery.readResumeState replay
+                reload <- atomicModifyIORef' reloadRef (\value -> (False, value))
+                resume <- case (reload, config.loadReplay) of
+                    (True, Just load) -> do
+                        items <- config.prepareReplay <$> load
+                        pure saved { agentLoopInput = items, agentLoopPreviousResponseId = Nothing }
+                    _ -> pure saved
+                runAgenticLoop (wrap available connection) resume
+            case execution of
                 Left exception -> pure (Right (Recovery.ConnectionFinished (Left exception)))
                 Right (Finished result) -> pure (Right (Recovery.ConnectionFinished (Right result)))
                 Right (AccountFailed err) -> pure (Left err)
@@ -131,7 +146,9 @@ runConversationWith config nativeResponse withConnection mkHooks initialState = 
         { replacementLimit = config.replacementLimit
         , classifyException = transportFailure
         , exhaustedError = id
-        , beforeReplacement = config.beforeReplacement
+        , beforeReplacement = \number err -> do
+            writeIORef reloadRef True
+            config.beforeReplacement number err
         } withConnection attempt
     traverse (either Exception.throwIO pure) result
 

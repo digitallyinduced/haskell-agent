@@ -48,6 +48,35 @@ spec = describe "recovering native conversations" do
         [connection | Sent connection _ _ _ <- sent] `shouldBe` replicate 4 1
         effects `shouldBe` []
 
+    it "loads authoritative durable input only after replacement without duplicating pending output" do
+        loads <- newIORef (0 :: Int)
+        let persisted = [userMessage "start", toolCall, toolOutput, userMessage "durable observation"]
+            recovery = immediateRecovery
+                { loadReplay = Just (modifyIORef' loads (+ 1) >> pure persisted) }
+        (result, sent, effects) <- scriptedWithRecovery recovery ownedStart
+            [Right (response "tool" [toolCall]), Left (ConnectionError "closed"), Right completed] id
+        result `shouldBe` Right "done"
+        last sent `shouldBe` Sent 2 1 Nothing persisted
+        readIORef loads `shouldReturn` 1
+        effects `shouldBe` [("tool", "audit"), ("done", "audit")]
+
+    it "uses durable history to move a stored continuation to another account" do
+        let persisted = [userMessage "complete durable transcript"]
+            start = ownedStart { agentLoopPreviousResponseId = Just "stored" }
+            recovery = immediateRecovery { loadReplay = Just (pure persisted) }
+        (result, sent, _) <- scriptedWithRecovery recovery start
+            [Left (ProviderError UsageLimitReached "quota" Nothing), Right completed] id
+        result `shouldBe` Right "done"
+        sent `shouldBe` [Sent 1 0 (Just "stored") [userMessage "start"], Sent 2 0 Nothing persisted]
+
+    it "propagates a history loader failure instead of treating it as a model disconnect" do
+        loads <- newIORef (0 :: Int)
+        let recovery = immediateRecovery
+                { loadReplay = Just (modifyIORef' loads (+ 1) >> throwIO WS.ConnectionClosed) }
+        scriptedWithRecovery recovery ownedStart [Left (ConnectionError "closed")] id
+            `shouldThrow` (== WS.ConnectionClosed)
+        readIORef loads `shouldReturn` 1
+
     it "replays on account failover while retaining the pending iteration" do
         (result, sent, _) <- scripted 3 ownedStart
             [ Right (response "tool" [toolCall])
@@ -131,7 +160,14 @@ scripted
     :: Int -> AgentLoopState -> [Either ApiError Response]
     -> (AgentLoopHooks Envelope Text -> AgentLoopHooks Envelope Text)
     -> IO (Either ApiError Text, [Sent], [(Text, Text)])
-scripted replacements start script customize = do
+scripted replacements start script customize =
+    scriptedWithRecovery (immediateRecovery { replacementLimit = replacements }) start script customize
+
+scriptedWithRecovery
+    :: ConversationRecovery -> AgentLoopState -> [Either ApiError Response]
+    -> (AgentLoopHooks Envelope Text -> AgentLoopHooks Envelope Text)
+    -> IO (Either ApiError Text, [Sent], [(Text, Text)])
+scriptedWithRecovery recovery start script customize = do
     remaining <- newIORef script
     sent <- newIORef []
     effects <- newIORef []
@@ -168,7 +204,7 @@ scripted replacements start script customize = do
                     then AgentLoopContinue [toolOutput] (Just envelope.native.responseId)
                     else AgentLoopFinish "done"
             }
-    result <- runConversationWith (immediateRecovery { replacementLimit = replacements }) (.native) source hooks start
+    result <- runConversationWith recovery (.native) source hooks start
     (result,,) <$> readIORef sent <*> readIORef effects
   where
     isCall FunctionCallItem{} = True

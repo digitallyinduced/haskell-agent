@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Allow native conversation recovery to load an authoritative durable transcript
+  with `ConversationRecovery.loadReplay`, including pending input exactly once.
+  This also enables account failover for stored continuations. History-loader
+  exceptions propagate without replaying model or host effects.
+
 - Add `Agent.OpenAI.Conversation` to resume native lifecycle hooks across
   connection replacement and account failover, preserving response wrappers,
   replay history and iteration limits. Host-effect failures propagate without

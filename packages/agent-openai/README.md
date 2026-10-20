@@ -26,6 +26,11 @@ Use `defaultConversationRecovery` for three connection replacements and the
 shared backoff, or customize account classification, replay preparation and
 the callback before replacement. Stored continuations without complete local
 history retain their response id and leave account failures to the host.
+Hosts with durable history can set `loadReplay` to load the complete transcript
+after a replacement connection is acquired, including pending input for the
+failed turn. That transcript is authoritative: pending input is not appended
+again. The failed iteration is retained, and stored continuations can then move
+to another account. History-loader failures propagate without model retries.
 Persistent overload reaches the host after the transport's turn retry budget;
 connection replacement never restarts that budget. Transport exceptions from
 submission may recover; exceptions in host effects propagate unchanged.
