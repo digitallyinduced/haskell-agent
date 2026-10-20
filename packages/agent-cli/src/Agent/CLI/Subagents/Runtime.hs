@@ -1301,7 +1301,7 @@ prepareChild
                     runtime.subagentStoreRoot
                     runtime.subagentTypes
                     nestedForkSource)
-            , multiSendToRoot =
+            , multiSendToAgent = Nothing, multiSendToRoot =
                 case dialectChildAgentProtocol sessionDialect of
                     CodexCollaborationProtocol -> sendToRoot
                     GrokTaskProtocol -> Nothing

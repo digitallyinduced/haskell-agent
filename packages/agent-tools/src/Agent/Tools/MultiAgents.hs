@@ -124,6 +124,10 @@ data MultiAgentContext = MultiAgentContext
         :: !(Maybe (SubagentId -> CollaborationSpawnOptions -> IO ()))
       -- | Deliver a child message to the root agent's next model turn.
     , multiSendToRoot :: !(Maybe (InterAgentMessage -> IO (Either Text Text)))
+      -- | Durable hosts persist guidance before acknowledging it. The Bool
+      -- permits starting an idle target for followup_task only; ToolCall
+      -- carries the trusted delivery identity for deduplicating retries.
+    , multiSendToAgent :: !(Maybe (ToolCall -> SubagentId -> InterAgentMessageContent -> Bool -> IO (Either Text Text)))
       -- | Optional provider/billing-specific guidance for model overrides.
     , multiSpawnModelGuidance :: !(Maybe Text)
       -- | When set, spawn_subagent may only use these model slugs (or inherit).
@@ -154,6 +158,7 @@ rootMultiAgentContext session cwd = MultiAgentContext
     , multiCreateWorktree = Nothing
     , multiPrepareSpawn = Nothing
     , multiSendToRoot = Nothing
+    , multiSendToAgent = Nothing
     , multiSpawnModelGuidance = Nothing
     , multiAllowedChildModels = Nothing
     , multiResolveChildModel = Nothing
@@ -579,7 +584,7 @@ runWait ctx args = do
         Nothing -> do
             (statuses, timedOut) <-
                 waitAnyLive ctx.multiRegistry ctx.multiSelfId timeoutMs
-            pure $ Right $ renderWaitResult timedOut statuses False
+            pure $ Right $ renderWaitResult timedOut statuses True
         Just [] -> pure (Left "targets must be non-empty when provided")
         Just targets -> do
             resolved <- mapM (resolveAgentTarget ctx.multiRegistry ctx.multiTaskPath) targets
@@ -605,7 +610,12 @@ renderWaitStatus (agentId, status) =
         [ agentId.unSubagentId
         , "  Status: " <> agentListStatus status
         ]
-            <> agentListDetails status
+            <> case status of
+                Completed (Just final) -> labeledField "Final" final
+                Errored err -> labeledField "Error" err
+                Suspended deadline reason ->
+                    labeledField "Until" (Text.pack (show deadline)) <> labeledField "Reason" reason
+                _ -> []
 
 waitSummary :: Bool -> Map SubagentId SubagentStatus -> Text
 waitSummary timedOut statuses
@@ -668,10 +678,12 @@ runSendMessage ctx call args
                     RootMessageTarget ->
                         sendToRoot ctx (messageContent call args.message)
                     AgentMessageTarget agentId rootTurnId ->
-                        queueMessageFromForTurn
+                        maybe (queueMessageFromForTurn
                             ctx.multiRegistry rootTurnId
                             ctx.multiTaskPath agentId
-                            (messageContent call args.message)
+                            (messageContent call args.message))
+                            (\deliver -> deliver call agentId (messageContent call args.message) False)
+                            ctx.multiSendToAgent
 
 followupTaskTool :: MultiAgentContext -> AppTool
 followupTaskTool ctx = jsonTool "followup_task" followupDescription
@@ -700,10 +712,12 @@ runFollowup ctx call args
                     RootMessageTarget ->
                         pure (Left "followup_task cannot target the root agent; use send_message")
                     AgentMessageTarget agentId rootTurnId ->
-                        sendInputMessageForTurn
+                        maybe (sendInputMessageForTurn
                             ctx.multiRegistry rootTurnId
                             ctx.multiTaskPath agentId
-                            (messageContent call args.message) False
+                            (messageContent call args.message) False)
+                            (\deliver -> deliver call agentId (messageContent call args.message) True)
+                            ctx.multiSendToAgent
 
 validateMessage :: Text -> Text -> Either Text ()
 validateMessage toolName message

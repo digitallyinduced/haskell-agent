@@ -826,7 +826,7 @@ spec = describe "schemasFromAppTools" do
                             , multiResumeFromDisk = Nothing
                             , multiCreateWorktree = Nothing
                             , multiPrepareSpawn = Nothing
-                            , multiSendToRoot = Nothing
+                            , multiSendToRoot = Nothing, multiSendToAgent = Nothing
                             , multiSpawnModelGuidance = Nothing
                             , multiAllowedChildModels = Nothing
                             , multiResolveChildModel = Nothing
@@ -873,7 +873,7 @@ spec = describe "schemasFromAppTools" do
                         , multiCreateWorktree = Just
                             (\_ -> pure (Left "not used"))
                         , multiPrepareSpawn = Nothing
-                        , multiSendToRoot = Nothing
+                        , multiSendToRoot = Nothing, multiSendToAgent = Nothing
                         , multiSpawnModelGuidance = Nothing
                         , multiAllowedChildModels = Nothing
                         , multiResolveChildModel = Nothing

@@ -144,6 +144,22 @@ spec = describe "durable tree recovery" do
             persisted <- readIORef rows
             map (.status) persisted `shouldBe` [Pending, Running]
 
+    it "resumes interrupted running work without repeating its obsolete assignment" $
+        withHandle \handle -> do
+            (config, _) <- configuration [snapshot "child" Running]
+            admitted <- newEmptyMVar
+            release <- newEmptyMVar
+            let tested = config
+                    { runner = \_ _ _ message _ -> do
+                        putMVar admitted (renderInterAgentMessage message)
+                        readMVar release
+                        pure (Left Loop.LoopNoResponseId)
+                    }
+            (durableRuntimeHooks tested).initialize handle
+            result <- timeout 1000000 (takeMVar admitted)
+            result `shouldSatisfy` maybe False (Text.isInfixOf config.wakeMessage)
+            result `shouldSatisfy` maybe False (not . Text.isInfixOf "Recover this task")
+
     it "resumes completed work with the host wake instruction" $
         withHandle \handle -> do
             let child = (snapshot "child" (Completed Nothing)) { wakeRequested = True }

@@ -606,8 +606,51 @@ spec = describe "Agent.Tools.MultiAgents" do
             (appToolHandlers (multiAgentTools context))
             waitCall
         result.output `shouldSatisfy` Text.isInfixOf child.unSubagentId
+        result.output `shouldSatisfy` Text.isInfixOf "Final: child"
         result.output `shouldNotSatisfy` Text.isInfixOf parent.unSubagentId
         atomically (writeTVar parentGate True)
+        closeSubagentRegistry registry
+
+    it "returns the complete report for an untargeted wait rather than the list preview" do
+        let final = Text.replicate 700 "x" <> "\nReport ending"
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure (resultWithText final)) (\_ _ -> pure ())
+        Right (agentId, _) <- spawnSubagentAt registry Nothing taskPathRoot 0 "reviewer"
+            (plainInterAgentContent "review") Nothing
+        _ <- waitSubagents registry [agentId] 15000
+        waited <- dispatchToolCall defaultLoopDispatch
+            (appToolHandlers (multiAgentTools (rootContext registry Nothing))) waitCall
+        waited.output `shouldSatisfy` Text.isInfixOf (Text.replicate 700 "x")
+        waited.output `shouldSatisfy` Text.isInfixOf "    Report ending"
+        waited.output `shouldNotSatisfy` Text.isInfixOf "(truncated)"
+        closeSubagentRegistry registry
+
+    it "lets durable hosts acknowledge guidance before live delivery and distinguish follow-ups" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure (resultWithText "review done"))
+            (\_ _ -> pure ())
+        Right (agentId, _) <- spawnSubagentAt registry Nothing taskPathRoot 0 "reviewer"
+            (plainInterAgentContent "review") Nothing
+        _ <- waitSubagents registry [agentId] 15000
+        delivered <- newIORef []
+        let context = (rootContext registry Nothing)
+                { multiSendToAgent = Just \call target content start -> do
+                    modifyIORef' delivered (<> [(call.callId, target, content, start)])
+                    pure (Right "durably queued")
+                }
+            handlers = appToolHandlers (multiAgentTools context)
+        queued <- dispatchToolCall defaultLoopDispatch handlers
+            (ToolCall "guidance" "collaboration.send_message"
+                "{\"target\":\"reviewer\",\"message\":\"only May\"}" FunctionCallKind False)
+        followed <- dispatchToolCall defaultLoopDispatch handlers
+            (ToolCall "follow-up" "collaboration.followup_task"
+                "{\"target\":\"reviewer\",\"message\":\"check the result\"}" FunctionCallKind False)
+        queued.output `shouldBe` "durably queued"
+        followed.output `shouldBe` "durably queued"
+        readIORef delivered `shouldReturn`
+            [("guidance", agentId, plainInterAgentContent "only May", False)
+            ,("follow-up", agentId, plainInterAgentContent "check the result", True)]
+        getStatus registry agentId `shouldReturn` Completed (Just "review done")
         closeSubagentRegistry registry
 
     it "returns text for targeted waits and preserves completed output on interruption" do
@@ -769,6 +812,7 @@ spec = describe "Agent.Tools.MultiAgents" do
                 , multiCreateWorktree = Nothing
                 , multiPrepareSpawn = Nothing
                 , multiSendToRoot = Just deliverRoot
+                , multiSendToAgent = Nothing
                 , multiSpawnModelGuidance = Nothing
                 , multiAllowedChildModels = Nothing
                 , multiResolveChildModel = Nothing
@@ -809,6 +853,7 @@ rootContext registry sendToRoot = MultiAgentContext
     , multiCreateWorktree = Nothing
     , multiPrepareSpawn = Nothing
     , multiSendToRoot = sendToRoot
+    , multiSendToAgent = Nothing
     , multiSpawnModelGuidance = Nothing
     , multiAllowedChildModels = Nothing
     , multiResolveChildModel = Nothing
