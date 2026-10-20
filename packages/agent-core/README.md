@@ -24,6 +24,11 @@ Provider-neutral infrastructure shared by the harness transports:
   when a background command it owns completes, and drops tool calls a failed
   turn left without output. The model-facing collaboration tools live in
   `agent-tools` (`Agent.Tools.MultiAgents`).
+- Messages to a child running through `runChildTurn` enter its active steering
+  queue. They can redirect an unfinished model request and are included in the
+  next request after a tool completes. Provider acknowledgement consumes the
+  message; cancellation returns unacknowledged mail to the supervisor. Mail
+  arriving after the final-answer boundary stays for the next turn.
 - A loop runs with sub-agents when `loopSubagents` is set. `subagentLoop`
   builds it from a `RootSubagents` (a conversation's registry) and a
   `SubagentTurnEnd` policy. The loop then begins a root turn before its first

@@ -101,7 +101,8 @@ library
                     , Agent.Tools.Registration
                     , Agent.Transport.SSE
                     , Agent.Transport.WebSocket
-    other-modules:    Agent.Image.Normalize
+    other-modules:    Agent.Subagents.Registry.Internal.Steering
+                    , Agent.Image.Normalize
                     , Agent.Loop.Backend
                     , Agent.Loop.DisplayJournal
                     , Agent.Loop.EventPump

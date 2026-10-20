@@ -1,11 +1,14 @@
 module Agent.Subagents.ChildSpec (spec) where
 
 import Agent.Cancel (newCancelFlag, requestCancel, requestTurnYield)
+import Agent.InterAgentMessage (InterAgentMessage(..), plainInterAgentContent)
 import Agent.Loop.Fixtures (functionResult)
 import Agent.Loop.InputItems (toolResultToItem)
 import Agent.Json (rawJsonFromEncoding)
 import Agent.Loop
     ( Backend(..)
+    , BackendCallbacks(..)
+    , BackendCancellationMode(..)
     , BackendContinuation(..)
     , BackendProviderState(..)
     , BackendResult(..)
@@ -19,6 +22,7 @@ import Agent.Loop
     , TurnInput(..)
     , TurnOutput(..)
     , defaultLoopDispatch
+    , backendWithCallbacks
     , emptyBackendSnapshot
     , emptyTurnOutput
     , initialBackendSnapshot
@@ -46,9 +50,12 @@ import Agent.Subagents
     , defaultSubagentConfig
     , getPreviousResponseId
     , newSubagentRegistry
+    , queueMessage
     , restoreSubagent
     , runChildTurn
     , runChildWithBackgroundTasks
+    , sendInput
+    , setSubagentRunner
     )
 import Agent.Subagents.TestItems (functionCallItem, reasoningItem, userItem)
 import Agent.Tools.Types
@@ -59,7 +66,7 @@ import Agent.Tools.Types
     )
 import Control.Concurrent.Async (wait, withAsync)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar, tryPutMVar)
-import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar)
+import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, retry)
 import Control.Exception.Safe (bracket)
 import Control.Monad (void)
 import qualified Data.Aeson as Aeson
@@ -164,9 +171,127 @@ withChild action =
                 , subRootTurnId = Nothing
                 }
 
+-- | Hold a real tool boundary open while the parent redirects its child.
+-- The second provider request must include the guidance exactly once, before
+-- the original multi-step child run has returned to its supervisor.
+steerDuringTool :: (SubagentRegistry -> SubagentId -> IO (Either Text Text)) -> IO ()
+steerDuringTool deliver = withChild \registry env -> do
+    requests <- newIORef []
+    transcript <- newIORef emptyBackendSnapshot
+    toolStarted <- newEmptyMVar
+    finishTool <- newEmptyMVar
+    finished <- newEmptyMVar
+    base <- answeringChild requests transcript
+    let backend = Backend \current _ inputs _ -> do
+            index <- atomicModifyIORef' requests \previous ->
+                (previous <> [inputs], length previous)
+            pure $ Right BackendResult
+                { backendOutput = case index of
+                    0 -> emptyTurnOutput "tool-response"
+                        [functionToolCall "echo-call" "echo" "{\"message\":\"hi\"}"] Nothing
+                    _ -> emptyTurnOutput "answer" [] (Just "done")
+                , backendState = current
+                }
+    fixture <- testConfig backend
+    let child = base
+            { childBackend = backend
+            , childTools = fixture.loopTools
+            , childApproval = fixture.loopApprove
+            }
+    setSubagentRunner registry \environment _ message _ -> do
+        result <- runChildTurn registry environment child \config ->
+            runLoopInputs config
+                { loopWithToolExecution = \_ action -> do
+                    putMVar toolStarted ()
+                    takeMVar finishTool
+                    action
+                } Nothing [AgentMessage message]
+        putMVar finished result
+        pure result
+    sendInput registry env.subId "build year" False `shouldReturn` Right "queued"
+    timeout 1000000 (takeMVar toolStarted) `shouldReturn` Just ()
+    deliver registry env.subId `shouldReturn` Right "queued"
+    putMVar finishTool ()
+    result <- timeout 1000000 (takeMVar finished)
+    fmap (fmap (.turnsUsed)) result `shouldBe` Just (Right 2)
+    received <- readIORef requests
+    length received `shouldBe` 2
+    [message.messageContent | AgentMessage message <- last received]
+        `shouldBe` [plainInterAgentContent "Only May"]
+
 spec :: Spec
 spec = describe "Agent.Subagents.Child" do
     describe "runChildTurn" do
+        it "redirects an unfinished model request with an incoming agent message" do
+            withChild \registry env -> do
+                requests <- newIORef []
+                transcript <- newIORef emptyBackendSnapshot
+                ready <- newEmptyMVar
+                base <- answeringChild requests transcript
+                let child = base
+                        { childBackend = backendWithCallbacks \current _ inputs callbacks -> do
+                            callbacks.onCancellationMode CancelSubmission
+                            index <- atomicModifyIORef' requests \previous ->
+                                (previous <> [inputs], length previous)
+                            if index == 0
+                                then putMVar ready () >> atomically retry
+                                else pure $ Right BackendResult
+                                    { backendOutput = emptyTurnOutput "answer" [] (Just "done")
+                                    , backendState = current
+                                    }
+                        }
+                withAsync
+                    (runChildTurn registry env child \config ->
+                        runLoopInputs config Nothing [UserMessage "build year"])
+                    \worker -> do
+                        timeout 1000000 (takeMVar ready) `shouldReturn` Just ()
+                        queueMessage registry env.subId "Only May" `shouldReturn` Right "queued"
+                        result <- timeout 1000000 (wait worker)
+                        fmap (fmap (.turnsUsed)) result `shouldBe` Just (Right 1)
+                received <- readIORef requests
+                length received `shouldBe` 2
+                [message.messageContent | AgentMessage message <- last received]
+                    `shouldBe` [plainInterAgentContent "Only May"]
+
+        it "steers the next provider request with queue-only mail received during a tool" do
+            steerDuringTool \registry agentId -> queueMessage registry agentId "Only May"
+
+        it "steers the next provider request with a follow-up received during a tool" do
+            steerDuringTool \registry agentId -> sendInput registry agentId "Only May" False
+
+        it "retains unacknowledged guidance when the active child turn is cancelled" do
+            withChild \registry env -> do
+                requests <- newIORef []
+                transcript <- newIORef emptyBackendSnapshot
+                child <- answeringChild requests transcript
+                _ <- runChildTurn registry env child \_ -> do
+                    queueMessage registry env.subId "Only May" `shouldReturn` Right "queued"
+                    pure (Left (LoopCancelled []))
+                _ <- runChildTurn registry env child \config ->
+                    runLoopInputs config Nothing [UserMessage "resume"]
+                _ <- runChildTurn registry env child \config ->
+                    runLoopInputs config Nothing [UserMessage "another task"]
+                received <- readIORef requests
+                [message.messageContent | AgentMessage message <- concat received]
+                    `shouldBe` [plainInterAgentContent "Only May"]
+
+        it "keeps mail arriving after the final-answer gate for the next child turn" do
+            withChild \registry env -> do
+                requests <- newIORef []
+                transcript <- newIORef emptyBackendSnapshot
+                child <- answeringChild requests transcript
+                _ <- runChildTurn registry env child \config -> do
+                    config.loopCloseSteering `shouldReturn` []
+                    queueMessage registry env.subId "Only May" `shouldReturn` Right "queued"
+                    runLoopInputs config Nothing [UserMessage "finish"]
+                first <- readIORef requests
+                first `shouldBe` [[UserMessage "finish"]]
+                _ <- runChildTurn registry env child \config ->
+                    runLoopInputs config Nothing [UserMessage "resume"]
+                received <- readIORef requests
+                [message.messageContent | AgentMessage message <- concat received]
+                    `shouldBe` [plainInterAgentContent "Only May"]
+
         it "keeps the completed suspension call and its output in the child transcript" do
             withChild \registry env -> do
                 let items = [userItem "wait", functionCallItem "suspend"]

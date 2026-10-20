@@ -61,6 +61,7 @@ import Agent.Subagents.TaskPath
     , taskPathText
     )
 import Agent.Subagents.Registry.Internal.Types
+import Agent.Subagents.Registry.Internal.Steering (enqueueSubagentWorkSTM)
 import Agent.Subagents.Registry.Internal.Suspension (commitRequestedSuspension)
 
 
@@ -364,6 +365,7 @@ spawnSubagentAtWithIdPreparedForTurn
         parentId requestedParentPath requestedParentDepth taskName content nickname = do
     cancelFlag <- newCancelFlag
     mailbox <- newTQueueIO
+    steeringVar <- newTVarIO Nothing
     asyncVar <- newTVarIO Nothing
     previousVar <- newTVarIO Nothing
     lastUpdateVar <- newTVarIO Nothing
@@ -440,6 +442,7 @@ spawnSubagentAtWithIdPreparedForTurn
                                                                 , recordPhase = phaseVar
                                                                 , recordCancel = cancelFlag
                                                                 , recordMailbox = mailbox
+                                                                , recordSteering = steeringVar
                                                                 , recordAsync = asyncVar
                                                                 , recordPreviousResponseId = previousVar
                                                                 , recordLastUpdate = lastUpdateVar
@@ -663,7 +666,7 @@ routeCompletionSTM registry record status =
         if parentStatus == Running || parentStatus == Pending
             then do
                 rootTurnId <- phaseRootTurnId <$> readTVar record.recordPhase
-                writeTQueue parent.recordMailbox
+                enqueueSubagentWorkSTM parent
                     SubagentWork
                         { workRootTurnId = rootTurnId
                         , workMessage = completionMessage record parent status
