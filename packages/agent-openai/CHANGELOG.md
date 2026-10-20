@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add `Agent.OpenAI.Turn` for complete model responses with automatic waiting,
+  bounded retries, rejected-socket replacement, transcript replay and shared
+  turn attribution. The HTTP client now uses `Agent.Turn` from `agent-core`
+  for the same retry policy, including temporary Codex capacity limits.
+
 - Name the conversation on WebSocket handshakes, as the official client
   does. `withCodexWsCredentialForSession` sends `session-id`, `thread-id`
   and `x-client-request-id` (`buildCodexWsSessionHeaders`) with the prompt

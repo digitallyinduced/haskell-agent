@@ -30,15 +30,15 @@ import Agent.Loop
     , emptyTokenUsage
     , runLoopInputs
     )
-import Agent.Loop.SteeringInputs
-    ( SteeringInputs
+import Agent.Loop.InputQueue
+    ( InputQueue
     , awaitSteeringInput
     , awaitSteeringInputReady
     , awaitUserSteeringAfter
     , closeSteeringInputs
     , dismissBackgroundCompletion
     , enqueueBackgroundCompletion
-    , newSteeringInputs
+    , newInputQueue
     , reserveSteeringInputs
     )
 import Agent.Subagents.History (trimDanglingToolSuffix)
@@ -103,7 +103,7 @@ runChildTurn
     -> (LoopConfig -> IO (Either LoopError LoopResult))
     -> IO (Either LoopError LoopResult)
 runChildTurn registry env child start = do
-    steering <- newSteeringInputs
+    steering <- newInputQueue
     withSubagentMessageSteering registry env steering
         (runChildTurnWithSteering registry env child start)
 
@@ -192,7 +192,7 @@ runChildTurnWithSteering registry env child start messageSteering =
 -- submitted when a command completes, not on a polling timer.
 runChildWithBackgroundTasks
     :: Maybe ChildBackgroundTasks
-    -> SteeringInputs
+    -> InputQueue
     -> LoopConfig
     -> (LoopConfig -> IO (Either LoopError LoopResult))
     -> IO (Either LoopError LoopResult)

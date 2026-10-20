@@ -1,5 +1,13 @@
 # agent-core
 
+`Agent.Turn.runTurn` executes a complete model submission with automatic
+bounded retry and waiting through `Control.Retry.retryingDynamic`. A shared
+`RetryPolicyM` owns the retry count and exponential backoff; provider delay
+hints cannot override its stopping decision. Its retry scope ends before
+callers execute tools or commit successful response effects. `Agent.Transport.SessionResource`
+retains a credential's connection across successful requests, releases failed
+requests before returning, and cancels and joins active work with its owner.
+
 Provider-neutral infrastructure shared by the harness transports:
 
 - `Agent.Error` defines the common transport and provider error channel.
@@ -13,7 +21,7 @@ Provider-neutral infrastructure shared by the harness transports:
   (`Agent.XAI.LoopBackend`), `agent-openrouter`
   (`Agent.OpenRouter.LoopBackend`), and `agent-gemini`
   (`Agent.Gemini.LoopBackend`).
-- `Agent.Loop.SteeringInputs` is a bounded queue that a host can use for the
+- `Agent.Loop.InputQueue` is a bounded queue that a host can use for the
   loop's steering callbacks. When the queue is full, it holds background
   completion notices back instead of dropping them. `Agent.Loop.InputBudget`
   measures the size of retained inputs.

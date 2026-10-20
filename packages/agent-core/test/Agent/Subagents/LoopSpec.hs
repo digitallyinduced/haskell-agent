@@ -15,10 +15,10 @@ import Agent.Loop
     , runLoopInputs
     )
 import Agent.Loop.Fixtures (testConfig)
-import Agent.Loop.SteeringInputs
+import Agent.Loop.InputQueue
     ( commitSteeringInputs
     , enqueueSteeringInputs
-    , newSteeringInputs
+    , newInputQueue
     , readSteeringInputs
     )
 import Agent.Subagents
@@ -219,7 +219,7 @@ spec = describe "Agent.Subagents.Loop" do
     it "acknowledges host guidance and child reports separately" do
         withRoot NoticesToLoop \registry root release -> do
             requests <- newIORef []
-            steering <- newSteeringInputs
+            steering <- newInputQueue
             backend <- scriptedRoot requests
                 [ \_ -> do
                     agentId <- spawnChild registry root

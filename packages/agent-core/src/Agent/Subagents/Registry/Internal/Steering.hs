@@ -6,8 +6,8 @@ module Agent.Subagents.Registry.Internal.Steering
     ) where
 
 import Agent.Loop (TurnInput(..))
-import Agent.Loop.SteeringInputs
-    ( SteeringInputs
+import Agent.Loop.InputQueue
+    ( InputQueue
     , commitSteeringInputsSTM
     , enqueueSteeringInputsSTM
     , readSteeringInputs
@@ -39,7 +39,7 @@ enqueueSubagentWorkSTM record work = do
 withSubagentMessageSteering
     :: SubagentRegistry
     -> SubagentSpawnEnv
-    -> SteeringInputs
+    -> InputQueue
     -> (SubagentSteering -> IO a)
     -> IO a
 withSubagentMessageSteering registry env inputs action = do
