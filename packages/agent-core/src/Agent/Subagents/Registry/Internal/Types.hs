@@ -3,6 +3,7 @@ module Agent.Subagents.Registry.Internal.Types where
 import Agent.Cancel (CancelFlag)
 import Agent.InterAgentMessage (InterAgentMessage)
 import Agent.Loop (LoopEvent)
+import Agent.Loop.SteeringInputs (SteeringInputs)
 import Agent.Subagents.TaskPath (TaskPath)
 import Agent.Subagents.Types
     ( RootTurnId
@@ -32,6 +33,7 @@ data SubagentRecord = SubagentRecord
     , recordPhase :: !(TVar SubagentPhase)
     , recordCancel :: !CancelFlag
     , recordMailbox :: !(TQueue SubagentWork)
+    , recordSteering :: !(TVar (Maybe SubagentSteering))
     , recordAsync :: !(TVar (Maybe (Async ())))
       -- | Last successful response id for conversation continuity.
     , recordPreviousResponseId :: !(TVar (Maybe Text))
@@ -43,6 +45,13 @@ data SubagentRecord = SubagentRecord
 data SubagentWork = SubagentWork
     { workRootTurnId :: !(Maybe RootTurnId)
     , workMessage :: !InterAgentMessage
+    }
+
+-- | Accepted guidance stays associated with its root turn until the provider
+-- acknowledges it. Unconsumed work returns to the mailbox when a turn ends.
+data SubagentSteering = SubagentSteering
+    { steeringInputs :: !SteeringInputs
+    , steeringWork :: !(TQueue SubagentWork)
     }
 
 -- | The complete turn lifecycle of an open subagent.
