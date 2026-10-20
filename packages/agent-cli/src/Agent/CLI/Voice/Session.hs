@@ -16,7 +16,7 @@ import Agent.CLI.Turn (runOneTurn)
 import Agent.CLI.Voice.Audio (runVoiceAudio)
 import Agent.CLI.Voice.Transport (runCodexVoiceConversation, runGatewayVoiceConversation)
 import Agent.Error (ApiError(..))
-import Agent.Loop (LoopConfig(..), TurnInput(..))
+import Agent.Loop (LoopConfig(..), TurnInput(..), isRecoveryMessage)
 import Agent.OpenAI.Live
 import Agent.OpenAI.Live.Call
 import qualified Agent.OpenAI.Auth as OpenAI
@@ -100,6 +100,7 @@ runSessionVoiceCall env devices announce = do
                         | item@(MessageItem message) <- after
                         , item `notElem` before
                         , message.role == RoleAssistant
+                        , not (isRecoveryMessage message)
                         , message.phase /= Just "commentary"
                         ])
             TurnCancelled -> pure "The coding task was cancelled."

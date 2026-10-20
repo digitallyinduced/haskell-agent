@@ -58,6 +58,7 @@ turnInputsToItems inputs =
 turnInputToItem :: TurnInput -> ResponseItem
 turnInputToItem = \case
     UserMessage text -> userMessageItem text
+    RecoveryMessage text -> recoveryMessageItem text
     AgentMessage message -> agentMessageItem message
     UserMessageWithAttachments text attachments ->
         userMessageWithAttachmentsItem text attachments
@@ -71,6 +72,24 @@ userMessageItem text = MessageItem ResponseMessage
     , status = Nothing
     , phase = Nothing
     , passthrough = Nothing
+    }
+
+-- | Codex represents interruption boundaries as assistant output text. The
+-- local marker survives persistence and distinguishes host evidence from
+-- actual model output; native adapters project this canonical history.
+recoveryMessageItem :: Text -> ResponseItem
+recoveryMessageItem text = MessageItem ResponseMessage
+    { messageId = Nothing
+    , content = MessageContentParts [OutputTextPart text Nothing Nothing]
+    , role = RoleAssistant
+    , status = Nothing
+    , phase = Nothing
+    , passthrough = Just InternalChatMetadata
+        { turnId = Nothing
+        , createTime = Nothing
+        , contentItemKinds = Just [recoveryContextContentItemKind]
+        , executedToolCalls = Nothing
+        }
     }
 
 userMessageWithAttachmentsItem

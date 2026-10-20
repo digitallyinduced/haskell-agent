@@ -36,6 +36,7 @@ module Agent.Loop
     , backendWithCallbacks
     , clearBackendContinuation
     , isModelContextItem
+    , isRecoveryMessage
     , defaultLoopMaxTurns
     , defaultLoopDispatch
     , emptyTokenUsage

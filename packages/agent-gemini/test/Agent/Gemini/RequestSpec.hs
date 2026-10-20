@@ -2,6 +2,8 @@ module Agent.Gemini.RequestSpec (spec) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Gemini.Request
+import Agent.Loop (TurnInput(..))
+import Agent.Loop.InputItems (turnInputsToItems)
 import Agent.Responses.Types
 import Data.Aeson (Value(..), object, (.=))
 import qualified Data.Aeson as Aeson
@@ -14,6 +16,21 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Gemini request projection" do
+    it "projects recovery as model context followed by the actual user request" do
+        let params :: ResponseCreateParams
+            params = defaultResponseCreateParams
+                { input = Just (ResponseInputItems (turnInputsToItems
+                    [RecoveryMessage "interrupted work", UserMessage "continue"])) }
+        fmap (.requestBody) (buildRequest "gemini-test" params)
+            `shouldBe` Right (object
+                [ "contents" .=
+                    [ object ["role" .= ("model" :: Text), "parts" .=
+                        [object ["text" .= ("interrupted work" :: Text)]]]
+                    , object ["role" .= ("user" :: Text), "parts" .=
+                        [object ["text" .= ("continue" :: Text)]]]
+                    ]
+                ])
+
     it "projects native PDF tool results as inline data without JSON fallback" do
         let parts =
                 [ InputTextPart "before" Nothing

@@ -35,6 +35,7 @@ import Agent.Loop
     , addTokenUsage
     , emptyTokenUsage
     , isModelContextItem
+    , isRecoveryMessage
     )
 import Agent.Runtime.Compaction
     ( AutomaticCompactionBoundary(..)
@@ -252,7 +253,8 @@ appendAssistantDelta :: Text -> [ResponseItem] -> [ResponseItem]
 appendAssistantDelta delta items =
     case reverse items of
         MessageItem message : rest
-            | message.role == RoleAssistant ->
+            | message.role == RoleAssistant
+            , not (isRecoveryMessage message) ->
                 reverse rest
                     <> [ MessageItem message
                             { content =
@@ -541,12 +543,12 @@ abortNote :: TurnAbort -> [ResponseItem] -> [ResponseItem]
 abortNote abort retained = case abort of
     TurnAbortedByUser
         | any isModelOutputItem retained ->
-            turnInputsToItems [UserMessage turnAbortedNote]
+            turnInputsToItems [RecoveryMessage turnAbortedNote]
     _ -> []
 
 -- | Recorded after a user-initiated cancel, adapted from the @<turn_aborted>@
--- marker Codex adds to its history. It is a user-role transcript item so any
--- Responses-compatible provider replays it; history projection hides it.
+-- marker Codex adds to its history. Its typed harness attribution survives
+-- persistence and replay; conversation projection hides it.
 turnAbortedNote :: Text
 turnAbortedNote =
     "<turn_aborted>\n\
@@ -561,7 +563,8 @@ isTurnAbortedNote = Text.isPrefixOf "<turn_aborted>" . Text.stripStart
 
 isModelOutputItem :: ResponseItem -> Bool
 isModelOutputItem = \case
-    MessageItem message -> message.role == RoleAssistant
+    MessageItem message ->
+        message.role == RoleAssistant && not (isRecoveryMessage message)
     FunctionCallItem{} -> True
     CustomToolCallItem{} -> True
     ComputerCallItem{} -> True

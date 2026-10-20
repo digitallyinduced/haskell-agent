@@ -2,6 +2,8 @@ module Agent.OpenRouter.RequestSpec (spec) where
 
 import Agent.Error (ApiError(..))
 import Agent.Json (rawJsonFromEncoding)
+import Agent.Loop (TurnInput(..))
+import Agent.Loop.InputItems (turnInputsToItems)
 import Agent.Responses.Types
 import Agent.OpenRouter.Options
 import Agent.OpenRouter.Request
@@ -31,6 +33,21 @@ spec = do
             mapModel options "gpt-4o" `shouldBe` "openai/gpt-5.1"
 
     describe "buildRequest" do
+        it "keeps recovery attribution in history without leaking the local marker to the provider" do
+            let items = turnInputsToItems [RecoveryMessage "interrupted work"]
+                request :: ResponseCreateParams
+                request = sampleRequest { input = Just (ResponseInputItems items) }
+            object <- expectObject (requestValue defaultClientOptions request)
+            wireItems <- expectArray (KeyMap.lookup "input" object)
+            case wireItems of
+                [wireItem] -> do
+                    message <- expectObject wireItem
+                    KeyMap.lookup "role" message `shouldBe` Just (Aeson.String "assistant")
+                    KeyMap.lookup "content" message `shouldBe`
+                        Just (Aeson.toJSON [OutputTextPart "interrupted work" Nothing Nothing])
+                    KeyMap.lookup "internal_chat_message_metadata_passthrough" message `shouldBe` Nothing
+                _ -> expectationFailure "expected one recovery message"
+
         it "keeps Claude tool-result images as ordered typed content" do
             let parts =
                     [ InputTextPart "before" Nothing

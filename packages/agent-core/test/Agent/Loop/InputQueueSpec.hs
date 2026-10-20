@@ -119,6 +119,10 @@ spec = do
         Model.retainedBytes committed `shouldBe` 3
 
   describe "logicalTurnInputBytes" do
+    it "bounds recovery context by the same retained input budget" do
+        let oversized = RecoveryMessage (Text.replicate (pendingInputByteLimit + 1) "x")
+        snd (Model.enqueueInput oversized Model.emptyPendingState) `shouldSatisfy` isLeft
+
     it "counts native file content and UTF-8 metadata against the retained queue budget" do
         let metadata = logicalTextBytes "über.pdf" + logicalTextBytes "application/pdf"
             contentLength = pendingInputByteLimit - metadata - 4

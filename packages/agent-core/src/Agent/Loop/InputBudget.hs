@@ -61,6 +61,7 @@ logicalToolResultImageBytes image =
 logicalTurnInputBytes :: TurnInput -> Int
 logicalTurnInputBytes = \case
     UserMessage text -> logicalTextBytes text
+    RecoveryMessage text -> logicalTextBytes text
     AgentMessage message ->
         logicalTextBytes message.messageAuthor
             `saturatingAdd` logicalTextBytes message.messageRecipient

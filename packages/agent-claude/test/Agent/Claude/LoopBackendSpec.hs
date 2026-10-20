@@ -600,6 +600,28 @@ spec = do
                             [message | MessageItem message <- history]
                             `shouldBe` ["read it", "fake response"]
 
+        it "labels recovery as harness evidence and retains its canonical attribution" $
+            withFakeClaude \fake -> do
+                transcript <- newIORef []
+                result <- timeout 5_000_000 $
+                    withClaudeCodeBackend
+                        (defaultClaudeCodeOptions fake.executable fake.workingDirectory)
+                        Nothing (pure defaultResponseCreateParams) transcript \backend ->
+                            submitBackend backend Nothing
+                                [ RecoveryMessage "Files may already have changed."
+                                , UserMessage "continue"
+                                ] (const (pure ()))
+                result `shouldSatisfy` \case
+                    Just (Right _) -> True
+                    _ -> False
+                submitted <- readFile fake.promptLog
+                submitted `shouldContain` "Harness recovery context (not a user request):"
+                submitted `shouldContain` "Files may already have changed."
+                history <- readIORef transcript
+                [(message.role, Loop.isRecoveryMessage message)
+                    | MessageItem message <- take 2 history]
+                    `shouldBe` [(RoleAssistant, True), (RoleUser, False)]
+
         it "renders and persists structured tool results as text" $
             withFakeClaude \fake ->
                 withEnvironmentVariables
