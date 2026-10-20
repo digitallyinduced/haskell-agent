@@ -7,9 +7,9 @@ import Agent.Runtime.ManagedTurn (managedTurnRequestFromText)
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.Runtime.Session
 import Agent.Runtime.SessionLock
-import Agent.Loop.SteeringInputs
+import Agent.Loop.InputQueue
     ( awaitSteeringInput, clearSteeringInputs, commitSteeringInputs
-    , hasSteeringInputWake, newSteeringInputs
+    , hasSteeringInputWake, newInputQueue
     , prepareBackgroundCompletion, readSteeringInputs )
 import Agent.Dialect (DialectId(..))
 import Agent.Loop (TurnInput(..), defaultLoopDispatch)
@@ -599,7 +599,7 @@ spec = describe "Agent.CLI.AgentSessions" do
 
     it "wakes an idle parent and retains child completion until the provider commits it" $
         withTempSessionThreadManager ["child"] \_ manager -> do
-            steering <- newSteeringInputs
+            steering <- newInputQueue
             enqueue <- prepareBackgroundCompletion steering
             let notice = UserMessage (formatSessionCompletionNotice "child" "completed")
             _ <- launchSessionThreadNotifying manager "child"
@@ -617,7 +617,7 @@ spec = describe "Agent.CLI.AgentSessions" do
 
     it "does not deliver a late child completion into a reset parent conversation" $
         withTempSessionThreadManager ["child"] \_ manager -> do
-            steering <- newSteeringInputs
+            steering <- newInputQueue
             enqueue <- prepareBackgroundCompletion steering
             gate <- newEmptyMVar
             _ <- launchSessionThreadNotifying manager "child"

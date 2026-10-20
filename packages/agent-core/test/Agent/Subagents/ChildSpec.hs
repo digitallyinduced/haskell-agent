@@ -31,12 +31,12 @@ import Agent.Loop
 import Agent.Loop.Fixtures (testConfig)
 import Agent.Loop.InputItems (turnInputsToItems)
 import Agent.ToolDispatch (functionToolCall)
-import Agent.Loop.SteeringInputs
-    ( SteeringInputs
+import Agent.Loop.InputQueue
+    ( InputQueue
     , awaitUserSteeringAfter
     , commitSteeringInputs
     , enqueueBackgroundCompletion
-    , newSteeringInputs
+    , newInputQueue
     , readSteeringInputs
     , reserveSteeringInputs
     )
@@ -94,7 +94,7 @@ backgroundTasks commands = ChildBackgroundTasks
     , awaitingBackgroundResume = or <$> readTVar commands
     }
 
-backgroundChildConfig :: SteeringInputs -> IORef [[TurnInput]] -> IO LoopConfig
+backgroundChildConfig :: InputQueue -> IORef [[TurnInput]] -> IO LoopConfig
 backgroundChildConfig steering requests = do
     cancel <- newCancelFlag
     snapshot <- newIORef emptyBackendSnapshot
@@ -433,7 +433,7 @@ spec = describe "Agent.Subagents.Child" do
     describe "owned background command continuation" do
         it "keeps the child alive after its reply and resumes with completion exactly once" do
             commands <- newTVarIO Map.empty
-            steering <- newSteeringInputs
+            steering <- newInputQueue
             requests <- newIORef []
             config <- backgroundChildConfig steering requests
             returned <- newEmptyMVar
@@ -458,7 +458,7 @@ spec = describe "Agent.Subagents.Child" do
 
         it "observes completion queued before checking whether the child can finish" do
             commands <- newTVarIO Map.empty
-            steering <- newSteeringInputs
+            steering <- newInputQueue
             requests <- newIORef []
             config <- backgroundChildConfig steering requests
             let runFirst current = do
@@ -475,7 +475,7 @@ spec = describe "Agent.Subagents.Child" do
 
         it "cancels a child suspended on an owned command without another model request" do
             commands <- newTVarIO Map.empty
-            steering <- newSteeringInputs
+            steering <- newInputQueue
             requests <- newIORef []
             config <- backgroundChildConfig steering requests
             returned <- newEmptyMVar
@@ -494,7 +494,7 @@ spec = describe "Agent.Subagents.Child" do
 
         it "does not wait for tasks that require explicit observation" do
             commands <- newTVarIO Map.empty
-            steering <- newSteeringInputs
+            steering <- newInputQueue
             requests <- newIORef []
             config <- backgroundChildConfig steering requests
             startCommand commands "observation" False
@@ -506,7 +506,7 @@ spec = describe "Agent.Subagents.Child" do
 
         it "finishes without a model request when an owned command is explicitly removed" do
             commands <- newTVarIO Map.empty
-            steering <- newSteeringInputs
+            steering <- newInputQueue
             requests <- newIORef []
             config <- backgroundChildConfig steering requests
             returned <- newEmptyMVar
@@ -526,7 +526,7 @@ spec = describe "Agent.Subagents.Child" do
 
         it "does not reset the model turn budget when a completion resumes the child" do
             commands <- newTVarIO Map.empty
-            steering <- newSteeringInputs
+            steering <- newInputQueue
             requests <- newIORef []
             initialConfig <- backgroundChildConfig steering requests
             let config = initialConfig { loopMaxTurns = 2 }
@@ -546,7 +546,7 @@ spec = describe "Agent.Subagents.Child" do
                 [[UserMessage "initial"], [UserMessage "completed"]]
 
         it "finishes after its reply when the host has no background commands" do
-            steering <- newSteeringInputs
+            steering <- newInputQueue
             requests <- newIORef []
             config <- backgroundChildConfig steering requests
             result <- timeout 1000000 $

@@ -20,12 +20,12 @@ module Agent.Subagents.Loop
 
 import Agent.InterAgentMessage (InterAgentMessage)
 import Agent.Loop (LoopSubagents(..), TurnInput(..))
-import Agent.Loop.SteeringInputs
-    ( SteeringInputs
+import Agent.Loop.InputQueue
+    ( InputQueue
     , awaitSteeringInputReady
     , commitSteeringInputs
     , enqueueBackgroundCompletion
-    , newSteeringInputs
+    , newInputQueue
     , readSteeringInputs
     )
 import Agent.Subagents.Format (formatCompletionNotice)
@@ -74,7 +74,7 @@ data SubagentTurnEnd
 data RootSubagents = RootSubagents
     { sessionRegistry :: !SubagentRegistry
     , sessionNotices :: !SubagentNotices
-    , sessionInputs :: !SteeringInputs
+    , sessionInputs :: !InputQueue
     , sessionNextNotice :: !(IORef Int)
     , sessionTurn :: !(IORef (Maybe RootTurnId))
     , sessionLastTurn :: !(IORef (Maybe RootTurnId))
@@ -84,7 +84,7 @@ data RootSubagents = RootSubagents
 -- registry's completion callback.
 newRootSubagents :: SubagentNotices -> SubagentRegistry -> IO RootSubagents
 newRootSubagents notices registry = do
-    inputs <- newSteeringInputs
+    inputs <- newInputQueue
     nextNotice <- newIORef 0
     turn <- newIORef Nothing
     lastTurn <- newIORef Nothing

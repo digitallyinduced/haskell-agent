@@ -3,7 +3,7 @@ module Agent.Subagents.Registry.Internal.Types where
 import Agent.Cancel (CancelFlag)
 import Agent.InterAgentMessage (InterAgentMessage)
 import Agent.Loop (LoopEvent)
-import Agent.Loop.SteeringInputs (SteeringInputs)
+import Agent.Loop.InputQueue (InputQueue)
 import Agent.Subagents.TaskPath (TaskPath)
 import Agent.Subagents.Types
     ( RootTurnId
@@ -50,7 +50,7 @@ data SubagentWork = SubagentWork
 -- | Accepted guidance stays associated with its root turn until the provider
 -- acknowledges it. Unconsumed work returns to the mailbox when a turn ends.
 data SubagentSteering = SubagentSteering
-    { steeringInputs :: !SteeringInputs
+    { steeringInputs :: !InputQueue
     , steeringWork :: !(TQueue SubagentWork)
     }
 

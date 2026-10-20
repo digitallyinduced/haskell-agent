@@ -6,7 +6,7 @@ import Agent.Runtime.Session
     )
 import Agent.CLI.Session.ConversationStore (newConversationStore)
 import Agent.CLI.Session.History (hydrateUiHistory)
-import qualified Agent.Loop.SteeringInputs as Steering
+import qualified Agent.Loop.InputQueue as Steering
 import Agent.CLI.TUI.SessionHistory (sessionHistoryTurn)
 import Agent.CLI.TUI.History (HistoryTurn(..))
 import Control.Concurrent.STM (atomically)
@@ -71,7 +71,7 @@ spec = do
 
     describe "hydrateUiHistory" do
       it "retains idle wake guidance in both text and detailed history" do
-        steering <- Steering.newSteeringInputs
+        steering <- Steering.newInputQueue
         Steering.enqueueSteeringInputs steering [UserMessage "late guidance"]
             `shouldReturn` Right ()
         atomically (Steering.awaitSteeringInput steering)
