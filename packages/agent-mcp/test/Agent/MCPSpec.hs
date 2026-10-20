@@ -17,6 +17,7 @@ import Agent.MCP.Client
     , ProbeOutcome(..)
     , annotateHeaderParams
     , boundedTaskPollDelayMicros
+    , callDiscoveredTool
     , cancelMcpTask
     , closeMcpClient
     , configuredAccessToken
@@ -34,8 +35,10 @@ import Agent.MCP.Client
     , readBoundedWithLimit
     , responseBodyLimitFor
     , remainingHardDeadlineMicros
+    , mcpHttpRetryDelayMicros
     , retryUnauthorizedOnce
     , requestMcp
+    , requestMcpOnce
     , emptyRequestRegistry
     , registerPending
     , spawnClientWorker
@@ -134,6 +137,8 @@ import Data.IORef
 import Data.List (find)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Text as Text
+import Data.Time.Clock (UTCTime(..), addUTCTime)
+import Data.Time.Calendar (fromGregorian)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import qualified Network.Socket as Socket
 import System.Directory
@@ -1391,6 +1396,180 @@ spec = describe "Agent.MCP" do
             classifyProbe (Left (McpTransportError "boom"))
                 `shouldBe` ProbeFailure "boom"
 
+    describe "Streamable HTTP retries" do
+        let readTool = (schemaTool []) { discoveredReadOnly = True }
+            call client tool = callDiscoveredTool client tool
+                (rawJsonFromEncoding (Data.Aeson.toEncoding (object [])))
+            now = UTCTime (fromGregorian 2026 10 20) 0
+
+        forM_ [408, 429, 500, 502, 503, 504] \status ->
+            it ("recovers a read after HTTP " <> show status) $
+                withToolHttpReplies [httpFixtureStatus status []] \config requests ->
+                    bracket (startMcpClient config) closeMcpClient \client -> do
+                        call client readTool `shouldReturn` Right "/"
+                        received <- readIORef requests
+                        length received `shouldBe` 2
+                        received `shouldSatisfy` \case
+                            [first, second] -> first == second
+                            _ -> False
+
+        it "recovers after two temporary failures" $
+            withToolHttpReplies [httpFixtureStatus 503 [], httpFixtureStatus 502 []] \config requests ->
+                bracket (startMcpClient config) closeMcpClient \client -> do
+                    call client readTool `shouldReturn` Right "/"
+                    length <$> readIORef requests `shouldReturn` 3
+
+        it "shares the transient retry budget across OAuth refresh" $
+            withToolHttpReplies
+                [httpFixtureStatus 503 [], httpFixtureStatus 401 [], httpFixtureStatus 503 [], httpFixtureStatus 503 []]
+                \config requests -> do
+                    refreshes <- newIORef (0 :: Int)
+                    let hooks = defaultMcpHostHooks
+                            { mcpHostCredentials = const (pure (Just McpCredentialProvider
+                                { mcpCredentialAccessToken = pure (Right (Just "initial-token"))
+                                , mcpCredentialRefreshAccessToken = do
+                                    modifyIORef' refreshes (+ 1)
+                                    pure (Right "refreshed-token")
+                                }))
+                            }
+                    bracket (startMcpClientWith hooks Nothing config) closeMcpClient \client -> do
+                        call client readTool `shouldReturn` Left "MCP HTTP request failed with status 503"
+                        length <$> readIORef requests `shouldReturn` 4
+                        readIORef refreshes `shouldReturn` 1
+
+        it "retries a protocol read operation" $
+            withHttpRepliesFor "tools/list" [httpFixtureStatus 503 []] \config requests ->
+                bracket (startMcpClient config) closeMcpClient \client -> do
+                    result <- requestMcp client 1000000 "tools/list" mempty
+                    result `shouldSatisfy` either (const False) (const True)
+                    length <$> readIORef requests `shouldReturn` 2
+
+        it "recovers when an SSE stream ends before delivering the result" $
+            withToolHttpReplies
+                [HttpFixtureResponse "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"]
+                \config requests ->
+                    bracket (startMcpClient config) closeMcpClient \client -> do
+                        call client readTool `shouldReturn` Right "/"
+                        length <$> readIORef requests `shouldReturn` 2
+
+        it "preserves explicit one-shot requests even for read operations" $
+            withHttpRepliesFor "tools/list" [httpFixtureStatus 503 []] \config requests ->
+                bracket (startMcpClient config) closeMcpClient \client -> do
+                    requestMcpOnce client 1000000 "tools/list" mempty
+                        >>= (`shouldSatisfy` isLeft)
+                    length <$> readIORef requests `shouldReturn` 1
+
+        it "does not assume an unknown protocol method is safe" $
+            withHttpRepliesFor "custom/execute" [httpFixtureStatus 503 []] \config requests ->
+                bracket (startMcpClient config) closeMcpClient \client -> do
+                    requestMcp client 1000000 "custom/execute" mempty
+                        >>= (`shouldSatisfy` isLeft)
+                    length <$> readIORef requests `shouldReturn` 1
+
+        it "stops after three attempts and returns the final error" $
+            withToolHttpReplies (replicate 3 (httpFixtureStatus 503 [])) \config requests ->
+                bracket (startMcpClient config) closeMcpClient \client -> do
+                    call client readTool `shouldReturn` Left "MCP HTTP request failed with status 503"
+                    length <$> readIORef requests `shouldReturn` 3
+
+        it "recovers a read after the connection closes without a response" $
+            withToolHttpReplies [HttpFixtureDisconnect] \config requests ->
+                bracket (startMcpClient config) closeMcpClient \client -> do
+                    call client readTool `shouldReturn` Right "/"
+                    length <$> readIORef requests `shouldReturn` 2
+
+        it "retries an explicitly idempotent mutation" $
+            withToolHttpReplies [httpFixtureStatus 503 []] \config requests ->
+                bracket (startMcpClient config) closeMcpClient \client -> do
+                    call client ((schemaTool []) { discoveredIdempotent = True })
+                        `shouldReturn` Right "/"
+                    length <$> readIORef requests `shouldReturn` 2
+
+        forM_ [httpFixtureStatus 503 [], HttpFixtureDisconnect] \reply -> do
+            it "does not replay an ordinary mutation after an uncertain outcome" $
+                withToolHttpReplies [reply] \config requests ->
+                    bracket (startMcpClient config) closeMcpClient \client -> do
+                        call client (schemaTool []) >>= (`shouldSatisfy` isLeft)
+                        length <$> readIORef requests `shouldReturn` 1
+            it "does not replay a read requiring fresh approval" $
+                withToolHttpReplies [reply] \config requests ->
+                    bracket (startMcpClient config) closeMcpClient \client -> do
+                        call client (readTool { discoveredRequiresFreshApproval = True })
+                            >>= (`shouldSatisfy` isLeft)
+                        length <$> readIORef requests `shouldReturn` 1
+
+        it "does not mistake a protocol error in HTTP 503 for a transient failure" $
+            withToolHttpReplies
+                [HttpFixtureResponse
+                    ("HTTP/1.1 503 Failure\r\nContent-Type: application/json\r\nContent-Length: "
+                        <> BS8.pack (show (BS.length protocolErrorBody))
+                        <> "\r\nConnection: close\r\n\r\n" <> protocolErrorBody)]
+                \config requests ->
+                    bracket (startMcpClient config) closeMcpClient \client -> do
+                        call client readTool `shouldReturn` Left "MCP error -32602: invalid arguments"
+                        length <$> readIORef requests `shouldReturn` 1
+
+        forM_ [400, 401, 403, 404, 501] \status ->
+            it ("does not retry HTTP " <> show status) $
+                withToolHttpReplies [httpFixtureStatus status []] \config requests ->
+                    bracket (startMcpClient config) closeMcpClient \client -> do
+                        call client readTool >>= (`shouldSatisfy` isLeft)
+                        length <$> readIORef requests `shouldReturn` 1
+
+        it "returns a protocol error without retrying" $
+            withToolHttpReplies
+                [HttpFixtureResponse (httpFixtureJson protocolErrorBody)]
+                \config requests ->
+                    bracket (startMcpClient config) closeMcpClient \client -> do
+                        call client readTool `shouldReturn` Left "MCP error -32602: invalid arguments"
+                        length <$> readIORef requests `shouldReturn` 1
+
+        it "returns a tool error without retrying" $
+            withToolHttpReplies
+                [HttpFixtureResponse (httpFixtureJson "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"invalid arguments\"}]}}")]
+                \config requests ->
+                    bracket (startMcpClient config) closeMcpClient \client -> do
+                        call client readTool `shouldReturn` Left "invalid arguments"
+                        length <$> readIORef requests `shouldReturn` 1
+
+        it "does not retry a malformed response" $
+            withToolHttpReplies [HttpFixtureResponse (httpFixtureJson "invalid JSON")] \config requests ->
+                bracket (startMcpClient config) closeMcpClient \client -> do
+                    call client readTool >>= (`shouldSatisfy` isLeft)
+                    length <$> readIORef requests `shouldReturn` 1
+
+        it "returns immediately when Retry-After exceeds the inline budget" $
+            withToolHttpReplies [httpFixtureStatus 429 ["Retry-After: 30"]] \config requests ->
+                bracket (startMcpClient config) closeMcpClient \client -> do
+                    call client readTool >>= (`shouldSatisfy` isLeft)
+                    length <$> readIORef requests `shouldReturn` 1
+
+        it "cancels during retry backoff and unregisters the pending request" $
+            withToolHttpReplies [httpFixtureStatus 429 ["Retry-After: 5"]] \config requests ->
+                bracket (startMcpClient config) closeMcpClient \client ->
+                    withAsync (call client readTool) \worker -> do
+                        waitForHttpRequests requests 1
+                        threadDelay 50000
+                        timeout 1000000 (cancel worker) `shouldReturn` Just ()
+                        length <$> readIORef requests `shouldReturn` 1
+                        registry <- readTVarIO client.clientRequestRegistry
+                        IntMap.null registry.requestRegistryPending `shouldBe` True
+
+        it "uses bounded exponential backoff" do
+            mcpHttpRetryDelayMicros 0 now Nothing `shouldBe` Just 250000
+            mcpHttpRetryDelayMicros 1 now Nothing `shouldBe` Just 500000
+            mcpHttpRetryDelayMicros 2 now Nothing `shouldBe` Nothing
+
+        it "honors seconds and HTTP dates without shortening server delays" do
+            mcpHttpRetryDelayMicros 0 now (Just "2") `shouldBe` Just 2000000
+            mcpHttpRetryDelayMicros 0 now (Just "Tue, 20 Oct 2026 00:00:03 GMT")
+                `shouldBe` Just 3000000
+            mcpHttpRetryDelayMicros 1 (addUTCTime 4 now) (Just "Tue, 20 Oct 2026 00:00:03 GMT")
+                `shouldBe` Just 500000
+            mcpHttpRetryDelayMicros 0 now (Just "6") `shouldBe` Nothing
+            mcpHttpRetryDelayMicros 0 now (Just "99999999999999999999999999") `shouldBe` Nothing
+            mcpHttpRetryDelayMicros 0 now (Just "invalid") `shouldBe` Just 250000
+
     describe "Streamable HTTP headers" do
         forM_ [McpProtocolModern, McpProtocolLegacy] \protocol ->
             it ("keeps immutable turn context on shared fleet calls: " <> show protocol) $
@@ -2298,8 +2477,52 @@ raw :: BS8.ByteString -> RawJson
 raw bytes =
     either (error . show) id (Json.decodeEither rawJsonDecoder bytes)
 
+data HttpFixtureReply
+    = HttpFixtureDefault
+    | HttpFixtureDisconnect
+    | HttpFixtureResponse !BS.ByteString
+
+protocolErrorBody :: BS.ByteString
+protocolErrorBody = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32602,\"message\":\"invalid arguments\"}}"
+
+httpFixtureStatus :: Int -> [BS.ByteString] -> HttpFixtureReply
+httpFixtureStatus status headers = HttpFixtureResponse $
+    "HTTP/1.1 " <> BS8.pack (show status) <> " Failure\r\n"
+        <> BS8.concat [header <> "\r\n" | header <- headers]
+        <> "Content-Length: 0\r\nConnection: close\r\n\r\n"
+
+httpFixtureJson :: BS.ByteString -> BS.ByteString
+httpFixtureJson body =
+    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+        <> BS8.pack (show (BS.length body))
+        <> "\r\nConnection: close\r\n\r\n" <> body
+
+withToolHttpReplies = withHttpRepliesFor "tools/call"
+
+withHttpRepliesFor method replies action = do
+    remaining <- newIORef replies
+    requests <- newIORef []
+    let reply fields = case KeyMap.lookup "method" fields of
+            Just (Data.Aeson.String name) | name == method -> do
+                modifyIORef' requests (<> [fields])
+                atomicModifyIORef' remaining \case
+                    [] -> ([], HttpFixtureDefault)
+                    response : rest -> (rest, response)
+            _ -> pure HttpFixtureDefault
+    withContextHttpServerReply reply \config _ -> action config requests
+
+waitForHttpRequests requests count = do
+    completed <- timeout 1000000 waitForCount
+    completed `shouldBe` Just ()
+  where
+    waitForCount = do
+        received <- readIORef requests
+        if length received >= count then pure () else threadDelay 1000 >> waitForCount
+
 -- A bounded-lifetime HTTP fixture that echoes transport identity, not arguments.
-withContextHttpServer action =
+withContextHttpServer = withContextHttpServerReply (const (pure HttpFixtureDefault))
+
+withContextHttpServerReply reply action =
     Socket.withSocketsDo $
         bracket (Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol)
             Socket.close \listener -> do
@@ -2349,11 +2572,14 @@ withContextHttpServer action =
                                     Just (Data.Aeson.String name) ->
                                         modifyIORef' captured (<> [(name, turn, session)])
                                     _ -> pure ()
-                                BS8.hPutStr handle $
-                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
-                                        <> BS8.pack (show (BS.length body))
-                                        <> "\r\nConnection: close\r\n\r\n" <> body
-                                hFlush handle
+                                reply fields >>= \case
+                                    HttpFixtureDisconnect -> pure ()
+                                    HttpFixtureDefault -> do
+                                        BS8.hPutStr handle (httpFixtureJson body)
+                                        hFlush handle
+                                    HttpFixtureResponse response -> do
+                                        BS8.hPutStr handle response
+                                        hFlush handle
                         serve
                 withAsync serve \_ -> action config captured
 
