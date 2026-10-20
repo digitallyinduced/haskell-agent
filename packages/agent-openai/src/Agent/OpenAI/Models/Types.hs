@@ -38,6 +38,9 @@ module Agent.OpenAI.Models.Types
     , CollaborationModeMessages(..)
     , AutoReviewMessages(..)
     , PermissionMessages(..)
+    , ModelToolMessage(..)
+    , ModelToolMessages(..)
+    , MultiAgentToolMessages(..)
     , MultiAgentMessages(..)
     , MultiAgentRoleMessages(..)
     , MultiAgentModeMessages(..)
@@ -185,6 +188,42 @@ instance ToJSON PermissionMessages where
         <> maybeField "workspace_write" messages.workspaceWrite
         <> maybeField "read_only" messages.readOnly
 
+data ModelToolMessage = ModelToolMessage
+    { description :: !(Maybe Text)
+    , parameters :: !(Maybe Text)
+    } deriving (Eq, Show)
+
+instance ToJSON ModelToolMessage where
+    toJSON message = object $
+        maybeField "description" message.description
+        <> maybeField "parameters" message.parameters
+
+data MultiAgentToolMessages = MultiAgentToolMessages
+    { spawnAgent :: !(Maybe ModelToolMessage)
+    , sendMessage :: !(Maybe ModelToolMessage)
+    , followupTask :: !(Maybe ModelToolMessage)
+    , waitAgent :: !(Maybe ModelToolMessage)
+    , interruptAgent :: !(Maybe ModelToolMessage)
+    , listAgents :: !(Maybe ModelToolMessage)
+    } deriving (Eq, Show)
+
+instance ToJSON MultiAgentToolMessages where
+    toJSON messages = object $
+        maybeField "spawn_agent" messages.spawnAgent
+        <> maybeField "send_message" messages.sendMessage
+        <> maybeField "followup_task" messages.followupTask
+        <> maybeField "wait_agent" messages.waitAgent
+        <> maybeField "interrupt_agent" messages.interruptAgent
+        <> maybeField "list_agents" messages.listAgents
+
+data ModelToolMessages = ModelToolMessages
+    { multiAgent :: !(Maybe MultiAgentToolMessages)
+    } deriving (Eq, Show)
+
+instance ToJSON ModelToolMessages where
+    toJSON messages = object $
+        maybeField "multi_agent" messages.multiAgent
+
 data MultiAgentMessages = MultiAgentMessages
     { role :: !(Maybe MultiAgentRoleMessages)
     , mode :: !(Maybe MultiAgentModeMessages)
@@ -239,6 +278,7 @@ data ModelMessages = ModelMessages
     , collaborationModes :: !(Maybe CollaborationModeMessages)
     , autoReview :: !(Maybe AutoReviewMessages)
     , permissions :: !(Maybe PermissionMessages)
+    , tools :: !(Maybe ModelToolMessages)
     , multiAgent :: !(Maybe MultiAgentMessages)
     , tokenBudget :: !(Maybe ModelTokenBudgetConfig)
     } deriving (Eq, Show)
@@ -251,6 +291,7 @@ instance ToJSON ModelMessages where
         <> maybeField "collaboration_modes" messages.collaborationModes
         <> maybeField "auto_review" messages.autoReview
         <> maybeField "permissions" messages.permissions
+        <> maybeField "tools" messages.tools
         <> maybeField "multi_agent" messages.multiAgent
         <> maybeField "token_budget" messages.tokenBudget
 
@@ -573,6 +614,27 @@ permissionMessagesDecoder = Json.object $
         <*> optionalField "workspace_write" Json.text
         <*> optionalField "read_only" Json.text
 
+modelToolMessageDecoder :: Json.Decoder ModelToolMessage
+modelToolMessageDecoder = Json.object $
+    ModelToolMessage
+        <$> optionalField "description" Json.text
+        <*> optionalField "parameters" Json.text
+
+multiAgentToolMessagesDecoder :: Json.Decoder MultiAgentToolMessages
+multiAgentToolMessagesDecoder = Json.object $
+    MultiAgentToolMessages
+        <$> optionalField "spawn_agent" modelToolMessageDecoder
+        <*> optionalField "send_message" modelToolMessageDecoder
+        <*> optionalField "followup_task" modelToolMessageDecoder
+        <*> optionalField "wait_agent" modelToolMessageDecoder
+        <*> optionalField "interrupt_agent" modelToolMessageDecoder
+        <*> optionalField "list_agents" modelToolMessageDecoder
+
+modelToolMessagesDecoder :: Json.Decoder ModelToolMessages
+modelToolMessagesDecoder = Json.object $
+    ModelToolMessages
+        <$> optionalField "multi_agent" multiAgentToolMessagesDecoder
+
 multiAgentMessagesDecoder :: Json.Decoder MultiAgentMessages
 multiAgentMessagesDecoder = Json.object $
     MultiAgentMessages
@@ -610,6 +672,7 @@ modelMessagesDecoder = Json.object do
         optionalField "collaboration_modes" collaborationModeMessagesDecoder
     autoReview <- optionalField "auto_review" autoReviewMessagesDecoder
     permissions <- optionalField "permissions" permissionMessagesDecoder
+    tools <- optionalField "tools" modelToolMessagesDecoder
     multiAgent <- optionalField "multi_agent" multiAgentMessagesDecoder
     tokenBudget <- optionalField "token_budget" modelTokenBudgetConfigDecoder
     pure ModelMessages
@@ -892,6 +955,7 @@ legacyModelMessages instructions = ModelMessages
     , collaborationModes = Nothing
     , autoReview = Nothing
     , permissions = Nothing
+    , tools = Nothing
     , multiAgent = Nothing
     , tokenBudget = Nothing
     }

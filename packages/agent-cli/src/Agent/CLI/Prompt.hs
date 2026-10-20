@@ -73,7 +73,7 @@ subscriptionSubagentModelGuidance provider billing
             , "tier. Full-history forks (`fork_turns` omitted or `\"all\"`)"
             , "inherit the parent model and reasoning effort and do not accept"
             , "overrides. When setting `model` or `reasoning_effort`, set"
-            , "`fork_turns` to `\"none\"` or a positive integer string. Do not"
+            , "`fork_turns` to `\"none\"`. Do not"
             , "spawn a subagent when doing the work directly would be faster."
             ]
     | otherwise = Nothing

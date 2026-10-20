@@ -2,6 +2,7 @@
 module Agent.CLI.Tools
     ( requireToolRegistry
     , lookupAppTool
+    , codexToolsForModel
     , schemasFromAppTools
     , schemasFromAppToolsWithAsyncCapability
     , schemasFromAppToolsWithHostedSearch
@@ -45,6 +46,9 @@ import Agent.OpenAI.ImageGeneration
     , imageGenerationToolName
     )
 import Agent.OpenAI.ToolDSL (buildGrokTool, buildTool)
+import Agent.OpenAI.Models.Types
+    ( ModelInfo(..), ModelMessages(..), ModelToolMessages(..)
+    , ModelToolMessage(..), MultiAgentToolMessages(..), MultiAgentVersion(..) )
 import Agent.ToolDSL (PropertySchema(..), parametersObjectLoose)
 import Agent.ToolDispatch (canonicalToolName)
 import Agent.Codex.Dialect.ApplyPatch (applyPatchGrammar)
@@ -60,12 +64,16 @@ import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import Control.Applicative ((<|>))
+import Control.Monad (foldM, guard)
 import qualified Data.Foldable as Foldable
 import Data.List (partition)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
+import Data.Scientific (toBoundedInteger)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import System.Info (os)
 
 requireToolRegistry :: [AppTool] -> IO ToolRegistry
@@ -90,6 +98,115 @@ lookupAppTool name tools =
             [ (canonicalToolName tool.appToolName, tool)
             | tool <- tools
             ]
+
+-- | Resolve the selected native Codex model's collaboration surface before
+-- namespace and code-mode projection. Metadata changes declarations only;
+-- handlers, approval rules and execution policies remain host-owned.
+-- Missing capability metadata retains the established fallback surface.
+codexToolsForModel :: Maybe ModelInfo -> [AppTool] -> [AppTool]
+codexToolsForModel Nothing = id
+codexToolsForModel (Just info) = map applyMessage . filter supported
+  where
+    supported tool =
+        tool.appToolName `notElem`
+            (multiAgentToolNames <> ["spawn_agent_in_worktree"])
+            || maybe True (== MultiAgentV2) info.multiAgentVersion
+    messages = info.modelMessages >>= (.tools) >>= (.multiAgent)
+    messageFor name = messages >>= \overrides -> case name of
+        "spawn_agent" -> overrides.spawnAgent
+        "send_message" -> overrides.sendMessage
+        "followup_task" -> overrides.followupTask
+        "wait_agent" -> overrides.waitAgent
+        "interrupt_agent" -> overrides.interruptAgent
+        "list_agents" -> overrides.listAgents
+        _ -> Nothing
+    applyMessage tool = case messageFor tool.appToolName of
+        Nothing -> tool
+        Just message -> tool
+            { appToolDescription =
+                maybe tool.appToolDescription id message.description
+            , appToolSchema = maybe tool.appToolSchema RawJsonFunctionSchema $
+                message.parameters >>= catalogParameters tool
+            }
+
+catalogParameters :: AppTool -> Text -> Maybe Aeson.Value
+catalogParameters tool encoded = do
+    candidate@(Aeson.Object root) <-
+        Aeson.decodeStrict' (TextEncoding.encodeUtf8 encoded)
+    guard (KeyMap.lookup "type" root == Just (Aeson.String "object"))
+    normalized@(Aeson.Object fields) <- normalizeCatalogSchema candidate
+    let original = case tool.appToolSchema of
+            JsonFunctionSchema properties -> parametersObjectLoose properties
+            RawJsonFunctionSchema schema -> schema
+            _ -> Aeson.Null
+        propertiesOf (Aeson.Object schema) = case KeyMap.lookup "properties" schema of
+            Just (Aeson.Object properties) -> properties
+            _ -> KeyMap.empty
+        propertiesOf _ = KeyMap.empty
+        encryptedNames =
+            [ name
+            | (name, Aeson.Object property) <- KeyMap.toList (propertiesOf original)
+            , KeyMap.lookup "encrypted" property == Just (Aeson.Bool True)
+            ]
+    if null encryptedNames then pure normalized else do
+        properties <- foldM preserveEncryption
+            (propertiesOf normalized) encryptedNames
+        pure (Aeson.Object (KeyMap.insert "properties" (Aeson.Object properties) fields))
+  where
+    preserveEncryption properties name = do
+        Aeson.Object property <- KeyMap.lookup name properties
+        pure (KeyMap.insert name
+            (Aeson.Object (KeyMap.insert "encrypted" (Aeson.Bool True) property))
+            properties)
+
+-- Match the Codex JsonSchema subset: malformed known fields reject the
+-- override; unknown keywords and null optional fields are omitted.
+normalizeCatalogSchema :: Aeson.Value -> Maybe Aeson.Value
+normalizeCatalogSchema (Aeson.Object fields) =
+    Aeson.Object . KeyMap.fromList <$> traverse normalizeField
+        [ (key, value)
+        | (key, value) <- KeyMap.toList fields
+        , value /= Aeson.Null
+        , Key.toText key `elem` supportedFields
+        ]
+  where
+    supportedFields =
+        [ "$ref", "type", "description", "encrypted", "enum", "items"
+        , "minItems", "properties", "required", "additionalProperties"
+        , "anyOf", "oneOf", "allOf", "$defs", "definitions"
+        ]
+    normalizeField (key, value) = (key,) <$> case Key.toText key of
+        "$ref" -> string value
+        "description" -> string value
+        "encrypted" -> boolean value
+        "type" -> primitive value <|> array primitive value
+        "enum" -> array Just value
+        "items" -> normalizeCatalogSchema value
+        "minItems" -> case value of
+            Aeson.Number number
+                | Just (_ :: Word) <- toBoundedInteger number -> Just value
+            _ -> Nothing
+        "properties" -> schemaMap value
+        "$defs" -> schemaMap value
+        "definitions" -> schemaMap value
+        "required" -> array string value
+        "additionalProperties" -> boolean value <|> normalizeCatalogSchema value
+        "anyOf" -> array normalizeCatalogSchema value
+        "oneOf" -> array normalizeCatalogSchema value
+        "allOf" -> array normalizeCatalogSchema value
+        _ -> Nothing
+    primitive value@(Aeson.String name)
+        | name `elem` ["string", "number", "boolean", "integer", "object", "array", "null"] = Just value
+    primitive _ = Nothing
+    string value@(Aeson.String _) = Just value
+    string _ = Nothing
+    boolean value@(Aeson.Bool _) = Just value
+    boolean _ = Nothing
+    array f (Aeson.Array values) = Aeson.Array <$> traverse f values
+    array _ _ = Nothing
+    schemaMap (Aeson.Object values) = Aeson.Object <$> traverse normalizeCatalogSchema values
+    schemaMap _ = Nothing
+normalizeCatalogSchema _ = Nothing
 
 -- | Built-in Responses @web_search@ tool, enabled for every provider by default.
 -- The host runs the search server-side; the agent loop never dispatches it.

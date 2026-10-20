@@ -188,7 +188,7 @@ import Agent.CLI.Subagents.Runtime
     ( runCodexSubagent, runHttpSubagent, runXaiParentSubagent
     , runGatewaySubagent, runXaiSubagent
     , SubagentRuntime(subagentOpenAiChild, SubagentRuntime,
-                      subagentOptions, subagentNetworkRecovery,
+                      subagentOptions, subagentCodexModelInfo, subagentNetworkRecovery,
                       subagentGhciEnabled, subagentBashEnabled,
                       subagentPolicy, subagentPlanHooks, subagentSkillRoots,
                       subagentAllowedRoots, subagentToolResourceArbiter, subagentRootAccessRequest,
@@ -208,7 +208,8 @@ import Agent.CLI.TUI.App
     ( FullscreenRuntime, withFullscreenSuspended, emitUiEvent )
 import Agent.CLI.Terminal ( resolveColor )
 import Agent.CLI.Tools
-    ( schemasFromAppToolsCodeModeWithHostedSearchAndAsyncCapability
+    ( codexToolsForModel
+    , schemasFromAppToolsCodeModeWithHostedSearchAndAsyncCapability
     , schemasFromAppToolsWithHostedSearchAndAsyncCapability
     )
 import Agent.Tools.OutputArtifact (finalizeToolOutput)
@@ -219,7 +220,7 @@ import Agent.Claude
 import Agent.Claude.Control
     ( ClaudeCodeHostHandlers(..), ClaudeCodeMcpRequest(..), defaultClaudeCodeHostHandlers )
 import Agent.CLI.ClaudeGatewayProxy (withClaudeGatewayProxy)
-import Agent.Dialect (Dialect, DialectId (CodexDialect), dialectId, dialectForId)
+import Agent.Dialect (Dialect, DialectId (CodexDialect), codexDialect, dialectId, dialectForId)
 import Agent.Error (ApiError)
 import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.Loop
@@ -521,12 +522,13 @@ prepareSessionCodeRuntime AgentSessionRequest
                 allowFullCodeMode
                 codeModeFallback
                 sessionModelInfo
+        modelTools = codexToolsForModel sessionModelInfo tools
         initializeCodeMode
             | not nativeCapabilities.nativeHostExtensions =
                 pure (Right Nothing)
             | otherwise =
                 codeModeRuntimeForBackend options.optCodeModeBackend
-                    codeModePlan sessionModelInfo tools
+                    codeModePlan sessionModelInfo modelTools
         codeModeFallbackWarning =
             case codeModePlan of
                 PlanImageGenerationCodeMode ->
@@ -553,13 +555,13 @@ prepareSessionCodeRuntime AgentSessionRequest
     let providerTools =
             filterStartupUnavailableTools
                 suppressDirectImageGeneration
-                tools
+                modelTools
         -- Keep toggle-disabled tools available for later refreshes, but never
         -- re-advertise a tool whose startup runtime failed to initialize.
         sessionRefreshTools =
             filterStartupUnavailableTools
                 suppressDirectImageGeneration
-                allTools
+                (codexToolsForModel sessionModelInfo allTools)
         executionLanguageInstructions =
             maybe "" (const (codeModeBackendInstructions options.optCodeModeBackend))
                 sessionCodeModeRuntime
@@ -619,7 +621,7 @@ prepareSessionCodeRuntime AgentSessionRequest
         sessionEnvironmentContext =
             (.catalogEnvironmentContext) <$> sessionCatalogSession
         sessionRegistryTools =
-            allTools
+            codexToolsForModel sessionModelInfo allTools
                 <> maybe [] (.codeModeWireTools) sessionCodeModeRuntime
         sessionBaseParams =
             requestParams provider model instructions wireSchemas effortText
@@ -775,9 +777,13 @@ buildSessionSubagentRuntime AgentSessionRequest
     , childModelAllowed
     , openaiChild
     , gatewayModelsRef
+    , stateDirectory
     } promptRuntime =
     SubagentRuntime
         { subagentOptions = options
+        , subagentCodexModelInfo =
+            \tokenProvider -> loadCodexCatalogModelInfo
+                stateDirectory OpenAIProvider codexDialect (Just tokenProvider)
         , subagentNetworkRecovery = startup.startupNetworkRecovery
         , subagentGhciEnabled = ghciEnabledRef
         , subagentBashEnabled = bashEnabledRef

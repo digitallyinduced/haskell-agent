@@ -1,6 +1,9 @@
 module Agent.Subagents.HistorySpec (spec) where
 
-import Agent.Responses.Types (ResponseRole(..))
+import Agent.Responses.Types
+    ( ResponseRole(..), ResponseItem(..), ResponseMessage(..)
+    , MessageContent(..), ResponseContentPart(..), InternalChatMetadata(..)
+    )
 import Agent.Subagents.History
 import Agent.Subagents.TestItems
 import Test.Hspec
@@ -82,7 +85,7 @@ spec = describe "Agent.Subagents.History" do
             trimDanglingToolSuffix items `shouldBe` [userItem "continued later"]
 
     describe "forkSubagentTranscript" do
-        it "forks all, none, or the requested number of recent turns" do
+        it "forks all or none and treats legacy positive counts as full history" do
             let items =
                     [ messageItem RoleUser "one"
                     , messageItem RoleAssistant "answer-one"
@@ -91,10 +94,54 @@ spec = describe "Agent.Subagents.History" do
                     ]
             forkSubagentTranscript Nothing items `shouldBe` items
             forkSubagentTranscript (Just "none") items `shouldBe` []
+            forkSubagentTranscript (Just "all") items `shouldBe` items
             forkSubagentTranscript (Just "1") items
-                `shouldBe` drop 2 items
+                `shouldBe` items
             forkSubagentTranscript (Just "18446744073709551617") items
                 `shouldBe` items
+
+        it "removes parent hints without dropping adjacent developer constraints" do
+            let metadata = InternalChatMetadata
+                    { turnId = Just "parent-turn"
+                    , createTime = Nothing
+                    , contentItemKinds = Just
+                        [ "multi_agent.role_instructions"
+                        , "repository.instructions"
+                        , "multi_agent.usage_hint"
+                        ]
+                    , executedToolCalls = Nothing
+                    }
+                message = ResponseMessage
+                    { messageId = Nothing
+                    , role = RoleDeveloper
+                    , content = MessageContentParts
+                        [ InputTextPart "You are the root agent." Nothing
+                        , InputTextPart "Use Nix for dependencies." Nothing
+                        , InputTextPart "Coordinate the root's children." Nothing
+                        ]
+                    , status = Nothing
+                    , phase = Nothing
+                    , passthrough = Just metadata
+                    }
+                retained = message
+                    { content = MessageContentParts
+                        [InputTextPart "Use Nix for dependencies." Nothing]
+                    , passthrough = Just metadata
+                        { contentItemKinds = Just ["repository.instructions"] }
+                    }
+                assignment = userItem "Inspect the protocol."
+            forkSubagentTranscript Nothing [MessageItem message, assignment]
+                `shouldBe` [MessageItem retained, assignment]
+
+        it "strips legacy developer hint tags but preserves quoted user content" do
+            let quoted = messageItem RoleUser "<multi_agent_role>quoted example</multi_agent_role>"
+                constraint = messageItem RoleDeveloper "Preserve existing changes."
+            forkSubagentTranscript Nothing
+                [ messageItem RoleDeveloper "<multi_agent_role>root</multi_agent_role>"
+                , messageItem RoleDeveloper "  <multi_agent_usage_hint>coordinate</multi_agent_usage_hint>"
+                , constraint
+                , quoted
+                ] `shouldBe` [constraint, quoted]
 
         it "does not inherit a tool call the parent is still running" do
             let complete = [messageItem RoleUser "one"]

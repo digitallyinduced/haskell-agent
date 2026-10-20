@@ -163,7 +163,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                 (Just "medium")
                 `shouldBe` ("gpt-5.6-luna", "medium")
 
-        it "keeps the Luna floor for bounded forks without an effort override" do
+        it "inherits the parent's effort for legacy numeric full-history forks" do
             sessionsRef <- newIORef Map.empty
             storeRootRef <- newIORef Nothing
             typesRef <- newIORef Map.empty
@@ -190,7 +190,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                     , collaborationInitialMessage = plainInterAgentContent "test task"
                     }
             lookupAgentReasoningEffort typesRef agentId
-                `shouldReturn` Nothing
+                `shouldReturn` Just "medium"
             let rootParams =
                     requestParams OpenAIProvider "gpt-6-sol" "" [] "medium"
             resolveChildModelAndEffort
@@ -198,8 +198,8 @@ spec = describe "Agent.CLI.SubagentStore" do
                 rootParams
                 "gpt-6-luna"
                 Nothing
-                Nothing
-                `shouldBe` ("gpt-6-luna", "high")
+                (Just "medium")
+                `shouldBe` ("gpt-6-luna", "medium")
 
         it "uses an authoritative resolved target for collaboration overrides" do
             sessionsRef <- newIORef Map.empty

@@ -16,39 +16,61 @@ import Agent.Responses.Types
     , ResponseItem(..)
     , ResponseMessage(..)
     , ResponseRole(..)
+    , InternalChatMetadata(..)
+    , MessageContent(..)
+    , ResponseContentPart(..)
     )
-import Agent.ToolArgs (readExactInt)
 import Data.List (dropWhileEnd, findIndex)
+import Data.Maybe (mapMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 
--- | The history a spawned child starts with. @fork_turns@ is @none@, a
--- positive number of the parent's most recent user turns, or (by default)
--- the parent's complete history.
+-- | Codex V2 forks either no history or the complete parent history. Legacy
+-- positive counts also mean full history; they no longer truncate context.
+-- Parent-local role and usage hints must not redefine the child's identity.
 forkSubagentTranscript :: Maybe Text -> [ResponseItem] -> [ResponseItem]
 forkSubagentTranscript forkTurns items =
-    let completeItems = trimDanglingToolSuffix items
+    let completeItems = trimDanglingToolSuffix (mapMaybe retainForkedItem items)
         normalized = Text.toLower . Text.strip <$> forkTurns
     in case normalized of
         Just "none" -> []
-        Just turns
-            | Just count <- readExactInt turns
-            , count > 0 -> takeRecentTurns count completeItems
         _ -> completeItems
 
-takeRecentTurns :: Int -> [ResponseItem] -> [ResponseItem]
-takeRecentTurns count items =
-    case drop (max 0 (length starts - count)) starts of
-        start : _ -> drop start items
-        [] -> items
+retainForkedItem :: ResponseItem -> Maybe ResponseItem
+retainForkedItem (MessageItem message)
+    | message.role == RoleDeveloper = MessageItem <$> retainForkedMessage message
+retainForkedItem item = Just item
+
+retainForkedMessage :: ResponseMessage -> Maybe ResponseMessage
+retainForkedMessage message = case message.content of
+    MessageContentText text
+        | any parentKind (maybe [] id kinds) || parentText text -> Nothing
+        | otherwise -> Just message
+    MessageContentParts parts ->
+        let aligned = maybe False ((== length parts) . length) kinds
+            annotated = zip
+                (if aligned then maybe [] (map Just) kinds else repeat Nothing)
+                parts
+            retained = filter (not . parentPart) annotated
+            metadata = case message.passthrough of
+                Just value | aligned -> Just value
+                    { contentItemKinds = Just [kind | (Just kind, _) <- retained] }
+                value -> value
+        in if null retained then Nothing else Just message
+            { content = MessageContentParts (map snd retained)
+            , passthrough = metadata
+            }
   where
-    starts =
-        [ index
-        | (index, MessageItem message) <- zip [0 :: Int ..] items
-        , message.role == RoleUser
-        ]
+    kinds = message.passthrough >>= (.contentItemKinds)
+    parentKind kind = kind `elem`
+        ["multi_agent.role_instructions", "multi_agent.usage_hint"]
+    parentText text = any (`Text.isPrefixOf` Text.stripStart text)
+        ["<multi_agent_role>", "<multi_agent_usage_hint>"]
+    parentPart (kind, part) = maybe False parentKind kind || case part of
+        InputTextPart text _ -> parentText text
+        _ -> False
 
 -- | Remove an incomplete tool-call suffix from a live transcript snapshot.
 --
