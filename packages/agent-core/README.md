@@ -42,6 +42,13 @@ Provider-neutral infrastructure shared by the harness transports:
   when a background command it owns completes, and drops tool calls a failed
   turn left without output. The model-facing collaboration tools live in
   `agent-tools` (`Agent.Tools.MultiAgents`).
+- `Agent.Subagents.Error` defines `CoordinationError` for registry spawn and
+  delivery failures. Admission errors retain capacity limits and distinguish
+  closed registries from aborted turns; startup errors retain their stage and
+  rejection cause. A released execution slot can resolve capacity exhaustion,
+  while a depth or per-turn spawn limit requires a different delegation plan.
+  Use `coordinationErrorText` at a display or tool boundary. Lookup,
+  restoration, interruption, and closure keep their existing text contracts.
 - Messages to a child running through `runChildTurn` enter its active steering
   queue. They can redirect an unfinished model request and are included in the
   next request after a tool completes. Provider acknowledgement consumes the

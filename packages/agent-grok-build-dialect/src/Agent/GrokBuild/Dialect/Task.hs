@@ -32,6 +32,7 @@ import Agent.OsPath (fromText, toText)
 import Agent.Subagents
     ( SubagentId(..)
     , SubagentStatus(..)
+    , coordinationErrorText
     , defaultMaxDepth
     , defaultWaitTimeoutMs
     , getStatus
@@ -62,6 +63,7 @@ import Agent.Tools.Types
 import Control.Concurrent.MVar (modifyMVar, newMVar)
 import Control.Exception.Safe (mask, onException)
 import Control.Monad (void)
+import Data.Bifunctor (first)
 import Data.IORef
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -403,7 +405,7 @@ spawnFresh childCwd worktree ctx typesRef args resolvedModel = mask \restore -> 
             (Just args.description))
         `onException` cleanupWorktreeQuietly ownedWorktree
     case result of
-        Left err -> cleanupFailedWorktree ownedWorktree err
+        Left err -> cleanupFailedWorktree ownedWorktree (coordinationErrorText err)
         Right agentId -> restore do
             if args.runInBackground
                 then pure $ Right $ formatTaskStarted agentId args worktreePath
@@ -517,7 +519,7 @@ resumeTask ctx typesRef args resumeId = do
                                 ctx.multiTaskPath agentId
                                 (plainInterAgentContent args.prompt) False
                             case sent of
-                                Left err -> pure (Left err)
+                                Left err -> pure (Left (coordinationErrorText err))
                                 Right _ ->
                                     if args.runInBackground
                                         then pure $ Right $ formatTaskStarted agentId args Nothing
@@ -567,7 +569,7 @@ spawnManagedGrokSubagent childCwd ctx typesRef spec prompt nickname
         case resolvedSpec of
             Left err -> pure (Left err)
             Right (preparedSpec, resolvedModel) ->
-                spawnSubagentWithCwdPreparedForTurn
+                first coordinationErrorText <$> spawnSubagentWithCwdPreparedForTurn
                     ctx.multiRegistry
                     Nothing
                     childCwd

@@ -23,6 +23,7 @@ import Agent.Subagents
     , rootSubagentsRegistry
     , RootTurnId(..)
     , SubagentStatus(..)
+    , coordinationErrorText
     , defaultWaitTimeoutMs
     , interruptSubagent
     , requestSubagentSuspension
@@ -78,6 +79,7 @@ import Control.Concurrent.MVar (modifyMVar, newMVar)
 import Control.Exception.Safe (mask, onException)
 import Control.Monad (void)
 import Data.Aeson (object, (.=))
+import Data.Bifunctor (first)
 import Data.List (sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -405,7 +407,7 @@ spawnInWorkspace ctx call args resolvedModel childCwd worktree = mask \restore -
             Nothing)
         `onException` cleanupWorktreeQuietly ownedWorktree
     case result of
-        Left err -> cleanupFailedWorktree ownedWorktree err
+        Left err -> cleanupFailedWorktree ownedWorktree (coordinationErrorText err)
         Right (_agentId, path) ->
             pure $ Right $ renderSpawnResult path ownedWorktree
 
@@ -683,7 +685,7 @@ runSendMessage ctx call args
                     RootMessageTarget ->
                         sendToRoot ctx call (messageContent call args.message)
                     AgentMessageTarget agentId rootTurnId ->
-                        maybe (queueMessageFromForTurnWithOrigin
+                        maybe (first coordinationErrorText <$> queueMessageFromForTurnWithOrigin
                             ctx.multiRegistry rootTurnId (Just call.callId)
                             ctx.multiTaskPath agentId
                             (messageContent call args.message))
@@ -720,7 +722,7 @@ runFollowup ctx call args
                     RootMessageTarget ->
                         pure (Left "followup_task cannot target the root agent; use send_message")
                     AgentMessageTarget agentId rootTurnId ->
-                        maybe (sendInputMessageForTurnWithOrigin
+                        maybe (first coordinationErrorText <$> sendInputMessageForTurnWithOrigin
                             ctx.multiRegistry rootTurnId (Just call.callId)
                             ctx.multiTaskPath agentId
                             (messageContent call args.message) False)

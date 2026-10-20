@@ -91,6 +91,68 @@ spec = describe "Agent.Subagents" do
         it "keeps pending and running agents non-final" do
             map isFinalStatus [Pending, Running] `shouldBe` [False, False]
 
+    describe "coordination errors" do
+        it "reports preparation failure and permits reusing its admission and task path" do
+            bracket
+                (newSubagentRegistry (defaultSubagentConfig { maxConcurrent = 1 })
+                    (fromFilePath ".") (\_ _ _ _ -> pure (completedResult "done"))
+                    (\_ _ -> pure ()))
+                closeSubagentRegistry \registry -> do
+                    failed <- spawnSubagentAtWithCwdPrepared registry (fromFilePath ".")
+                        (\_ -> fail "preparation unavailable") Nothing taskPathRoot 0 "worker"
+                        (plainInterAgentContent "task") Nothing
+                    case failed of
+                        Left failure@(CoordinationStartupFailed PreparationStage detail) -> do
+                            detail `shouldSatisfy` Text.isInfixOf "preparation unavailable"
+                            coordinationErrorText failure `shouldSatisfy`
+                                Text.isPrefixOf "Failed to prepare subagent: "
+                        other -> expectationFailure (show other)
+                    Right (replacement, _) <- spawnSubagentAt registry Nothing taskPathRoot 0
+                        "worker" (plainInterAgentContent "replacement") Nothing
+                    (statuses, _) <- waitSubagents registry [replacement] 15000
+                    Map.lookup replacement statuses `shouldBe` Just (Completed (Just "done"))
+
+        it "retains invalid request and task-path conflict classifications" do
+            bracket
+                (newSubagentRegistry defaultSubagentConfig (fromFilePath ".")
+                    (\_ _ _ _ -> pure (completedResult "done")) (\_ _ -> pure ()))
+                closeSubagentRegistry \registry -> do
+                    invalid <- spawnSubagentAt registry Nothing taskPathRoot 0 "Invalid"
+                        (plainInterAgentContent "task") Nothing
+                    invalid `shouldBe` Left (CoordinationInvalidTaskName
+                        "task_name must use lowercase letters, digits, and underscores only")
+                    Right (worker, path) <- spawnSubagentAt registry Nothing taskPathRoot 0
+                        "worker" (plainInterAgentContent "task") Nothing
+                    _ <- waitSubagents registry [worker] 15000
+                    spawnSubagentAt registry Nothing taskPathRoot 0 "worker"
+                        (plainInterAgentContent "task") Nothing
+                        `shouldReturn` Left (CoordinationTaskPathOccupied path)
+                    spawnSubagentAt registry Nothing path 1 "child"
+                        (plainInterAgentContent "task") Nothing
+                        `shouldReturn` Left CoordinationInvalidParentContext
+
+        it "retains the target identity for unknown and closed message recipients" do
+            bracket
+                (newSubagentRegistry defaultSubagentConfig (fromFilePath ".")
+                    (\_ _ _ _ -> pure (completedResult "done")) (\_ _ -> pure ()))
+                closeSubagentRegistry \registry -> do
+                    let missing = SubagentId "missing-agent"
+                    sendInput registry missing "task" False
+                        `shouldReturn` Left (CoordinationUnknownAgent missing)
+                    queueMessage registry missing "task"
+                        `shouldReturn` Left (CoordinationUnknownAgent missing)
+                    Right worker <- spawnSubagent registry Nothing 0 "task" Nothing
+                    _ <- waitSubagents registry [worker] 15000
+                    _ <- closeSubagent registry worker
+                    queueMessage registry worker "task"
+                        `shouldReturn` Left (CoordinationAgentClosed worker)
+
+        it "preserves legacy suspended admission text for each typed cause" do
+            let failures = map CoordinationSuspendedAdmissionRejected
+                    [AdmissionRegistryClosed, AdmissionTurnAborted, AdmissionCapacityExceeded 3]
+            map coordinationErrorText failures `shouldBe` replicate 3
+                "Suspended agent remains queued: registry closed, turn aborted, or concurrency capacity exhausted."
+
     it "assigns distinct message identities and retains tool-call and root-turn origin" do
         received <- newTQueueIO
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath ".")
@@ -152,8 +214,10 @@ spec = describe "Agent.Subagents" do
         takeMVar entered
         closeSubagentRegistry registry
         putMVar release ()
-        Async.wait spawning `shouldReturn`
-            Left "Subagent closed before its supervisor started."
+        result <- Async.wait spawning
+        result `shouldSatisfy` \case
+            Left (CoordinationStartupRejected _ StartupRegistryClosed) -> True
+            _ -> False
         readIORef ran `shouldReturn` False
 
     it "releases a prepared lease when the supervisor cannot start" do
@@ -173,8 +237,10 @@ spec = describe "Agent.Subagents" do
         takeMVar entered
         closeSubagentRegistry registry
         putMVar release ()
-        Async.wait spawning `shouldReturn`
-            Left "Subagent closed before its supervisor started."
+        result <- Async.wait spawning
+        result `shouldSatisfy` \case
+            Left (CoordinationStartupRejected _ StartupRegistryClosed) -> True
+            _ -> False
         readIORef releases `shouldReturn` 1
         readIORef ran `shouldReturn` False
 
@@ -211,13 +277,11 @@ spec = describe "Agent.Subagents" do
         closeSubagent registry agentId `shouldReturn` Right Pending
         putMVar release ()
         Async.wait spawning `shouldReturn`
-            Left "Subagent closed before its supervisor started."
+            Left (CoordinationStartupRejected agentId StartupAgentClosed)
 
         Right _ <- spawnSubagent registry Nothing 0 "replacement" Nothing
         extra <- spawnSubagent registry Nothing 0 "extra" Nothing
-        extra `shouldSatisfy` \case
-            Left err -> "Concurrent subagent limit" `Text.isInfixOf` err
-            Right _ -> False
+        extra `shouldBe` Left (CoordinationAdmissionRejected (AdmissionCapacityExceeded 1))
         closeSubagentRegistry registry
 
     it "rejects a prepared spawn after its root turn is aborted" do
@@ -243,7 +307,7 @@ spec = describe "Agent.Subagents" do
         getStatus registry agentId `shouldReturn` Interrupted
         putMVar release ()
         Async.wait spawning `shouldReturn`
-            Left "Subagent closed before its supervisor started."
+            Left (CoordinationStartupRejected agentId StartupTurnAborted)
         readIORef leaseReleases `shouldReturn` 1
         getStatus registry agentId `shouldReturn` NotFound
         closeSubagentRegistry registry
@@ -284,9 +348,7 @@ spec = describe "Agent.Subagents" do
         Right level1 <- spawnSubagent registry Nothing 0 "one" Nothing
         _ <- waitSubagents registry [level1] 15000
         result <- spawnSubagent registry (Just level1) 1 "two" Nothing
-        result `shouldBe`
-            Left
-                "Agent depth limit reached (maximum depth 1). Solve the task yourself."
+        result `shouldBe` Left (CoordinationDepthLimitExceeded 1)
 
     it "caps cumulative new agents per root turn after agents finish" do
         let config = defaultSubagentConfig
@@ -304,9 +366,11 @@ spec = describe "Agent.Subagents" do
         Right second <- spawnForTurn "second"
         _ <- waitSubagents registry [second] 15000
         third <- spawnForTurn "third"
-        third `shouldBe`
-            Left
-                "Subagent budget reached for this turn (maximum 2). Solve the remaining task yourself."
+        third `shouldBe` Left (CoordinationTurnBudgetExceeded 2)
+        nextTurn <- beginRootTurn registry
+        Right replacement <- spawnSubagentWithCwdForTurn registry (Just nextTurn)
+            (fromFilePath ".") Nothing 0 "next-turn" Nothing
+        _ <- waitSubagents registry [replacement] 15000
         closeSubagentRegistry registry
 
     it "releases maxConcurrent capacity when agents finish" do
@@ -324,9 +388,7 @@ spec = describe "Agent.Subagents" do
             (\_ _ -> pure ())
         Right first <- spawnSubagent registry Nothing 0 "a" Nothing
         second <- spawnSubagent registry Nothing 0 "b" Nothing
-        second `shouldSatisfy` \case
-            Left err -> "Concurrent subagent limit" `Text.isInfixOf` err
-            Right _ -> False
+        second `shouldBe` Left (CoordinationAdmissionRejected (AdmissionCapacityExceeded 1))
         atomically $ writeTVar gate True
         _ <- waitSubagents registry [first] 15000
         Right _ <- spawnSubagent registry Nothing 0 "c" Nothing
@@ -339,17 +401,13 @@ spec = describe "Agent.Subagents" do
             (\_ _ -> pure ())
         Right _ <- spawnSubagent registry Nothing 0 "a" Nothing
         rejected <- spawnSubagent registry Nothing 0 "b" Nothing
-        rejected `shouldSatisfy` \case
-            Left err -> "Concurrent subagent limit" `Text.isInfixOf` err
-            Right _ -> False
+        rejected `shouldBe` Left (CoordinationAdmissionRejected (AdmissionCapacityExceeded 1))
         setMaxConcurrent registry 2
         config' <- subagentConfig registry
         config'.maxConcurrent `shouldBe` 2
         Right _ <- spawnSubagent registry Nothing 0 "c" Nothing
         extra <- spawnSubagent registry Nothing 0 "d" Nothing
-        extra `shouldSatisfy` \case
-            Left err -> "Concurrent subagent limit" `Text.isInfixOf` err
-            Right _ -> False
+        extra `shouldBe` Left (CoordinationAdmissionRejected (AdmissionCapacityExceeded 2))
         closeSubagentRegistry registry
 
     it "supports nested spawn when depth is unlimited" do
@@ -423,7 +481,7 @@ spec = describe "Agent.Subagents" do
         _ <- closeSubagent registry parent
         result <- spawnSubagentAt registry (Just parent) parentPath 1 "child"
             (plainInterAgentContent "child") Nothing
-        result `shouldBe` Left "Parent subagent is closed or missing."
+        result `shouldBe` Left (CoordinationParentUnavailable parent)
 
     it "waitSubagents returns when any target finishes" do
         gate <- newTVarIO False
@@ -612,9 +670,7 @@ spec = describe "Agent.Subagents" do
         -- The completed idle agent no longer owns a slot, while holder owns the
         -- only active slot.
         result <- sendInput registry idle "follow-up" False
-        result `shouldSatisfy` \case
-            Left err -> "Concurrent subagent limit" `Text.isInfixOf` err
-            Right _ -> False
+        result `shouldBe` Left (CoordinationAdmissionRejected (AdmissionCapacityExceeded 1))
         status <- getStatus registry idle
         status `shouldBe` Completed (Just "idle")
         atomically $ writeTVar gate True
@@ -830,9 +886,9 @@ spec = describe "Agent.Subagents" do
         restored `shouldBe` Left "Subagent registry is closed."
         getStatus registry agentId `shouldReturn` Closed
         queueMessage registry agentId "late"
-            `shouldReturn` Left "Subagent registry is closed."
+            `shouldReturn` Left (CoordinationAdmissionRejected AdmissionRegistryClosed)
         sendInput registry agentId "late" False
-            `shouldReturn` Left "Subagent registry is closed."
+            `shouldReturn` Left (CoordinationAdmissionRejected AdmissionRegistryClosed)
     it "restores persisted lifecycle status and marks abandoned work interrupted" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)
@@ -957,7 +1013,7 @@ spec = describe "Agent.Subagents" do
         _ <- closeSubagent registry agentId
         readIORef settled `shouldReturn` [Completed (Just "first"), Closed]
         sendInput registry agentId "should-not-run" False
-            `shouldReturn` Left "agent is closed"
+            `shouldReturn` Left (CoordinationAgentClosed agentId)
         getStatus registry agentId `shouldReturn` Closed
 
     it "reset cancels old supervisors and reopens the registry" do
@@ -1001,7 +1057,7 @@ spec = describe "Agent.Subagents" do
         _ <- waitSubagents registry [parent] 15000
         _ <- closeSubagent registry parent
         result <- spawnSubagent registry (Just parent) 1 "child" Nothing
-        result `shouldBe` Left "Parent subagent is closed or missing."
+        result `shouldBe` Left (CoordinationParentUnavailable parent)
 
     it "restored agents receive a fresh cancellation flag" do
         seenCancelled <- newIORef ([] :: [Bool])
@@ -1183,7 +1239,7 @@ spec = describe "Agent.Subagents" do
             `shouldBe` Just (Completed (Just "unrelated"))
         rejected <- spawnSubagentWithCwdForTurn registry (Just ownedTurn)
             (fromFilePath "/tmp") Nothing 0 "too-late" Nothing
-        rejected `shouldBe` Left "Root turn was aborted."
+        rejected `shouldBe` Left (CoordinationAdmissionRejected AdmissionTurnAborted)
         closeSubagentRegistry registry
 
     it "can restart an interrupted agent in a later root turn" do
@@ -1268,7 +1324,7 @@ spawnPreparedAt
     :: SubagentRegistry
     -> MVar ()
     -> MVar ()
-    -> IO (Either Text (SubagentId, TaskPath))
+    -> IO (Either CoordinationError (SubagentId, TaskPath))
 spawnPreparedAt registry entered release =
     spawnSubagentAtWithCwdPrepared registry (fromFilePath "/tmp")
         (blockPreparation entered release)

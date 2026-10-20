@@ -19,6 +19,7 @@ import Agent.InterAgentMessage
     )
 import System.OsPath (OsPath)
 import Agent.Subagents.Format (isFinalStatus)
+import Agent.Subagents.Error
 import Agent.Subagents.Types
     ( RootTurnId(..)
     , SubagentId(..)
@@ -101,7 +102,7 @@ sendInput
     -> SubagentId
     -> Text
     -> Bool
-    -> IO (Either Text Text)
+    -> IO (Either CoordinationError Text)
 sendInput registry agentId message interrupt =
     sendInputMessage registry taskPathRoot agentId
         (plainInterAgentContent message) interrupt
@@ -112,7 +113,7 @@ sendInputMessage
     -> SubagentId
     -> InterAgentMessageContent
     -> Bool
-    -> IO (Either Text Text)
+    -> IO (Either CoordinationError Text)
 sendInputMessage registry senderPath agentId content interrupt = do
     sendInputMessageForTurn registry Nothing senderPath agentId content interrupt
 
@@ -123,7 +124,7 @@ sendInputMessageForTurn
     -> SubagentId
     -> InterAgentMessageContent
     -> Bool
-    -> IO (Either Text Text)
+    -> IO (Either CoordinationError Text)
 sendInputMessageForTurn registry rootTurnId senderPath agentId content interrupt =
     sendInputMessageForTurnWithOrigin registry rootTurnId Nothing
         senderPath agentId content interrupt
@@ -136,20 +137,20 @@ sendInputMessageForTurnWithOrigin
     -> SubagentId
     -> InterAgentMessageContent
     -> Bool
-    -> IO (Either Text Text)
+    -> IO (Either CoordinationError Text)
 sendInputMessageForTurnWithOrigin registry rootTurnId originToolCallId senderPath agentId content interrupt = do
     metadata <- newInterAgentMessageMetadata originToolCallId
         (Text.pack . show . (.unRootTurnId) <$> rootTurnId)
     withMVar registry.registryLifecycle \_ -> do
         closed <- atomically $ readTVar registry.registryClosed
         if closed
-            then pure (Left "Subagent registry is closed.")
+            then pure (Left (CoordinationAdmissionRejected AdmissionRegistryClosed))
             else do
                 mrecord <- atomically $
                     Map.lookup agentId <$> readTVar registry.registryAgents
                 case mrecord of
                     Nothing ->
-                        pure (Left ("unknown agent id: " <> agentId.unSubagentId))
+                        pure (Left (CoordinationUnknownAgent agentId))
                     Just record -> do
                         status <- atomically $
                             phaseStatus <$> readTVar record.recordPhase
@@ -165,8 +166,8 @@ sendInputMessageForTurnWithOrigin registry rootTurnId originToolCallId senderPat
                                     }
                                 }
                         case status of
-                            Closed -> pure (Left "agent is closed")
-                            NotFound -> pure (Left "agent not found")
+                            Closed -> pure (Left (CoordinationAgentClosed agentId))
+                            NotFound -> pure (Left (CoordinationMissingAgent agentId))
                             Running -> queue record work
                             Pending -> queue record work
                             Suspended{} -> resumeSuspendedWork registry record work
@@ -175,7 +176,7 @@ sendInputMessageForTurnWithOrigin registry rootTurnId originToolCallId senderPat
     queue
         :: SubagentRecord
         -> SubagentWork
-        -> IO (Either Text Text)
+        -> IO (Either CoordinationError Text)
     queue record work = do
         queued <- atomically do
             aborted <- isRootTurnAborted registry rootTurnId
@@ -185,18 +186,18 @@ sendInputMessageForTurnWithOrigin registry rootTurnId originToolCallId senderPat
         whenIO (queued && interrupt) (requestCancel record.recordCancel)
         pure $ if queued
             then Right "queued"
-            else Left "Root turn was aborted."
+            else Left (CoordinationAdmissionRejected AdmissionTurnAborted)
 
     restart
         :: SubagentRecord
         -> SubagentWork
-        -> IO (Either Text Text)
+        -> IO (Either CoordinationError Text)
     restart record work = do
         resetCancel record.recordCancel
         admitted <- atomically do
             aborted <- isRootTurnAborted registry rootTurnId
             if aborted
-                then pure (Left "Root turn was aborted.")
+                then pure (Left (CoordinationAdmissionRejected AdmissionTurnAborted))
                 else scheduleIdleWork registry record work
         case admitted of
             Left err -> pure (Left err)
@@ -205,7 +206,7 @@ sendInputMessageForTurnWithOrigin registry rootTurnId originToolCallId senderPat
 -- | Admit due work under the same lifecycle lock and shared execution budget
 -- as explicit follow-ups. A repeated scheduler tick cannot admit it twice.
 -- Hosts restore persisted agents before calling this operation.
-resumeDueSubagents :: SubagentRegistry -> UTCTime -> IO [(SubagentId, Either Text Text)]
+resumeDueSubagents :: SubagentRegistry -> UTCTime -> IO [(SubagentId, Either CoordinationError Text)]
 resumeDueSubagents registry now = withMVar registry.registryLifecycle \_ -> do
     records <- atomically $ Map.elems <$> readTVar registry.registryAgents
     fmap concat $ mapM resume records
@@ -241,18 +242,21 @@ resumeDueSubagents registry now = withMVar registry.registryLifecycle \_ -> do
                     Nothing -> pure []
             _ -> pure []
 
-resumeSuspendedWork :: SubagentRegistry -> SubagentRecord -> SubagentWork -> IO (Either Text Text)
+resumeSuspendedWork :: SubagentRegistry -> SubagentRecord -> SubagentWork -> IO (Either CoordinationError Text)
 resumeSuspendedWork registry record work = do
     admission <- atomically do
         closed <- readTVar registry.registryClosed
         live <- readTVar registry.registryLiveCount
         config <- readTVar registry.registryConfig
         aborted <- isRootTurnAborted registry work.workRootTurnId
-        pure (not closed && not aborted && live < config.maxConcurrent)
-    if not admission
-        then pure (Left "Suspended agent remains queued: registry closed, turn aborted, or concurrency capacity exhausted.")
-        else persistResume registry record.recordId work.workMessage >>= \case
-            Left err -> pure (Left err)
+        pure $ if closed then Left AdmissionRegistryClosed
+            else if aborted then Left AdmissionTurnAborted
+            else if live >= config.maxConcurrent then Left (AdmissionCapacityExceeded config.maxConcurrent)
+            else Right ()
+    case admission of
+        Left failure -> pure (Left (CoordinationSuspendedAdmissionRejected failure))
+        Right () -> persistResume registry record.recordId work.workMessage >>= \case
+            Left err -> pure (Left (CoordinationResumePersistenceFailed err))
             Right () -> do
                 resetCancel record.recordCancel
                 result <- atomically $ scheduleIdleWork registry record work
@@ -457,7 +461,7 @@ restoreSubagentWithCwd
         (Completed Nothing) \agents ->
             resolveParentSTM agents parentId taskPathRoot (max 0 (depth - 1))
                 >>= \case
-                    Left err -> pure (Left err)
+                    Left err -> pure (Left (coordinationErrorText err))
                     Right (parentPath, actualDepth) ->
                         pure $
                             fmap
@@ -562,7 +566,7 @@ restoreSubagentResolvedWithCwd
                 case restarted of
                     Left err -> do
                         atomically $ writeTVar record.recordPhase AgentClosed
-                        pure (Left err)
+                        pure (Left (coordinationErrorText err))
                     Right () -> pure (Right agentId)
 
     restoreMissing = do
@@ -622,7 +626,7 @@ restoreSubagentResolvedWithCwd
                 startRecordSupervisor registry record mempty >>= \case
                     Left err -> do
                         rollbackAdmission registry record
-                        pure (Left err)
+                        pure (Left (coordinationErrorText err))
                     Right () -> pure (Right agentId)
 
 getStatus :: SubagentRegistry -> SubagentId -> IO SubagentStatus
@@ -779,7 +783,7 @@ queueMessage
     :: SubagentRegistry
     -> SubagentId
     -> Text
-    -> IO (Either Text Text)
+    -> IO (Either CoordinationError Text)
 queueMessage registry agentId message =
     queueMessageFrom registry taskPathRoot agentId
         (plainInterAgentContent message)
@@ -789,7 +793,7 @@ queueMessageFrom
     -> TaskPath
     -> SubagentId
     -> InterAgentMessageContent
-    -> IO (Either Text Text)
+    -> IO (Either CoordinationError Text)
 queueMessageFrom registry senderPath agentId content = do
     queueMessageFromForTurn registry Nothing senderPath agentId content
 
@@ -799,7 +803,7 @@ queueMessageFromForTurn
     -> TaskPath
     -> SubagentId
     -> InterAgentMessageContent
-    -> IO (Either Text Text)
+    -> IO (Either CoordinationError Text)
 queueMessageFromForTurn registry rootTurnId senderPath agentId content =
     queueMessageFromForTurnWithOrigin registry rootTurnId Nothing
         senderPath agentId content
@@ -811,7 +815,7 @@ queueMessageFromForTurnWithOrigin
     -> TaskPath
     -> SubagentId
     -> InterAgentMessageContent
-    -> IO (Either Text Text)
+    -> IO (Either CoordinationError Text)
 queueMessageFromForTurnWithOrigin registry rootTurnId originToolCallId senderPath agentId content = do
     metadata <- newInterAgentMessageMetadata originToolCallId
         (Text.pack . show . (.unRootTurnId) <$> rootTurnId)
@@ -820,19 +824,18 @@ queueMessageFromForTurnWithOrigin registry rootTurnId originToolCallId senderPat
             closed <- readTVar registry.registryClosed
             aborted <- isRootTurnAborted registry rootTurnId
             if closed
-                then pure (Left "Subagent registry is closed.")
+                then pure (Left (CoordinationAdmissionRejected AdmissionRegistryClosed))
                 else if aborted
-                    then pure (Left "Root turn was aborted.")
+                    then pure (Left (CoordinationAdmissionRejected AdmissionTurnAborted))
                     else do
                         agents <- readTVar registry.registryAgents
                         case Map.lookup agentId agents of
                             Nothing ->
-                                pure (Left
-                                    ("unknown agent id: " <> agentId.unSubagentId))
+                                pure (Left (CoordinationUnknownAgent agentId))
                             Just record -> do
                                 status <- phaseStatus <$> readTVar record.recordPhase
                                 if status == Closed
-                                    then pure (Left "agent is closed")
+                                    then pure (Left (CoordinationAgentClosed agentId))
                                     else do
                                         let work = SubagentWork
                                                 { workRootTurnId = rootTurnId

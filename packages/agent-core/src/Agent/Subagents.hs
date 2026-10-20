@@ -1,6 +1,7 @@
 -- | Stable public façade for nestable subagent runtimes.
 module Agent.Subagents
     ( module Agent.Subagents.Child
+    , module Agent.Subagents.Error
     , module Agent.Subagents.Format
     , module Agent.Subagents.History
     , module Agent.Subagents.Loop
@@ -9,6 +10,7 @@ module Agent.Subagents
     ) where
 
 import Agent.Subagents.Child
+import Agent.Subagents.Error
 import Agent.Subagents.Format
 import Agent.Subagents.History
 import Agent.Subagents.Loop

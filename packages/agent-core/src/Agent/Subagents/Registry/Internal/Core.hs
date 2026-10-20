@@ -21,6 +21,7 @@ import Agent.InterAgentMessage
 import Agent.Loop (LoopError(..), LoopEvent, LoopResult(..))
 import System.OsPath (OsPath)
 import Agent.Subagents.Format (formatCompletionNotice, isFinalStatus)
+import Agent.Subagents.Error
 import Agent.Subagents.Types
     ( RunSubagent
     , RootTurnId(..)
@@ -221,7 +222,7 @@ spawnSubagent
     -> Int
     -> Text
     -> Maybe Text
-    -> IO (Either Text SubagentId)
+    -> IO (Either CoordinationError SubagentId)
 spawnSubagent registry =
     spawnSubagentWithCwd registry registry.registryCwd
 
@@ -232,7 +233,7 @@ spawnSubagentWithCwd
     -> Int
     -> Text
     -> Maybe Text
-    -> IO (Either Text SubagentId)
+    -> IO (Either CoordinationError SubagentId)
 spawnSubagentWithCwd registry =
     spawnSubagentWithCwdForTurn registry Nothing
 
@@ -244,7 +245,7 @@ spawnSubagentWithCwdForTurn
     -> Int
     -> Text
     -> Maybe Text
-    -> IO (Either Text SubagentId)
+    -> IO (Either CoordinationError SubagentId)
 spawnSubagentWithCwdForTurn registry rootTurnId childCwd =
     spawnSubagentWithCwdPreparedForTurn
         registry rootTurnId childCwd (\_ -> pure mempty)
@@ -258,7 +259,7 @@ spawnSubagentWithCwdPrepared
     -> Int
     -> Text
     -> Maybe Text
-    -> IO (Either Text SubagentId)
+    -> IO (Either CoordinationError SubagentId)
 spawnSubagentWithCwdPrepared registry =
     spawnSubagentWithCwdPreparedForTurn registry Nothing
 
@@ -271,7 +272,7 @@ spawnSubagentWithCwdPreparedForTurn
     -> Int
     -> Text
     -> Maybe Text
-    -> IO (Either Text SubagentId)
+    -> IO (Either CoordinationError SubagentId)
 spawnSubagentWithCwdPreparedForTurn
         registry rootTurnId childCwd beforeStart
         parentId parentDepth message nickname = do
@@ -291,7 +292,7 @@ spawnSubagentAt
     -> Text
     -> InterAgentMessageContent
     -> Maybe Text
-    -> IO (Either Text (SubagentId, TaskPath))
+    -> IO (Either CoordinationError (SubagentId, TaskPath))
 spawnSubagentAt registry =
     spawnSubagentAtForTurn registry Nothing
 
@@ -304,7 +305,7 @@ spawnSubagentAtForTurn
     -> Text
     -> InterAgentMessageContent
     -> Maybe Text
-    -> IO (Either Text (SubagentId, TaskPath))
+    -> IO (Either CoordinationError (SubagentId, TaskPath))
 spawnSubagentAtForTurn registry rootTurnId =
     spawnSubagentAtPreparedForTurn registry rootTurnId (\_ -> pure mempty)
 
@@ -318,7 +319,7 @@ spawnSubagentAtPreparedForTurn
     -> Text
     -> InterAgentMessageContent
     -> Maybe Text
-    -> IO (Either Text (SubagentId, TaskPath))
+    -> IO (Either CoordinationError (SubagentId, TaskPath))
 spawnSubagentAtPreparedForTurn registry rootTurnId beforeStart =
     spawnSubagentAtWithCwdPreparedForTurn
         registry rootTurnId registry.registryCwd beforeStart
@@ -333,7 +334,7 @@ spawnSubagentAtWithCwdPrepared
     -> Text
     -> InterAgentMessageContent
     -> Maybe Text
-    -> IO (Either Text (SubagentId, TaskPath))
+    -> IO (Either CoordinationError (SubagentId, TaskPath))
 spawnSubagentAtWithCwdPrepared registry =
     spawnSubagentAtWithCwdPreparedForTurn registry Nothing
 
@@ -348,7 +349,7 @@ spawnSubagentAtWithCwdPreparedForTurn
     -> Text
     -> InterAgentMessageContent
     -> Maybe Text
-    -> IO (Either Text (SubagentId, TaskPath))
+    -> IO (Either CoordinationError (SubagentId, TaskPath))
 spawnSubagentAtWithCwdPreparedForTurn
         registry rootTurnId childCwd beforeStart
         parentId parentPath parentDepth taskName content nickname =
@@ -368,7 +369,7 @@ spawnSubagentAtWithCwdPreparedForTurnWithOrigin
     -> Text
     -> InterAgentMessageContent
     -> Maybe Text
-    -> IO (Either Text (SubagentId, TaskPath))
+    -> IO (Either CoordinationError (SubagentId, TaskPath))
 spawnSubagentAtWithCwdPreparedForTurnWithOrigin
         registry rootTurnId originToolCallId childCwd beforeStart
         parentId parentPath parentDepth taskName content nickname = do
@@ -390,7 +391,7 @@ spawnSubagentAtWithIdPreparedForTurn
     -> Text
     -> InterAgentMessageContent
     -> Maybe Text
-    -> IO (Either Text (SubagentId, TaskPath))
+    -> IO (Either CoordinationError (SubagentId, TaskPath))
 spawnSubagentAtWithIdPreparedForTurn
         registry rootTurnId originToolCallId childCwd beforeStart agentId
         parentId requestedParentPath requestedParentDepth taskName content nickname = do
@@ -406,9 +407,9 @@ spawnSubagentAtWithIdPreparedForTurn
         closed <- readTVar registry.registryClosed
         aborted <- isRootTurnAborted registry rootTurnId
         if closed
-            then pure (Left "Subagent registry is closed.")
+            then pure (Left (CoordinationAdmissionRejected AdmissionRegistryClosed))
             else if aborted
-                then pure (Left "Root turn was aborted.")
+                then pure (Left (CoordinationAdmissionRejected AdmissionTurnAborted))
                 else do
                     agents <- readTVar registry.registryAgents
                     parent <- resolveParentSTM
@@ -428,31 +429,20 @@ spawnSubagentAtWithIdPreparedForTurn
                                             else Nothing
                                 _ -> pure Nothing
                             case (budgetExceeded, config.maxDepth) of
-                                (Just limit, _) -> pure $ Left
-                                    ("Subagent budget reached for this turn (maximum "
-                                        <> Text.pack (show limit)
-                                        <> "). Solve the remaining task yourself.")
+                                (Just limit, _) -> pure (Left (CoordinationTurnBudgetExceeded limit))
                                 (_, Just limit) | nextDepth > limit ->
-                                    pure $ Left
-                                        ("Agent depth limit reached (maximum depth "
-                                            <> Text.pack (show limit)
-                                            <> "). Solve the task yourself.")
+                                    pure (Left (CoordinationDepthLimitExceeded limit))
                                 _ -> case joinTaskPath parentPath taskName of
-                                    Left err -> pure (Left err)
+                                    Left err -> pure (Left (CoordinationInvalidTaskName err))
                                     Right childPath -> do
                                         paths <- readTVar registry.registryPaths
                                         if Map.member childPath paths
-                                            then pure $ Left $
-                                                "task path already in use: "
-                                                    <> taskPathText childPath
+                                            then pure (Left (CoordinationTaskPathOccupied childPath))
                                             else do
                                                 live <- readTVar registry.registryLiveCount
                                                 if live >= config.maxConcurrent
-                                                    then pure $ Left $
-                                                        "Concurrent subagent limit reached: "
-                                                            <> Text.pack
-                                                                (show config.maxConcurrent)
-                                                            <> " agents are already active."
+                                                    then pure (Left (CoordinationAdmissionRejected
+                                                        (AdmissionCapacityExceeded config.maxConcurrent)))
                                                     else do
                                                         let work = SubagentWork
                                                                 { workRootTurnId = rootTurnId
@@ -504,8 +494,7 @@ spawnSubagentAtWithIdPreparedForTurn
                 case prepared of
                     Left (exc :: SomeException) -> do
                         rollbackAdmission registry record
-                        pure $ Left $
-                            "Failed to prepare subagent: " <> Text.pack (show exc)
+                        pure (Left (CoordinationStartupFailed PreparationStage (Text.pack (show exc))))
                     Right lease ->
                         startPrepared restore record lease)
                 `onException` rollbackAdmission registry record
@@ -528,19 +517,19 @@ resolveParentSTM
     -> Maybe SubagentId
     -> TaskPath
     -> Int
-    -> STM (Either Text (TaskPath, Int))
+    -> STM (Either CoordinationError (TaskPath, Int))
 resolveParentSTM _ Nothing requestedPath requestedDepth
     | requestedPath == taskPathRoot && requestedDepth == 0 =
         pure (Right (taskPathRoot, 1))
     | otherwise =
-        pure (Left "root spawn has inconsistent parent context")
+        pure (Left CoordinationInvalidParentContext)
 resolveParentSTM agents (Just parentId) _ _ =
     case Map.lookup parentId agents of
-        Nothing -> pure (Left "Parent subagent is closed or missing.")
+        Nothing -> pure (Left (CoordinationParentUnavailable parentId))
         Just parent -> do
             status <- phaseStatus <$> readTVar parent.recordPhase
             if status == Closed || status == NotFound
-                then pure (Left "Parent subagent is closed or missing.")
+                then pure (Left (CoordinationParentUnavailable parentId))
                 else pure (Right (parent.recordTaskPath, parent.recordDepth + 1))
 
 taskNameForAgentId :: SubagentId -> Text
@@ -738,36 +727,37 @@ startRecordSupervisor
     :: SubagentRegistry
     -> SubagentRecord
     -> SubagentLease
-    -> IO (Either Text ())
+    -> IO (Either CoordinationError ())
 startRecordSupervisor registry record lease =
     mask \restore -> do
-        canStart <- atomically do
+        rejection <- atomically do
             closed <- readTVar registry.registryClosed
             phase <- readTVar record.recordPhase
             aborted <- isRootTurnAborted registry (phaseRootTurnId phase)
             agents <- readTVar registry.registryAgents
             paths <- readTVar registry.registryPaths
             current <- readTVar record.recordAsync
-            pure $
-                not closed
-                    && not aborted
-                    && phaseStatus phase /= Closed
-                    && Map.member record.recordId agents
-                    && maybe True (== record.recordId)
-                        (Map.lookup record.recordTaskPath paths)
-                    && maybe True (const False) current
-        if not canStart
-            then do
+            pure $ if closed then Just StartupRegistryClosed
+                else if aborted then Just StartupTurnAborted
+                else if phaseStatus phase == Closed then Just StartupAgentClosed
+                else if not (Map.member record.recordId agents) then Just StartupAgentMissing
+                else if maybe False (/= record.recordId) (Map.lookup record.recordTaskPath paths)
+                    then Just StartupPathOccupied
+                else case current of
+                    Just _ -> Just StartupSupervisorPresent
+                    Nothing -> Nothing
+        case rejection of
+            Just reason -> do
                 releaseSubagentLease lease
-                pure (Left "Subagent closed before its supervisor started.")
-            else do
+                pure (Left (CoordinationStartupRejected record.recordId reason))
+            Nothing -> do
                 ready <- newEmptyTMVarIO
                 started <- tryAny $ async $
                     supervisorAction ready
                 case started of
                     Left (exception :: SomeException) -> do
                         releaseSubagentLease lease
-                        pure (Left ("Failed to start subagent: " <> Text.pack (show exception)))
+                        pure (Left (CoordinationStartupFailed SupervisorStartupStage (Text.pack (show exception))))
                     Right supervisor -> do
                         atomically $ writeTVar record.recordAsync (Just supervisor)
                         ownership <- restore (atomically (takeTMVar ready))
@@ -787,7 +777,7 @@ startRecordSupervisor registry record lease =
                 liftIO $ restoreSupervisor (runSupervisor registry record))
             `catchAny` \exception -> do
                 atomically $ void $ tryPutTMVar ready $ Left $
-                    "Failed to start subagent: " <> Text.pack (show exception)
+                    CoordinationStartupFailed SupervisorStartupStage (Text.pack (show exception))
                 throwIO exception
 
 releaseSubagentLease :: SubagentLease -> IO ()
@@ -936,11 +926,11 @@ scheduleIdleWork
     :: SubagentRegistry
     -> SubagentRecord
     -> SubagentWork
-    -> STM (Either Text ())
+    -> STM (Either CoordinationError ())
 scheduleIdleWork registry record work = do
     closed <- readTVar registry.registryClosed
     if closed
-        then pure (Left "Subagent registry is closed.")
+        then pure (Left (CoordinationAdmissionRejected AdmissionRegistryClosed))
         else do
             phase <- readTVar record.recordPhase
             case phase of
@@ -948,21 +938,19 @@ scheduleIdleWork registry record work = do
                     live <- readTVar registry.registryLiveCount
                     config <- readTVar registry.registryConfig
                     if live >= config.maxConcurrent
-                        then pure $ Left $
-                            "Concurrent subagent limit reached: "
-                                <> Text.pack (show config.maxConcurrent)
-                                <> " agents are already active."
+                        then pure (Left (CoordinationAdmissionRejected
+                            (AdmissionCapacityExceeded config.maxConcurrent)))
                         else do
                             modifyTVar' registry.registryLiveCount (+ 1)
                             writeTVar record.recordPhase (AgentPending work)
                             pure (Right ())
-                AgentClosed -> pure (Left "agent is closed")
+                AgentClosed -> pure (Left (CoordinationAgentClosed record.recordId))
                 AgentPending{} ->
-                    pure (Left "Subagent already has pending work.")
+                    pure (Left (CoordinationAgentBusy record.recordId WorkPending))
                 AgentRunning{} ->
-                    pure (Left "Subagent is already running.")
+                    pure (Left (CoordinationAgentBusy record.recordId WorkRunning))
                 AgentInterrupting{} ->
-                    pure (Left "Subagent is still interrupting.")
+                    pure (Left (CoordinationAgentBusy record.recordId WorkInterrupting))
 
 descendants :: Map SubagentId SubagentRecord -> SubagentId -> [SubagentRecord]
 descendants agents parentId =
