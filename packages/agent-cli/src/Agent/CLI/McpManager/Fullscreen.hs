@@ -142,80 +142,6 @@ runFullscreenMcpManager runtime home readRuntime =
     continueDashboard (nextNotice, nextRevision, nextSnapshot) =
         dashboard nextNotice nextRevision nextSnapshot
 
-    addServer notice revision snapshot = do
-        targetText <-
-            requestFullscreenText
-                runtime
-                "Add MCP server"
-                ( Text.unlines
-                    [ "Paste a remote **http(s)** URL or a local stdio command."
-                    , "Examples: `https://mcp.sentry.dev/mcp` or `npx -y @modelcontextprotocol/server-filesystem /path`."
-                    ]
-                )
-                ""
-        case targetText of
-            Nothing -> pure (notice, revision, snapshot)
-            Just raw -> case parseMcpTarget raw of
-                Left err ->
-                    addServer (Just (McpNotice False err)) revision snapshot
-                Right target -> do
-                    let suggested = suggestMcpTargetName target
-                    nameText <-
-                        requestFullscreenText
-                            runtime
-                            "Name"
-                            ("Leave empty to use **"
-                                <> markdownText 80 suggested
-                                <> "**.")
-                            suggested
-                    case nameText of
-                        Nothing -> pure (notice, revision, snapshot)
-                        Just rawName ->
-                            case parseMcpAddName
-                                (if Text.null (Text.strip rawName)
-                                    then suggested
-                                    else rawName) of
-                                Left err ->
-                                    addServer
-                                        (Just (McpNotice False err))
-                                        revision
-                                        snapshot
-                                Right label
-                                    | Map.member label
-                                        snapshot.snapshotConfig.configMcpServers ->
-                                        addServer
-                                            (Just
-                                                (McpNotice False
-                                                    ("MCP server '"
-                                                        <> label
-                                                        <> "' already exists")))
-                                            revision
-                                            snapshot
-                                    | otherwise ->
-                                        persist
-                                            revision
-                                            snapshot
-                                            (snapshot.snapshotConfig
-                                                { configMcpServers =
-                                                    Map.insert label
-                                                        (mcpServerForTarget target)
-                                                        snapshot.snapshotConfig.configMcpServers
-                                                })
-                                            (Set.insert label snapshot.snapshotPending)
-                                            ("Added " <> label)
-                                            >>= \case
-                                                Left err ->
-                                                    pure
-                                                        ( Just (McpNotice False err)
-                                                        , revision
-                                                        , snapshot
-                                                        )
-                                                Right next ->
-                                                    authorizeAddedHttpServer
-                                                        next
-                                                        label
-                                                        (mcpServerForTarget target)
-
     serverMenu notice revision snapshot entry = do
         let actions = mcpServerMenuEntries entry
         choice <-
@@ -294,78 +220,171 @@ runFullscreenMcpManager runtime home readRuntime =
 
     persist revision snapshot updated pending message =
         persistSnapshot home revision snapshot updated pending message
+    addServer = addFullscreenMcpServer runtime home
+    authorizeHttpServer = authorizeFullscreenMcpServer runtime home
+    confirmRemove = confirmMcpServerRemoval runtime
+    managerState = readMcpManagerState readRuntime
 
-    authorizeAddedHttpServer next label server =
-        case pendingHttpAuthorizationUrl
-            next.persistedSnapshot.snapshotAuthorized
-            server of
-            Nothing ->
-                pure
-                    ( Just (McpNotice True next.message)
-                    , next.persistedRevision
-                    , next.persistedSnapshot
-                    )
-            Just url ->
-                authorizeHttpServer
-                    True
-                    label
-                    url
-                    next.persistedRevision
-                    next.persistedSnapshot
+type ManagerUpdate = (Maybe McpNotice, Word64, ManagerSnapshot)
 
-    authorizeHttpServer addedFirst label url revision snapshot = do
-        loginMcpWithHost
-            (fullscreenMcpLoginHost runtime)
-            defaultLoginOptions
-            url
-            >>= \case
-                Left err ->
-                    pure
-                        ( Just
-                            (McpNotice False $
-                                if addedFirst
-                                    then "Added " <> label <> ". " <> err
-                                    else err)
-                        , revision
-                        , snapshot
-                        )
-                Right message -> do
-                    nextAuthorized <-
-                        authorizedMcpUrls home snapshot.snapshotConfig
-                    pure
-                        ( Just (McpNotice True message)
-                        , revision
-                        , snapshot
-                            { snapshotPending = Set.insert label snapshot.snapshotPending
-                            , snapshotChanged = True
-                            , snapshotAuthorized = nextAuthorized
-                            }
-                        )
-
-    confirmRemove name = do
-        choice <-
-            requestFullscreenChoiceWithBody
-                runtime
-                "Remove MCP server?"
-                ("Remove **" <> markdownText 100 name
-                    <> "** from ~/.haskell-agent/config.json?\n\n"
-                    <> "The next MCP restart drops this server from the session.")
-                1
-                [ ("Remove", "Delete the saved server")
-                , ("Keep server", "Return without changing anything")
+addFullscreenMcpServer
+    :: FullscreenRuntime -> OsPath -> Maybe McpNotice -> Word64 -> ManagerSnapshot
+    -> IO ManagerUpdate
+addFullscreenMcpServer runtime home notice revision snapshot = do
+    targetText <-
+        requestFullscreenText
+            runtime
+            "Add MCP server"
+            ( Text.unlines
+                [ "Paste a remote **http(s)** URL or a local stdio command."
+                , "Examples: `https://mcp.sentry.dev/mcp` or `npx -y @modelcontextprotocol/server-filesystem /path`."
                 ]
-        pure (choice == Just 0)
+            )
+            ""
+    case targetText of
+        Nothing -> pure (notice, revision, snapshot)
+        Just raw -> case parseMcpTarget raw of
+            Left err ->
+                addFullscreenMcpServer runtime home (Just (McpNotice False err)) revision snapshot
+            Right target -> do
+                let suggested = suggestMcpTargetName target
+                nameText <-
+                    requestFullscreenText
+                        runtime
+                        "Name"
+                        ("Leave empty to use **"
+                            <> markdownText 80 suggested
+                            <> "**.")
+                        suggested
+                case nameText of
+                    Nothing -> pure (notice, revision, snapshot)
+                    Just rawName ->
+                        case parseMcpAddName
+                            (if Text.null (Text.strip rawName)
+                                then suggested
+                                else rawName) of
+                            Left err ->
+                                addFullscreenMcpServer runtime home
+                                    (Just (McpNotice False err))
+                                    revision
+                                    snapshot
+                            Right label
+                                | Map.member label
+                                    snapshot.snapshotConfig.configMcpServers ->
+                                    addFullscreenMcpServer runtime home
+                                        (Just
+                                            (McpNotice False
+                                                ("MCP server '"
+                                                    <> label
+                                                    <> "' already exists")))
+                                        revision
+                                        snapshot
+                                | otherwise ->
+                                    persistSnapshot home
+                                        revision
+                                        snapshot
+                                        (snapshot.snapshotConfig
+                                            { configMcpServers =
+                                                Map.insert label
+                                                    (mcpServerForTarget target)
+                                                    snapshot.snapshotConfig.configMcpServers
+                                            })
+                                        (Set.insert label snapshot.snapshotPending)
+                                        ("Added " <> label)
+                                        >>= \case
+                                            Left err ->
+                                                pure
+                                                    ( Just (McpNotice False err)
+                                                    , revision
+                                                    , snapshot
+                                                    )
+                                            Right next ->
+                                                authorizeAddedHttpServer runtime home
+                                                    next
+                                                    label
+                                                    (mcpServerForTarget target)
 
-    managerState snapshot notice = do
-        (registrations, warnings, statuses) <- readRuntime
-        pure $ initialMcpManagerState
-            snapshot.snapshotConfig
-            registrations
-            warnings
-            statuses
-            snapshot.snapshotPending
-            snapshot.snapshotAuthorized
-            (noticeText notice)
+authorizeAddedHttpServer
+    :: FullscreenRuntime -> OsPath -> PersistedUpdate -> Text -> McpServerConfig
+    -> IO ManagerUpdate
+authorizeAddedHttpServer runtime home next label server =
+    case pendingHttpAuthorizationUrl
+        next.persistedSnapshot.snapshotAuthorized
+        server of
+        Nothing ->
+            pure
+                ( Just (McpNotice True next.message)
+                , next.persistedRevision
+                , next.persistedSnapshot
+                )
+        Just url ->
+            authorizeFullscreenMcpServer runtime home
+                True
+                label
+                url
+                next.persistedRevision
+                next.persistedSnapshot
+
+authorizeFullscreenMcpServer
+    :: FullscreenRuntime -> OsPath -> Bool -> Text -> Text -> Word64 -> ManagerSnapshot
+    -> IO ManagerUpdate
+authorizeFullscreenMcpServer runtime home addedFirst label url revision snapshot = do
+    loginMcpWithHost
+        (fullscreenMcpLoginHost runtime)
+        defaultLoginOptions
+        url
+        >>= \case
+            Left err ->
+                pure
+                    ( Just
+                        (McpNotice False $
+                            if addedFirst
+                                then "Added " <> label <> ". " <> err
+                                else err)
+                    , revision
+                    , snapshot
+                    )
+            Right message -> do
+                nextAuthorized <-
+                    authorizedMcpUrls home snapshot.snapshotConfig
+                pure
+                    ( Just (McpNotice True message)
+                    , revision
+                    , snapshot
+                        { snapshotPending = Set.insert label snapshot.snapshotPending
+                        , snapshotChanged = True
+                        , snapshotAuthorized = nextAuthorized
+                        }
+                    )
+
+confirmMcpServerRemoval :: FullscreenRuntime -> Text -> IO Bool
+confirmMcpServerRemoval runtime name = do
+    choice <-
+        requestFullscreenChoiceWithBody
+            runtime
+            "Remove MCP server?"
+            ("Remove **" <> markdownText 100 name
+                <> "** from ~/.haskell-agent/config.json?\n\n"
+                <> "The next MCP restart drops this server from the session.")
+            1
+            [ ("Remove", "Delete the saved server")
+            , ("Keep server", "Return without changing anything")
+            ]
+    pure (choice == Just 0)
+
+readMcpManagerState
+    :: IO ([McpToolRegistration], [Text], [MCP.McpServerStatus])
+    -> ManagerSnapshot -> Maybe McpNotice -> IO McpManagerState
+readMcpManagerState readRuntime snapshot notice = do
+    (registrations, warnings, statuses) <- readRuntime
+    pure $ initialMcpManagerState
+        snapshot.snapshotConfig
+        registrations
+        warnings
+        statuses
+        snapshot.snapshotPending
+        snapshot.snapshotAuthorized
+        (noticeText notice)
 
 data PersistedUpdate = PersistedUpdate
     { persistedRevision :: !Word64

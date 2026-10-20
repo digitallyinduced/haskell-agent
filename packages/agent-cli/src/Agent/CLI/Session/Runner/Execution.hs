@@ -631,7 +631,7 @@ buildSkillContextRuntime
     -> SessionBackend
     -> SkillContextRuntime
 buildSkillContextRuntime
-        callbacks host controls SessionRequest{..} SessionBackend{..} =
+        callbacks host controls request@SessionRequest{..} SessionBackend{..} =
     SkillContextRuntime
         { skillReloadGeneratedContext = reloadGeneratedContext
         , skillResetSession = sessionReset
@@ -758,83 +758,10 @@ buildSkillContextRuntime
                 installSkills startupContext queueContext refreshed
             when queueContext $
                 reportSkillCatalog True refreshed omitted
-    loadAvailableSkills = do
-        workspaceSkills <-
-            if loadsHostWorkspaceContext
-                then loadSkillsCatalogQuiet
-                    options workspace.home workspace.projectRoot workspace.cwd
-                else pure (SkillCatalog [] [])
-        operatorSkills <-
-            loadOperatorSkillsCatalog host.hostOperatorSkillRoots
-        let local = mergeSkillCatalogs workspaceSkills operatorSkills
-        remote <-
-            if options.optSkills
-                then maybe
-                    (pure (SkillCatalog [] []))
-                    loadMcpSkillsCatalog
-                    mcpFleet
-                else pure (SkillCatalog [] [])
-        pure (mergeSkillCatalogs local remote)
+    loadAvailableSkills = loadSessionSkillCatalog host request
     contextLength = maybe 0 Text.length
-    formatSkillWarning warning =
-        "skill ignored: "
-            <> toText warning.skillWarningPath
-            <> ": "
-            <> warning.skillWarningMessage
-    formatSkillOmission omitted =
-        "skills: "
-            <> Text.pack (show omitted)
-            <> " omitted from model context due to the catalog budget"
-    reportLearnedSkillWarning message =
-        case fullscreen of
-            Nothing -> do
-                color <- resolveColor stderrHandle
-                putTextLn stderrHandle $
-                    roleWarn color (glyphWarn <> message)
-            Just runtime ->
-                emitUiEvent runtime (UiSystemMessage message)
-    reportSkillCatalog includeSummary catalog omitted =
-        case fullscreen of
-            Nothing -> do
-                color <- resolveColor stderrHandle
-                when includeSummary do
-                    let count = length catalog.catalogSkills
-                    putTextLn stderrHandle $
-                        roleMuted color
-                            (glyphSession
-                                <> "skills: loaded "
-                                <> Text.pack (show count)
-                                <> if count == 1
-                                    then " skill"
-                                    else " skills")
-                mapM_
-                    (putTextLn stderrHandle
-                        . roleWarn color
-                        . (glyphWarn <>)
-                        . formatSkillWarning)
-                    catalog.catalogWarnings
-                when (omitted > 0) $
-                    putTextLn stderrHandle $
-                        roleWarn color
-                            (glyphWarn <> formatSkillOmission omitted)
-            Just runtime -> do
-                when includeSummary do
-                    let count = length catalog.catalogSkills
-                    emitUiEvent runtime $
-                        UiSystemMessage
-                            ("skills: loaded "
-                                <> Text.pack (show count)
-                                <> if count == 1
-                                    then " skill"
-                                    else " skills")
-                mapM_
-                    (emitUiEvent runtime
-                        . UiSystemMessage
-                        . formatSkillWarning)
-                    catalog.catalogWarnings
-                when (omitted > 0) $
-                    emitUiEvent runtime
-                        (UiSystemMessage (formatSkillOmission omitted))
+    reportLearnedSkillWarning = reportSessionSkillWarning stderrHandle fullscreen
+    reportSkillCatalog = reportSessionSkillCatalog stderrHandle fullscreen
     initializeSkills = do
         markStartupStage startup "Loading skills…"
         skills <- readIORef skillsRef
@@ -867,6 +794,94 @@ buildSkillContextRuntime
         installDatabaseMemory startupContext
         callbacks.runnerFinishStartup startup
         pure learnedSkills
+
+loadSessionSkillCatalog :: SessionHostRuntime -> SessionRequest -> IO SkillCatalog
+loadSessionSkillCatalog host SessionRequest{..} = do
+    let loadsHostWorkspaceContext = host.hostLoadsWorkspaceContext
+    workspaceSkills <-
+        if loadsHostWorkspaceContext
+            then loadSkillsCatalogQuiet
+                options workspace.home workspace.projectRoot workspace.cwd
+            else pure (SkillCatalog [] [])
+    operatorSkills <-
+        loadOperatorSkillsCatalog host.hostOperatorSkillRoots
+    let local = mergeSkillCatalogs workspaceSkills operatorSkills
+    remote <-
+        if options.optSkills
+            then maybe
+                (pure (SkillCatalog [] []))
+                loadMcpSkillsCatalog
+                mcpFleet
+            else pure (SkillCatalog [] [])
+    pure (mergeSkillCatalogs local remote)
+
+formatSkillWarning :: SkillWarning -> Text.Text
+formatSkillWarning warning =
+    "skill ignored: "
+        <> toText warning.skillWarningPath
+        <> ": "
+        <> warning.skillWarningMessage
+
+formatSkillOmission :: Int -> Text.Text
+formatSkillOmission omitted =
+    "skills: "
+        <> Text.pack (show omitted)
+        <> " omitted from model context due to the catalog budget"
+
+reportSessionSkillWarning :: Handle -> Maybe FullscreenRuntime -> Text.Text -> IO ()
+reportSessionSkillWarning stderrHandle fullscreen message =
+    case fullscreen of
+        Nothing -> do
+            color <- resolveColor stderrHandle
+            putTextLn stderrHandle $
+                roleWarn color (glyphWarn <> message)
+        Just runtime ->
+            emitUiEvent runtime (UiSystemMessage message)
+
+reportSessionSkillCatalog
+    :: Handle -> Maybe FullscreenRuntime -> Bool -> SkillCatalog -> Int -> IO ()
+reportSessionSkillCatalog stderrHandle fullscreen includeSummary catalog omitted =
+    case fullscreen of
+        Nothing -> do
+            color <- resolveColor stderrHandle
+            when includeSummary do
+                let count = length catalog.catalogSkills
+                putTextLn stderrHandle $
+                    roleMuted color
+                        (glyphSession
+                            <> "skills: loaded "
+                            <> Text.pack (show count)
+                            <> if count == 1
+                                then " skill"
+                                else " skills")
+            mapM_
+                (putTextLn stderrHandle
+                    . roleWarn color
+                    . (glyphWarn <>)
+                    . formatSkillWarning)
+                catalog.catalogWarnings
+            when (omitted > 0) $
+                putTextLn stderrHandle $
+                    roleWarn color
+                        (glyphWarn <> formatSkillOmission omitted)
+        Just runtime -> do
+            when includeSummary do
+                let count = length catalog.catalogSkills
+                emitUiEvent runtime $
+                    UiSystemMessage
+                        ("skills: loaded "
+                            <> Text.pack (show count)
+                            <> if count == 1
+                                then " skill"
+                                else " skills")
+            mapM_
+                (emitUiEvent runtime
+                    . UiSystemMessage
+                    . formatSkillWarning)
+                catalog.catalogWarnings
+            when (omitted > 0) $
+                emitUiEvent runtime
+                    (UiSystemMessage (formatSkillOmission omitted))
 
 data SessionLoopEventRuntime = SessionLoopEventRuntime
     { loopEventRender :: !RenderConfig
@@ -1144,7 +1159,7 @@ buildSessionShellRuntime
     -> SessionControlRuntime
     -> SessionRequest
     -> SessionShellRuntime
-buildSessionShellRuntime host controls SessionRequest{..} =
+buildSessionShellRuntime host controls request@SessionRequest{..} =
     SessionShellRuntime
         { shellToolDisabledReason = toolDisabledReason
         , shellActiveToolNames = currentActiveToolNames
@@ -1177,23 +1192,6 @@ buildSessionShellRuntime host controls SessionRequest{..} =
                     ("Tool " <> call.name
                         <> " is disabled by the current /shell setting.")
             else Nothing
-    activeSessionTools available ghciEnabled bashEnabled computerUseEnabled =
-        filterComputerUseTools computerUseEnabled $
-            filterGhciTools ghciEnabled
-                (filterBashTools bashEnabled available)
-    providerVisibleTools wireTools enabledTools =
-        case codeModeRuntime of
-            Nothing -> enabledTools
-            Just runtime ->
-                wireTools
-                    <> (projectCodeModeToolsFor
-                            runtime.codeModeProjectionStrategy
-                            enabledTools
-                        ).directCodeModeTools
-    filterComputerUseTools True = id
-    filterComputerUseTools False =
-        filter \tool ->
-            canonicalToolName tool.appToolName /= computerToolName
     currentShellMode = do
         ghciEnabled <- readIORef ghciEnabledRef
         bashEnabled <- readIORef bashEnabledRef
@@ -1239,79 +1237,7 @@ buildSessionShellRuntime host controls SessionRequest{..} =
                         nativeCapabilities.nativeProviderHostedTools
                         dialect
                         ++ projectedNames
-    shellModeFlags = \case
-        ShellGhci -> (True, False)
-        ShellBash -> (False, True)
-        ShellBoth -> (True, True)
-        ShellNone -> (False, False)
-    shellModeLabel = \case
-        ShellGhci -> "ghci"
-        ShellBash -> "bash"
-        ShellBoth -> "ghci + bash"
-        ShellNone -> "none"
-    refreshSessionParams ghciEnabled bashEnabled computerUseEnabled = do
-        sessionTmp <- readIORef toolEnv.toolSessionTmp
-        effectiveModel <- readSessionRequestModel paramsRef
-        today <- utctDay <$> getCurrentTime
-        discovered <- maybe (pure []) id deferredTools
-        let enabledTools =
-                activeSessionTools
-                    (sessionTools <> discovered)
-                    ghciEnabled
-                    bashEnabled
-                    computerUseEnabled
-        wireTools <- case codeModeRuntime of
-            Nothing -> pure []
-            Just runtime ->
-                runtime.codeModeRefreshTools enabledTools >>=
-                    either (fail . Text.unpack) pure
-        when (needsDynamicToolRefresh deferredTools codeModeRuntime) do
-            registry <- requireToolRegistry $
-                sessionDirectTools allTools codeModeRuntime
-                    <> discovered <> wireTools
-            writeIORef controls.controlCurrentToolRegistry registry
-        let
-            enabledNames = map (.appToolName) enabledTools
-            instructionText =
-                appendMcpInstructions mcpInstructions case codexCatalogSession of
-                    Just catalog ->
-                        catalog.catalogInstructionsFor
-                            enabledNames sessionTmp
-                    Nothing ->
-                        systemPromptForToolsWithHostedSearch
-                            nativeCapabilities.nativeProviderHostedTools
-                            dialect
-                            commitAttributionModel
-                            commitAttributionEffort
-                            enabledNames
-                            workspace.cwd
-                            sessionTmp
-                            today
-                            (isOneShot options)
-            toolSchemas =
-                let modelSupportsAsync =
-                        catalogSupportsAsyncToolCallsForTransport
-                            catalog
-                            connectionId
-                            effectiveModel
-                in
-                case codeModeRuntime of
-                    Just _ ->
-                        schemasFromAppToolsCodeModeWithHostedSearchAndAsyncCapability
-                            nativeCapabilities.nativeProviderHostedTools
-                            modelSupportsAsync
-                            dialect
-                            (providerVisibleTools wireTools enabledTools)
-                    Nothing ->
-                        schemasFromAppToolsWithHostedSearchAndAsyncCapability
-                            nativeCapabilities.nativeProviderHostedTools
-                            modelSupportsAsync
-                            dialect
-                            enabledTools
-        modifySessionRequestOptions paramsRef
-            (setRequestInstructionsAndTools
-                instructionText
-                (Just toolSchemas))
+    refreshSessionParams = refreshSessionToolParams host controls request
     refreshCurrentSessionParams = do
         ghciEnabled <- readIORef ghciEnabledRef
         bashEnabled <- readIORef bashEnabledRef
@@ -1356,6 +1282,117 @@ buildSessionShellRuntime host controls SessionRequest{..} =
         setToolSessionTmp toolEnv (Just tempDir)
         restoreShellEnvironment toolEnv
         refreshCurrentSessionParams
+
+activeSessionTools :: [AppTool] -> Bool -> Bool -> Bool -> [AppTool]
+activeSessionTools available ghciEnabled bashEnabled computerUseEnabled =
+    filterComputerUseTools computerUseEnabled $
+        filterGhciTools ghciEnabled
+            (filterBashTools bashEnabled available)
+  where
+    filterComputerUseTools True = id
+    filterComputerUseTools False =
+        filter \tool ->
+            canonicalToolName tool.appToolName /= computerToolName
+
+providerVisibleSessionTools
+    :: Maybe CodeModeSessionRuntime -> [AppTool] -> [AppTool] -> [AppTool]
+providerVisibleSessionTools codeModeRuntime wireTools enabledTools =
+    case codeModeRuntime of
+        Nothing -> enabledTools
+        Just runtime ->
+            wireTools
+                <> (projectCodeModeToolsFor
+                        runtime.codeModeProjectionStrategy
+                        enabledTools
+                    ).directCodeModeTools
+
+shellModeFlags :: ShellMode -> (Bool, Bool)
+shellModeFlags = \case
+    ShellGhci -> (True, False)
+    ShellBash -> (False, True)
+    ShellBoth -> (True, True)
+    ShellNone -> (False, False)
+
+shellModeLabel :: ShellMode -> Text.Text
+shellModeLabel = \case
+    ShellGhci -> "ghci"
+    ShellBash -> "bash"
+    ShellBoth -> "ghci + bash"
+    ShellNone -> "none"
+
+refreshSessionToolParams
+    :: SessionHostRuntime
+    -> SessionControlRuntime
+    -> SessionRequest
+    -> Bool
+    -> Bool
+    -> Bool
+    -> IO ()
+refreshSessionToolParams host controls SessionRequest{..} ghciEnabled bashEnabled computerUseEnabled = do
+    let nativeCapabilities = host.hostNativeCapabilities
+        sessionTools = sessionDirectTools refreshTools codeModeRuntime
+    sessionTmp <- readIORef toolEnv.toolSessionTmp
+    effectiveModel <- readSessionRequestModel paramsRef
+    today <- utctDay <$> getCurrentTime
+    discovered <- maybe (pure []) id deferredTools
+    let enabledTools =
+            activeSessionTools
+                (sessionTools <> discovered)
+                ghciEnabled
+                bashEnabled
+                computerUseEnabled
+    wireTools <- case codeModeRuntime of
+        Nothing -> pure []
+        Just runtime ->
+            runtime.codeModeRefreshTools enabledTools >>=
+                either (fail . Text.unpack) pure
+    when (needsDynamicToolRefresh deferredTools codeModeRuntime) do
+        registry <- requireToolRegistry $
+            sessionDirectTools allTools codeModeRuntime
+                <> discovered <> wireTools
+        writeIORef controls.controlCurrentToolRegistry registry
+    let
+        enabledNames = map (.appToolName) enabledTools
+        instructionText =
+            appendMcpInstructions mcpInstructions case codexCatalogSession of
+                Just catalog ->
+                    catalog.catalogInstructionsFor
+                        enabledNames sessionTmp
+                Nothing ->
+                    systemPromptForToolsWithHostedSearch
+                        nativeCapabilities.nativeProviderHostedTools
+                        dialect
+                        commitAttributionModel
+                        commitAttributionEffort
+                        enabledNames
+                        workspace.cwd
+                        sessionTmp
+                        today
+                        (isOneShot options)
+        toolSchemas =
+            let modelSupportsAsync =
+                    catalogSupportsAsyncToolCallsForTransport
+                        catalog
+                        connectionId
+                        effectiveModel
+            in
+            case codeModeRuntime of
+                Just _ ->
+                    schemasFromAppToolsCodeModeWithHostedSearchAndAsyncCapability
+                        nativeCapabilities.nativeProviderHostedTools
+                        modelSupportsAsync
+                        dialect
+                        (providerVisibleSessionTools codeModeRuntime wireTools enabledTools)
+                Nothing ->
+                    schemasFromAppToolsWithHostedSearchAndAsyncCapability
+                        nativeCapabilities.nativeProviderHostedTools
+                        modelSupportsAsync
+                        dialect
+                        enabledTools
+    modifySessionRequestOptions paramsRef
+        (setRequestInstructionsAndTools
+            instructionText
+            (Just toolSchemas))
 
 -- | The loop begins and ends root turns ('subagentLoop'). The CLI only
 -- interrupts the children of a turn it restarts after the loop answered.

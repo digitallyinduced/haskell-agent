@@ -207,166 +207,9 @@ drawBlock state target ui block =
             selected
                 && state.appUi.uiFocus == FocusScrollback
                 && state.appAgentSelected == target
-        waveElapsed = accentWaveElapsed state target block
         marker =
             txt (if highlighted then "❯ " else "  ")
-        -- Completed/history blocks already have a whole-block cache. Avoid
-        -- paying for cold prose-section cache entries when no appends remain.
-        assistantMarkdown cacheCode codeHeader body
-            | block.blockState == BlockStreaming
-            , Just (ident, parsed) <- ui.uiStreamingMarkdown
-            , ident == block.blockId =
-                markdownWidgetWithMarkdownStreamingCache
-                    state.appSyntaxHighlighter
-                    MarkdownLink
-                    cacheProse
-                    cacheCode codeHeader parsed
-            | block.blockState == BlockStreaming =
-                markdownWidgetWithStreamingCache
-                    state.appSyntaxHighlighter
-                    MarkdownLink
-                    cacheProse
-                    cacheCode codeHeader body
-            | otherwise =
-                markdownWidgetWithSyntaxHighlightingAndLinks
-                    state.appSyntaxHighlighter
-                    MarkdownLink
-                    cacheCode codeHeader body
-        cacheProse chunkIndex sectionIndex =
-            cached (MarkdownProseCache target block.blockId chunkIndex sectionIndex)
-        content = case block.blockKind of
-            BlockUser ->
-                withAttr Theme.userAttr $
-                    padAll 1 $
-                        hBox
-                            [ withAttr
-                                (if highlighted
-                                    then Theme.borderActiveAttr
-                                    else Theme.userMutedAttr)
-                                marker
-                            , timestampedMessage
-                                Theme.userMutedAttr
-                                block.blockTimestamp
-                                (submittedUserMessage state target block)
-                            ]
-            BlockAssistant ->
-                padLeft (Pad 3) $
-                    padRight (Pad 1) $
-                        timestampedMessage Theme.mutedAttr block.blockTimestamp $
-                            withAttr Theme.assistantAttr
-                                (assistantMarkdown
-                                    (\codeIndex ->
-                                        cached
-                                            (CodeBlockCache
-                                                target
-                                                block.blockId
-                                                codeIndex))
-                                    (codeBlockHeader
-                                        state
-                                        target
-                                        block.blockId)
-                                    block.blockBody)
-            BlockThinking ->
-                accentMarkdownBlock
-                    state
-                    target
-                    ui
-                    block
-                    waveElapsed
-                    (thinkingBlockAttr state target block)
-                    (blockStateGlyph state target block <> block.blockTitle)
-                    (visibleBody block)
-            BlockTool ->
-                accentBlockWithSections
-                    state
-                    target
-                    ui
-                    block
-                    waveElapsed
-                    (statusAttr state target block)
-                    (blockStateGlyph state target block
-                        <> block.blockTitle
-                        <> detailSuffix block)
-                    (toolBodySections
-                        state.appSyntaxHighlighter
-                        block.blockBody
-                        (visibleBody block)
-                        <> toolImageSections state target block)
-            BlockInspect ->
-                accentFileBlockWithSections
-                    state
-                    target
-                    ui
-                    block
-                    waveElapsed
-                    (inspectionStatusAttr block)
-                    (blockStateGlyph state target block)
-                    block.blockTitle
-                    block.blockDetail
-                    (toolBodySections
-                        state.appSyntaxHighlighter
-                        block.blockBody
-                        (visibleBody block)
-                        <> toolImageSections state target block)
-            BlockTodo ->
-                accentBlockWithSections
-                    state
-                    target
-                    ui
-                    block
-                    waveElapsed
-                    (statusAttr state target block)
-                    (blockStateGlyph state target block <> block.blockTitle)
-                    (todoBodyWidgets block)
-            BlockShell ->
-                accentCodeBlock
-                    state
-                    target
-                    ui
-                    block
-                    state.appSyntaxHighlighter
-                    waveElapsed
-                    (statusAttr state target block)
-                    (blockStateGlyph state target block
-                        <> shellBlockTitle block)
-                    (if block.blockExpanded then block.blockDetail else "")
-                    (visibleShellBody block)
-                    (if block.blockExpanded
-                        then toolImageSections state target block
-                        else [])
-            BlockEdit ->
-                accentFileBlockWithSections
-                    state
-                    target
-                    ui
-                    block
-                    waveElapsed
-                    (statusAttr state target block)
-                    (blockStateGlyph state target block)
-                    block.blockTitle
-                    block.blockDetail
-                    [ diffWidgetWithSyntaxHighlighting
-                        state.appSyntaxHighlighter
-                        (editInitialPath block)
-                        (visibleBody block)
-                    | not (Text.null (Text.strip (visibleBody block)))
-                    ]
-            BlockSystem ->
-                withAttr Theme.mutedAttr
-                    (terminalTxtWrap block.blockBody)
-            BlockRecap ->
-                accentMarkdownBlock
-                    state
-                    target
-                    ui
-                    block
-                    waveElapsed
-                    (statusAttr state target block)
-                    (blockStateGlyph state target block <> "Recap")
-                    (visibleBody block)
-            BlockError ->
-                withAttr Theme.errorAttr
-                    (terminalTxtWrap block.blockBody)
+        content = drawBlockContent state target ui block highlighted
         framed =
             if highlighted && not (compactActionBlock block)
                 then
@@ -411,6 +254,174 @@ drawBlock state target ui block =
                 (codeCopyCacheState state target block.blockId))
             rendered
         else rendered
+
+drawBlockContent
+    :: AppState -> AgentTarget -> UiState -> UiBlock -> Bool -> Widget Name
+drawBlockContent state target ui block highlighted =
+    let waveElapsed = accentWaveElapsed state target block
+        marker = txt (if highlighted then "❯ " else "  ")
+    in case block.blockKind of
+        BlockUser ->
+            withAttr Theme.userAttr $
+                padAll 1 $
+                    hBox
+                        [ withAttr
+                            (if highlighted
+                                then Theme.borderActiveAttr
+                                else Theme.userMutedAttr)
+                            marker
+                        , timestampedMessage
+                            Theme.userMutedAttr
+                            block.blockTimestamp
+                            (submittedUserMessage state target block)
+                        ]
+        BlockAssistant ->
+            drawAssistantBlock state target ui block
+        BlockThinking ->
+            accentMarkdownBlock
+                state
+                target
+                ui
+                block
+                waveElapsed
+                (thinkingBlockAttr state target block)
+                (blockStateGlyph state target block <> block.blockTitle)
+                (visibleBody block)
+        BlockTool ->
+            accentBlockWithSections
+                state
+                target
+                ui
+                block
+                waveElapsed
+                (statusAttr state target block)
+                (blockStateGlyph state target block
+                    <> block.blockTitle
+                    <> detailSuffix block)
+                (toolBodySections
+                    state.appSyntaxHighlighter
+                    block.blockBody
+                    (visibleBody block)
+                    <> toolImageSections state target block)
+        BlockInspect ->
+            accentFileBlockWithSections
+                state
+                target
+                ui
+                block
+                waveElapsed
+                (inspectionStatusAttr block)
+                (blockStateGlyph state target block)
+                block.blockTitle
+                block.blockDetail
+                (toolBodySections
+                    state.appSyntaxHighlighter
+                    block.blockBody
+                    (visibleBody block)
+                    <> toolImageSections state target block)
+        BlockTodo ->
+            accentBlockWithSections
+                state
+                target
+                ui
+                block
+                waveElapsed
+                (statusAttr state target block)
+                (blockStateGlyph state target block <> block.blockTitle)
+                (todoBodyWidgets block)
+        BlockShell ->
+            accentCodeBlock
+                state
+                target
+                ui
+                block
+                state.appSyntaxHighlighter
+                waveElapsed
+                (statusAttr state target block)
+                (blockStateGlyph state target block
+                    <> shellBlockTitle block)
+                (if block.blockExpanded then block.blockDetail else "")
+                (visibleShellBody block)
+                (if block.blockExpanded
+                    then toolImageSections state target block
+                    else [])
+        BlockEdit ->
+            accentFileBlockWithSections
+                state
+                target
+                ui
+                block
+                waveElapsed
+                (statusAttr state target block)
+                (blockStateGlyph state target block)
+                block.blockTitle
+                block.blockDetail
+                [ diffWidgetWithSyntaxHighlighting
+                    state.appSyntaxHighlighter
+                    (editInitialPath block)
+                    (visibleBody block)
+                | not (Text.null (Text.strip (visibleBody block)))
+                ]
+        BlockSystem ->
+            withAttr Theme.mutedAttr
+                (terminalTxtWrap block.blockBody)
+        BlockRecap ->
+            accentMarkdownBlock
+                state
+                target
+                ui
+                block
+                waveElapsed
+                (statusAttr state target block)
+                (blockStateGlyph state target block <> "Recap")
+                (visibleBody block)
+        BlockError ->
+            withAttr Theme.errorAttr
+                (terminalTxtWrap block.blockBody)
+
+drawAssistantBlock :: AppState -> AgentTarget -> UiState -> UiBlock -> Widget Name
+drawAssistantBlock state target ui block =
+    padLeft (Pad 3) $
+        padRight (Pad 1) $
+            timestampedMessage Theme.mutedAttr block.blockTimestamp $
+                withAttr Theme.assistantAttr
+                    (assistantMarkdown
+                        (\codeIndex ->
+                            cached
+                                (CodeBlockCache
+                                    target
+                                    block.blockId
+                                    codeIndex))
+                        (codeBlockHeader
+                            state
+                            target
+                            block.blockId)
+                        block.blockBody)
+  where
+    -- Completed/history blocks already have a whole-block cache. Avoid
+    -- paying for cold prose-section cache entries when no appends remain.
+    assistantMarkdown cacheCode codeHeader body
+        | block.blockState == BlockStreaming
+        , Just (ident, parsed) <- ui.uiStreamingMarkdown
+        , ident == block.blockId =
+            markdownWidgetWithMarkdownStreamingCache
+                state.appSyntaxHighlighter
+                MarkdownLink
+                cacheProse
+                cacheCode codeHeader parsed
+        | block.blockState == BlockStreaming =
+            markdownWidgetWithStreamingCache
+                state.appSyntaxHighlighter
+                MarkdownLink
+                cacheProse
+                cacheCode codeHeader body
+        | otherwise =
+            markdownWidgetWithSyntaxHighlightingAndLinks
+                state.appSyntaxHighlighter
+                MarkdownLink
+                cacheCode codeHeader body
+    cacheProse chunkIndex sectionIndex =
+        cached (MarkdownProseCache target block.blockId chunkIndex sectionIndex)
 
 submittedUserMessage
     :: AppState
