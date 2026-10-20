@@ -35,7 +35,7 @@ import Agent.Loop.SteeringInputs
     , awaitSteeringInput
     , awaitSteeringInputReady
     , awaitUserSteeringAfter
-    , commitSteeringInputs
+    , closeSteeringInputs
     , dismissBackgroundCompletion
     , enqueueBackgroundCompletion
     , newSteeringInputs
@@ -44,6 +44,11 @@ import Agent.Loop.SteeringInputs
 import Agent.Subagents.History (trimDanglingToolSuffix)
 import Agent.Subagents.Registry (SubagentRegistry, setPreviousResponseId)
 import Agent.Subagents.Registry.Internal.Suspension (withSuspensionSignal)
+import Agent.Subagents.Registry.Internal.Steering
+    ( withSubagentMessageSteering
+    , commitSubagentMessageSteering
+    )
+import Agent.Subagents.Registry.Internal.Types (SubagentSteering(..))
 import Agent.Subagents.Types (SubagentSpawnEnv(..))
 import Agent.ToolDispatch (ToolCall, ToolDispatchConfig)
 import Agent.Tools.Types
@@ -97,8 +102,21 @@ runChildTurn
     -> ChildTurn
     -> (LoopConfig -> IO (Either LoopError LoopResult))
     -> IO (Either LoopError LoopResult)
-runChildTurn registry env child start = withSuspensionSignal registry env.subId \suspensionSignal -> do
+runChildTurn registry env child start = do
     steering <- newSteeringInputs
+    withSubagentMessageSteering registry env steering
+        (runChildTurnWithSteering registry env child start)
+
+runChildTurnWithSteering
+    :: SubagentRegistry
+    -> SubagentSpawnEnv
+    -> ChildTurn
+    -> (LoopConfig -> IO (Either LoopError LoopResult))
+    -> SubagentSteering
+    -> IO (Either LoopError LoopResult)
+runChildTurnWithSteering registry env child start messageSteering =
+  withSuspensionSignal registry env.subId \suspensionSignal -> do
+    let steering = messageSteering.steeringInputs
     for_ child.childBackgroundTasks \tasks ->
         tasks.installBackgroundTaskHooks BackgroundTaskHooks
             { backgroundTaskCompleted = \notice ->
@@ -139,8 +157,8 @@ runChildTurn registry env child start = withSuspensionSignal registry env.subId 
             , loopWithToolExecution = \_ action -> action
             , loopReadSteering = reserveSteeringInputs steering
             , loopWaitSteering = atomically . awaitUserSteeringAfter steering
-            , loopCommitSteering = commitSteeringInputs steering
-            , loopCloseSteering = pure []
+            , loopCommitSteering = commitSubagentMessageSteering messageSteering
+            , loopCloseSteering = closeSteeringInputs steering
             , loopInterrupt = pure ()
             , loopCancel = suspensionSignal
             , loopSubagents = Nothing

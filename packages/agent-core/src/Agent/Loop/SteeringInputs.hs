@@ -8,6 +8,7 @@ module Agent.Loop.SteeringInputs
     , clearSteeringInputs
     , closeSteeringInputs
     , commitSteeringInputs
+    , commitSteeringInputsSTM
     , dismissBackgroundCompletion
     , enqueueBackgroundCompletion
     , enqueueSteeringInputs
@@ -343,8 +344,12 @@ suppressUserSteeringWake (SteeringInputs ref) =
         Just _ -> entry
 
 commitSteeringInputs :: SteeringInputs -> Int -> IO ()
-commitSteeringInputs (SteeringInputs ref) count =
-    atomically $ modifyTVar' ref \state ->
+commitSteeringInputs inputs = atomically . commitSteeringInputsSTM inputs
+
+-- | Commit guidance together with its host's acceptance records.
+commitSteeringInputsSTM :: SteeringInputs -> Int -> STM ()
+commitSteeringInputsSTM (SteeringInputs ref) count =
+    modifyTVar' ref \state ->
         let removed = Seq.take (max 0 count) state.steeringQueue
             remaining = Seq.drop (max 0 count) state.steeringQueue
             removedBytes = foldr

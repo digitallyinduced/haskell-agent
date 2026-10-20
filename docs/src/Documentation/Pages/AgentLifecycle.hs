@@ -110,7 +110,9 @@ page = Page
         <p><code>send_message</code> delivers information without starting a new turn
         when the target is idle. <code>followup_task</code> sends an assignment and
         starts a turn for an idle child; for a running child, it is delivered at
-        message boundaries. These are different from creating another agent.</p>
+        message boundaries. Both tools steer a running child: guidance can redirect
+        an unfinished model request and reaches the next request after a tool completes.
+        Neither requires the child to finish its current assignment first.</p>
         <pre><code>{"Send parser_review this clarification: focus on malformed nested input.\nWhen its review is complete, give that same agent a follow-up task:\nrank the proposed tests by regression risk, without editing files." :: Text}</code></pre>
         <p>If a completed agent does not answer an informational message, ask the
         coordinator to give it a follow-up task. Do not assume every message causes

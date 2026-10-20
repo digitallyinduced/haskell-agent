@@ -103,7 +103,8 @@ library
                     , Agent.Transport.SSE
                     , Agent.Transport.WebSocket
                     , Agent.Transport.SessionResource
-    other-modules:    Agent.Image.Normalize
+    other-modules:    Agent.Subagents.Registry.Internal.Steering
+                    , Agent.Image.Normalize
                     , Agent.Loop.Backend
                     , Agent.Loop.DisplayJournal
                     , Agent.Loop.EventPump

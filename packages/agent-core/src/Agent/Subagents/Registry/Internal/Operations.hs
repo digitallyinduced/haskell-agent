@@ -41,6 +41,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Read as TextRead
 import Data.Time.Clock (UTCTime)
 import Agent.Subagents.Registry.Internal.Suspension (persistResume, cancelSuspension)
+import Agent.Subagents.Registry.Internal.Steering (enqueueSubagentWorkSTM)
 import Agent.Subagents.TaskPath
     ( TaskPath
     , joinTaskPath
@@ -162,7 +163,7 @@ sendInputMessageForTurn registry rootTurnId senderPath agentId content interrupt
             aborted <- isRootTurnAborted registry rootTurnId
             if aborted
                 then pure False
-                else writeTQueue record.recordMailbox work >> pure True
+                else enqueueSubagentWorkSTM record work >> pure True
         whenIO (queued && interrupt) (requestCancel record.recordCancel)
         pure $ if queued
             then Right "queued"
@@ -547,6 +548,7 @@ restoreSubagentResolvedWithCwd
     restoreMissing = do
         cancelFlag <- newCancelFlag
         mailbox <- newTQueueIO
+        steeringVar <- newTVarIO Nothing
         phaseVar <- newTVarIO normalizedPhase
         asyncVar <- newTVarIO Nothing
         previousVar <- newTVarIO previous
@@ -576,6 +578,7 @@ restoreSubagentResolvedWithCwd
                                             , recordPhase = phaseVar
                                             , recordCancel = cancelFlag
                                             , recordMailbox = mailbox
+                                            , recordSteering = steeringVar
                                             , recordAsync = asyncVar
                                             , recordPreviousResponseId = previousVar
                                             , recordLastUpdate = lastUpdateVar
@@ -809,7 +812,7 @@ queueMessageFromForTurn registry rootTurnId senderPath agentId content =
                                                     , messageContent = content
                                                     }
                                                 }
-                                        writeTQueue record.recordMailbox work
+                                        enqueueSubagentWorkSTM record work
                                         pure (Right "queued")
 
 -- | Wait until any live non-final agent reaches a final status (or timeout).
