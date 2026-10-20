@@ -93,6 +93,24 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "runLoop" do
+    describe "recovery attribution" do
+        it "persists recovery as attributed assistant context and preserves user-authored examples" do
+            let text = "<turn_aborted>Verify existing effects.</turn_aborted>"
+                items = turnInputsToItems [RecoveryMessage text, UserMessage text]
+                encoded = LazyByteString.toStrict (Aeson.encode items)
+            Json.decodeEither (Json.list responseItemDecoder) encoded `shouldBe` Right items
+            case items of
+                [MessageItem recovery, MessageItem user] -> do
+                    recovery.role `shouldBe` RoleAssistant
+                    recovery.content `shouldBe`
+                        MessageContentParts [OutputTextPart text Nothing Nothing]
+                    isRecoveryMessage recovery `shouldBe` True
+                    user.role `shouldBe` RoleUser
+                    isRecoveryMessage user `shouldBe` False
+                _ -> expectationFailure "expected recovery and user messages"
+            mapTurnInputUserText (const "edited") (RecoveryMessage text)
+                `shouldBe` RecoveryMessage text
+
     describe "instant steering" do
         mapM_ (\partial ->
             it ("preempts an unfinished submission with partial output " <> show partial) do
@@ -609,6 +627,10 @@ spec = describe "runLoop" do
             let retained = execution.executionState
             take 1 retained `shouldBe` turnInputsToItems [UserMessage "fix it"]
             length retained `shouldBe` 2
+            [message.role | MessageItem message <- retained]
+                `shouldBe` [RoleUser, RoleAssistant]
+            [isRecoveryMessage message | MessageItem message <- retained]
+                `shouldBe` [False, True]
             show retained `shouldContain` "Assistant reported: opened PR #86."
             show retained `shouldNotContain` "unfinished answer"
             execution.executionUncommittedAssistantText `shouldBe` Just "unfinished answer"
@@ -3304,6 +3326,10 @@ spec = describe "runLoop" do
         execution.executionResult `shouldBe` Left (LoopCancelled [])
         take 2 execution.executionState `shouldBe` turnInputsToItems initialInputs
         length execution.executionState `shouldBe` 3
+        [message.role | MessageItem message <- execution.executionState]
+            `shouldBe` [RoleUser, RoleUser, RoleAssistant]
+        [isRecoveryMessage message | MessageItem message <- execution.executionState]
+            `shouldBe` [False, False, True]
         show execution.executionState `shouldContain` "saved once"
         stored <- config.loopBackendState.readBackendState
         stored.backendItems `shouldBe` execution.executionState

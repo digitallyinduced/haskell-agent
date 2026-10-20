@@ -601,6 +601,13 @@ collectTurnInputs inputs = do
     inputText = \case
         UserMessage text ->
             [text]
+        RecoveryMessage text ->
+            -- The SDK accepts prompt text rather than assistant prefill.
+            -- Quote the host evidence and retain its source explicitly.
+            [ "Harness recovery context (not a user request):\n"
+                <> TextEncoding.decodeUtf8
+                    (LazyByteString.toStrict (Aeson.encode text))
+            ]
         AgentMessage message ->
             [renderInterAgentMessage message]
         UserMessageWithAttachments text _ ->

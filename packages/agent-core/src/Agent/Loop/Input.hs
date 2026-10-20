@@ -4,6 +4,7 @@ module Agent.Loop.Input
     , FileAttachment(..)
     , TurnAttachment(..)
     , TurnInput(..)
+    , isRecoveryMessage
     , userMessageWithAttachments
     , turnInputImages
     , turnInputFiles
@@ -30,6 +31,8 @@ import Agent.Responses.Types
     , ResponseItem(..)
     , ResponseMessage(..)
     , ReasoningItem(..)
+    , recoveryContextContentItemKind
+    , responseMessageHasContentItemKind
     )
 import Agent.ToolDispatch (ToolCallResult(..), ToolResultImage(..))
 import qualified Data.Aeson as Aeson
@@ -77,9 +80,17 @@ data TurnAttachment
     | FileAttachmentItem !FileAttachment
     deriving (Eq, Show)
 
+-- | Persist attribution separately from the text, so quoted user examples
+-- and legacy transcripts are never reclassified by their wording.
+isRecoveryMessage :: ResponseMessage -> Bool
+isRecoveryMessage = responseMessageHasContentItemKind recoveryContextContentItemKind
+
 -- | One input supplied to the provider-neutral agent loop.
 data TurnInput
     = UserMessage Text
+    -- | Harness-generated interruption evidence, never a new user request
+    -- or a successful model answer.
+    | RecoveryMessage !Text
     | AgentMessage InterAgentMessage
     | UserMessageWithAttachments !Text !(NonEmpty TurnAttachment)
     | CompletedTool ToolCallResult

@@ -487,7 +487,7 @@ spec = do
                                     "Tool `shell` was interrupted: the user cancelled the turn. It was not run, or was stopped before finishing and may have partially executed."
                                     FunctionCallKind BlockingToolCall [] Nothing)
                            ]
-                        <> turnInputsToItems [UserMessage turnAbortedNote]
+                        <> turnInputsToItems [RecoveryMessage turnAbortedNote]
 
         it "drops a call cut off mid-arguments by an incomplete response but keeps complete ones" do
             let inputs = inputOnlyTurnItems prepared

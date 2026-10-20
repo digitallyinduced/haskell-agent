@@ -52,7 +52,7 @@ import Agent.CLI.TextLayout
     , clampSelectionIndex
     , renderSplitPaneFrame
     )
-import Agent.Loop (LoopEvent(..))
+import Agent.Loop (LoopEvent(..), isRecoveryMessage)
 import Agent.Responses.LoopBackend (responseItemToToolCall)
 import Agent.Responses.Types
 import Agent.Subagents (SubagentId(..), SubagentStatus(..))
@@ -443,7 +443,8 @@ responseItemStepPreviewsRelative workspace count items
                         (Map.delete call.callId completed)
                         rest
             MessageItem message
-                | message.role == RoleAssistant ->
+                | message.role == RoleAssistant
+                , not (isRecoveryMessage message) ->
                     case textStep
                         (messageStepState message.status)
                         (responseMessageText message.content) of
@@ -591,7 +592,7 @@ responseItemFirstLine = go
 responseItemFirstItemLine :: ResponseItem -> Maybe Text
 responseItemFirstItemLine = \case
     MessageItem message ->
-        if isTaskPlanContextMessage message
+        if isTaskPlanContextMessage message || isRecoveryMessage message
             then Nothing
             else
                 labelledFirst
@@ -608,7 +609,7 @@ responseItemFirstItemLine = \case
 responseItemLineList :: ResponseItem -> [Text]
 responseItemLineList = \case
     MessageItem message ->
-        if isTaskPlanContextMessage message
+        if isTaskPlanContextMessage message || isRecoveryMessage message
             then []
             else
                 labelled
@@ -659,7 +660,7 @@ responseContentText = \case
 appendResponseItem :: Bool -> UiState -> ResponseItem -> UiState
 appendResponseItem showRawReasoning state = \case
     MessageItem message ->
-        if isTaskPlanContextMessage message
+        if isTaskPlanContextMessage message || isRecoveryMessage message
             then state
             else appendResponseMessage message state
     FunctionCallItem item ->

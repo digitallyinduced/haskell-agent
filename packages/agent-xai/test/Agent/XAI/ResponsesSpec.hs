@@ -11,6 +11,8 @@ import Agent.XAI.Options
 import Agent.XAI.Request
 import Agent.XAI.Stream
 import Agent.Responses.Types
+import Agent.Loop (TurnInput(..))
+import Agent.Loop.InputItems (turnInputsToItems)
 import Agent.Json (rawJsonFromEncoding)
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
@@ -47,6 +49,19 @@ spec = do
                 `shouldBe` Just "organization-research"
 
     describe "buildRequest" do
+        it "projects recovery as assistant context without local metadata" do
+            let request = sampleRequest
+                    { instructions = Nothing
+                    , input = Just (ResponseInputItems (turnInputsToItems
+                        [RecoveryMessage "interrupted work", UserMessage "continue"])) }
+            object <- expectObject (requestValue defaultClientOptions request)
+            items <- expectArray (KeyMap.lookup "input" object)
+            messages <- traverse expectObject items
+            map (KeyMap.lookup "role") messages `shouldBe`
+                [Just (Aeson.String "assistant"), Just (Aeson.String "user")]
+            map (KeyMap.lookup "internal_chat_message_metadata_passthrough") messages
+                `shouldBe` [Nothing, Nothing]
+
         it "projects custom freeform tools as functions accepted by Grok" do
             let custom = CustomToolValue CustomTool
                     { name = "apply_patch"

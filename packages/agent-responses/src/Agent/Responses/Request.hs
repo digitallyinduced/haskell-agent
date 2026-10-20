@@ -118,10 +118,9 @@ isServerCompactionCheckpoint = \case
     KnownResponseItem ItemContextCompaction _ -> True
     _ -> False
 
--- | Remove host-only compaction metadata. These markers remain in persisted
--- state so compaction policy can recognize local summaries and the provider
--- that created an opaque checkpoint, but Responses-compatible providers must
--- never receive them.
+-- | Remove host-only transcript metadata. Compaction provenance and recovery
+-- attribution remain in persisted state, but Responses-compatible providers
+-- must never receive these local markers.
 stripLocalCompactionMarker
     :: ResponseCreateParams
     -> ResponseCreateParams
@@ -161,7 +160,10 @@ stripLocalCompactionMarker ResponseCreateParams { input, .. } =
                     Nothing -> Nothing
                     Just kinds -> case
                         filter
-                            (/= localCompactionSummaryContentItemKind)
+                            (`notElem`
+                                [ localCompactionSummaryContentItemKind
+                                , recoveryContextContentItemKind
+                                ])
                             kinds
                         of
                             [] -> Nothing

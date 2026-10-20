@@ -38,6 +38,7 @@ import Agent.CLI.TUI.History
     )
 import Agent.Loop
     ( LoopEvent(..)
+    , isRecoveryMessage
     )
 import Agent.OpenAI.Compaction (isCompactSessionTurn)
 import Agent.Responses.LoopBackend (responseItemToToolCall)
@@ -236,6 +237,7 @@ lastMatchingUserIndex prompt =
 projectItem :: Bool -> UiState -> ResponseItem -> UiState
 projectItem projectPlanProtocol state = \case
     MessageItem message
+        | isRecoveryMessage message -> state
         | message.role == RoleAssistant ->
             projectAssistantText
                 projectPlanProtocol
@@ -389,7 +391,8 @@ turnUsesProposedPlanProtocol turn =
   where
     matchesPresentedText presented = \case
         MessageItem message
-            | message.role == RoleAssistant ->
+            | message.role == RoleAssistant
+            , not (isRecoveryMessage message) ->
                 let raw = messageText message.content
                     stripped = stripProposedPlan raw
                 in stripped /= raw && stripped == presented
@@ -407,7 +410,8 @@ hasAssistantBlock =
 hasDisplayAssistant :: [ResponseItem] -> Bool
 hasDisplayAssistant =
     any \case
-        MessageItem message -> message.role == RoleAssistant
+        MessageItem message ->
+            message.role == RoleAssistant && not (isRecoveryMessage message)
         _ -> False
 
 -- | Items are committed history: an assistant message projected through text

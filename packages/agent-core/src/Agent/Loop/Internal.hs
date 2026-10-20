@@ -709,7 +709,7 @@ publishSubmissionRecovery runtime state recovery steering = do
                             <> turnInputsToItems state.pending.inputs
                             <> map fst items
                             <> if hasSummary
-                                then turnInputsToItems [UserMessage note]
+                                then turnInputsToItems [RecoveryMessage note]
                                 else [])
                         Nothing
                 committed <-
@@ -991,7 +991,7 @@ recoverTools runtime scope execution = do
                     , executionResult = result
                     }
                 else do
-                    let recoveryInputs = pending <> [UserMessage (toolRecoveryNote orphans)]
+                    let recoveryInputs = pending <> [RecoveryMessage (toolRecoveryNote orphans)]
                         candidate = advanceBackendSnapshot current
                             (current.backendItems
                                 <> turnInputsToItems recoveryInputs)

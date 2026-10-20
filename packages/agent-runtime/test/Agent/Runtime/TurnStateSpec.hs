@@ -87,7 +87,7 @@ spec = describe "frontend-neutral turn policy" do
 
     it "retains explicit interrupted-work context without promoting display activity" do
         let recovery = turnInputsToItems
-                [UserMessage "<turn_aborted>\n<interrupted_work>\nAssistant reported: PR #86 opened.\n</interrupted_work>\n</turn_aborted>"]
+                [RecoveryMessage "<turn_aborted>\n<interrupted_work>\nAssistant reported: PR #86 opened.\n</interrupted_work>\n</turn_aborted>"]
             committed = inputOnlyTurnItems prepared <> recovery
             execution = failedExecution
                 { executionState = history <> committed

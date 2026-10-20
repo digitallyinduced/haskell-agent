@@ -20,6 +20,9 @@ import Agent.Runtime.Session.History
     )
 import Agent.Loop (ImageAttachment(..), TurnInput(..))
 import Agent.Responses.LoopBackend (turnInputsToItems)
+import Agent.Responses.Types
+    ( MessageContent(..), ResponseContentPart(..), ResponseItem(..)
+    , ResponseMessage(..), ResponseRole(..) )
 import Agent.Tools.PlanMode (newPlanModeEnv)
 import Agent.TUI.Model (BlockKind(..), UiBlock(..), UiState(..))
 import qualified Data.ByteString.Char8 as ByteString
@@ -70,6 +73,25 @@ spec = do
         readLiveAttachments conversationRef `shouldReturn` []
 
     describe "hydrateUiHistory" do
+      it "hides attributed recovery context while preserving canonical history" do
+        let items = turnInputsToItems
+                [UserMessage "question", RecoveryMessage "Host evidence: files may have changed."]
+                <> [MessageItem ResponseMessage
+                    { messageId = Nothing
+                    , role = RoleAssistant
+                    , content = MessageContentParts [OutputTextPart "answer" Nothing Nothing]
+                    , status = Nothing, phase = Nothing, passthrough = Nothing
+                    }]
+            turn = (sessionTurn "question" (Just "answer") TranscriptAppend)
+                { turnItems = items }
+            blocks = Foldable.toList
+                (sessionHistoryTurn (0 :: Int) turn).historyTurnBlocks
+        [block.blockBody | block <- blocks, block.blockKind == BlockAssistant]
+            `shouldBe` ["answer"]
+        [block.blockBody | block <- blocks, block.blockKind == BlockUser]
+            `shouldBe` ["question"]
+        foldSessionItems [turn] `shouldBe` items
+
       it "retains idle wake guidance in both text and detailed history" do
         steering <- Steering.newInputQueue
         Steering.enqueueSteeringInputs steering [UserMessage "late guidance"]

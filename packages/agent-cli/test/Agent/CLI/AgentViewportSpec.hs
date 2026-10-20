@@ -22,7 +22,8 @@ import Agent.TUI.Model
     , initialUiState
     , reduceUi
     )
-import Agent.Loop (LoopEvent(..))
+import Agent.Loop (LoopEvent(..), TurnInput(..))
+import Agent.Loop.InputItems (turnInputsToItems)
 import Agent.ToolDispatch
     ( ToolCallKind(..)
     , ToolCallResult(..)
@@ -383,6 +384,13 @@ spec = do
             ui.uiShellProcesses `shouldNotBe` mempty
 
     describe "responseItemStepPreviews" do
+        it "excludes harness recovery from model activity previews" do
+            let items = turnInputsToItems [RecoveryMessage "Verify previous tool effects."]
+            responseItemStepPreviews 2 items `shouldBe` []
+            responseItemLines items `shouldBe` []
+            responseItemPreviewLines 2 items `shouldBe` []
+            toList (responseItemsToUiState False items).uiBlocks `shouldBe` []
+
         it "coalesces tool calls with their outputs and returns newest first" do
             let steps =
                     responseItemStepPreviews 2

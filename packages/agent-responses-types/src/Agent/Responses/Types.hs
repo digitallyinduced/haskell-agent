@@ -24,6 +24,7 @@ module Agent.Responses.Types
     , responseItemTypeText
     , ResponseMessage(..)
     , localCompactionSummaryContentItemKind
+    , recoveryContextContentItemKind
     , responseMessageHasContentItemKind
     , compactionCheckpointOriginItem
     , responseItemCompactionCheckpointOrigin

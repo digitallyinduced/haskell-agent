@@ -1,6 +1,8 @@
 module Agent.OpenAI.RequestSpec (spec) where
 
 import Agent.OpenAI.Request (sanitizeCodexRequest)
+import Agent.Loop (TurnInput(..))
+import Agent.Loop.InputItems (turnInputsToItems)
 import Agent.OpenAI.WebSocketClient
     ( buildWsPayloadWithOptions
     , defaultCodexWsOptions
@@ -25,6 +27,29 @@ spec = describe "Codex wire contract" do
 
 transportSpec :: (String, ResponseCreateParams -> Aeson.Value) -> Spec
 transportSpec (transport, payloadFor) = describe transport do
+    it "sends recovery as assistant output text without local attribution metadata" do
+        let request :: ResponseCreateParams
+            request = sampleRequest
+                { input = Just (ResponseInputItems (turnInputsToItems
+                    [RecoveryMessage "interrupted work", UserMessage "continue"])) }
+            actual = payloadFor request `at` "input"
+        actual `shouldBe` Just (Aeson.toJSON
+            [ Aeson.object
+                [ "type" Aeson..= ("message" :: Text)
+                , "role" Aeson..= ("assistant" :: Text)
+                , "content" Aeson..= [Aeson.object
+                    [ "type" Aeson..= ("output_text" :: Text)
+                    , "text" Aeson..= ("interrupted work" :: Text) ]]
+                ]
+            , Aeson.object
+                [ "type" Aeson..= ("message" :: Text)
+                , "role" Aeson..= ("user" :: Text)
+                , "content" Aeson..= [Aeson.object
+                    [ "type" Aeson..= ("input_text" :: Text)
+                    , "text" Aeson..= ("continue" :: Text) ]]
+                ]
+            ])
+
     it "sets reasoning.context to all_turns on Responses Lite requests" do
         let reasoning = payloadFor sampleRequest `at` "reasoning"
         (reasoning >>= (`at` "context"))
