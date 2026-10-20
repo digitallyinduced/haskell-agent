@@ -165,7 +165,6 @@ replWithDraft :: SessionEnv -> Text -> IO RunResult
 replWithDraft env@SessionEnv
     { sessionRender = render
     , sessionState = sessionState
-    , sessionProvider = provider
     , sessionModelCatalog = catalog
     , sessionGatewayModels = gatewayModelsRef
     , sessionDialect = dialect
@@ -177,12 +176,10 @@ replWithDraft env@SessionEnv
     , sessionRefreshSkills = refreshSkills
     , sessionActiveToolNames = readActiveToolNames
     , sessionDraft = draftRef
-    , sessionInterrupt = interrupt
     , sessionAccount = accountRef
     , sessionSelectAccount = selectAccount
     , sessionTerminal = terminal
     , sessionFullscreen = fullscreen
-    , sessionAgentViewport = agentViewport
     } requestedDraft = do
     -- Both lifecycle continuations (including those rebuilt after a provider
     -- switch) reopen here. A suspended composer takes precedence over the
@@ -241,25 +238,13 @@ replWithDraft env@SessionEnv
                 gatewayAccess
                 (currentModel params)
         Nothing -> withMVar render.renderLock \_ -> do
-            let inbox = env.sessionInboxRuntime.inboxInline
             -- The inline editor redraws its ANSI frame with several writes.
             -- Keep the renderer out for the complete prompt lifetime so a
             -- late tool event cannot be spliced into the composer row.
             when terminal.terminalSemanticPrompts $
                 emitTerminalSequence terminal stdout osc133PromptStart
             termCols <- fmap snd <$> getTerminalSize
-            case agentViewport of
-                Nothing -> pure ()
-                Just viewport -> do
-                    entries <- viewport.viewportEntries
-                    selected <- readIORef viewport.viewportSelected
-                    let panel =
-                            renderAgentViewportPanelFor
-                                stdoutColor
-                                (fromMaybe 100 termCols)
-                                selected
-                                entries
-                    when (not (Text.null panel)) (Text.putStrLn panel)
+            renderSessionAgentViewport env stdoutColor termCols
             -- Status sits on the line above λ in minimal mode.
             withSynchronizedOutput terminal stdout do
                 savedRate <-
@@ -297,65 +282,10 @@ replWithDraft env@SessionEnv
                         emitTerminalSequence terminal stdout osc133PromptEnd
                     Text.putStr (endBackground stdoutColor)
                     hFlush stdout
-            failedTurn <- readIORef env.sessionLastFailedTurn
-            let steeringWake = case failedTurn of
-                    Just _ -> retry
-                    Nothing -> Right <$> awaitSteeringInputReady env.sessionSteeringInputs
-                -- Readiness must not consume the inbox: keyboard readiness
-                -- can win the editor's race after this transaction commits.
-                wake = (Left <$> readTMVar inbox) `orElse` steeringWake
-                readLine =
-                    readReplLineOrWithCatalogForTarget
-                        (dictationTargetForSession provider gatewayAccess)
-                        slashCatalog interrupt chromePrompt draft wake
-            queued <- atomically (tryTakeTMVar inbox)
-            case queued of
-                Just text -> do
-                    finishChrome
-                    pure (Right (ReplText text, True))
-                Nothing -> do
-                    outcome <- readLine
-                    finishChrome
-                    case outcome of
-                        Left (Left _, _) -> do
-                            text <- atomically (takeTMVar inbox)
-                            pure (Right (ReplText text, True))
-                        Left (Right (), suspendedDraft) -> do
-                            atomically $
-                                awaitSteeringInput env.sessionSteeringInputs
-                                    `orElse` pure ()
-                            pure (Left (SteeringInputWake suspendedDraft))
-                        Right line -> pure (Right (line, False))
+            readInlinePromptInput
+                env slashCatalog gatewayAccess chromePrompt draft finishChrome
     case mlineResult of
-        Left (SteeringInputWake suspendedDraft) -> do
-            suspendSessionDraft env.sessionDraft env.sessionSuspendedDraft suspendedDraft
-            (promptText, pending) <-
-                readSteeringTurn env.sessionSteeringInputs
-            if null pending
-                then replWithDraft env suspendedDraft
-                else do
-                    forM_ fullscreen \runtime ->
-                        emitUiEvent runtime
-                            (UiSystemMessage
-                                "Queued input received; resuming the agent.")
-                    -- Keep inputs in the normal steering queue so each is
-                    -- acknowledged only after the provider commits it. The
-                    -- prompt text preserves user guidance in durable history;
-                    -- it does not add a second copy to provider inputs.
-                    result <- runOneTurn env promptText []
-                    SessionLifecycle.finishTurn
-                        sessionContinuation
-                        env False result
-        Left (ProviderUnavailableWake apiError) -> do
-            -- The startup check is one-shot. If no fallback account is usable,
-            -- leave request-time error handling in charge of later submits.
-            writeIORef startupUnavailableRef Nothing
-            requestStartupProviderFallback env apiError >>= \case
-                Just providerTransition ->
-                    pure (RunSwitchProvider providerTransition)
-                Nothing -> do
-                    reportProviderUnavailable fullscreen apiError
-                    replWithDraft env ""
+        Left wake -> handleReplWake env wake
         Right (mline, fromInbox) -> do
             -- Any user action wins the startup race. In particular, a prompt
             -- already submitted while the preflight was running proceeds on
@@ -373,6 +303,94 @@ replWithDraft env@SessionEnv
                     planState
                     policy
                     mline
+
+readInlinePromptInput
+    :: SessionEnv
+    -> SlashCatalog
+    -> Maybe GatewayModelAccess
+    -> Text
+    -> Text
+    -> IO ()
+    -> IO (Either ReplWake (ReplLine, Bool))
+readInlinePromptInput env slashCatalog gatewayAccess chromePrompt draft finishChrome = do
+    failedTurn <- readIORef env.sessionLastFailedTurn
+    let inbox = env.sessionInboxRuntime.inboxInline
+        interrupt = env.sessionInterrupt
+        steeringWake = case failedTurn of
+            Just _ -> retry
+            Nothing -> Right <$> awaitSteeringInputReady env.sessionSteeringInputs
+        -- Readiness must not consume the inbox: keyboard readiness
+        -- can win the editor's race after this transaction commits.
+        wake = (Left <$> readTMVar inbox) `orElse` steeringWake
+        readLine =
+            readReplLineOrWithCatalogForTarget
+                (dictationTargetForSession env.sessionProvider gatewayAccess)
+                slashCatalog interrupt chromePrompt draft wake
+    queued <- atomically (tryTakeTMVar inbox)
+    case queued of
+        Just text -> do
+            finishChrome
+            pure (Right (ReplText text, True))
+        Nothing -> do
+            outcome <- readLine
+            finishChrome
+            case outcome of
+                Left (Left _, _) -> do
+                    text <- atomically (takeTMVar inbox)
+                    pure (Right (ReplText text, True))
+                Left (Right (), suspendedDraft) -> do
+                    atomically $
+                        awaitSteeringInput env.sessionSteeringInputs
+                            `orElse` pure ()
+                    pure (Left (SteeringInputWake suspendedDraft))
+                Right line -> pure (Right (line, False))
+
+renderSessionAgentViewport :: SessionEnv -> Bool -> Maybe Int -> IO ()
+renderSessionAgentViewport env stdoutColor termCols = do
+    case env.sessionAgentViewport of
+        Nothing -> pure ()
+        Just viewport -> do
+            entries <- viewport.viewportEntries
+            selected <- readIORef viewport.viewportSelected
+            let panel =
+                    renderAgentViewportPanelFor
+                        stdoutColor
+                        (fromMaybe 100 termCols)
+                        selected
+                        entries
+            when (not (Text.null panel)) (Text.putStrLn panel)
+
+handleReplWake :: SessionEnv -> ReplWake -> IO RunResult
+handleReplWake env = \case
+    SteeringInputWake suspendedDraft -> do
+        suspendSessionDraft env.sessionDraft env.sessionSuspendedDraft suspendedDraft
+        (promptText, pending) <-
+            readSteeringTurn env.sessionSteeringInputs
+        if null pending
+            then replWithDraft env suspendedDraft
+            else do
+                forM_ env.sessionFullscreen \runtime ->
+                    emitUiEvent runtime
+                        (UiSystemMessage
+                            "Queued input received; resuming the agent.")
+                -- Keep inputs in the normal steering queue so each is
+                -- acknowledged only after the provider commits it. The
+                -- prompt text preserves user guidance in durable history;
+                -- it does not add a second copy to provider inputs.
+                result <- runOneTurn env promptText []
+                SessionLifecycle.finishTurn
+                    sessionContinuation
+                    env False result
+    ProviderUnavailableWake apiError -> do
+        -- The startup check is one-shot. If no fallback account is usable,
+        -- leave request-time error handling in charge of later submits.
+        writeIORef env.sessionStartupUnavailable Nothing
+        requestStartupProviderFallback env apiError >>= \case
+            Just providerTransition ->
+                pure (RunSwitchProvider providerTransition)
+            Nothing -> do
+                reportProviderUnavailable env.sessionFullscreen apiError
+                replWithDraft env ""
 
 submitReplLine :: SessionEnv -> Bool -> IO RunResult -> IO RunResult
 submitReplLine env fromInbox action = do
