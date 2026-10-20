@@ -72,6 +72,7 @@ library
                     , Agent.ProjectInstructions
                     , Agent.ResourceScope
                     , Agent.Retry
+                    , Agent.Turn
                     , Agent.Skills
                     , Agent.Skills.ToolSearch
                     , Agent.Subagents
@@ -101,6 +102,7 @@ library
                     , Agent.Tools.Registration
                     , Agent.Transport.SSE
                     , Agent.Transport.WebSocket
+                    , Agent.Transport.SessionResource
     other-modules:    Agent.Image.Normalize
                     , Agent.Loop.Backend
                     , Agent.Loop.DisplayJournal
@@ -296,6 +298,9 @@ test-suite agent-core-test
                     , Agent.ProviderSpec
                     , Agent.ResourceScopeSpec
                     , Agent.RetrySpec
+                    , Agent.TurnSpec
+                    , Agent.TurnPolicySpec
+                    , Agent.Transport.SessionResourceSpec
                     , Agent.SkillsSpec
                     , Agent.Skills.ToolSearchSpec
                     , Agent.SubagentsSpec

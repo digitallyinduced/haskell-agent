@@ -1,5 +1,11 @@
 # agent-core
 
+`Agent.Turn.runTurn` executes a complete model submission with automatic
+bounded retry and waiting. Its retry scope ends before callers execute tools
+or commit successful response effects. `Agent.Transport.SessionResource`
+retains a credential's connection across successful requests, releases failed
+requests before returning, and cancels and joins active work with its owner.
+
 Provider-neutral infrastructure shared by the harness transports:
 
 - `Agent.Error` defines the common transport and provider error channel.

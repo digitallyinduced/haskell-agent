@@ -15,6 +15,7 @@ module Agent.OpenAI.WebSocketClient
     , withCodexWsRetryingAfterForSession
     , sendWsRequest
     , sendWsRequestWithOptions
+    , sendWsRequestOnceWithOptions
     , sendWsRequestWithEvents
     , sendWsRequestWithSteering
     , sendWsRequestWithEventsPreservingTurnState
@@ -738,6 +739,14 @@ sendWsRequestWithOptions
     -> IO (Either ApiError Response)
 sendWsRequestWithOptions options cc request previousResponseId =
     retryTransientWsResultWithPolicy transientWsResultPolicy $
+        sendWsRequestOnceWithOptions options cc request previousResponseId
+
+-- | One physical submission. 'Agent.OpenAI.Turn' owns the complete retry
+-- budget and can replace a socket invalidated by a provider error event.
+sendWsRequestOnceWithOptions
+    :: CodexWsOptions -> CodexConn -> ResponseCreateParams -> Maybe Text
+    -> IO (Either ApiError Response)
+sendWsRequestOnceWithOptions options cc request previousResponseId =
         sendWsRequestWithEventsAndOptions
             FinishNormalTurnState
             options
