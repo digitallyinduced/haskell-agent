@@ -17,6 +17,7 @@ import Agent.Runtime.Session (LegacySubagentTarget)
 import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.Loop (BackendSnapshot)
 import Agent.Provider (Provider, TokenProvider)
+import Agent.OpenAI.Models.Types (ModelInfo)
 import Agent.Responses.Types (ResponseCreateParams)
 import Agent.Subagents (SubagentId, SubagentRegistry)
 import Agent.Tools.MultiAgents
@@ -61,6 +62,9 @@ type SubagentStoreRoot = IORef (Maybe OsPath)
 -- | Provider-neutral dependencies shared by all child-agent backends.
 data SubagentRuntime = SubagentRuntime
     { subagentOptions :: !CliOptions
+    -- | Native Codex metadata scoped to the child's credential and model.
+    -- Resolution never borrows the root model's collaboration capabilities.
+    , subagentCodexModelInfo :: !(TokenProvider -> Text -> IO (Maybe ModelInfo))
     , subagentNetworkRecovery :: !(Maybe NetworkRecovery)
     , subagentGhciEnabled :: !(IORef Bool)
     , subagentBashEnabled :: !(IORef Bool)

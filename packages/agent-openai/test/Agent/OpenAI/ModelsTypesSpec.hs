@@ -13,6 +13,32 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "model-owned collaboration tools" do
+        it "round-trips partial tool descriptions and encoded parameter schemas" do
+            let model = decodeModelOrFail $ Aeson.object
+                    [ "slug" Aeson..= ("tool-model" :: Text.Text)
+                    , "base_instructions" Aeson..= ("Instructions." :: Text.Text)
+                    , "model_messages" Aeson..= Aeson.object
+                        [ "tools" Aeson..= Aeson.object
+                            [ "multi_agent" Aeson..= Aeson.object
+                                [ "list_agents" Aeson..= Aeson.object
+                                    [ "description" Aeson..= ("List workers." :: Text.Text)
+                                    , "parameters" Aeson..= ("{\"type\":\"object\"}" :: Text.Text)
+                                    ]
+                                , "wait_agent" Aeson..= Aeson.object
+                                    [ "description" Aeson..= ("Wait for mail." :: Text.Text) ]
+                                ]
+                            ]
+                        ]
+                    ]
+                tools = model.modelMessages >>= (.tools) >>= (.multiAgent)
+            (tools >>= (.listAgents)) `shouldBe`
+                Just (ModelToolMessage (Just "List workers.") (Just "{\"type\":\"object\"}"))
+            (tools >>= (.waitAgent)) `shouldBe`
+                Just (ModelToolMessage (Just "Wait for mail.") Nothing)
+            (tools >>= (.spawnAgent)) `shouldBe` Nothing
+            decodeModelOrFail (Aeson.toJSON model) `shouldBe` model
+
     describe "bundled Codex model catalog" do
         it "loads the current upstream catalog and selects GPT-6.1 Sol by priority" do
             catalog <- loadBundledModelsOrThrow

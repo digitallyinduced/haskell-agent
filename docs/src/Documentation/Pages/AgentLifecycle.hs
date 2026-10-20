@@ -65,7 +65,7 @@ page = Page
             <tbody>
                 <tr><td><code>fork_turns</code> omitted or <code>"all"</code></td><td>Fork the available parent conversation history.</td><td>Inherits the parent model and reasoning effort; explicit overrides are rejected.</td></tr>
                 <tr><td><code>fork_turns: "none"</code></td><td>Do not copy the parent transcript.</td><td>The task message must provide the necessary background, paths, and constraints.</td></tr>
-                <tr><td><code>fork_turns: "3"</code></td><td>Copy a bounded recent history using a positive integer string.</td><td>Older decisions may be missing; summarize those in the assignment.</td></tr>
+                <tr><td>Legacy positive integer <code>fork_turns</code></td><td>Accepted as a full-history fork for compatibility.</td><td>Uses the same inheritance rules as <code>"all"</code>. New calls should use <code>"all"</code> or <code>"none"</code>.</td></tr>
                 <tr><td><code>model</code></td><td>Select a different allowed child model.</td><td>Requires no-history or bounded-history spawning and must satisfy the host's model policy.</td></tr>
                 <tr><td><code>reasoning_effort</code></td><td>Request a child reasoning setting.</td><td>Requires no-history or bounded-history spawning; supported values depend on the selected model.</td></tr>
             </tbody>
@@ -155,7 +155,7 @@ page = Page
                 <tr><td>Spawn rejected by concurrency policy</td><td>Inspect active agents and wait for completion or interrupt unnecessary work. Increase the cap only when the host and provider can support it.</td></tr>
                 <tr><td>Child cannot find the parent's new file</td><td>Check whether it has a separate worktree and which base it uses. Supply or integrate the required change explicitly.</td></tr>
                 <tr><td>Conflicting edits</td><td>Stop overlapping writers, inspect the shared diff, and assign a single integration owner.</td></tr>
-                <tr><td>Model override rejected</td><td>Check allowed model IDs and use <code>"none"</code> or a positive integer for <code>fork_turns</code>, not <code>"all"</code>.</td></tr>
+                <tr><td>Model override rejected</td><td>Check allowed model IDs and use <code>fork_turns: "none"</code> when overriding the model or reasoning effort.</td></tr>
                 <tr><td>Message sent but no answer</td><td>An idle target needs a follow-up task, not only an informational message.</td></tr>
                 <tr><td>Completed report but no changes in the parent</td><td>Inspect the child worktree and integration plan. A report is not a merge.</td></tr>
                 <tr><td>Interrupted operation has an uncertain outcome</td><td>Inspect local or remote state before retrying. Do not equate cancellation with rollback.</td></tr>

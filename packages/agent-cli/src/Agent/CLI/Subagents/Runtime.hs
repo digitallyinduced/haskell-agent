@@ -61,7 +61,7 @@ import Agent.Runtime.Provider.OpenAI.Fresh
 import Agent.Runtime.ModelConfig
     (connectionSupportsDialect, organizationGatewayConnectionId)
 import Agent.CLI.Tools
-    (hostedSearchToolNames, requireToolRegistry, schemasFromAppTools)
+    (codexToolsForModel, hostedSearchToolNames, requireToolRegistry, schemasFromAppTools)
 import Agent.Runtime.Tools.Dialects
     ( CodingTools(..)
     , codingToolsFor
@@ -736,18 +736,19 @@ runPreparedCodexSubagent
         coding.codingPlanMode
     flip finally coding.codingClose do
         (toolRegistry, childParams) <-
-            prepareCodexChildTools runtime env preparation coding
+            prepareCodexChildTools runtime tokenProvider env preparation coding
         runCodexChildBackend
             gatewayOnly runtime tokenProvider env previous prompt onEvent
             preparation coding toolRegistry childParams
 
 prepareCodexChildTools
     :: SubagentRuntime
+    -> TokenProvider
     -> SubagentSpawnEnv
     -> CodexSubagentPreparation
     -> CodingTools
     -> IO (ToolRegistry, ResponseCreateParams)
-prepareCodexChildTools runtime env preparation coding = do
+prepareCodexChildTools runtime tokenProvider env preparation coding = do
     today <- utctDay <$> getCurrentTime
     shellPath <-
         Text.pack . fromMaybe defaultShell <$> lookupEnv "SHELL"
@@ -759,17 +760,19 @@ prepareCodexChildTools runtime env preparation coding = do
                 preparation.codexPreparationAgentType
                 childDialect)
             coding.codingAppToolGroups
+    modelInfo <- runtime.subagentCodexModelInfo tokenProvider preparation.codexPreparationModel
+    let modelTools = codexToolsForModel modelInfo tools
     let instructions =
             codexChildInstructions
-                preparation env today shellPath tools
+                preparation env today shellPath modelTools
         childParams =
             requestParams
                 OpenAIProvider
                 preparation.codexPreparationModel
                 instructions
-                (schemasFromAppTools childDialect tools)
+                (schemasFromAppTools childDialect modelTools)
                 preparation.codexPreparationEffort
-    toolRegistry <- requireToolRegistry tools
+    toolRegistry <- requireToolRegistry modelTools
     pure (toolRegistry, childParams)
 
 -- | Compose a child's tools through the root run's hook, never by
@@ -1349,7 +1352,7 @@ inheritsFullHistory :: Maybe Text -> Bool
 inheritsFullHistory = \case
     Nothing -> True
     Just turns ->
-        Text.toLower (Text.strip turns) `elem` ["", "all"]
+        Text.toLower (Text.strip turns) /= "none"
 
 allowedChildModelError :: Maybe [Text] -> Text -> Maybe Text
 allowedChildModelError Nothing _ = Nothing

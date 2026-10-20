@@ -272,14 +272,14 @@ spawnAgentParameters ctx encryptMessage =
     , PropertySchema "model" PropertyString False $ Just
         (Text.intercalate " " $
             [ "Model override for the new agent. Omit unless an explicit override is needed."
-            , "Model or reasoning-effort overrides require `fork_turns` to be `none` or a positive integer."
+            , "Model or reasoning-effort overrides require `fork_turns` to be `none`."
             ]
                 <> maybe [] pure ctx.multiSpawnModelGuidance
                 <> allowedModelGuidance ctx.multiAllowedChildModels)
     , PropertySchema "reasoning_effort" PropertyString False $ Just
-        "Reasoning effort override for the new agent. Omit to inherit the parent effort. Overrides require `fork_turns` to be `none` or a positive integer."
+        "Reasoning effort override for the new agent. Omit to inherit the parent effort. Overrides require `fork_turns` to be `none`."
     , PropertySchema "fork_turns" PropertyString False $ Just
-        "Optional number of turns to fork. Defaults to `all`. Full-history forks (`all` or omitted) inherit the parent model and reasoning effort and do not accept overrides. Use `none` or a positive integer string such as `3` when setting `model` or `reasoning_effort`."
+        "Optional history mode: `all` (default) or `none`. Full-history forks inherit the parent model and reasoning effort and do not accept overrides. Set `fork_turns` to `none` when setting `model` or `reasoning_effort`."
     ]
 
 spawnAgentDescription :: Text
@@ -315,7 +315,7 @@ runSpawn ctx workspace call args
     | hasSpawnOverride args && usesFullHistory args.forkTurns =
         pure (Left
             "full-history forks inherit the parent model and reasoning effort; \
-            \set fork_turns to none or a positive integer when overriding \
+            \set fork_turns to none when overriding \
             \model or reasoning_effort")
     | otherwise = do
         resolveChildModelOverride ctx args.model >>= \case
@@ -543,6 +543,7 @@ normalizeForkTurns value =
     case Text.toLower . Text.strip <$> value of
         Nothing -> Just "all"
         Just "" -> Just "all"
+        Just turns | Just count <- readExactInt turns, count > 0 -> Just "all"
         normalized -> normalized
 
 --------------------------------------------------------------------------------
@@ -805,8 +806,6 @@ listAgentsTool :: MultiAgentContext -> AppTool
 listAgentsTool ctx = jsonTool "list_agents" listAgentsDescription
     [ PropertySchema "path_prefix" PropertyString False $ Just
         "Task-path prefix filter without a trailing slash. Omit to list all live agents."
-    , PropertySchema "offset" PropertyNumber False $ Just "Zero-based page offset, default 0."
-    , PropertySchema "limit" PropertyNumber False $ Just "Page size, default 20, maximum 100."
     ]
     True
     ParallelSafe
@@ -814,9 +813,7 @@ listAgentsTool ctx = jsonTool "list_agents" listAgentsDescription
 
 listAgentsDescription :: Text
 listAgentsDescription =
-    "List live agents in the current root thread tree. Optionally filter by \
-    \task-path prefix. Bounded pages prioritize running/pending, then suspended, \
-    \then settled agents, each sorted by task path. Returns readable labeled text."
+    "List live agents in the current root thread tree. Optionally filter by task-path prefix."
 
 runListAgents :: MultiAgentContext -> ListAgentsArgs -> IO (Either Text Text)
 runListAgents ctx args = do
@@ -824,7 +821,11 @@ runListAgents ctx args = do
     let offset = max 0 (fromMaybe 0 args.pageOffset)
         limit = max 1 (min 100 (fromMaybe 20 args.pageLimit))
         ordered = sortOn (\(path, _, status) -> (priority status, taskPathText path)) agents
-        page = take limit (drop offset ordered)
+        -- Old transcripts can still invoke the former paging arguments, but
+        -- the reserved native schema advertises only path_prefix.
+        page = case (args.pageOffset, args.pageLimit) of
+            (Nothing, Nothing) -> ordered
+            _ -> take limit (drop offset ordered)
         next = offset + length page
         footer = if next < length agents
             then "\n\nMore agents available; call list_agents with offset="

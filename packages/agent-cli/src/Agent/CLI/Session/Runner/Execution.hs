@@ -1206,7 +1206,7 @@ buildSessionShellRuntime host controls request@SessionRequest{..} =
         computerUseEnabled <- readIORef computerUseEnabledRef
         discovered <- maybe (pure []) id deferredTools
         let active =
-                activeSessionTools
+                codexToolsForModel modelInfo $ activeSessionTools
                     (sessionTools <> discovered)
                     ghciEnabled
                     bashEnabled
@@ -1336,7 +1336,7 @@ refreshSessionToolParams host controls SessionRequest{..} ghciEnabled bashEnable
     today <- utctDay <$> getCurrentTime
     discovered <- maybe (pure []) id deferredTools
     let enabledTools =
-            activeSessionTools
+            codexToolsForModel modelInfo $ activeSessionTools
                 (sessionTools <> discovered)
                 ghciEnabled
                 bashEnabled

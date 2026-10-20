@@ -27,7 +27,7 @@ import Agent.Tools.Types
     , jsonToolParameters
     )
 import Control.Concurrent.STM
-import Control.Monad (unless)
+import Control.Monad (forM, unless)
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -382,8 +382,37 @@ spec = describe "Agent.Tools.MultiAgents" do
                 , property <- fromMaybe [] (jsonToolParameters tool)
                 ]
         propertyNames "spawn_agent" `shouldNotContain` ["isolation"]
+        propertyNames "list_agents" `shouldBe` ["path_prefix"]
         propertyNames "spawn_agent_in_worktree"
             `shouldMatchList` propertyNames "spawn_agent"
+        closeSubagentRegistry registry
+
+    it "normalizes legacy numeric forks to full history before startup" do
+        prepared <- newEmptyTMVarIO
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure (resultWithText "done"))
+            (\_ _ -> pure ())
+        let context = (rootContext registry Nothing)
+                { multiPrepareSpawn = Just
+                    (\_ options -> atomically (putTMVar prepared options)) }
+            call = ToolCall
+                { callId = "legacy-fork"
+                , name = "collaboration.spawn_agent"
+                , arguments = "{\"task_name\":\"worker\",\"message\":\"task\",\"fork_turns\":\"3\"}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+        result <- dispatchToolCall defaultLoopDispatch
+            (appToolHandlers (multiAgentTools context)) call
+        result.output `shouldSatisfy` Text.isInfixOf "/root/worker"
+        options <- atomically (takeTMVar prepared)
+        options.collaborationForkTurns `shouldBe` Just "all"
+        denied <- dispatchToolCall defaultLoopDispatch
+            (appToolHandlers (multiAgentTools context)) call
+                { callId = "legacy-fork-override"
+                , arguments = "{\"task_name\":\"other\",\"message\":\"task\",\"fork_turns\":\"3\",\"model\":\"gpt-test\"}"
+                }
+        denied.output `shouldSatisfy` Text.isInfixOf "set fork_turns to none"
         closeSubagentRegistry registry
 
     it "preserves encrypted spawn payloads" do
@@ -410,7 +439,7 @@ spec = describe "Agent.Tools.MultiAgents" do
             EncryptedInterAgentContent "gAAAAA-task"
         closeSubagentRegistry registry
 
-    it "applies model, effort, and fork overrides before the supervisor starts" do
+    it "applies fresh-agent model and effort overrides before the supervisor starts" do
         prepared <- newEmptyTMVarIO
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\env _ _ _ -> pure (resultWithText env.subId.unSubagentId))
@@ -424,7 +453,7 @@ spec = describe "Agent.Tools.MultiAgents" do
                 , arguments =
                     "{\"task_name\":\"worker\",\"message\":\"task\",\
                     \\"model\":\"gpt-test\",\"reasoning_effort\":\"high\",\
-                    \\"fork_turns\":\"3\"}"
+                    \\"fork_turns\":\"none\"}"
                 , callKind = FunctionCallKind
                 , argumentsEncrypted = False
                 }
@@ -436,7 +465,7 @@ spec = describe "Agent.Tools.MultiAgents" do
             { collaborationModel = Just "gpt-test"
             , collaborationResolvedModel = Nothing
             , collaborationReasoningEffort = Just "high"
-            , collaborationForkTurns = Just "3"
+            , collaborationForkTurns = Just "none"
             , collaborationInitialMessage = plainInterAgentContent "task"
             }
         closeSubagentRegistry registry
@@ -476,7 +505,7 @@ spec = describe "Agent.Tools.MultiAgents" do
         result <- dispatchToolCall defaultLoopDispatch
             (appToolHandlers (multiAgentTools (rootContext registry Nothing))) call
         result.output `shouldSatisfy`
-            Text.isInfixOf "set fork_turns to none or a positive integer"
+            Text.isInfixOf "set fork_turns to none"
         closeSubagentRegistry registry
 
     it "spawns an isolated child in a host-provided worktree" do
@@ -714,7 +743,25 @@ spec = describe "Agent.Tools.MultiAgents" do
         emptyListed.output `shouldBe` "(no live agents)"
         closeSubagentRegistry registry
 
-    it "paginates agent lists and bounds final-result previews" do
+    it "lists all agents when the native call omits legacy paging arguments" do
+        gate <- newEmptyTMVarIO
+        registry <- newSubagentRegistry
+            (defaultSubagentConfig {maxConcurrent = 21, maxSpawnedPerTurn = Nothing})
+            (fromFilePath "/tmp")
+            (\_ _ _ _ -> atomically (readTMVar gate) >> pure (resultWithText "done"))
+            (\_ _ -> pure ())
+        agents <- forM [1 .. 21 :: Int] \number -> do
+            Right (agentId, _) <- spawnSubagentAt registry Nothing taskPathRoot 0
+                ("worker_" <> Text.pack (show number)) (plainInterAgentContent "work") Nothing
+            pure agentId
+        listed <- dispatchToolCall defaultLoopDispatch
+            (appToolHandlers (multiAgentTools (rootContext registry Nothing)))
+            (ToolCall "list-all" "collaboration.list_agents" "{}" FunctionCallKind False)
+        Text.count "Agent: /root/worker_" listed.output `shouldBe` length agents
+        listed.output `shouldNotSatisfy` Text.isInfixOf "More agents"
+        closeSubagentRegistry registry
+
+    it "reads legacy paginated agent lists and bounds final-result previews" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ _ _ -> pure (resultWithText (Text.replicate 2000 "x")))
             (\_ _ -> pure ())

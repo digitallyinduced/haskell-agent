@@ -92,17 +92,127 @@ import Agent.Tools.Types
 import Control.Exception.Safe (bracket)
 import Control.Monad (forM_, join)
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (newIORef, readIORef, modifyIORef')
 import Agent.Tools.CodeMode.Haskell.Host (HaskellRepairRequest(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import System.Info (os)
 import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
 
 spec :: Spec
 spec = describe "schemasFromAppTools" do
+    describe "model-owned collaboration declarations" do
+        let parameters = Aeson.object
+                [ "type" Aeson..= ("object" :: Text)
+                , "properties" Aeson..= Aeson.object
+                    [ "path_prefix" Aeson..= Aeson.object
+                        ["type" Aeson..= ("string" :: Text)] ]
+                , "additionalProperties" Aeson..= False
+                ]
+            encoded = TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode
+            modelFor schema = catalogToolModel "list_agents" "Model list description." schema
+            original = jsonAppTool "list_agents" "Original list description."
+                [PropertySchema "limit" PropertyNumber False Nothing]
+                AlwaysReadOnly (noArgsTool "list_agents" (pure (Right "host result")))
+        it "projects the selected model's declaration into namespaces and code mode" do
+            let selected = codexToolsForModel (Just (modelFor (encoded parameters))) [original]
+                nested = (projectCodeModeTools CodeOnlyToolMode selected).nestedCodeModeTools
+                functions =
+                    [ function
+                    | NamespaceToolValue namespace <- schemasFromAppTools codexDialect selected
+                    , FunctionToolValue function <- namespace.tools
+                    ]
+            map (.appToolDescription) nested `shouldBe` ["Model list description."]
+            map (.appToolSchema) nested `shouldBe` [RawJsonFunctionSchema parameters]
+            map (.parameters) functions `shouldBe` [Just (rawJsonValue parameters)]
+            map (.description) functions `shouldBe` [Just "Model list description."]
+            map (.strict) functions `shouldBe` [Just False]
+            map (.parameters) (functionToolsNamed "list_agents"
+                (schemasFromAppTools grokBuildDialect selected))
+                `shouldBe` [Just (rawJsonValue parameters)]
+
+        it "retains the host schema on malformed or unsupported overrides" do
+            forM_ ["not json", "[]", "{\"type\":\"array\"}",
+                "{\"type\":\"object\",\"properties\":[]}",
+                "{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"invalid\"}}}"] \schema -> do
+                let selected = codexToolsForModel (Just (modelFor schema)) [original]
+                map (.appToolSchema) selected `shouldBe` [original.appToolSchema]
+                map (.appToolDescription) selected `shouldBe` ["Model list description."]
+
+        it "keeps supported schema structures while omitting unknown keywords" do
+            let schema = Aeson.object
+                    [ "type" Aeson..= ("object" :: Text)
+                    , "properties" Aeson..= Aeson.object
+                        [ "path_prefix" Aeson..= Aeson.object
+                            [ "type" Aeson..= (["string", "null"] :: [Text])
+                            , "pattern" Aeson..= ("^/root" :: Text)
+                            ]
+                        ]
+                    , "required" Aeson..= (["path_prefix"] :: [Text])
+                    , "additionalProperties" Aeson..= False
+                    ]
+                expected = Aeson.object
+                    [ "type" Aeson..= ("object" :: Text)
+                    , "properties" Aeson..= Aeson.object
+                        [ "path_prefix" Aeson..= Aeson.object
+                            [ "type" Aeson..= (["string", "null"] :: [Text]) ] ]
+                    , "required" Aeson..= (["path_prefix"] :: [Text])
+                    , "additionalProperties" Aeson..= False
+                    ]
+            map (.appToolSchema)
+                (codexToolsForModel (Just (modelFor (encoded schema))) [original])
+                `shouldBe` [RawJsonFunctionSchema expected]
+
+        it "preserves encrypted properties and rejects overrides that omit them" do
+            let encryptedSchema annotation = Aeson.object
+                    [ "type" Aeson..= ("object" :: Text)
+                    , "properties" Aeson..= Aeson.object
+                        [ "message" Aeson..= Aeson.object
+                            (["type" Aeson..= ("string" :: Text)] <> annotation) ]
+                    ]
+                hostSchema = encryptedSchema ["encrypted" Aeson..= True]
+                hostTool = rawJsonAppTool "send_message" "Host message." hostSchema
+                    AlwaysReadOnly (noArgsTool "send_message" (pure (Right "sent")))
+                selected schema = codexToolsForModel
+                    (Just (catalogToolModel "send_message" "Model message." (encoded schema))) [hostTool]
+            map (.appToolSchema) (selected (encryptedSchema []))
+                `shouldBe` [RawJsonFunctionSchema hostSchema]
+            map (.appToolSchema) (selected parameters)
+                `shouldBe` [hostTool.appToolSchema]
+            result <- dispatchToolHandlerDetailed
+                ToolDispatchConfig
+                    { toolDispatchUnknownTool = id
+                    , toolDispatchFormatResult = either id id
+                    , toolDispatchFormatException = \_ exception -> Text.pack (show exception)
+                    , toolDispatchOnException = \_ _ -> pure ()
+                    , toolDispatchOnOutput = \_ _ -> pure ()
+                    , toolDispatchFinalizeOutput = \_ -> pure
+                    }
+                (Just (head (selected (encryptedSchema []))).appToolHandler)
+                (functionToolCall "send" "send_message" "{}")
+            result.toolDispatchResult.output `shouldBe` "sent"
+
+        it "uses each child's capability metadata and preserves unknown-model fallbacks" do
+            let tools = map testTool
+                    [ "spawn_agent", "spawn_agent_in_worktree", "send_message"
+                    , "followup_task", "wait_agent", "interrupt_agent", "list_agents"
+                    , "shell_command", "docs__search"
+                    ]
+                model = OpenAIModels.fallbackModelInfo "selected-child"
+                names version = map (.appToolName)
+                    (codexToolsForModel (Just model {multiAgentVersion = version}) tools)
+            names (Just OpenAIModels.MultiAgentV2) `shouldBe` map (.appToolName) tools
+            names (Just OpenAIModels.MultiAgentV1) `shouldBe` ["shell_command", "docs__search"]
+            names (Just OpenAIModels.MultiAgentDisabled) `shouldBe` ["shell_command", "docs__search"]
+            names Nothing `shouldBe` map (.appToolName) tools
+            map (.appToolName) (codexToolsForModel Nothing tools)
+                `shouldBe` map (.appToolName) tools
+
     describe "Codex catalog fallback warning" do
         it "warns when the original OpenAI Codex model instructions are unavailable" do
             let warning =
@@ -946,6 +1056,25 @@ spec = describe "schemasFromAppTools" do
                     other -> expectationFailure
                         ("expected one collaboration namespace, got "
                             <> show other)
+
+catalogToolModel :: Text -> Text -> Text -> ModelInfo
+catalogToolModel name description parameters =
+    either (error . show) id $ Hermes.decodeEither OpenAIModels.modelInfoDecoder $
+        LBS.toStrict $ Aeson.encode $ Aeson.object
+            [ "slug" Aeson..= ("tool-model" :: Text)
+            , "base_instructions" Aeson..= ("Instructions." :: Text)
+            , "multi_agent_version" Aeson..= ("v2" :: Text)
+            , "model_messages" Aeson..= Aeson.object
+                [ "tools" Aeson..= Aeson.object
+                    [ "multi_agent" Aeson..= Aeson.object
+                        [ Key.fromText name Aeson..= Aeson.object
+                            [ "description" Aeson..= description
+                            , "parameters" Aeson..= parameters
+                            ]
+                        ]
+                    ]
+                ]
+            ]
 
 jsonTool :: AppTool
 jsonTool = jsonAppTool "read_file" "Read a file."
