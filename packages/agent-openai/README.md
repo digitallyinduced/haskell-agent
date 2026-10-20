@@ -15,6 +15,21 @@ in as a plain `AuthState -> IO (Either ApiError AuthState)` callback.
 
 ## Model turns with automatic recovery
 
+`Agent.OpenAI.Conversation.runConversation` runs lifecycle hooks across
+connection replacement and account failover. It retains successful native
+history and pending tool outputs, resumes the failed iteration, and shares
+one replacement budget across the run. `runConversationWith` accepts an
+application connector and an opaque response wrapper with a native projection.
+Successful response hooks receive the original wrapper unchanged.
+
+Use `defaultConversationRecovery` for three connection replacements and the
+shared backoff, or customize account classification, replay preparation and
+the callback before replacement. Stored continuations without complete local
+history retain their response id and leave account failures to the host.
+Persistent overload reaches the host after the transport's turn retry budget;
+connection replacement never restarts that budget. Transport exceptions from
+submission may recover; exceptions in host effects propagate unchanged.
+
 For complete responses, use `Agent.OpenAI.Turn.withTurnConnection` and
 `sendTurn` (or `sendTurnWithOptions`). The library waits and retries temporary
 provider failures, replaces rejected WebSockets, and replays successful

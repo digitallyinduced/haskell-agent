@@ -5,6 +5,12 @@ bounded retry and waiting through `Control.Retry.retryingDynamic`. A shared
 `RetryPolicyM` owns the retry count and exponential backoff; provider delay
 hints cannot override its stopping decision. Its retry scope ends before
 callers execute tools or commit successful response effects.
+
+`Agent.Loop.Conversation` supplies lifecycle hooks for hosts that execute and
+commit native response effects themselves. It schedules turns through the
+core loop, preserves opaque response wrappers, and retains iteration limits
+when resumed. Use `Agent.Loop.Native` when the core should dispatch tools.
+
 `Agent.Transport.SessionResource` retains a credential's connection in an
 existing `ResourceScope`. Its acquisition function receives a child scope and
 returns the resource and active credential directly. Requests execute in the

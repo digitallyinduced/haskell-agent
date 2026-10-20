@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add `Agent.OpenAI.Conversation` to resume native lifecycle hooks across
+  connection replacement and account failover, preserving response wrappers,
+  replay history and iteration limits. Host-effect failures propagate without
+  replaying successful responses.
+
 - Replace the retained-resource request worker with `ResourceScope` ownership
   and caller-thread requests. Add `acquireTurnConnection` and native scoped
   acquisition while preserving the callback-based connection interfaces.
