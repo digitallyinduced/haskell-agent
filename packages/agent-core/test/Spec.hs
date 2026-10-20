@@ -22,6 +22,9 @@ import qualified Agent.Provider.OptionsSpec as ProviderOptionsSpec
 import qualified Agent.ProviderSpec as ProviderSpec
 import qualified Agent.ResourceScopeSpec as ResourceScopeSpec
 import qualified Agent.RetrySpec as RetrySpec
+import qualified Agent.TurnSpec as TurnSpec
+import qualified Agent.TurnPolicySpec as TurnPolicySpec
+import qualified Agent.Transport.SessionResourceSpec as SessionResourceSpec
 import qualified Agent.SkillsSpec as SkillsSpec
 import qualified Agent.Skills.ToolSearchSpec as SkillsToolSearchSpec
 import qualified Agent.SubagentsSpec as SubagentsSpec
@@ -70,6 +73,9 @@ main = hspec do
     ProviderSpec.spec
     ResourceScopeSpec.spec
     RetrySpec.spec
+    TurnSpec.spec
+    TurnPolicySpec.spec
+    SessionResourceSpec.spec
     SkillsSpec.spec
     SkillsToolSearchSpec.spec
     SubagentsSpec.spec

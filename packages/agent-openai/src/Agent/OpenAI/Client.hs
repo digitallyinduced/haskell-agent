@@ -19,6 +19,7 @@ module Agent.OpenAI.Client
 import Agent.OpenAI.Auth (Pool)
 import Agent.OpenAI.Credential (poolTokenProvider)
 import Agent.Error
+import Agent.Turn (runTurn)
 import Agent.Http.Header (parseRetryAfterSeconds)
 import Agent.OpenAI.Error (classifyHttpFailure)
 import Agent.OpenAI.Features
@@ -69,8 +70,6 @@ import qualified Agent.Responses.Types as OpenAI
 import Control.Monad (forM_, when)
 import Control.Retry
     ( RetryPolicyM
-    , exponentialBackoff
-    , limitRetries
     , retrying
     )
 import qualified Data.Aeson as Aeson
@@ -266,7 +265,7 @@ createCodexMessageWithProviderAtWithOptionsInternal options turnState
                 "Claude Code subscription sessions must use agent-claude"
                 Nothing
             OpenAIProvider ->
-                retryTransientCodexResultWithPolicy transientResultPolicy $
+                runTurn $
                     handleSyncExceptions
                         (ConnectionError
                             . ("Codex request failed: " <>)
@@ -285,8 +284,6 @@ createCodexMessageWithProviderAtWithOptionsInternal options turnState
                 finishCodexTurnStateResponse state response
         _ -> pure ()
     pure result
-  where
-    transientResultPolicy = exponentialBackoff 5_000_000 <> limitRetries 3
 
 -- | Retry short-lived provider and transport failures. Quota and rate-limit
 -- errors remain excluded by 'isInlineRetryableProviderError'.

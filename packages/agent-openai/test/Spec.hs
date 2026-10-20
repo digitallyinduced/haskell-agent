@@ -25,6 +25,7 @@ import qualified Agent.OpenAI.ToolCatalogSpec as ToolCatalogSpec
 import qualified Agent.OpenAI.ToolCatalogRequestSpec as ToolCatalogRequestSpec
 import qualified Agent.OpenAI.TranscriptionSpec as TranscriptionSpec
 import qualified Agent.OpenAI.TurnStateSpec as TurnStateSpec
+import qualified Agent.OpenAI.TurnSpec as TurnSpec
 import qualified Agent.OpenAI.UsageSpec as UsageSpec
 import qualified Agent.OpenAI.WebSocketClientSpec as WebSocketClientSpec
 
@@ -53,5 +54,6 @@ main = hspec do
     ToolCatalogRequestSpec.spec
     TranscriptionSpec.spec
     TurnStateSpec.spec
+    TurnSpec.spec
     UsageSpec.spec
     WebSocketClientSpec.spec

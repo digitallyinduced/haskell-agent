@@ -13,6 +13,28 @@ The library is IHP-agnostic — it has no dependency on IHP, a database, or any
 specific persistence layer. You bring your own persistence (if any) and pass it
 in as a plain `AuthState -> IO (Either ApiError AuthState)` callback.
 
+## Model turns with automatic recovery
+
+For complete responses, use `Agent.OpenAI.Turn.withTurnConnection` and
+`sendTurn` (or `sendTurnWithOptions`). The library waits and retries temporary
+provider failures, replaces rejected WebSockets, and replays successful
+conversation history with the pending input. The session cache key and logical
+turn attribution survive connection replacement. Execute tools and persist
+the successful response after the call returns; those effects are never
+part of its retry scope.
+
+`Agent.Turn.runTurn` supplies the same provider-neutral bounded retry policy
+to non-streaming transports using `Control.Retry`. The HTTP client uses it
+automatically. There are
+three retries with exponential 5/10/20-second waits or a positive server hint
+capped at a minute. Quota exhaustion and authentication failures are returned
+to credential failover; persistent outages are returned to the host for durable
+rescheduling. The library does not know about application job queues.
+
+Use `Agent.OpenAI.LoopBackend` for streaming turns that expose partial output
+or admit asynchronous tools. Its commit and replay boundaries remain explicit;
+do not wrap an entire model-and-tool loop in `runTurn`.
+
 ## Application-owned storage with library-owned compaction
 
 `Agent.OpenAI.Compaction.Manager.prepareCompaction` owns threshold evaluation,
