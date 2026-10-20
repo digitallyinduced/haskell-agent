@@ -456,6 +456,16 @@ spec = do
                 "openrouter" OpenRouterProvider CodexDialect sameDialect
                 `shouldBe` False
 
+        it "rebuilds native Codex selections to reload model-owned tools and instructions" do
+            mapM_ (\connection ->
+                mapM_ (\model ->
+                    modelTargetRequiresRebuild connection OpenAIProvider CodexDialect
+                        (testOption OpenAIProvider connection model model CodexDialect
+                            Nothing Nothing)
+                        `shouldBe` True)
+                    ["gpt-5.6-luna", "gpt-6.1-sol"])
+                ["openai", "organization-codex"]
+
         it "rebuilds when only the dialect changes" do
             modelTargetRequiresRebuild
                 "openrouter"

@@ -469,6 +469,8 @@ applyPickerEvent event state = case event of
 
 -- | Changing connections, providers, or model-facing dialects requires
 -- rebuilding tools, prompts, auth, and the transport backend.
+-- Native Codex selections also rebuild within one connection and dialect:
+-- each model owns its catalog instructions, tool mode, and capabilities.
 modelTargetRequiresRebuild
     :: Text
     -> Provider
@@ -479,6 +481,7 @@ modelTargetRequiresRebuild connectionId provider dialect option =
     option.modelTarget.targetConnectionId /= connectionId
         || option.modelTarget.targetProvider /= provider
         || option.modelTarget.targetDialect /= dialect
+        || (provider == OpenAIProvider && dialect == CodexDialect)
 
 -- | Keep an explicitly persisted dialect while the effective transport model
 -- is unchanged. When a recorded alias/default now resolves elsewhere, use the
