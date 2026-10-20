@@ -108,6 +108,7 @@ withSettledTree workload childCount delayMicros action = do
             , depth = 1
             , status = finished
             , initialMessage = "Recover this task"
+            , hasTranscript = True
             , wakeRequested = False
             , cancellationRequested = False
             , settled = True

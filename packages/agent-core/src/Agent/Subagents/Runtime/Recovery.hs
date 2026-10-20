@@ -28,6 +28,9 @@ data SubagentSnapshot = SubagentSnapshot
     , depth :: !Int
     , status :: !SubagentStatus
     , initialMessage :: !Text
+    , hasTranscript :: !Bool
+    -- ^ A crash can occur after the Running handoff but before the first
+    -- transcript write. That attempt still needs its admitted assignment.
     , wakeRequested :: !Bool
     , cancellationRequested :: !Bool
     , settled :: !Bool
@@ -197,7 +200,7 @@ pumpStoredSubagents config handle = withHandleExecution handle do
                 -- Only an unstarted task needs its original assignment.
                 -- A running task already has a transcript, potentially with
                 -- newer instructions that the original prompt would override.
-                (if recover && snapshot.status == Pending
+                (if recover && (snapshot.status == Pending || not snapshot.hasTranscript)
                     then snapshot.initialMessage else config.wakeMessage) False)
 
 -- | Cancellation remains requested until the actual worker has been joined.

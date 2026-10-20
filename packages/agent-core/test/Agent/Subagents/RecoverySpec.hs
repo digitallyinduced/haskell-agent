@@ -144,6 +144,21 @@ spec = describe "durable tree recovery" do
             persisted <- readIORef rows
             map (.status) persisted `shouldBe` [Pending, Running]
 
+    it "preserves the assignment when a crash preceded the first transcript commit" $
+        withHandle \handle -> do
+            (config, _) <- configuration [(snapshot "child" Running) { hasTranscript = False }]
+            admitted <- newEmptyMVar
+            release <- newEmptyMVar
+            let tested = config
+                    { runner = \_ _ _ message _ -> do
+                        putMVar admitted (renderInterAgentMessage message)
+                        readMVar release
+                        pure (Left Loop.LoopNoResponseId)
+                    }
+            (durableRuntimeHooks tested).initialize handle
+            result <- timeout 1000000 (takeMVar admitted)
+            result `shouldSatisfy` maybe False (Text.isInfixOf "Recover this task")
+
     it "resumes interrupted running work without repeating its obsolete assignment" $
         withHandle \handle -> do
             (config, _) <- configuration [snapshot "child" Running]
@@ -302,6 +317,7 @@ snapshot identifier status = SubagentSnapshot
     , depth = 1
     , status
     , initialMessage = "Recover this task"
+    , hasTranscript = True
     , wakeRequested = False
     , cancellationRequested = False
     , settled = False
