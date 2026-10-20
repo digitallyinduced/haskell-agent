@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveFunctor #-}
 -- | Lifecycle hooks for hosts that commit native response effects themselves.
 -- The response remains opaque, preserving provider payloads and host metadata.
 module Agent.Loop.Conversation
@@ -31,6 +32,7 @@ emptyAgentLoopState = AgentLoopState 0 [] Nothing
 data AgentLoopDecision result
     = AgentLoopContinue ![ResponseItem] !(Maybe Text)
     | AgentLoopFinish result
+    deriving Functor
 
 data AgentLoopHooks response result = AgentLoopHooks
     { agentLoopMaxIterations :: !Int
@@ -41,7 +43,7 @@ data AgentLoopHooks response result = AgentLoopHooks
     , agentLoopSendRequest :: ResponseCreateParams -> Maybe Text -> IO (Either ApiError response)
     , agentLoopOnError :: AgentLoopState -> ResponseCreateParams -> ApiError -> IO (AgentLoopDecision result)
     , agentLoopOnResponse :: AgentLoopState -> ResponseCreateParams -> response -> IO (AgentLoopDecision result)
-    }
+    } deriving Functor
 
 -- | Schedule model turns with agent-core while the host owns successful
 -- response effects. Retrying a submission never re-enters the response hook.

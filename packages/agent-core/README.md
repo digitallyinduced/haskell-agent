@@ -10,6 +10,8 @@ callers execute tools or commit successful response effects.
 commit native response effects themselves. It schedules turns through the
 core loop, preserves opaque response wrappers, and retains iteration limits
 when resumed. Use `Agent.Loop.Native` when the core should dispatch tools.
+`AgentLoopHooks` and `AgentLoopDecision` are functors in the final result, so a
+host can adapt its result channel with `fmap` while retaining all callbacks.
 
 `Agent.Transport.SessionResource` retains a credential's connection in an
 existing `ResourceScope`. Its acquisition function receives a child scope and
