@@ -25,12 +25,12 @@ import Agent.CLI.Input
     )
 import Agent.CLI.TUI.Composer
 import Agent.CLI.TUI.Types
-import Agent.Loop.SteeringInputs
+import Agent.Loop.InputQueue
     ( awaitSteeringInput
     , commitSteeringInputs
     , enqueueSteeringInputs
     , hasSteeringInputWake
-    , newSteeringInputs
+    , newInputQueue
     , readSteeringInputs
     )
 import Agent.Loop (ImageAttachment(..), LoopEvent(..), TurnInput(..))
@@ -758,7 +758,7 @@ spec = describe "fullscreen composer" do
 
     it "wakes an idle prompt reader for late guidance without consuming the input" do
         buffer <- newFullscreenInputBuffer
-        steering <- newSteeringInputs
+        steering <- newInputQueue
         let readPrompt = fmap (fmap (.fullscreenInputLine)) $ atomically $
                 takeFullscreenInputOr buffer (awaitSteeringInput steering)
         withAsync readPrompt \reader -> do
@@ -774,7 +774,7 @@ spec = describe "fullscreen composer" do
 
     it "leaves a simultaneous guidance wake intact when a submitted prompt wins" do
         buffer <- newFullscreenInputBuffer
-        steering <- newSteeringInputs
+        steering <- newInputQueue
         atomically (appendFullscreenInput buffer (input (ReplText "submitted")))
             `shouldReturn` Right ()
         enqueueSteeringInputs steering [UserMessage "guidance"]

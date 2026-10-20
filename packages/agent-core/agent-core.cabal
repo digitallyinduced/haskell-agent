@@ -64,7 +64,8 @@ library
                     , Agent.Loop.Recovery
                     , Agent.Loop.InputBudget
                     , Agent.Loop.InputItems
-                    , Agent.Loop.SteeringInputs
+                    , Agent.Loop.InputQueue
+                    , Agent.Loop.InputQueue.Model
                     , Agent.JsonText
                     , Agent.OsPath
                     , Agent.Http.Header
@@ -138,6 +139,7 @@ library
                     , retry >= 0.9.3.1 && < 0.10
                     , resourcet
                     , safe-exceptions
+                    , exceptions
                     , scientific
                     , stm
                     , text
@@ -285,6 +287,7 @@ test-suite agent-core-test
                     , Agent.Http.HeaderSpec
                     , Agent.LoopSpec
                     , Agent.Loop.InputInboxSpec
+                    , Agent.Loop.InputQueueSpec
                     , Agent.Loop.RecoverySpec
                     , Agent.Loop.NativeSpec
                     , Agent.Loop.EventDeliverySpec

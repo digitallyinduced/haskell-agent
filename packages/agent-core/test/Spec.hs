@@ -9,6 +9,7 @@ import qualified Agent.DialectSpec as DialectSpec
 import qualified Agent.ErrorSpec as ErrorSpec
 import qualified Agent.HistorySpec as HistorySpec
 import qualified Agent.Loop.InputInboxSpec as InputInboxSpec
+import qualified Agent.Loop.InputQueueSpec as InputQueueSpec
 import qualified Agent.Loop.RecoverySpec as RecoverySpec
 import qualified Agent.Loop.NativeSpec as NativeSpec
 import qualified Agent.Tools.RegistrationSpec as RegistrationSpec
@@ -56,6 +57,7 @@ main = hspec do
     ErrorSpec.spec
     HistorySpec.spec
     InputInboxSpec.spec
+    InputQueueSpec.spec
     RecoverySpec.spec
     NativeSpec.spec
     RegistrationSpec.spec

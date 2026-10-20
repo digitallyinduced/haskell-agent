@@ -67,7 +67,7 @@ import Agent.CLI.LearnedSkills
 import Agent.CLI.LearnedSkills.Store
 import Agent.CLI.Options
 import Agent.CLI.PendingInputs
-import Agent.Loop.SteeringInputs
+import Agent.Loop.InputQueue
 import Agent.CLI.Runtime.Types
 import Agent.CLI.Runtime.Orchestration.Types
     ( NativeDiscoveryContext(..)
@@ -466,7 +466,7 @@ withAppleFollowUpRouting fullscreen executable action =
 data SessionControlRuntime = SessionControlRuntime
     { controlToolRegistry :: !ToolRegistry
     , controlCurrentToolRegistry :: !(IORef ToolRegistry)
-    , controlSteeringInputs :: !SteeringInputs
+    , controlSteeringInputs :: !InputQueue
     , controlSpinnerRef :: !(IORef (Maybe (Async ())))
     , controlRenderStateRef :: !(IORef RenderState)
     , controlAllowedToolsRef :: !(IORef (Set.Set Text.Text))
@@ -481,7 +481,7 @@ data SessionControlRuntime = SessionControlRuntime
     , controlAgentViewport :: !AgentViewportEnv
     }
 
-installBackgroundTaskSteering :: ToolEnv -> SteeringInputs -> IO ()
+installBackgroundTaskSteering :: ToolEnv -> InputQueue -> IO ()
 installBackgroundTaskSteering toolEnv steeringInputs = do
     setToolSteeringWait toolEnv (awaitUserSteering steeringInputs)
     enqueueCompletion <- prepareBackgroundCompletion steeringInputs
@@ -505,7 +505,7 @@ newSessionControlRuntime
 newSessionControlRuntime host SessionRequest{..} = do
     toolRegistry <- requireToolRegistry allTools
     currentToolRegistry <- newIORef toolRegistry
-    steeringInputs <- newSteeringInputs
+    steeringInputs <- newInputQueue
     installBackgroundTaskSteering toolEnv steeringInputs
     forM_ (startup.startupNativeHooks >>= (.nativeRegisterSteering)) \register ->
         register \text -> enqueueSteeringInputsSTM steeringInputs [UserMessage text]
