@@ -59,6 +59,7 @@ library
                     , Agent.ReasoningEffort
                     , Agent.Loop
                     , Agent.Loop.Native
+                    , Agent.Loop.Conversation
                     , Agent.Loop.InputInbox
                     , Agent.Loop.OutputDelivery
                     , Agent.Loop.Recovery
@@ -292,6 +293,7 @@ test-suite agent-core-test
                     , Agent.Loop.InputQueueSpec
                     , Agent.Loop.RecoverySpec
                     , Agent.Loop.NativeSpec
+                    , Agent.Loop.ConversationSpec
                     , Agent.Loop.EventDeliverySpec
                     , Agent.Loop.FailedDisplaySpec
                     , Agent.Loop.Fixtures

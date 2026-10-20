@@ -8,6 +8,8 @@ import qualified Agent.Provider as Provider
 import Agent.Responses.Types
 import qualified Agent.Responses.Types as Responses (ResponseCreateParams(..))
 import Agent.OpenAI.Turn
+import Agent.Loop.Conversation
+import qualified Agent.OpenAI.Conversation as Conversation
 import qualified Control.Concurrent.Async as Async
 import qualified Control.Exception as Exception
 import Control.Monad (forever, void)
@@ -23,6 +25,28 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "model turns through the WebSocket transport" do
+    it "runs a complete conversation with the production connector and commits one response" do
+        requests <- newIORef []
+        effects <- newIORef (0 :: Int)
+        result <- withModelServer requests (== 1) \provider ->
+            Conversation.runConversation Conversation.defaultConversationRecovery "conversation-test" provider
+                (\connection -> AgentLoopHooks
+                    { agentLoopMaxIterations = 3
+                    , agentLoopBeforeIteration = const (pure Nothing)
+                    , agentLoopOnMaxIterations = const (fail "unexpected iteration limit")
+                    , agentLoopBuildRequest = const (pure request)
+                    , agentLoopOnRequest = \_ _ -> pure ()
+                    , agentLoopSendRequest = sendTurn connection
+                    , agentLoopOnError = \_ _ err -> fail (show err)
+                    , agentLoopOnResponse = \_ _ response -> do
+                        modifyIORef' effects (+ 1)
+                        pure (AgentLoopFinish response.responseId)
+                    })
+                emptyAgentLoopState { agentLoopInput = [messageItem RoleUser [inputText "continue"]] }
+        result `shouldBe` Right "completed-response"
+        readIORef effects `shouldReturn` 1
+        length <$> readIORef requests `shouldReturn` 2
+
     it "recovers from capacity without an agent-specific retry policy" do
         requests <- newIORef []
         result <- withModelServer requests (== 1) \provider ->

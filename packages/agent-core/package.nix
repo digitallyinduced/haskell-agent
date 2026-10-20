@@ -29,5 +29,5 @@ mkDerivation {
     containers filepath safe-exceptions stm text text-builder time
   ];
   description = "Provider-neutral infrastructure for the agent harness";
-  license = lib.meta.getLicenseFromSpdxId "MIT";
+  license = lib.licenses.mit;
 }

@@ -12,6 +12,7 @@ import qualified Agent.Loop.InputInboxSpec as InputInboxSpec
 import qualified Agent.Loop.InputQueueSpec as InputQueueSpec
 import qualified Agent.Loop.RecoverySpec as RecoverySpec
 import qualified Agent.Loop.NativeSpec as NativeSpec
+import qualified Agent.Loop.ConversationSpec as ConversationSpec
 import qualified Agent.Tools.RegistrationSpec as RegistrationSpec
 import qualified Agent.Http.HeaderSpec as HttpHeaderSpec
 import qualified Agent.JsonTextSpec as JsonTextSpec
@@ -63,6 +64,7 @@ main = hspec do
     InputQueueSpec.spec
     RecoverySpec.spec
     NativeSpec.spec
+    ConversationSpec.spec
     RegistrationSpec.spec
     HttpHeaderSpec.spec
     JsonTextSpec.spec

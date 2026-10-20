@@ -83,14 +83,25 @@ runRecoveringConnections config withConnection attempt = do
     remaining <- newIORef (max 0 config.replacementLimit)
     let available = (> 0) <$> readIORef remaining
         connect number = do
-            outcome <- Safe.try (withConnection (attempt available))
+            finished <- newIORef False
+            outcome <- Safe.try $ withConnection \connection -> do
+                result <- attempt available connection
+                writeIORef finished $ case result of
+                    Right (ConnectionFinished _) -> True
+                    _ -> False
+                pure result
             case outcome of
                 Right (Right (ConnectionFinished result)) -> pure (Right result)
                 Right (Right (ReplaceConnection reason)) -> replace number reason
                 Right (Left err) -> pure (Left err)
-                Left exception -> case config.classifyException exception of
-                    Just reason -> replace number reason
-                    Nothing -> Exception.throwIO exception
+                Left exception -> do
+                    committed <- readIORef finished
+                    -- The callback has finished its effects. A transport
+                    -- failure during source cleanup cannot replay them safely.
+                    if committed then Exception.throwIO exception
+                        else case config.classifyException exception of
+                            Just reason -> replace number reason
+                            Nothing -> Exception.throwIO exception
         replace number reason = do
             permitted <- available
             if permitted

@@ -36,6 +36,6 @@ mkDerivation {
     text
   ];
   description = "Haskell client for the OpenAI Responses API";
-  license = lib.meta.getLicenseFromSpdxId "MIT";
+  license = lib.licenses.mit;
   mainProgram = "agent-openai-login";
 }

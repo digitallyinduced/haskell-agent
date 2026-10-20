@@ -88,6 +88,22 @@ spec = do
                 (\_ _ -> pure (Right (ConnectionFinished ())))
                 `shouldThrow` anyIOException
 
+        it "does not repeat a finished callback after a classified cleanup failure" do
+            effects <- newIORef (0 :: Int)
+            replacements <- newIORef (0 :: Int)
+            let config = configuration
+                    { classifyException = const (Just "closed")
+                    , beforeReplacement = \_ _ -> modifyIORef' replacements (+ 1)
+                    }
+            runRecoveringConnections config
+                (\action -> action () >> ioError (userError "closed during cleanup"))
+                (\_ _ -> do
+                    modifyIORef' effects (+ 1)
+                    pure (Right (ConnectionFinished ())))
+                `shouldThrow` anyIOException
+            readIORef effects `shouldReturn` 1
+            readIORef replacements `shouldReturn` 0
+
         it "retries only classified transport exceptions" do
             count <- newIORef (0 :: Int)
             let config = configuration

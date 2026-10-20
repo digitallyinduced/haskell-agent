@@ -61,6 +61,7 @@ library
                     , Agent.OpenAI.RequestIdentity
                     , Agent.OpenAI.TurnState
                     , Agent.OpenAI.Turn
+                    , Agent.OpenAI.Conversation
                     , Agent.OpenAI.ReasoningEffort
                     , Agent.OpenAI.Features
                     , Agent.OpenAI.ModelMetadata
@@ -176,6 +177,7 @@ test-suite agent-openai-test
                     , Agent.OpenAI.TranscriptionSpec
                     , Agent.OpenAI.TurnStateSpec
                     , Agent.OpenAI.TurnSpec
+                    , Agent.OpenAI.ConversationSpec
                     , Agent.OpenAI.UsageSpec
                     , Agent.OpenAI.WebSocketClientSpec
     ghc-options:      -threaded
