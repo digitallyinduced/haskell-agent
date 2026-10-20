@@ -881,155 +881,171 @@ openAiBackendWithCallbackSender
                             }
                     }
   where
-    sendRetrying callbacks request previousResponseId = do
-        go defaultRetryStatus defaultRetryStatus
+    sendRetrying =
+        sendOpenAiRequestWithRetries
+            showRawReasoning transientPolicy reconnectPolicy send
+
+sendOpenAiRequestWithRetries
+    :: Bool
+    -> RetryPolicyM IO
+    -> RetryPolicyM IO
+    -> (BackendCallbacks -> ResponseCreateParams -> Maybe Text
+        -> (ResponseStreamEvent -> IO ()) -> IO (Either ApiError Response))
+    -> BackendCallbacks
+    -> ResponseCreateParams
+    -> Maybe Text
+    -> IO (Either ApiError Response)
+sendOpenAiRequestWithRetries
+        showRawReasoning transientPolicy reconnectPolicy send
+        callbacks request previousResponseId = do
+    go defaultRetryStatus defaultRetryStatus
+  where
+    go transientStatus reconnectStatus = do
+        -- One projector per attempt: argument-progress counters must
+        -- describe a single provider sample, not the whole retry chain.
+        attemptState <- newIORef OpenAiAttemptState
+            { attemptProjection = Responses.emptyStreamProjectionState
+            , attemptObservation = emptyAttemptObservation
+            }
+        result <- send callbacks request previousResponseId \event -> do
+            -- Like Codex, retain independently completed items even when
+            -- the response itself never reaches response.completed. Text
+            -- deltas remain display-only; no continuation is checkpointed.
+            case event of
+                ResponseOutputItemDoneEvent { item }
+                    | isCompletedOutputItem item ->
+                    callbacks.onCompletedResponseItem item
+                        (Responses.responseItemToToolCall item)
+                _ -> pure ()
+            loopEvents <- atomicModifyIORef' attemptState $
+                openAiAttemptStep showRawReasoning event
+            mapM_ (\loopEvent -> do
+                -- Observe only events that are about to be delivered:
+                -- a failed callback must not pre-record later events in
+                -- the same projected batch.
+                atomicModifyIORef' attemptState \state ->
+                    ( state
+                        { attemptObservation =
+                            observeLoopEvent loopEvent
+                                state.attemptObservation
+                        }
+                    , ()
+                    )
+                callbacks.onLoopEvent loopEvent
+                ) loopEvents
+            case event of
+                ResponseOutputItemDoneEvent { item }
+                    | isCompletedOutputItem item
+                    , Just call <- Responses.responseItemToToolCall item
+                    , AsyncToolCall <- toolCallMode call -> do
+                        atomicModifyIORef' attemptState \state ->
+                            (state { attemptObservation =
+                                state.attemptObservation
+                                    { observedAsyncTool = True } }, ())
+                        callbacks.onAsyncToolCall call
+                _ -> pure ()
+        observation <- (.attemptObservation) <$> readIORef attemptState
+        let emitted = observation.observedRawOutput
+        case result of
+            Left apiError
+                -- A pre-output connection failure is handled by the
+                -- connection-recovery sender and the transport fallback;
+                -- only a socket that died mid-response is retried here.
+                | emitted
+                , not observation.observedAsyncTool
+                , isReconnectableTransportFailure apiError ->
+                    replayAfterOutput
+                        reconnectPolicy
+                        reconnectStatus
+                        formatReconnectScheduled
+                        connectionRestartMessage
+                        reconnectingAttemptMessage
+                        (\nextStatus -> go transientStatus nextStatus)
+                        observation
+                        apiError
+                        result
+                -- Overload and unavailability mean the sample did not
+                -- finish. Replay behind the same restart boundary used
+                -- for a mid-response socket drop rather than ending the
+                -- turn as replay-unsafe.
+                | emitted
+                , not observation.observedAsyncTool
+                , isReplayableCapacityFailure apiError ->
+                    replayAfterOutput
+                        transientPolicy
+                        transientStatus
+                        formatRetryScheduled
+                        capacityRestartMessage
+                        retryingAttemptMessage
+                        (\nextStatus -> go nextStatus reconnectStatus)
+                        observation
+                        apiError
+                        result
+                | not emitted
+                , isInlineRetryableProviderResponseError apiError ->
+                    applyPolicy transientPolicy transientStatus >>= \case
+                        Nothing -> pure result
+                        Just nextStatus -> do
+                            let delayMicros =
+                                    fromMaybe 0 nextStatus.rsPreviousDelay
+                                attempt = nextStatus.rsIterNumber
+                            callbacks.onLoopEvent $ ActivityUpdated $
+                                formatRetryScheduled apiError attempt delayMicros
+                            threadDelay delayMicros
+                            callbacks.onLoopEvent $ ActivityUpdated $
+                                retryingAttemptMessage attempt
+                            go nextStatus reconnectStatus
+                | emitted -> settle observation apiError result
+            _ -> pure result
       where
-        go transientStatus reconnectStatus = do
-            -- One projector per attempt: argument-progress counters must
-            -- describe a single provider sample, not the whole retry chain.
-            attemptState <- newIORef OpenAiAttemptState
-                { attemptProjection = Responses.emptyStreamProjectionState
-                , attemptObservation = emptyAttemptObservation
-                }
-            result <- send callbacks request previousResponseId \event -> do
-                -- Like Codex, retain independently completed items even when
-                -- the response itself never reaches response.completed. Text
-                -- deltas remain display-only; no continuation is checkpointed.
-                case event of
-                    ResponseOutputItemDoneEvent { item }
-                        | isCompletedOutputItem item ->
-                        callbacks.onCompletedResponseItem item
-                            (Responses.responseItemToToolCall item)
-                    _ -> pure ()
-                loopEvents <- atomicModifyIORef' attemptState $
-                    openAiAttemptStep showRawReasoning event
-                mapM_ (\loopEvent -> do
-                    -- Observe only events that are about to be delivered:
-                    -- a failed callback must not pre-record later events in
-                    -- the same projected batch.
-                    atomicModifyIORef' attemptState \state ->
-                        ( state
-                            { attemptObservation =
-                                observeLoopEvent loopEvent
-                                    state.attemptObservation
-                            }
-                        , ()
-                        )
-                    callbacks.onLoopEvent loopEvent
-                    ) loopEvents
-                case event of
-                    ResponseOutputItemDoneEvent { item }
-                        | isCompletedOutputItem item
-                        , Just call <- Responses.responseItemToToolCall item
-                        , AsyncToolCall <- toolCallMode call -> do
-                            atomicModifyIORef' attemptState \state ->
-                                (state { attemptObservation =
-                                    state.attemptObservation
-                                        { observedAsyncTool = True } }, ())
-                            callbacks.onAsyncToolCall call
-                    _ -> pure ()
-            observation <- (.attemptObservation) <$> readIORef attemptState
-            let emitted = observation.observedRawOutput
-            case result of
-                Left apiError
-                    -- A pre-output connection failure is handled by the
-                    -- connection-recovery sender and the transport fallback;
-                    -- only a socket that died mid-response is retried here.
-                    | emitted
-                    , not observation.observedAsyncTool
-                    , isReconnectableTransportFailure apiError ->
-                        replayAfterOutput
-                            reconnectPolicy
-                            reconnectStatus
-                            formatReconnectScheduled
-                            connectionRestartMessage
-                            reconnectingAttemptMessage
-                            (\nextStatus -> go transientStatus nextStatus)
-                            observation
-                            apiError
-                            result
-                    -- Overload and unavailability mean the sample did not
-                    -- finish. Replay behind the same restart boundary used
-                    -- for a mid-response socket drop rather than ending the
-                    -- turn as replay-unsafe.
-                    | emitted
-                    , not observation.observedAsyncTool
-                    , isReplayableCapacityFailure apiError ->
-                        replayAfterOutput
-                            transientPolicy
-                            transientStatus
-                            formatRetryScheduled
-                            capacityRestartMessage
-                            retryingAttemptMessage
-                            (\nextStatus -> go nextStatus reconnectStatus)
-                            observation
-                            apiError
-                            result
-                    | not emitted
-                    , isInlineRetryableProviderResponseError apiError ->
-                        applyPolicy transientPolicy transientStatus >>= \case
-                            Nothing -> pure result
-                            Just nextStatus -> do
-                                let delayMicros =
-                                        fromMaybe 0 nextStatus.rsPreviousDelay
-                                    attempt = nextStatus.rsIterNumber
-                                callbacks.onLoopEvent $ ActivityUpdated $
-                                    formatRetryScheduled apiError attempt delayMicros
-                                threadDelay delayMicros
-                                callbacks.onLoopEvent $ ActivityUpdated $
-                                    retryingAttemptMessage attempt
-                                go nextStatus reconnectStatus
-                    | emitted -> settle observation apiError result
-                _ -> pure result
-          where
-            replayAfterOutput
-                    policy
-                    status
-                    formatScheduled
-                    restartMessage
-                    retryingMessage
-                    continue
-                    observation
-                    apiError
-                    result =
-                applyPolicy policy status >>= \case
-                    Nothing -> settle observation apiError result
-                    Just nextStatus -> do
-                        let delayMicros =
-                                fromMaybe 0 nextStatus.rsPreviousDelay
-                            attempt = nextStatus.rsIterNumber
-                        callbacks.onLoopEvent $ ActivityUpdated $
-                            formatScheduled apiError attempt delayMicros
-                        threadDelay delayMicros
-                        -- Close the interrupted attempt in every renderer
-                        -- before the replay streams. Visible partial output
-                        -- stays on screen marked as failed; hidden activity
-                        -- such as an announced tool call is removed.
-                        emitAttemptBoundary observation restartMessage
-                        callbacks.onLoopEvent $ ActivityUpdated $
-                            retryingMessage attempt
-                        continue nextStatus
+        replayAfterOutput
+                policy
+                status
+                formatScheduled
+                restartMessage
+                retryingMessage
+                continue
+                observation
+                apiError
+                result =
+            applyPolicy policy status >>= \case
+                Nothing -> settle observation apiError result
+                Just nextStatus -> do
+                    let delayMicros =
+                            fromMaybe 0 nextStatus.rsPreviousDelay
+                        attempt = nextStatus.rsIterNumber
+                    callbacks.onLoopEvent $ ActivityUpdated $
+                        formatScheduled apiError attempt delayMicros
+                    threadDelay delayMicros
+                    -- Close the interrupted attempt in every renderer
+                    -- before the replay streams. Visible partial output
+                    -- stays on screen marked as failed; hidden activity
+                    -- such as an announced tool call is removed.
+                    emitAttemptBoundary observation restartMessage
+                    callbacks.onLoopEvent $ ActivityUpdated $
+                        retryingMessage attempt
+                    continue nextStatus
 
-            emitAttemptBoundary observation restartMessage =
-                if observation.observedVisibleOutput
-                    then callbacks.onLoopEvent
-                        (ResponseRestarted restartMessage)
-                    else callbacks.onLoopEvent ResponseAttemptDiscarded
+        emitAttemptBoundary observation restartMessage =
+            if observation.observedVisibleOutput
+                then callbacks.onLoopEvent
+                    (ResponseRestarted restartMessage)
+                else callbacks.onLoopEvent ResponseAttemptDiscarded
 
-            -- The transport fallback may still replay a dropped connection
-            -- after this backend gives up. Capacity failures are also left
-            -- unwrapped so an outer recovery layer can wait and retry.
-            -- Every other failure after output is terminal because the
-            -- provider may have committed the sample.
-            settle observation apiError result = do
-                pure $ if observation.observedAsyncTool
-                        then Left (replayUnsafeError
-                            "asynchronous tool call" apiError)
-                    else if observation.observedVisibleOutput
-                        || isReconnectableTransportFailure apiError
-                        || isReplayableCapacityFailure apiError
-                    then result
-                    else Left (replayUnsafeError "model output" apiError)
+        -- The transport fallback may still replay a dropped connection
+        -- after this backend gives up. Capacity failures are also left
+        -- unwrapped so an outer recovery layer can wait and retry.
+        -- Every other failure after output is terminal because the
+        -- provider may have committed the sample.
+        settle observation apiError result = do
+            pure $ if observation.observedAsyncTool
+                    then Left (replayUnsafeError
+                        "asynchronous tool call" apiError)
+                else if observation.observedVisibleOutput
+                    || isReconnectableTransportFailure apiError
+                    || isReplayableCapacityFailure apiError
+                then result
+                else Left (replayUnsafeError "model output" apiError)
 
 data AttemptObservation = AttemptObservation
     { observedRawOutput :: !Bool
