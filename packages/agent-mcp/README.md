@@ -50,3 +50,17 @@ bytes are accepted per tool response. Only reads of explicitly tagged artifacts
 allow 32 MiB of JSON or SSE framing to fit base64 blobs; ordinary responses,
 including untagged resource reads, retain their 16 MiB limit. Untagged links are
 not fetched automatically. No artifacts are fetched from failed tool results.
+
+# Automatic HTTP retries
+
+MCP HTTP requests retry transient connection failures and HTTP 408, 429, 500,
+502, 503, and 504 responses. Only read operations and tools declared read-only or
+idempotent qualify; tools requiring fresh approval never replay automatically.
+Ordinary mutations, protocol errors, tool errors, and malformed responses return
+their errors directly.
+
+Requests receive at most two transient retries with 250 ms and 500 ms backoff,
+sharing that budget across an OAuth refresh. `Retry-After`
+seconds and HTTP dates can extend the delay to five seconds. Longer server delays
+return the error rather than retrying early. Cancellation interrupts the wait.
+An already delivered result is retained even if the response stream later fails.

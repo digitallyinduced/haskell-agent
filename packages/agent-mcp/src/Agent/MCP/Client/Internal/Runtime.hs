@@ -93,6 +93,7 @@ import Control.Exception.Safe
       Exception(displayException),
       mask_,
       finally,
+      fromException,
       tryAny )
 import Control.Monad ( forM, forM_, unless, void, when )
 import Control.Monad.Trans.Class ( lift )
@@ -101,7 +102,7 @@ import Control.Monad.Trans.Except
 import Data.Aeson ( Value, object, Series, KeyValue((.=)) )
 import Data.Char ( ord )
 import Data.IORef
-    ( IORef, atomicModifyIORef', readIORef, writeIORef )
+    ( IORef, atomicModifyIORef', newIORef, readIORef, writeIORef )
 import Data.List ()
 import Data.Maybe ( catMaybes, fromMaybe, isJust, isNothing )
 import Data.Scientific ()
@@ -109,6 +110,8 @@ import Data.String ( fromString )
 import Data.Text ( Text )
 import Data.Text.Encoding.Error ( lenientDecode )
 import Data.Time.Clock.POSIX ( getPOSIXTime )
+import Data.Time.Clock ( UTCTime, diffUTCTime, getCurrentTime )
+import Data.Time.Format ( defaultTimeLocale, parseTimeM )
 import Data.Word ( Word64 )
 import GHC.Clock ( getMonotonicTimeNSec )
 import Network.HTTP.Client
@@ -146,10 +149,12 @@ import qualified Data.ByteString as BS
       stripSuffix,
       take )
 import qualified Data.ByteString.Char8 as BS8
-    ( intercalate, isPrefixOf, hGetLine, map, split, strip )
+    ( intercalate, isPrefixOf, hGetLine, map, split, strip, readInteger, unpack )
 import qualified Data.ByteString.Base64 as Base64 ( encode )
 import qualified Network.HTTP.Client as HC
-    ( responseTimeoutMicro,
+    ( HttpException(..),
+      HttpExceptionContent(..),
+      responseTimeoutMicro,
       responseTimeoutNone,
       httpNoBody,
       BodyReader,
@@ -361,6 +366,9 @@ data McpRequest = McpRequest
     -- ^ Whether the exact request may automatically be sent again (for
     -- input-required continuation or OAuth refresh). Sensitive tools whose
     -- approval is explicitly one-shot disable this.
+    , requestRetrySafe :: !Bool
+    -- ^ Replaying after an uncertain transport outcome cannot duplicate a
+    -- side effect. This is stricter than an OAuth or input continuation.
     , requestArtifactResource :: !Bool
     -- ^ A resources/read request for validated, explicitly tagged artifacts.
     -- Only this path may consume the larger base64 response envelope.
@@ -378,10 +386,18 @@ clientRequest client method parameters = McpRequest
     , requestMeta = True
     , requestOnProgress = Nothing
     , requestAllowReissue = True
+    , requestRetrySafe = method `elem`
+        [ "server/discover", "ping", "tools/list"
+        , "resources/list", "resources/templates/list", "resources/read"
+        , "prompts/list", "prompts/get", "completion/complete"
+        , "skills/list", "skills/get"
+        , "tasks/list", "tasks/get", "tasks/result"
+        ]
     , requestArtifactResource = False
     }
 
--- | Compatibility entry point: one request, rendered error.
+-- | Compatibility entry point with rendered errors. Read operations may retry
+-- transient HTTP failures; unknown methods are never assumed replay-safe.
 requestMcp
     :: McpClient
     -> Int
@@ -1315,8 +1331,11 @@ data HttpOutcome
     -- pending map.
     | HttpUnauthorized !Int ![Header]
     | HttpFailed !McpError
+    | HttpTransientFailure !McpError !(Maybe BS.ByteString)
+    -- ^ Retry-After is retained separately from the protocol error.
 
--- | Perform one POST to the MCP endpoint. Responses (single JSON objects or
+-- | Perform a POST to the MCP endpoint, with bounded retries for replay-safe
+-- requests. Responses (single JSON objects or
 -- SSE streams) are routed through 'handleInbound'; the pending entry, when
 -- present, then carries the result.
 httpExchange
@@ -1328,6 +1347,7 @@ httpExchange
     -> Aeson.Encoding
     -> IO (Either McpError RawJson)
 httpExchange client transport era request pending message = do
+    retryAttempts <- newIORef 0
     baseRequest <- parseRequest (Text.unpack transport.httpUrl)
     session <- readIORef transport.httpSession
     negotiated <- readTVarIO client.clientServerInfo
@@ -1412,11 +1432,15 @@ httpExchange client transport era request pending message = do
                                 pure (HttpFailed (McpTransportError
                                     ("MCP HTTP error response exceeded "
                                         <> Text.pack (show mcpBodyLimit) <> " bytes")))
-                            Right bytes ->
-                                pure . HttpFailed $ fromMaybe
-                                    (McpHttpStatus status
-                                        (TextEncoding.decodeUtf8With lenientDecode bytes))
-                                    (decodeErrorBody bytes)
+                            Right bytes -> case decodeErrorBody bytes of
+                                Just err -> pure (HttpFailed err)
+                                Nothing -> do
+                                    let err = McpHttpStatus status
+                                            (TextEncoding.decodeUtf8With lenientDecode bytes)
+                                    pure $
+                                        if status `elem` [408, 429, 500, 502, 503, 504]
+                                            then HttpTransientFailure err (lookup "Retry-After" headers)
+                                            else HttpFailed err
                     else if status == 202 || status == 204
                         then pure HttpDelivered
                         else if isEventStream headers
@@ -1443,6 +1467,7 @@ httpExchange client transport era request pending message = do
                 pure (Left (McpTransportError
                     ("MCP HTTP request failed: " <> exceptionSummary exception)))
             Right (HttpFailed err) -> pure (Left err)
+            Right (HttpTransientFailure err _) -> pure (Left err)
             Right (HttpUnauthorized status headers) ->
                 pure (Left (authorizationError status headers))
             Right HttpDelivered -> case pending of
@@ -1453,10 +1478,38 @@ httpExchange client transport era request pending message = do
                         Nothing ->
                             pure (Left (McpTransportError
                                 "MCP HTTP response did not include a result for the request"))
+        performWithRetry token = readIORef retryAttempts >>= retryRequest
+          where
+            retryRequest attempt = do
+                outcome <- perform token
+                let transient = case outcome of
+                        Left exception | transientHttpException exception -> Just Nothing
+                        Right (HttpTransientFailure _ retryAfter) -> Just retryAfter
+                        _ -> Nothing
+                -- A response can be delivered before an SSE body fails. Never
+                -- replay an already completed request or hide its result.
+                completed <- case pending of
+                    Nothing -> pure Nothing
+                    Just (_, entry) -> atomically (tryReadTMVar entry.pendingResponse)
+                case completed of
+                    Just _ -> pure (Right HttpDelivered)
+                    Nothing
+                        | request.requestAllowReissue
+                            && request.requestRetrySafe
+                            , Just retryAfter <- transient -> do
+                                now <- getCurrentTime
+                                case mcpHttpRetryDelayMicros attempt now retryAfter of
+                                    Just delay -> do
+                                        -- OAuth refresh shares this budget.
+                                        writeIORef retryAttempts (attempt + 1)
+                                        threadDelay delay
+                                        retryRequest (attempt + 1)
+                                    Nothing -> pure outcome
+                        | otherwise -> pure outcome
     case tokenResult of
         Left err -> pure (Left (McpTransportError err))
         Right configuredToken ->
-            perform configuredToken >>= \case
+            performWithRetry configuredToken >>= \case
                 outcome@(Right (HttpUnauthorized 401 _)) ->
                     retryUnauthorizedOnce
                         request.requestAllowReissue
@@ -1468,7 +1521,7 @@ httpExchange client transport era request pending message = do
                                 (lookup "MCP_OAUTH_TOKEN_FILE"
                                     client.clientConfig.mcpServerEnv))
                         id
-                        (perform . Just)
+                        (performWithRetry . Just)
                         >>= \case
                             Left err ->
                                 pure (Left (McpTransportError
@@ -1478,6 +1531,43 @@ httpExchange client transport era request pending message = do
                 outcome -> settle outcome
   where
     accessToken (OAuth.OAuthTokenFile _ _ token _ _) = token
+
+-- | Select http-client transport failures rather than arbitrary exceptions.
+-- Invalid URLs, malformed responses and host callback errors are not retried.
+transientHttpException :: SomeException -> Bool
+transientHttpException exception =
+    case fromException exception of
+        Just (HC.HttpExceptionRequest _ content) -> case content of
+            HC.ConnectionTimeout -> True
+            HC.ResponseTimeout -> True
+            HC.ConnectionFailure _ -> True
+            HC.ConnectionClosed -> True
+            HC.NoResponseDataReceived -> True
+            HC.ResponseBodyTooShort _ _ -> True
+            HC.IncompleteHeaders -> True
+            _ -> False
+        _ -> False
+
+-- | Two retries, after 250 ms and 500 ms. Honor both Retry-After formats,
+-- but return the error when the server asks for more than five seconds.
+-- Never shorten a server's requested delay to fit the inline retry budget.
+mcpHttpRetryDelayMicros :: Int -> UTCTime -> Maybe BS.ByteString -> Maybe Int
+mcpHttpRetryDelayMicros attempt now retryAfter
+    | attempt < 0 || attempt >= 2 = Nothing
+    | delay > 5000000 = Nothing
+    | otherwise = Just (fromInteger delay)
+  where
+    fallback = 250000 * (2 ^ max 0 (min 1 attempt))
+    delay = max fallback (fromMaybe 0 (retryAfter >>= parseDelay))
+    parseDelay value =
+        let stripped = BS8.strip value
+        in case BS8.readInteger stripped of
+            Just (seconds, remainder) | seconds >= 0 && BS.null remainder ->
+                Just (seconds * 1000000)
+            _ -> do
+                date <- parseTimeM True defaultTimeLocale
+                    "%a, %d %b %Y %H:%M:%S GMT" (BS8.unpack stripped)
+                pure (max 0 (ceiling (diffUTCTime date now * 1000000)))
 
 -- | Run the OAuth refresh and exact-request replay at most once. Keeping the
 -- allow bit at this boundary makes it impossible for one-shot tools to invoke
@@ -1600,7 +1690,8 @@ readSseStream client reader pending request = do
                         activity <- maybe (pure 0) (readTVarIO . (.pendingActivity) . snd) pending
                         if activity /= seen && not (pastHardDeadline start now slice)
                             then go start activity buffer dataLines dataBytes
-                            else pure (HttpFailed (timeoutError request.requestMethod slice))
+                            else pure (HttpTransientFailure
+                                (timeoutError request.requestMethod slice) Nothing)
                     Just bytes
                         | BS.null bytes -> do
                             -- End of stream: flush a trailing event without a blank line.
@@ -1616,8 +1707,8 @@ readSseStream client reader pending request = do
                                     finished <- settled
                                     pure $ if finished || isNothing pending
                                         then HttpDelivered
-                                        else HttpFailed (McpTransportError
-                                            "MCP SSE stream closed before the response arrived")
+                                        else HttpTransientFailure (McpTransportError
+                                            "MCP SSE stream closed before the response arrived") Nothing
                         | otherwise -> do
                             -- Check the combined partial line before
                             -- concatenating.  A peer can otherwise force an

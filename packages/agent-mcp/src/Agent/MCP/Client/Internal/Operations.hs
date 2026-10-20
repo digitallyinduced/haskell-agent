@@ -7,7 +7,7 @@ import Agent.Json
     ( rawJsonBytes, rawJsonDecoder, rawJsonEncoding, rawJsonFromEncoding, RawJson )
 import Agent.MCP.Client.Internal.Runtime
     ( McpRequest(requestName, requestHeaderParams, requestOnProgress,
-                 requestAllowReissue, requestArtifactResource),
+                 requestAllowReissue, requestRetrySafe, requestArtifactResource),
       decodeMcpPayload,
       requestAndDecode,
       renderTextMcpResult,
@@ -60,6 +60,7 @@ import Agent.MCP.Types
       mcpTaskDecoder,
       mcpTaskListDecoder,
       mcpToolDecoder,
+      mcpToolRetrySafe,
       projectRawOr )
 import Agent.ToolDispatch
     ( typedStreamingRichTool, ToolHandlerResult(..), ToolOutcome(..),
@@ -731,6 +732,7 @@ callDiscoveredToolPayloadWith images artifactDirectory client tool arguments onP
             , requestHeaderParams = headerParamValues tool arguments
             , requestOnProgress = onProgress
             , requestAllowReissue = toolAllowsAutomaticReissue tool
+            , requestRetrySafe = mcpToolRetrySafe tool
             }
         >>= \case
         Left err -> pure (textOnlyPayload (Left (renderMcpError err)) Nothing)
