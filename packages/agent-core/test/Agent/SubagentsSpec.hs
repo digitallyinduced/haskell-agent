@@ -15,8 +15,8 @@ import Control.Concurrent (threadDelay)
 import qualified Control.Concurrent.Async as Async
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
-import Control.Exception.Safe (finally)
-import Control.Monad (unless)
+import Control.Exception.Safe (bracket, finally)
+import Control.Monad (forM_, unless)
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import qualified Data.Map.Strict as Map
@@ -477,6 +477,57 @@ spec = describe "Agent.Subagents" do
         atomically $ writeTVar parentGate True
         _ <- waitSubagents registry [parent] 15000
         pure ()
+
+    it "retains concurrent child completion when an untargeted wait returns queued mail" do
+        forM_ [1 .. 200 :: Int] \_ -> do
+            childSpawned <- newEmptyTMVarIO
+            startWait <- newEmptyTMVarIO
+            finishChild <- newEmptyTMVarIO
+            finishParent <- newEmptyTMVarIO
+            waitResult <- newEmptyTMVarIO
+            settlements <- newTQueueIO
+            received <- newIORef []
+            bracket
+                (newSubagentRegistry (defaultSubagentConfig { maxDepth = Just 2 })
+                    (fromFilePath ".") (\_ _ _ _ -> pure (Left LoopNoResponseId))
+                    (\_ _ -> pure ()))
+                closeSubagentRegistry \registry -> do
+                    setSubagentOnSettled registry \agent status ->
+                        atomically (writeTQueue settlements (agent, status))
+                    setSubagentRunner registry \env _ message _ ->
+                        if env.subDepth == 2
+                            then do
+                                atomically (takeTMVar finishChild)
+                                pure (completedResult "leaf-final")
+                            else case message.messageType of
+                                NewTaskMessage -> do
+                                    parentPath <- fromMaybe taskPathRoot <$> getTaskPath registry env.subId
+                                    Right (child, _) <- spawnSubagentAt registry (Just env.subId)
+                                        parentPath env.subDepth "leaf" (plainInterAgentContent "leaf") Nothing
+                                    atomically (putTMVar childSpawned child)
+                                    atomically (takeTMVar startWait)
+                                    outcome <- waitAnyLive registry (Just env.subId) 10000
+                                    atomically (putTMVar waitResult outcome)
+                                    atomically (takeTMVar finishParent)
+                                    pure (completedResult "parent-final")
+                                _ -> do
+                                    modifyIORef' received (<> [message])
+                                    pure (completedResult "parent-final")
+                    Right parent <- spawnSubagent registry Nothing 0 "parent" Nothing
+                    Just child <- timeout 1000000 (atomically (takeTMVar childSpawned))
+                    queueMessage registry parent "guidance" `shouldReturn` Right "queued"
+                    atomically (putTMVar startWait () >> putTMVar finishChild ())
+                    Just (statuses, timedOut) <- timeout 1000000 (atomically (takeTMVar waitResult))
+                    timedOut `shouldBe` False
+                    timeout 1000000 (atomically (readTQueue settlements))
+                        `shouldReturn` Just (child, Completed (Just "leaf-final"))
+                    atomically (putTMVar finishParent ())
+                    timeout 1000000 (atomically (readTQueue settlements))
+                        `shouldReturn` Just (parent, Completed (Just "parent-final"))
+                    notices <- readIORef received
+                    (Map.lookup child statuses == Just (Completed (Just "leaf-final"))
+                        || any (Text.isInfixOf child.unSubagentId . messagePayload) notices)
+                        `shouldBe` True
 
     it "untargeted waits consume completions" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")

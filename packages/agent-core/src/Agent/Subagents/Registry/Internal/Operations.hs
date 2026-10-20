@@ -864,8 +864,13 @@ waitAnyLive registry caller timeoutMs = do
                 modifyTVar' registry.registryActiveWaits
                     (Map.insert caller [])
             race
-                (atomically (takeAgentUpdatesSTM registry caller
-                    `orElse` (Map.empty <$ pendingMessagesSTM registry caller)))
+                (atomically do
+                    statuses <- takeAgentUpdatesSTM registry caller
+                        `orElse` (Map.empty <$ pendingMessagesSTM registry caller)
+                    -- Later completions must route to the mailbox rather than
+                    -- assume this already-selected result will contain them.
+                    modifyTVar' registry.registryActiveWaits (Map.delete caller)
+                    pure statuses)
                 (threadDelay (clamped * 1000))
                 >>= \case
                     Left statuses -> pure (statuses, False)
