@@ -389,7 +389,8 @@ clientRequest client method parameters = McpRequest
     , requestRetrySafe = method `elem`
         [ "server/discover", "ping", "tools/list"
         , "resources/list", "resources/templates/list", "resources/read"
-        , "prompts/list", "prompts/get", "completion/complete", "skills/get"
+        , "prompts/list", "prompts/get", "completion/complete"
+        , "skills/list", "skills/get"
         , "tasks/list", "tasks/get", "tasks/result"
         ]
     , requestArtifactResource = False

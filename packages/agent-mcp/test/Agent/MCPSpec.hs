@@ -1437,12 +1437,13 @@ spec = describe "Agent.MCP" do
                         length <$> readIORef requests `shouldReturn` 4
                         readIORef refreshes `shouldReturn` 1
 
-        it "retries a protocol read operation" $
-            withHttpRepliesFor "tools/list" [httpFixtureStatus 503 []] \config requests ->
-                bracket (startMcpClient config) closeMcpClient \client -> do
-                    result <- requestMcp client 1000000 "tools/list" mempty
-                    result `shouldSatisfy` either (const False) (const True)
-                    length <$> readIORef requests `shouldReturn` 2
+        forM_ ["tools/list", "skills/list"] \method ->
+            it ("retries the protocol read operation " <> Text.unpack method) $
+                withHttpRepliesFor method [httpFixtureStatus 503 []] \config requests ->
+                    bracket (startMcpClient config) closeMcpClient \client -> do
+                        result <- requestMcp client 1000000 method mempty
+                        result `shouldSatisfy` either (const False) (const True)
+                        length <$> readIORef requests `shouldReturn` 2
 
         it "recovers when an SSE stream ends before delivering the result" $
             withToolHttpReplies
