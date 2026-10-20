@@ -2,6 +2,7 @@ module Agent.Subagents.ChildSpec (spec) where
 
 import Agent.Cancel (newCancelFlag, requestCancel, requestTurnYield)
 import Agent.InterAgentMessage (InterAgentMessage(..), plainInterAgentContent)
+import Agent.Subagents.Error (CoordinationError)
 import Agent.Loop.Fixtures (functionResult)
 import Agent.Loop.InputItems (toolResultToItem)
 import Agent.Json (rawJsonFromEncoding)
@@ -174,7 +175,7 @@ withChild action =
 -- | Hold a real tool boundary open while the parent redirects its child.
 -- The second provider request must include the guidance exactly once, before
 -- the original multi-step child run has returned to its supervisor.
-steerDuringTool :: (SubagentRegistry -> SubagentId -> IO (Either Text Text)) -> IO ()
+steerDuringTool :: (SubagentRegistry -> SubagentId -> IO (Either CoordinationError Text)) -> IO ()
 steerDuringTool deliver = withChild \registry env -> do
     requests <- newIORef []
     transcript <- newIORef emptyBackendSnapshot

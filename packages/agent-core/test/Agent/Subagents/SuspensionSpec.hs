@@ -147,10 +147,31 @@ spec = describe "durable subagent suspension" do
             restoreSuspended registry "agent-1" now
             restoreSuspended registry "agent-2" now
             first <- resumeDueSubagents registry now
-            length [() | (_, Right _) <- first] `shouldBe` 1
+            first `shouldBe`
+                [ (SubagentId "agent-1", Right "queued")
+                , (SubagentId "agent-2", Left (CoordinationSuspendedAdmissionRejected (AdmissionCapacityExceeded 1)))
+                ]
             second <- resumeDueSubagents registry now
-            length [() | (_, Right _) <- second] `shouldBe` 0
+            second `shouldBe`
+                [(SubagentId "agent-2", Left (CoordinationSuspendedAdmissionRejected (AdmissionCapacityExceeded 1)))]
             readIORef resumes `shouldReturn` 1
+            _ <- closeSubagent registry (SubagentId "agent-1")
+            resumeDueSubagents registry now `shouldReturn` [(SubagentId "agent-2", Right "queued")]
+            readIORef resumes `shouldReturn` 2
+
+    it "distinguishes an aborted delivery turn from exhausted suspension capacity" $
+        withRegistry \registry -> do
+            now <- getCurrentTime
+            let deadline = addUTCTime 3600 now
+                agent = SubagentId "agent-1"
+            restoreSuspended registry "agent-1" deadline
+            turn <- beginRootTurn registry
+            abortRootTurn registry turn
+            sendInputMessageForTurn registry (Just turn) taskPathRoot agent
+                (plainInterAgentContent "continue") False
+                `shouldReturn` Left (CoordinationSuspendedAdmissionRejected AdmissionTurnAborted)
+            getStatus registry agent `shouldReturn` Suspended deadline "waiting"
+            sendInput registry agent "continue" False `shouldReturn` Right "queued"
 
     it "does not execute when the durable resume handoff fails" $
         withRegistry \registry -> do
@@ -159,7 +180,7 @@ spec = describe "durable subagent suspension" do
             setSubagentSuspensionPersistence registry
                 acceptedStorage { persistSuspensionResume = \_ _ -> pure (Left "storage unavailable") }
             resumeDueSubagents registry now
-                `shouldReturn` [(SubagentId "agent-1", Left "storage unavailable")]
+                `shouldReturn` [(SubagentId "agent-1", Left (CoordinationResumePersistenceFailed "storage unavailable"))]
             getStatus registry (SubagentId "agent-1") `shouldReturn` Suspended now "waiting"
 
     it "allows an explicit follow-up before the deadline" $

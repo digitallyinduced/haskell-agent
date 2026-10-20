@@ -20,6 +20,7 @@ import Agent.ToolDispatch
     )
 import Agent.ToolDSL (PropertySchema(..))
 import Agent.Tools.MultiAgents
+import Control.Exception.Safe (bracket)
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
@@ -78,6 +79,26 @@ spec = describe "Agent.Tools.MultiAgents" do
                 , ("interrupt_agent", True)
                 ]
         closeSubagentRegistry registry
+
+    it "preserves collaboration error text when the registry returns typed failures" do
+        bracket
+            (newSubagentRegistry (defaultSubagentConfig { maxConcurrent = 1 }) (fromFilePath ".")
+                (\_ _ _ _ -> atomically retry) (\_ _ -> pure ()))
+            closeSubagentRegistry \registry -> do
+                let handlers = appToolHandlers (multiAgentTools (rootContext registry Nothing))
+                    call name arguments = dispatchToolCall defaultLoopDispatch handlers
+                        (ToolCall name name arguments FunctionCallKind False)
+                started <- call "spawn_agent" "{\"task_name\":\"worker\",\"message\":\"task\"}"
+                started.output `shouldBe` "Agent: /root/worker"
+                capacity <- call "spawn_agent" "{\"task_name\":\"extra\",\"message\":\"task\"}"
+                capacity.output `shouldBe` "Error: Concurrent subagent limit reached: 1 agents are already active."
+                Right worker <- resolveAgentTarget registry taskPathRoot "worker"
+                _ <- closeSubagent registry worker
+                closed <- call "followup_task" "{\"target\":\"worker\",\"message\":\"continue\"}"
+                closed.output `shouldBe` "Error: agent is closed"
+                closeSubagentRegistry registry
+                stopped <- call "spawn_agent" "{\"task_name\":\"extra\",\"message\":\"task\"}"
+                stopped.output `shouldBe` "Error: Subagent registry is closed."
 
     it "exposes the shared-workspace spawn helper for host tools" do
         prepared <- newEmptyTMVarIO

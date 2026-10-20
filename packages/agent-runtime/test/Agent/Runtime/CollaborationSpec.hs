@@ -6,6 +6,7 @@ import Agent.Runtime.Collaboration
 import Agent.Runtime.Models (ModelOption(..), ModelTarget(..))
 import Agent.Subagents
     ( SubagentId, SubagentRegistry, SubagentStatus(..), defaultMaxConcurrent
+    , CoordinationError(..), AdmissionFailure(..)
     , getStatus, setSubagentRunner, spawnSubagent )
 import Agent.Tools.MultiAgents (CollaborationModelTarget(..))
 import Control.Concurrent.Async (cancel, withAsync)
@@ -117,7 +118,7 @@ spec = describe "collaboration startup" do
         readIORef events `shouldReturn` ["child stopped", "snapshot"]
         getStatus registry child `shouldReturn` Closed
         spawnSubagent registry Nothing 0 "late" Nothing
-            `shouldReturn` Left "Subagent registry is closed."
+            `shouldReturn` Left (CoordinationAdmissionRejected AdmissionRegistryClosed)
 
     it "closes supervisors and rejects new work even when snapshot persistence fails" do
         events <- newIORef []
@@ -137,7 +138,7 @@ spec = describe "collaboration startup" do
         readIORef events `shouldReturn` ["child stopped", "snapshot"]
         getStatus registry child `shouldReturn` Closed
         spawnSubagent registry Nothing 0 "late" Nothing
-            `shouldReturn` Left "Subagent registry is closed."
+            `shouldReturn` Left (CoordinationAdmissionRejected AdmissionRegistryClosed)
 
     it "releases collaboration ownership when its session owner is cancelled" do
         events <- newIORef []
@@ -154,7 +155,7 @@ spec = describe "collaboration startup" do
             cancel worker
             getStatus registry child `shouldReturn` Closed
             spawnSubagent registry Nothing 0 "late" Nothing
-                `shouldReturn` Left "Subagent registry is closed."
+                `shouldReturn` Left (CoordinationAdmissionRejected AdmissionRegistryClosed)
         result `shouldBe` Just ()
         readIORef events `shouldReturn` ["child stopped", "snapshot"]
 

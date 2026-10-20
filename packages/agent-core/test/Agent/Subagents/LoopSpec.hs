@@ -89,7 +89,7 @@ spawnChild registry root = do
     turn <- currentRootTurn root
     spawnSubagentAtForTurn registry turn Nothing taskPathRoot 0 "lookup"
         (plainInterAgentContent "find it") Nothing
-        >>= either (fail . Text.unpack) (pure . fst)
+        >>= either (fail . show) (pure . fst)
 
 -- | A root backend that follows a script of answers, one per request, and
 -- records the inputs of every request.
