@@ -60,6 +60,14 @@ data Migration = Migration
 
 coreMigrations :: [Migration]
 coreMigrations =
+    initialStorageMigrations
+        <> sessionRuntimeMigrations
+        <> submittedTurnMigrations
+        <> serverCoordinationMigrations
+        <> sessionPersistenceMigrations
+
+initialStorageMigrations :: [Migration]
+initialStorageMigrations =
     [ Migration
         { migrationVersion = 1
         , migrationName = "initial harness storage"
@@ -187,7 +195,11 @@ coreMigrations =
               \ ADD COLUMN IF NOT EXISTS image_bytes bytea"
             ]
         }
-    , Migration
+    ]
+
+sessionRuntimeMigrations :: [Migration]
+sessionRuntimeMigrations =
+    [ Migration
         { migrationVersion = 102
         , migrationName = "provider turn telemetry"
         , migrationStatements =
@@ -299,7 +311,11 @@ coreMigrations =
               \ $ha$"
             ]
         }
-    , Migration
+    ]
+
+submittedTurnMigrations :: [Migration]
+submittedTurnMigrations =
+    [ Migration
         { migrationVersion = 111
         , migrationName = "durable externally submitted turns"
         , migrationStatements =
@@ -381,7 +397,11 @@ coreMigrations =
               \ ON harness.server_turns TO ha_runtime"
             ]
         }
-    , Migration
+    ]
+
+serverCoordinationMigrations :: [Migration]
+serverCoordinationMigrations =
+    [ Migration
         { migrationVersion = 112
         , migrationName = "cross-instance server coordination"
         , migrationStatements =
@@ -476,7 +496,11 @@ coreMigrations =
               \ WHERE status IN ('queued', 'running')"
             ]
         }
-    , Migration
+    ]
+
+sessionPersistenceMigrations :: [Migration]
+sessionPersistenceMigrations =
+    [ Migration
         { migrationVersion = 114
         , migrationName = "conversation pull request associations"
         , migrationStatements =
