@@ -62,6 +62,7 @@ data CollaborationRuntime = CollaborationRuntime
     , collaborationSubagentStoreRoot :: SubagentStoreRoot
     , collaborationSubagentForkSource
         :: IORef (Maybe (IO [ResponseItem]))
+    , collaborationParentEffort :: IORef (IO Text)
     , collaborationPendingNotices :: PendingInputs
     , collaborationRegistry :: SubagentRegistry
     , collaborationRootSubagents :: RootSubagents
@@ -119,6 +120,8 @@ acquireCollaborationRuntime AgentToolsRequest
     collaborationSubagentStoreRoot <- liftIO $ newIORef Nothing
     collaborationSubagentForkSource <-
         liftIO $ newIORef (Nothing :: Maybe (IO [ResponseItem]))
+    -- Session startup replaces this reader when the live request state exists.
+    collaborationParentEffort <- liftIO $ newIORef (pure effortText)
     collaborationPendingNotices <- liftIO newPendingInputs
     collaborationAgentTypes <- liftIO $ newIORef Map.empty
     collaborationRegistry <- acquireCollaborationRegistry
@@ -210,7 +213,7 @@ acquireCollaborationRuntime AgentToolsRequest
                         inferredTarget.targetConnectionId
                         transportModel
                         inferredTarget.targetWireModelId
-                        effortText
+                        (readIORef collaborationParentEffort >>= id)
                         dialectId
                         legacySubagentTarget
                         collaborationSubagentSessions

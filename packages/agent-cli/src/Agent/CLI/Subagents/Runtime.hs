@@ -153,7 +153,7 @@ prepareCollaborationSpawn
     -> Text
     -> (Text -> Text)
     -> Text
-    -> Text
+    -> IO Text
     -> DialectId
     -> Maybe LegacySubagentTarget
     -> IORef (Map SubagentId SubagentSession)
@@ -168,10 +168,11 @@ prepareCollaborationSpawn
         connection
         mapModel
         currentEffectiveModel
-        currentEffort
+        readCurrentEffort
         currentDialect
         legacyTarget
         sessionsRef storeRootRef typesRef sourceRef agentId spawnOptions = do
+    currentEffort <- readCurrentEffort
     recordAgentSpec typesRef agentId GrokSubagentSpec
         { agentType = defaultSubagentType
         , modelOverride = spawnOptions.collaborationModel
@@ -1285,7 +1286,7 @@ prepareChild
                     session.subSessionConnection
                     runtime.subagentMapModel
                     session.subSessionEffectiveModel
-                    currentEffort
+                    (pure currentEffort)
                     session.subSessionDialect
                     (Just LegacySubagentTarget
                         { legacyTargetProvider =

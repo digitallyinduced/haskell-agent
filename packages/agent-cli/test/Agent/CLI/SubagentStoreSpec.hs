@@ -1,10 +1,17 @@
 module Agent.CLI.SubagentStoreSpec (spec) where
 import Agent.InterAgentMessage (plainInterAgentContent)
+import Agent.CLI.Command (setReasoningEffort)
+import Agent.ReasoningEffort (ReasoningEffort(..))
+import Agent.Runtime.Session.Request
+    ( modifySessionRequestOptions
+    , newSessionRequestState
+    , readSessionRequestParams
+    )
 
 import Agent.Runtime.Compaction.Provider (estimatedOccupancy)
 import Agent.Runtime.ModelConfig (organizationGatewayConnectionId)
 import Agent.CLI.SubagentStore
-import Agent.Runtime.Session (LegacySubagentTarget(..))
+import Agent.Runtime.Session (LegacySubagentTarget(..), Persistence(..))
 import Agent.Dialect (DialectId(..))
 import Agent.Loop
     ( BackendSnapshot(..)
@@ -55,6 +62,7 @@ import Control.Monad (forM_, replicateM_)
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified System.Directory as Directory
 import System.Directory.OsPath (doesFileExist)
@@ -139,7 +147,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                 "openai"
                 id
                 "gpt-5.6-luna"
-                "medium"
+                (pure "medium")
                 CodexDialect
                 Nothing
                 sessionsRef
@@ -168,6 +176,46 @@ spec = describe "Agent.CLI.SubagentStore" do
                     capturedEffort
                     `shouldBe` ("gpt-5.6-luna", "medium")
 
+        it "captures live parent effort after updates without changing existing children" do
+            sessionsRef <- newIORef Map.empty
+            storeRootRef <- newIORef Nothing
+            typesRef <- newIORef Map.empty
+            forkSourceRef <- newIORef Nothing
+            parentState <- either (fail . show) pure =<< newSessionRequestState
+                PersistenceDisabled
+                (requestParams OpenAIProvider "gpt-5.6-sol" "" [] "medium")
+            let readParentEffort = do
+                    params <- readSessionRequestParams parentState
+                    pure (fromMaybe "medium" (params.reasoning >>= (.effort)))
+                prepare = prepareCollaborationSpawn
+                    OpenAIProvider "openai" id "gpt-5.6-sol" readParentEffort
+                    CodexDialect Nothing
+                    sessionsRef storeRootRef typesRef forkSourceRef
+                spawnOptions = CollaborationSpawnOptions
+                    { collaborationModel = Nothing
+                    , collaborationResolvedModel = Nothing
+                    , collaborationReasoningEffort = Nothing
+                    , collaborationForkTurns = Just "none"
+                    , collaborationInitialMessage = plainInterAgentContent "test task"
+                    }
+                firstAgent = SubagentId "agent-live-effort-first"
+                secondAgent = SubagentId "agent-live-effort-second"
+                explicitAgent = SubagentId "agent-live-effort-explicit"
+            modifySessionRequestOptions parentState (setReasoningEffort EffortHigh)
+            prepare firstAgent spawnOptions
+            lookupAgentReasoningEffort typesRef firstAgent
+                `shouldReturn` Just "high"
+            modifySessionRequestOptions parentState (setReasoningEffort EffortXHigh)
+            prepare secondAgent spawnOptions
+            lookupAgentReasoningEffort typesRef secondAgent
+                `shouldReturn` Just "xhigh"
+            lookupAgentReasoningEffort typesRef firstAgent
+                `shouldReturn` Just "high"
+            prepare explicitAgent
+                spawnOptions { collaborationReasoningEffort = Just "low" }
+            lookupAgentReasoningEffort typesRef explicitAgent
+                `shouldReturn` Just "low"
+
         it "inherits the parent's effort for legacy numeric full-history forks" do
             sessionsRef <- newIORef Map.empty
             storeRootRef <- newIORef Nothing
@@ -179,7 +227,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                 "openai"
                 id
                 "gpt-6-luna"
-                "medium"
+                (pure "medium")
                 CodexDialect
                 Nothing
                 sessionsRef
@@ -217,7 +265,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                 "openai"
                 (const "incorrect-wire-model")
                 "parent-model"
-                "medium"
+                (pure "medium")
                 CodexDialect
                 Nothing
                 sessionsRef
@@ -253,7 +301,7 @@ spec = describe "Agent.CLI.SubagentStore" do
             forkSourceRef <- newIORef Nothing
             let agentId = SubagentId "agent-explicit-effort"
             prepareCollaborationSpawn
-                OpenAIProvider "openai" id "gpt-5.6-sol" "xhigh"
+                OpenAIProvider "openai" id "gpt-5.6-sol" (pure "xhigh")
                 CodexDialect Nothing
                 sessionsRef storeRootRef typesRef forkSourceRef agentId
                 CollaborationSpawnOptions
@@ -282,7 +330,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                 forkSourceRef <- newIORef (Just (pure [messageItem RoleUser "parent history"]))
                 let agentId = SubagentId "agent-fresh-effort"
                 prepareCollaborationSpawn
-                    OpenAIProvider "openai" id "gpt-5.6-luna" "medium"
+                    OpenAIProvider "openai" id "gpt-5.6-luna" (pure "medium")
                     CodexDialect Nothing
                     sessionsRef storeRootRef typesRef forkSourceRef agentId
                     CollaborationSpawnOptions
