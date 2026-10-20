@@ -4,13 +4,16 @@ module Agent.Subagents.DurableTranscript
     ( DurableTranscriptConfig (..)
     , newDurableTranscriptBackend
     , newDurableTranscriptBackendWithInput
+    , newDurableTranscriptBackendWithInbox
     ) where
 
 import Agent.Error (ApiError)
 import qualified Agent.Loop as Agent
 import Agent.Loop.Native (NativeCodec (..))
 import Control.Concurrent.MVar
-import Control.Monad (void)
+import Control.Exception.Safe (onException)
+import Control.Monad (unless, void)
+import Data.IORef
 import Data.Text (Text)
 
 data DurableTranscriptConfig item response = DurableTranscriptConfig
@@ -38,33 +41,60 @@ newDurableTranscriptBackend config = do
 newDurableTranscriptBackendWithInput
     :: DurableTranscriptConfig item response
     -> IO (Agent.Backend, Agent.LoopEvent -> IO (), [item] -> IO ())
-newDurableTranscriptBackendWithInput config = do
-    history <- config.loadTranscript >>= newMVar . config.retainHistory
-    additional <- newMVar []
+newDurableTranscriptBackendWithInput config =
+    newDurableTranscriptBackendWithInbox config \items ->
+        [] <$ config.saveTranscript items
+
+-- | The host atomically saves the supplied history, appends accepted mailbox
+-- items and acknowledges those items in durable storage before a request.
+-- Other history writes use saveTranscript without consuming the inbox.
+-- Return just the mailbox suffix. A single lock protects pending continuation
+-- input, including mail received while a provider request is in flight.
+newDurableTranscriptBackendWithInbox
+    :: DurableTranscriptConfig item response
+    -> ([item] -> IO [item])
+    -> IO (Agent.Backend, Agent.LoopEvent -> IO (), [item] -> IO ())
+newDurableTranscriptBackendWithInbox config saveWithInbox = do
+    initial <- config.loadTranscript
+    state <- newMVar (config.retainHistory initial, [], Nothing)
+    usable <- newIORef True
     let native = config.codec
-        append items = modifyMVar history \previous -> do
-            let updated = config.retainHistory (foldl appendFresh previous items)
-            config.saveTranscript updated
-            pure (updated, updated)
+        append items keepForContinuation readInbox = modifyMVarMasked state \(previous, pending, responseId) -> do
+            valid <- readIORef usable
+            unless valid (fail "Durable transcript must be reloaded after a failed commit")
+            let candidate = config.retainHistory (foldl appendFresh previous items)
+            -- COMMIT may have succeeded even if its acknowledgement failed.
+            -- Never overwrite that committed inbox with stale local history.
+            incoming <- (if readInbox then saveWithInbox candidate else [] <$ config.saveTranscript candidate)
+                `onException` writeIORef usable False
+            let updated = config.retainHistory (candidate <> incoming)
+                remaining = pending <> incoming <> [item | keepForContinuation, item <- items]
+            pure ((updated, remaining, responseId), (updated, remaining, responseId))
         appendFresh previous item = case config.toolOutputIdentifier item of
             Just identifier | any ((== Just identifier) . config.toolOutputIdentifier) previous -> previous
             _ -> previous <> [item]
         recordEvent = \case
-            Agent.ToolFinished result -> void (append [native.completedToolItem result])
+            Agent.ToolFinished result -> void (append [native.completedToolItem result] False False)
             _ -> pure ()
         backend = Agent.backendWithCallbacks \snapshot previous inputs _ -> do
-            additionalItems <- readMVar additional
             let newItems =
                     [native.completedToolItem result | Agent.CompletedTool result <- inputs]
                         <> native.auxiliaryInputItems inputs
-            retained <- append newItems
-            let requestItems = maybe (config.prepareReplay retained) (const (newItems <> additionalItems)) previous
-            config.submit previous requestItems >>= \case
+            (retained, additionalItems, responseId) <- append newItems False True
+            -- A response may have been persisted just as steering cancelled
+            -- its publication to the loop. Its old continuation cannot omit
+            -- the durable response and the guidance that produced it.
+            let continuation = case responseId of
+                    Just known | previous /= Just known -> Nothing
+                    _ -> previous
+                requestItems = maybe (config.prepareReplay retained) (const (newItems <> additionalItems)) continuation
+            config.submit continuation requestItems >>= \case
                 Left err -> pure (Left err)
                 Right response -> do
                     config.recordResponse response
-                    void (append (native.responseItems response))
-                    modifyMVar_ additional (pure . drop (length additionalItems))
+                    void (append (native.responseItems response) False False)
+                    modifyMVar_ state \(items, pending, _) ->
+                        pure (items, drop (length additionalItems) pending, Just (native.responseIdentifier response))
                     pure $ Right Agent.BackendResult
                         { backendOutput = native.responseTurnOutput response
                         , backendState = Agent.advanceBackendSnapshot snapshot
@@ -72,7 +102,5 @@ newDurableTranscriptBackendWithInput config = do
                             (Just (Agent.BackendContinuation config.continuationNamespace
                                 (native.responseIdentifier response)))
                         }
-        appendAdditional items = modifyMVar_ additional \pending -> do
-            void (append items)
-            pure (pending <> items)
+        appendAdditional items = void (append items True False)
     pure (backend, recordEvent, appendAdditional)

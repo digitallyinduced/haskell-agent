@@ -99,6 +99,7 @@ main =
         , multiCreateWorktree = Nothing
         , multiPrepareSpawn = Nothing
         , multiSendToRoot = Nothing
+        , multiSendToAgent = Nothing
         , multiSpawnModelGuidance = Nothing
         , multiAllowedChildModels = Nothing
         , multiResolveChildModel = Nothing

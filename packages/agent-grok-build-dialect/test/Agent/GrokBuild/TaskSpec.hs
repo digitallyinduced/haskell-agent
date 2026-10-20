@@ -48,10 +48,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
-        let ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
-                (pure Nothing) Nothing Nothing Nothing Nothing Nothing Nothing
-                Nothing
-                Nothing
+        let ctx = testContext registry (fromFilePath "/tmp")
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
             parameters = fromMaybe [] (jsonToolParameters tool)
         let isolationTypes =
@@ -121,11 +118,8 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
                     })
                 (\_ _ -> pure ())
             typesRef <- newIORef Map.empty
-            let ctx = MultiAgentContext registry cwd Nothing 0 taskPathRoot
-                    (pure Nothing) Nothing Nothing Nothing Nothing Nothing
-                    (Just (grokRootChildModels True))
-                    Nothing
-                    Nothing
+            let ctx = (testContext registry cwd)
+                    { multiAllowedChildModels = Just (grokRootChildModels True) }
                 tool = taskTool cwd ctx typesRef
             tool.appToolDescription `shouldSatisfy`
                 Text.isInfixOf "gpt-6-luna"
@@ -151,11 +145,8 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
-        let ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
-                (pure Nothing) Nothing Nothing Nothing Nothing Nothing
-                (Just (grokRootChildModels True))
-                Nothing
-                Nothing
+        let ctx = (testContext registry (fromFilePath "/tmp"))
+                { multiAllowedChildModels = Just (grokRootChildModels True) }
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -340,10 +331,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
                     })
                 (\_ _ -> pure ())
             typesRef <- newIORef Map.empty
-            let ctx = MultiAgentContext registry cwd Nothing 0 taskPathRoot
-                    (pure Nothing) Nothing Nothing Nothing Nothing Nothing Nothing
-                    Nothing
-                    Nothing
+            let ctx = testContext registry cwd
                 tool = taskTool cwd ctx typesRef
             result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
                 (functionToolCall "c1" "task"
@@ -362,10 +350,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
             registry <- newSubagentRegistry defaultSubagentConfig cwd
                 (observeSpec typesRef observed)
                 (\_ _ -> pure ())
-            let ctx = MultiAgentContext registry cwd Nothing 0 taskPathRoot
-                    (pure Nothing) Nothing Nothing Nothing Nothing Nothing Nothing
-                    Nothing
-                    Nothing
+            let ctx = testContext registry cwd
                 tool = taskTool cwd ctx typesRef
             _ <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
                 (functionToolCall "c1" "task" raceArgs)
@@ -394,10 +379,8 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         typesRef <- newIORef Map.empty
         let restore _ =
                 pure (Left "persisted subagent dialect is incompatible")
-            ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
-                (pure Nothing) (Just restore) Nothing Nothing Nothing Nothing Nothing
-                Nothing
-                Nothing
+            ctx = (testContext registry (fromFilePath "/tmp"))
+                { multiResumeFromDisk = Just restore }
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -432,10 +415,8 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
         let childId = SubagentId "agent-child"
-            ctx = MultiAgentContext registry (fromFilePath "/tmp") (Just childId) 1 taskPathRoot
-                (pure Nothing) Nothing Nothing Nothing Nothing Nothing Nothing
-                Nothing
-                Nothing
+            ctx = (testContext registry (fromFilePath "/tmp"))
+                { multiSelfId = Just childId, multiDepth = 1 }
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         expectAlwaysReadOnly tool.appToolApproval
         closeSubagentRegistry registry
@@ -447,9 +428,8 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
         let createIsolated = cleanupLease cleaned
-            ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot (pure Nothing)
-                Nothing (Just createIsolated) Nothing Nothing Nothing Nothing Nothing
-                Nothing
+            ctx = (testContext registry (fromFilePath "/tmp"))
+                { multiCreateWorktree = Just createIsolated }
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task"
@@ -469,10 +449,8 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         cleaned <- newIORef False
         registry <- closedRegistry
         typesRef <- newIORef Map.empty
-        let ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
-                (pure Nothing) Nothing (Just (cleanupLease cleaned)) Nothing Nothing Nothing Nothing
-                Nothing
-                Nothing
+        let ctx = (testContext registry (fromFilePath "/tmp"))
+                { multiCreateWorktree = Just (cleanupLease cleaned) }
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
             (functionToolCall "c1" "task" worktreeArgs)
@@ -553,6 +531,7 @@ testContext registry cwd = MultiAgentContext
     , multiCreateWorktree = Nothing
     , multiPrepareSpawn = Nothing
     , multiSendToRoot = Nothing
+    , multiSendToAgent = Nothing
     , multiSpawnModelGuidance = Nothing
     , multiAllowedChildModels = Nothing
     , multiResolveChildModel = Nothing

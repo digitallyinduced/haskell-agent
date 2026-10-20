@@ -218,6 +218,7 @@ acquireCollaborationRuntime AgentToolsRequest
                         collaborationAgentTypes
                         collaborationSubagentForkSource)
                 , multiSendToRoot = Just sendToRoot
+                , multiSendToAgent = Nothing
                 , multiSpawnModelGuidance =
                     if isJust gatewayAllowedChildModels
                         then Nothing
