@@ -45,6 +45,7 @@ withSubagentMessageSteering
 withSubagentMessageSteering registry env inputs action = do
     work <- newTQueueIO
     let steering = SubagentSteering inputs work
+        acquire :: IO SubagentRecord
         acquire = atomically do
             agents <- readTVar registry.registryAgents
             record <- maybe (throwSTM (userError "Missing child mailbox")) pure
@@ -57,12 +58,14 @@ withSubagentMessageSteering registry env inputs action = do
             queued <- flushTQueue record.recordMailbox
             mapM_ (enqueueSubagentWorkSTM record) queued
             pure record
+        release :: SubagentRecord -> IO ()
         release record = atomically do
             writeTVar record.recordSteering Nothing
             pending <- flushTQueue steering.steeringWork
             phase <- readTVar record.recordPhase
             aborted <- readTVar registry.registryAbortedRootTurns
-            let retain queued = maybe True (`Set.notMember` aborted) queued.workRootTurnId
+            let retain :: SubagentWork -> Bool
+                retain queued = maybe True (`Set.notMember` aborted) queued.workRootTurnId
             case phase of
                 AgentClosed -> pure ()
                 _ -> mapM_ (unGetTQueue record.recordMailbox)
