@@ -1,10 +1,17 @@
 module Agent.CLI.SubagentStoreSpec (spec) where
 import Agent.InterAgentMessage (plainInterAgentContent)
+import Agent.CLI.Command (setReasoningEffort)
+import Agent.ReasoningEffort (ReasoningEffort(..))
+import Agent.Runtime.Session.Request
+    ( modifySessionRequestOptions
+    , newSessionRequestState
+    , readSessionRequestParams
+    )
 
 import Agent.Runtime.Compaction.Provider (estimatedOccupancy)
 import Agent.Runtime.ModelConfig (organizationGatewayConnectionId)
 import Agent.CLI.SubagentStore
-import Agent.Runtime.Session (LegacySubagentTarget(..))
+import Agent.Runtime.Session (LegacySubagentTarget(..), Persistence(..))
 import Agent.Dialect (DialectId(..))
 import Agent.Loop
     ( BackendSnapshot(..)
@@ -55,6 +62,7 @@ import Control.Monad (forM_, replicateM_)
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified System.Directory as Directory
 import System.Directory.OsPath (doesFileExist)
@@ -124,7 +132,11 @@ spec = describe "Agent.CLI.SubagentStore" do
                 (Just "company-code") Nothing Nothing "company-code"
                 `shouldReturn` Left "The child model has an incompatible provider dialect."
     describe "nested subagent model inheritance" do
-        it "inherits the immediate parent's model and effort for full-history forks" do
+        let historyModes =
+                [ ("inherits the immediate parent's model and effort for full-history forks", Nothing)
+                , ("inherits the immediate parent's model and effort for fresh children", Just "none")
+                ]
+        forM_ historyModes \(description, forkTurns) -> it description do
             sessionsRef <- newIORef Map.empty
             storeRootRef <- newIORef Nothing
             typesRef <- newIORef Map.empty
@@ -135,7 +147,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                 "openai"
                 id
                 "gpt-5.6-luna"
-                "medium"
+                (pure "medium")
                 CodexDialect
                 Nothing
                 sessionsRef
@@ -147,21 +159,62 @@ spec = describe "Agent.CLI.SubagentStore" do
                     { collaborationModel = Nothing
                     , collaborationResolvedModel = Nothing
                     , collaborationReasoningEffort = Nothing
-                    , collaborationForkTurns = Nothing
+                    , collaborationForkTurns = forkTurns
                     , collaborationInitialMessage = plainInterAgentContent "test task"
                     }
             Just session <- Map.lookup agentId <$> readIORef sessionsRef
-            lookupAgentReasoningEffort typesRef agentId
-                `shouldReturn` Just "medium"
-            let rootParams =
-                    requestParams OpenAIProvider "gpt-5.6-sol" "" [] "medium"
-            resolveChildModelAndEffort
-                OpenAIProvider
-                rootParams
-                session.subSessionEffectiveModel
-                Nothing
-                (Just "medium")
-                `shouldBe` ("gpt-5.6-luna", "medium")
+            capturedEffort <- lookupAgentReasoningEffort typesRef agentId
+            capturedEffort `shouldBe` Just "medium"
+            forM_ ["high", "xhigh"] \rootEffort -> do
+                let rootParams =
+                        requestParams OpenAIProvider "gpt-5.6-sol" "" [] rootEffort
+                resolveChildModelAndEffort
+                    OpenAIProvider
+                    rootParams
+                    session.subSessionEffectiveModel
+                    Nothing
+                    capturedEffort
+                    `shouldBe` ("gpt-5.6-luna", "medium")
+
+        it "captures live parent effort after updates without changing existing children" do
+            sessionsRef <- newIORef Map.empty
+            storeRootRef <- newIORef Nothing
+            typesRef <- newIORef Map.empty
+            forkSourceRef <- newIORef Nothing
+            parentState <- either (fail . show) pure =<< newSessionRequestState
+                PersistenceDisabled
+                (requestParams OpenAIProvider "gpt-5.6-sol" "" [] "medium")
+            let readParentEffort = do
+                    params <- readSessionRequestParams parentState
+                    pure (fromMaybe "medium" (params.reasoning >>= (.effort)))
+                prepare = prepareCollaborationSpawn
+                    OpenAIProvider "openai" id "gpt-5.6-sol" readParentEffort
+                    CodexDialect Nothing
+                    sessionsRef storeRootRef typesRef forkSourceRef
+                spawnOptions = CollaborationSpawnOptions
+                    { collaborationModel = Nothing
+                    , collaborationResolvedModel = Nothing
+                    , collaborationReasoningEffort = Nothing
+                    , collaborationForkTurns = Just "none"
+                    , collaborationInitialMessage = plainInterAgentContent "test task"
+                    }
+                firstAgent = SubagentId "agent-live-effort-first"
+                secondAgent = SubagentId "agent-live-effort-second"
+                explicitAgent = SubagentId "agent-live-effort-explicit"
+            modifySessionRequestOptions parentState (setReasoningEffort EffortHigh)
+            prepare firstAgent spawnOptions
+            lookupAgentReasoningEffort typesRef firstAgent
+                `shouldReturn` Just "high"
+            modifySessionRequestOptions parentState (setReasoningEffort EffortXHigh)
+            prepare secondAgent spawnOptions
+            lookupAgentReasoningEffort typesRef secondAgent
+                `shouldReturn` Just "xhigh"
+            lookupAgentReasoningEffort typesRef firstAgent
+                `shouldReturn` Just "high"
+            prepare explicitAgent
+                spawnOptions { collaborationReasoningEffort = Just "low" }
+            lookupAgentReasoningEffort typesRef explicitAgent
+                `shouldReturn` Just "low"
 
         it "inherits the parent's effort for legacy numeric full-history forks" do
             sessionsRef <- newIORef Map.empty
@@ -174,7 +227,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                 "openai"
                 id
                 "gpt-6-luna"
-                "medium"
+                (pure "medium")
                 CodexDialect
                 Nothing
                 sessionsRef
@@ -212,7 +265,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                 "openai"
                 (const "incorrect-wire-model")
                 "parent-model"
-                "medium"
+                (pure "medium")
                 CodexDialect
                 Nothing
                 sessionsRef
@@ -240,6 +293,93 @@ spec = describe "Agent.CLI.SubagentStore" do
             session.subSessionConnection `shouldBe` "openai"
             session.subSessionEffectiveModel `shouldBe` "company-model"
             session.subSessionDialect `shouldBe` GenericResponsesDialect
+
+        it "keeps an explicit effort override for a fresh child on another model" do
+            sessionsRef <- newIORef Map.empty
+            storeRootRef <- newIORef Nothing
+            typesRef <- newIORef Map.empty
+            forkSourceRef <- newIORef Nothing
+            let agentId = SubagentId "agent-explicit-effort"
+            prepareCollaborationSpawn
+                OpenAIProvider "openai" id "gpt-5.6-sol" (pure "xhigh")
+                CodexDialect Nothing
+                sessionsRef storeRootRef typesRef forkSourceRef agentId
+                CollaborationSpawnOptions
+                    { collaborationModel = Just "gpt-5.6-nano"
+                    , collaborationResolvedModel = Nothing
+                    , collaborationReasoningEffort = Just "low"
+                    , collaborationForkTurns = Just "none"
+                    , collaborationInitialMessage = plainInterAgentContent "test task"
+                    }
+            Just session <- Map.lookup agentId <$> readIORef sessionsRef
+            capturedEffort <- lookupAgentReasoningEffort typesRef agentId
+            capturedEffort `shouldBe` Just "low"
+            resolveChildModelAndEffort
+                OpenAIProvider
+                (requestParams OpenAIProvider "gpt-5.6-sol" "" [] "xhigh")
+                session.subSessionEffectiveModel
+                Nothing
+                capturedEffort
+                `shouldBe` ("gpt-5.6-nano", "low")
+
+        it "preserves a fresh child's captured effort through eviction and disk resume" do
+            withTempDir \dir -> do
+                sessionsRef <- newIORef Map.empty
+                storeRootRef <- newIORef (Just dir)
+                typesRef <- newIORef Map.empty
+                forkSourceRef <- newIORef (Just (pure [messageItem RoleUser "parent history"]))
+                let agentId = SubagentId "agent-fresh-effort"
+                prepareCollaborationSpawn
+                    OpenAIProvider "openai" id "gpt-5.6-luna" (pure "medium")
+                    CodexDialect Nothing
+                    sessionsRef storeRootRef typesRef forkSourceRef agentId
+                    CollaborationSpawnOptions
+                        { collaborationModel = Nothing
+                        , collaborationResolvedModel = Nothing
+                        , collaborationReasoningEffort = Nothing
+                        , collaborationForkTurns = Just "none"
+                        , collaborationInitialMessage = plainInterAgentContent "test task"
+                        }
+                Just session <- Map.lookup agentId <$> readIORef sessionsRef
+                (.backendItems) <$> readIORef session.subSessionTranscript
+                    `shouldReturn` []
+                bracket
+                    (newSubagentRegistry defaultSubagentConfig dir
+                        (\_ _ _ _ -> fail "unexpected subagent runner invocation")
+                        (\_ _ -> pure ()))
+                    closeSubagentRegistry
+                    \registry -> do
+                        persistAndEvictSubagentSessionWithStatus
+                            storeRootRef registry typesRef agentId
+                            (Completed Nothing) session
+                            `shouldReturn` Right True
+                        Just (_, metadata) <-
+                            either (fail . show) pure =<< loadSubagentState dir agentId
+                        (subagentDiskFields metadata).diskReasoningEffort
+                            `shouldBe` Just "medium"
+                        writeIORef typesRef Map.empty
+                        rehydrated <- lookupTestSession
+                            sessionsRef storeRootRef typesRef agentId
+                        capturedEffort <- lookupAgentReasoningEffort typesRef agentId
+                        capturedEffort `shouldBe` Just "medium"
+                        resolveChildModelAndEffort
+                            OpenAIProvider
+                            (requestParams OpenAIProvider "gpt-5.6-sol" "" [] "xhigh")
+                            rehydrated.subSessionEffectiveModel Nothing capturedEffort
+                            `shouldBe` ("gpt-5.6-luna", "medium")
+                        restoredSessions <- newIORef Map.empty
+                        restoredTypes <- newIORef Map.empty
+                        restoreTestAgent
+                            storeRootRef registry restoredSessions restoredTypes agentId
+                            `shouldReturn` Right ()
+                        restoredEffort <- lookupAgentReasoningEffort restoredTypes agentId
+                        restoredEffort `shouldBe` Just "medium"
+                        Just restored <- Map.lookup agentId <$> readIORef restoredSessions
+                        resolveChildModelAndEffort
+                            OpenAIProvider
+                            (requestParams OpenAIProvider "gpt-5.6-sol" "" [] "high")
+                            restored.subSessionEffectiveModel Nothing restoredEffort
+                            `shouldBe` ("gpt-5.6-luna", "medium")
 
         it "keeps an explicit child model override" do
             let rootParams =

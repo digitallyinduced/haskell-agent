@@ -153,7 +153,7 @@ prepareCollaborationSpawn
     -> Text
     -> (Text -> Text)
     -> Text
-    -> Text
+    -> IO Text
     -> DialectId
     -> Maybe LegacySubagentTarget
     -> IORef (Map SubagentId SubagentSession)
@@ -168,20 +168,18 @@ prepareCollaborationSpawn
         connection
         mapModel
         currentEffectiveModel
-        currentEffort
+        readCurrentEffort
         currentDialect
         legacyTarget
         sessionsRef storeRootRef typesRef sourceRef agentId spawnOptions = do
+    currentEffort <- readCurrentEffort
     recordAgentSpec typesRef agentId GrokSubagentSpec
         { agentType = defaultSubagentType
         , modelOverride = spawnOptions.collaborationModel
-        , reasoningEffortOverride = case
-                spawnOptions.collaborationReasoningEffort of
-            Just effort -> Just effort
-            Nothing
-                | inheritsFullHistory spawnOptions.collaborationForkTurns ->
-                    Just currentEffort
-                | otherwise -> Nothing
+        -- Capture the spawning agent's effort independently of copied history.
+        -- Follow-ups and resume must not fall back to the root's later settings.
+        , reasoningEffortOverride = Just $
+            fromMaybe currentEffort spawnOptions.collaborationReasoningEffort
         }
     let ( childProvider
             , childConnection
@@ -1288,7 +1286,7 @@ prepareChild
                     session.subSessionConnection
                     runtime.subagentMapModel
                     session.subSessionEffectiveModel
-                    currentEffort
+                    (pure currentEffort)
                     session.subSessionDialect
                     (Just LegacySubagentTarget
                         { legacyTargetProvider =
@@ -1347,12 +1345,6 @@ resolveChildModelAndEffort
         , model == "gpt-6-luna" || model == "gpt-5.6-luna"
         , inheritedEffort `notElem` ["xhigh", "max"] = "high"
         | otherwise = inheritedEffort
-
-inheritsFullHistory :: Maybe Text -> Bool
-inheritsFullHistory = \case
-    Nothing -> True
-    Just turns ->
-        Text.toLower (Text.strip turns) /= "none"
 
 allowedChildModelError :: Maybe [Text] -> Text -> Maybe Text
 allowedChildModelError Nothing _ = Nothing

@@ -788,6 +788,7 @@ launchAgentToolsSession codeModeResourceScope AgentToolsRequest{..} ToolStartup
     { collaborationSubagentSessions = subagentSessions
     , collaborationSubagentStoreRoot = subagentStoreRoot
     , collaborationSubagentForkSource = subagentForkSource
+    , collaborationParentEffort = subagentParentEffort
     , collaborationPendingNotices = pendingNotices
     , collaborationRegistry = registry
     , collaborationRootSubagents = rootSubagents
@@ -915,6 +916,7 @@ launchAgentToolsSession codeModeResourceScope AgentToolsRequest{..} ToolStartup
         , stateDirectory
         , stderrHandle
         , subagentForkSource
+        , subagentParentEffort
         , subagentSessions
         , subagentStoreRoot
         , tokenProvider

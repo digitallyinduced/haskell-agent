@@ -64,12 +64,14 @@ page = Page
             <thead><tr><th>Setting</th><th>Meaning</th><th>Constraint</th></tr></thead>
             <tbody>
                 <tr><td><code>fork_turns</code> omitted or <code>"all"</code></td><td>Fork the available parent conversation history.</td><td>Inherits the parent model and reasoning effort; explicit overrides are rejected.</td></tr>
-                <tr><td><code>fork_turns: "none"</code></td><td>Do not copy the parent transcript.</td><td>The task message must provide the necessary background, paths, and constraints.</td></tr>
+                <tr><td><code>fork_turns: "none"</code></td><td>Do not copy the parent transcript.</td><td>Inherits the spawning agent's model and reasoning effort unless overridden. The task message must provide the necessary background, paths, and constraints.</td></tr>
                 <tr><td>Legacy positive integer <code>fork_turns</code></td><td>Accepted as a full-history fork for compatibility.</td><td>Uses the same inheritance rules as <code>"all"</code>. New calls should use <code>"all"</code> or <code>"none"</code>.</td></tr>
                 <tr><td><code>model</code></td><td>Select a different allowed child model.</td><td>Requires no-history or bounded-history spawning and must satisfy the host's model policy.</td></tr>
                 <tr><td><code>reasoning_effort</code></td><td>Request a child reasoning setting.</td><td>Requires no-history or bounded-history spawning; supported values depend on the selected model.</td></tr>
             </tbody>
         </table>
+        <p>The child's reasoning effort is captured at spawn and retained for
+        follow-ups and resume, even if the root's reasoning settings change.</p>
         <p>Ask for a self-contained assignment when switching models. “Use another
         model” alone does not establish which files, acceptance criteria, or previous
         decisions it should know. If an organization rejects a child model, select

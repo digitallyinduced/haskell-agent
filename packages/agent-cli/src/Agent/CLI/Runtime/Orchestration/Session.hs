@@ -242,7 +242,7 @@ import Agent.Provider
 import Agent.ResourceScope (ResourceScope, allocateAcquire, logSlowCleanup)
 import Agent.Responses.GenericClient (GenericClientOptions)
 import Agent.Responses.Types
-    (ResponseItem, ResponseCreateParams(model))
+    (ResponseItem, ResponseCreateParams(model, reasoning), ReasoningConfig(effort))
 import Agent.Skills (SkillCatalog, SkillInvocation)
 import Agent.Store.Postgres ( trustedPool )
 import Agent.Subagents (SubagentRegistry, setSubagentRunner)
@@ -371,6 +371,7 @@ data AgentSessionRequest windowTitleResult = AgentSessionRequest
     , stateDirectory :: FilePath
     , stderrHandle :: Handle
     , subagentForkSource :: IORef (Maybe (IO [ResponseItem]))
+    , subagentParentEffort :: IORef (IO Text)
     , subagentSessions :: IORef (Map SubagentId SubagentSession)
     , subagentStoreRoot :: SubagentStoreRoot
     , tokenProvider :: TokenProvider
@@ -633,6 +634,7 @@ prepareSessionPromptRuntime
     -> IO SessionPromptRuntime
 prepareSessionPromptRuntime AgentSessionRequest
     { provider
+    , effortText
     , inferredTarget
     , dialect
     , workspace = WorkspaceContext{cwd}
@@ -642,6 +644,7 @@ prepareSessionPromptRuntime AgentSessionRequest
     , allTools
     , persist
     , startup
+    , subagentParentEffort
     } sessionCodeRuntime = do
     let compatiblePromptSnapshot =
             compatibleSessionPromptSnapshot
@@ -684,6 +687,9 @@ prepareSessionPromptRuntime AgentSessionRequest
     sessionParamsRef <-
         newSessionRequestState persist sessionParams
             >>= either (startupDie startup) pure
+    writeIORef subagentParentEffort do
+        currentParams <- readSessionRequestParams sessionParamsRef
+        pure (fromMaybe effortText (currentParams.reasoning >>= (.effort)))
     sessionPolicyRef <- newIORef policy
     sessionClaudeRuntimeSlot <- newClaudeSessionRuntimeSlot
     sessionAutomaticCompactionRef <- newIORef Nothing
