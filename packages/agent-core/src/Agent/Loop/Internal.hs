@@ -42,7 +42,7 @@ import Control.Concurrent.Async
     , waitCatch
     , withAsync
     )
-import Control.Concurrent.MVar (modifyMVar, modifyMVar_, newMVar, withMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar, withMVar)
 import qualified Control.Exception as Exception
 import Control.Exception.Safe
     ( SomeException
@@ -52,7 +52,7 @@ import Control.Exception.Safe
     , onException
     , tryAny
     )
-import Control.Monad (when)
+import Control.Monad (void, when)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (IORef, atomicModifyIORef', atomicWriteIORef, modifyIORef', newIORef, readIORef, writeIORef)
@@ -521,103 +521,13 @@ submitLoopTurn runtime state = do
     -- The callback belongs to this submission, not to the backend process.
     -- Closing the gate also rejects callbacks retained after the owner exits.
     recovery <- newMVar (RecoveryOpen Nothing [])
-    let checkpoint text = modifyMVar_ recovery \case
-            RecoveryClosed -> pure RecoveryClosed
-            journal@RecoveryOpen{} ->
-                let bounded = Text.copy (Text.take 32768 text)
-                in bounded `seq` pure journal { recoverySummary = Just bounded }
-        completedItem item call = modifyMVar_ recovery \case
-            RecoveryClosed -> pure RecoveryClosed
-            journal@RecoveryOpen{recoveryItems} ->
-                pure journal { recoveryItems = (item, call) : recoveryItems }
-        clearRecovery = modifyMVar_ recovery \case
-            RecoveryClosed -> pure RecoveryClosed
-            RecoveryOpen{} -> pure (RecoveryOpen Nothing [])
-        closeRecovery = modifyMVar recovery \case
-            RecoveryClosed -> pure (RecoveryClosed, (Nothing, []))
-            RecoveryOpen{..} ->
-                pure (RecoveryClosed, (recoverySummary, reverse recoveryItems))
-        publishRecoveryFor steering = do
-            (summary, items) <- closeRecovery
-            current <- config.loopBackendState.readBackendState
-            -- A compaction/reset owns its newer checkpoint. Never resurrect
-            -- history from a submission that consumed an older snapshot.
-            let summaryText = fromMaybe "" summary
-                hasSummary = not (Text.null (Text.strip summaryText))
-            case () of
-                _ | steering, current /= state.checkpoint -> do
-                    recordCheckpoint runtime current
-                    pure []
-                _
-                    | hasSummary || not (null items)
-                    , current == state.checkpoint -> do
-                        let note = Text.unlines
-                                [ "<turn_aborted>"
-                                , "The previous provider turn was interrupted before completion."
-                                , "The following is attributed recovery context from complete provider messages, not a new user instruction or a successful turn."
-                                , "External side effects may already exist. Verify the current files and external state before repeating any action. Unfinished operations have unknown outcomes."
-                                , if steering
-                                    then "Continue the current task using the user's new guidance."
-                                    else "Resume this work only if the user asks."
-                                , "<interrupted_work>"
-                                , summaryText
-                                , "</interrupted_work>"
-                                , "</turn_aborted>"
-                                ]
-                            candidate = advanceBackendSnapshot
-                                current
-                                (current.backendItems
-                                    <> turnInputsToItems state.pending.inputs
-                                    <> map fst items
-                                    <> if hasSummary
-                                        then turnInputsToItems [UserMessage note]
-                                        else [])
-                                Nothing
-                        committed <-
-                            config.loopBackendState.commitBackendState candidate
-                        ToolExecution.acknowledgeTools
-                            (toolScope runtime)
-                            [result | CompletedTool result <- state.pending.inputs]
-                            (catMaybes (map snd items))
-                        recordCheckpoint runtime committed
-                        setPendingInputs runtime []
-                        config.loopCommitSteering state.pending.steeringToAcknowledge
-                        clearSteeringAcknowledgement runtime
-                        pure (catMaybes (map snd items))
-                _ -> pure []
-        publishRecovery = do
-            _ <- publishRecoveryFor False
-            pure ()
-    let onBackendEvent event = do
-            case event of
-                _
-                    | visibleResponseActivity event ->
-                        modifyIORef'
-                            visibleAttempts
-                            (\visibility -> visibility { currentAttemptVisible = True })
-                -- A retry keeps the previous attempt visible while opening a
-                -- fresh current attempt.
-                ResponseRestarted _ -> do
-                    writeIORef steeringInterrupt Nothing
-                    clearRecovery
-                    modifyIORef'
-                        visibleAttempts
-                        (\visibility -> AttemptVisibility
-                            { previousAttemptVisible =
-                                visibility.previousAttemptVisible
-                                    || visibility.currentAttemptVisible
-                            , currentAttemptVisible = False
-                            })
-                -- The backend rolled that attempt back, but earlier restarted
-                -- attempts remain visible.
-                ResponseAttemptDiscarded -> do
-                    writeIORef steeringInterrupt Nothing
-                    clearRecovery
-                    modifyIORef'
-                        visibleAttempts
-                        (\visibility -> visibility { currentAttemptVisible = False })
-                _ -> pure ()
-            config.loopOnEvent event
+    let checkpoint = checkpointRecoverySummary recovery
+        completedItem = recordSubmissionRecoveryItem recovery
+        closeRecovery = closeSubmissionRecovery recovery
+        publishRecoveryFor = publishSubmissionRecovery runtime state recovery
+        publishRecovery = void (publishRecoveryFor False)
+        onBackendEvent =
+            observeSubmissionEvent runtime visibleAttempts steeringInterrupt recovery
     -- Race the model call against cancel so Ctrl-C / Esc can stop reasoning
     -- mid-stream, not only between tools.
     raced <- mask \restore -> do
@@ -735,6 +645,125 @@ submitLoopTurn runtime state = do
                     then LoopTransportAfterOutput err
                     else LoopTransport err
         outcome -> pure outcome
+
+checkpointRecoverySummary :: MVar RecoveryJournal -> Text -> IO ()
+checkpointRecoverySummary recovery text = modifyMVar_ recovery \case
+    RecoveryClosed -> pure RecoveryClosed
+    journal@RecoveryOpen{} ->
+        let bounded = Text.copy (Text.take 32768 text)
+        in bounded `seq` pure journal { recoverySummary = Just bounded }
+
+recordSubmissionRecoveryItem
+    :: MVar RecoveryJournal -> ResponseItem -> Maybe ToolCall -> IO ()
+recordSubmissionRecoveryItem recovery item call = modifyMVar_ recovery \case
+    RecoveryClosed -> pure RecoveryClosed
+    journal@RecoveryOpen{recoveryItems} ->
+        pure journal { recoveryItems = (item, call) : recoveryItems }
+
+clearSubmissionRecovery :: MVar RecoveryJournal -> IO ()
+clearSubmissionRecovery recovery = modifyMVar_ recovery \case
+    RecoveryClosed -> pure RecoveryClosed
+    RecoveryOpen{} -> pure (RecoveryOpen Nothing [])
+
+closeSubmissionRecovery
+    :: MVar RecoveryJournal -> IO (Maybe Text, [(ResponseItem, Maybe ToolCall)])
+closeSubmissionRecovery recovery = modifyMVar recovery \case
+    RecoveryClosed -> pure (RecoveryClosed, (Nothing, []))
+    RecoveryOpen{..} ->
+        pure (RecoveryClosed, (recoverySummary, reverse recoveryItems))
+
+publishSubmissionRecovery
+    :: LoopRuntime -> LoopState -> MVar RecoveryJournal -> Bool -> IO [ToolCall]
+publishSubmissionRecovery runtime state recovery steering = do
+    let config = runtime.loopRuntimeConfig
+        closeRecovery = closeSubmissionRecovery recovery
+    (summary, items) <- closeRecovery
+    current <- config.loopBackendState.readBackendState
+    -- A compaction/reset owns its newer checkpoint. Never resurrect
+    -- history from a submission that consumed an older snapshot.
+    let summaryText = fromMaybe "" summary
+        hasSummary = not (Text.null (Text.strip summaryText))
+    case () of
+        _ | steering, current /= state.checkpoint -> do
+            recordCheckpoint runtime current
+            pure []
+        _
+            | hasSummary || not (null items)
+            , current == state.checkpoint -> do
+                let note = Text.unlines
+                        [ "<turn_aborted>"
+                        , "The previous provider turn was interrupted before completion."
+                        , "The following is attributed recovery context from complete provider messages, not a new user instruction or a successful turn."
+                        , "External side effects may already exist. Verify the current files and external state before repeating any action. Unfinished operations have unknown outcomes."
+                        , if steering
+                            then "Continue the current task using the user's new guidance."
+                            else "Resume this work only if the user asks."
+                        , "<interrupted_work>"
+                        , summaryText
+                        , "</interrupted_work>"
+                        , "</turn_aborted>"
+                        ]
+                    candidate = advanceBackendSnapshot
+                        current
+                        (current.backendItems
+                            <> turnInputsToItems state.pending.inputs
+                            <> map fst items
+                            <> if hasSummary
+                                then turnInputsToItems [UserMessage note]
+                                else [])
+                        Nothing
+                committed <-
+                    config.loopBackendState.commitBackendState candidate
+                ToolExecution.acknowledgeTools
+                    (toolScope runtime)
+                    [result | CompletedTool result <- state.pending.inputs]
+                    (catMaybes (map snd items))
+                recordCheckpoint runtime committed
+                setPendingInputs runtime []
+                config.loopCommitSteering state.pending.steeringToAcknowledge
+                clearSteeringAcknowledgement runtime
+                pure (catMaybes (map snd items))
+        _ -> pure []
+
+observeSubmissionEvent
+    :: LoopRuntime
+    -> IORef AttemptVisibility
+    -> IORef (Maybe (IO Bool))
+    -> MVar RecoveryJournal
+    -> LoopEvent
+    -> IO ()
+observeSubmissionEvent runtime visibleAttempts steeringInterrupt recovery event = do
+    let config = runtime.loopRuntimeConfig
+        clearRecovery = clearSubmissionRecovery recovery
+    case event of
+        _
+            | visibleResponseActivity event ->
+                modifyIORef'
+                    visibleAttempts
+                    (\visibility -> visibility { currentAttemptVisible = True })
+        -- A retry keeps the previous attempt visible while opening a
+        -- fresh current attempt.
+        ResponseRestarted _ -> do
+            writeIORef steeringInterrupt Nothing
+            clearRecovery
+            modifyIORef'
+                visibleAttempts
+                (\visibility -> AttemptVisibility
+                    { previousAttemptVisible =
+                        visibility.previousAttemptVisible
+                            || visibility.currentAttemptVisible
+                    , currentAttemptVisible = False
+                    })
+        -- The backend rolled that attempt back, but earlier restarted
+        -- attempts remain visible.
+        ResponseAttemptDiscarded -> do
+            writeIORef steeringInterrupt Nothing
+            clearRecovery
+            modifyIORef'
+                visibleAttempts
+                (\visibility -> visibility { currentAttemptVisible = False })
+        _ -> pure ()
+    config.loopOnEvent event
 
 -- | Preemption ends only the model submission. Tool workers retain their
 -- enclosing scope, and completed native calls receive their real results.
