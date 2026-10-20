@@ -5,9 +5,15 @@ import Prelude
 import Test.Hspec
 import Agent.Error (ApiError (..), ErrorType (..))
 import Agent.Turn
+import Control.Retry (RetryStatus (..), defaultRetryStatus, getRetryPolicyM)
 
 spec :: Spec
 spec = describe "shared Codex request retry policy" do
+    it "uses the shared backoff and stops after three retries" do
+        mapM (\attempt -> getRetryPolicyM turnRetryPolicy
+            defaultRetryStatus { rsIterNumber = attempt }) [0 .. 4]
+            `shouldReturn` [Just 5_000_000, Just 10_000_000, Just 20_000_000, Nothing, Nothing]
+
     it "retries provider capacity errors and HTTP rate limits" do
         turnErrorIsRetryable
             (ProviderError RateLimitError

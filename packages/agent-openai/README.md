@@ -24,7 +24,8 @@ the successful response after the call returns; those effects are never
 part of its retry scope.
 
 `Agent.Turn.runTurn` supplies the same provider-neutral bounded retry policy
-to non-streaming transports. The HTTP client uses it automatically. There are
+to non-streaming transports using `Control.Retry`. The HTTP client uses it
+automatically. There are
 three retries with exponential 5/10/20-second waits or a positive server hint
 capped at a minute. Quota exhaustion and authentication failures are returned
 to credential failover; persistent outages are returned to the host for durable

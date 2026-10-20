@@ -4,9 +4,8 @@
 -- this at their submission boundary, before any successful response effects.
 module Agent.Turn
     ( runTurn
-    , runTurnWith
-    , TurnRuntime (..)
-    , defaultTurnRuntime
+    , runTurnWithPolicy
+    , turnRetryPolicy
     , turnErrorIsRetryable
     , transientApiError
     , turnErrorIsOverload
@@ -17,50 +16,52 @@ module Agent.Turn
 import Prelude
 import Agent.Error (ApiError (..), ErrorType (..), apiErrorRetryAfter)
 import qualified Agent.Error as Error
-import Control.Concurrent (threadDelay)
+import Control.Monad (when)
+import Control.Retry
+    ( RetryAction (..), RetryPolicyM, RetryStatus (..)
+    , capDelay, defaultRetryStatus, exponentialBackoff, getRetryPolicyM
+    , limitRetries, retryingDynamic
+    )
+import Data.Functor.Identity (runIdentity)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import System.IO (stderr)
 
--- | Injectable effects for deterministic tests. The retry policy itself is
--- shared by all callers, rather than configured by individual agents.
-data TurnRuntime = TurnRuntime
-    { waitForRetry :: Int -> IO ()
-    , logRetry :: Text -> IO ()
-    }
-
-defaultTurnRuntime :: TurnRuntime
-defaultTurnRuntime = TurnRuntime threadDelay (Text.hPutStrLn stderr)
-
 runTurn :: IO (Either ApiError result) -> IO (Either ApiError result)
-runTurn = runTurnWith defaultTurnRuntime
+runTurn = runTurnWithPolicy turnRetryPolicy
+
+-- | The shared submission budget. Dynamic provider hints may override its
+-- delay, but 'retryingDynamic' always respects the policy's stopping decision.
+turnRetryPolicy :: RetryPolicyM IO
+turnRetryPolicy = limitRetries requestRetryLimit <> requestRetryBackoff
+
+requestRetryBackoff :: Monad m => RetryPolicyM m
+requestRetryBackoff = capDelay 60_000_000 (exponentialBackoff 5_000_000)
 
 -- | Only the model submission is repeated. Successful responses, tool
 -- execution, accounting writes and message delivery stay outside this scope.
 -- Cancellation interrupts both the submission and its wait normally.
-runTurnWith
-    :: TurnRuntime
+runTurnWithPolicy
+    :: RetryPolicyM IO
     -> IO (Either ApiError result)
     -> IO (Either ApiError result)
-runTurnWith runtime submit = attempt 0
+runTurnWithPolicy policy submit = do
+    result <- retryingDynamic policy shouldRetry \status -> do
+        when (status.rsIterNumber > 0) $
+            Text.hPutStrLn stderr ("ModelTurn: retrying submission (attempt "
+                <> Text.pack (show status.rsIterNumber) <> ")" :: Text)
+        submit
+    case result of
+        Left err | turnErrorIsRetryable err ->
+            Text.hPutStrLn stderr ("ModelTurn: retry budget exhausted: " <> Text.pack (show err) :: Text)
+        _ -> pure ()
+    pure result
   where
-    attempt retries = do
-        result <- submit
-        case result of
-            Left err | turnErrorIsRetryable err ->
-                if retries >= requestRetryLimit
-                    then do
-                        runtime.logRetry ("ModelTurn: retry budget exhausted: " <> Text.pack (show err) :: Text)
-                        pure result
-                    else do
-                        let next = retries + 1
-                            delay = requestRetryDelayMicros err next
-                        runtime.logRetry ("ModelTurn: waiting before retry " <> Text.pack (show next)
-                            <> ": " <> Text.pack (show err) :: Text)
-                        runtime.waitForRetry delay
-                        attempt next
-            _ -> pure result
+    shouldRetry _ (Left err) | turnErrorIsRetryable err =
+        pure (maybe ConsultPolicy ConsultPolicyOverrideDelay (retryAfterMicros err))
+    shouldRetry _ _ = pure DontRetry
 
 transientApiError :: ApiError -> Bool
 transientApiError = \case
@@ -106,7 +107,15 @@ turnErrorIsOverload = \case
 -- Bound individual waits at a minute. Longer incidents reach durable retries.
 requestRetryDelayMicros :: ApiError -> Int -> Int
 requestRetryDelayMicros err attempt =
-    case apiErrorRetryAfter err of
-        Just seconds | seconds > 0 -> min seconds 60 * 1_000_000
-        _ -> min 60 (5 * 2 ^ min 4 (max 0 (attempt - 1))) * 1_000_000
+    fromMaybe backoff (retryAfterMicros err)
+  where
+    -- At index four the capped policy has reached its maximum delay. Clamp
+    -- lookups beyond it so exponentialBackoff cannot overflow on a large index.
+    status = defaultRetryStatus { rsIterNumber = min 4 (max 1 attempt - 1) }
+    backoff = fromMaybe 0 (runIdentity (getRetryPolicyM requestRetryBackoff status))
+
+retryAfterMicros :: ApiError -> Maybe Int
+retryAfterMicros err = case apiErrorRetryAfter err of
+    Just seconds | seconds > 0 -> Just (min seconds 60 * 1_000_000)
+    _ -> Nothing
 

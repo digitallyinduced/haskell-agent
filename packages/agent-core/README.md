@@ -1,8 +1,10 @@
 # agent-core
 
 `Agent.Turn.runTurn` executes a complete model submission with automatic
-bounded retry and waiting. Its retry scope ends before callers execute tools
-or commit successful response effects. `Agent.Transport.SessionResource`
+bounded retry and waiting through `Control.Retry.retryingDynamic`. A shared
+`RetryPolicyM` owns the retry count and exponential backoff; provider delay
+hints cannot override its stopping decision. Its retry scope ends before
+callers execute tools or commit successful response effects. `Agent.Transport.SessionResource`
 retains a credential's connection across successful requests, releases failed
 requests before returning, and cancels and joins active work with its owner.
 

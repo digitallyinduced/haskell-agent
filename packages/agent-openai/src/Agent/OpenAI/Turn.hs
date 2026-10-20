@@ -5,7 +5,6 @@
 module Agent.OpenAI.Turn
     ( TurnConnection
     , withTurnConnection
-    , withTurnConnectionWithRuntime
     , closeTurnConnection
     , sendTurn
     , sendTurnWithOptions
@@ -17,7 +16,7 @@ import Agent.Provider (Credential)
 import Agent.Responses.Types
 import qualified Agent.Responses.Types as Responses (ResponseCreateParams(..))
 import Agent.Transport.SessionResource
-import Agent.Turn (TurnRuntime, defaultTurnRuntime, runTurnWith)
+import Agent.Turn (runTurn)
 import qualified Agent.OpenAI.WebSocketClient as WebSocket
 import Control.Monad (forM_)
 import Data.IORef
@@ -28,7 +27,6 @@ data TurnConnection = TurnConnection
     { credential :: !Credential
     , resource :: !(SessionResource WebSocket.CodexConn Credential ApiError)
     , transcript :: !(IORef (Maybe Transcript))
-    , runtime :: !TurnRuntime
     }
 
 data Transcript = Transcript
@@ -45,15 +43,7 @@ withTurnConnection
     -> Credential
     -> (TurnConnection -> Credential -> IO (Either ApiError result))
     -> IO (Either ApiError result)
-withTurnConnection = withTurnConnectionWithRuntime defaultTurnRuntime
-
-withTurnConnectionWithRuntime
-    :: TurnRuntime
-    -> Maybe Text
-    -> Credential
-    -> (TurnConnection -> Credential -> IO (Either ApiError result))
-    -> IO (Either ApiError result)
-withTurnConnectionWithRuntime runtime sessionKey selected action = do
+withTurnConnection sessionKey selected action = do
     turnState <- WebSocket.newCodexTurnState
     let acquire
             :: Credential
@@ -67,7 +57,7 @@ withTurnConnectionWithRuntime runtime sessionKey selected action = do
             Left err -> pure (Left err)
             Right credential -> do
                 transcript <- newIORef Nothing
-                action TurnConnection { credential, resource, transcript, runtime } credential
+                action TurnConnection { credential, resource, transcript } credential
 
 closeTurnConnection :: TurnConnection -> IO ()
 closeTurnConnection connection = resetSessionResource connection.resource
@@ -80,7 +70,7 @@ sendTurn = sendTurnWithOptions WebSocket.defaultCodexWsOptions
 sendTurnWithOptions
     :: WebSocket.CodexWsOptions -> TurnConnection -> ResponseCreateParams -> Maybe Text
     -> IO (Either ApiError Response)
-sendTurnWithOptions options connection request previous = runTurnWith connection.runtime $
+sendTurnWithOptions options connection request previous = runTurn $
     runSessionResource connection.resource connection.credential \socket _ fresh -> do
         known <- readIORef connection.transcript
         let input = requestItems request
