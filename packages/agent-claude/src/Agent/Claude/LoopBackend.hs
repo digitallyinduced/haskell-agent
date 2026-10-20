@@ -332,58 +332,9 @@ submitClaudeCodeTurn
             \(inputText, inputImages, _inputFiles) -> do
                 params <- getParams
                 expectedCheckpoint <- readIORef processCheckpointRef
-                let checkpointMatches =
-                        maybe True (== snapshot) expectedCheckpoint
-                    checkpointSession =
-                        backendContinuationToken
-                            claudeProviderNamespace
-                            snapshot
-                    requestedSession =
-                        previous >>= canonicalClaudeSessionId
-                    runningSession =
-                        expectedCheckpoint >>=
-                            backendContinuationToken
-                                claudeProviderNamespace
-                    requestedSessionSwitch =
-                        case (runningSession, requestedSession) of
-                            (Just running, Just requested) ->
-                                running /= requested
-                            _ -> False
-                    selectionsAgree =
-                        case (checkpointSession, requestedSession) of
-                            (Just checkpoint, Just requested) ->
-                                checkpoint == requested
-                            _ -> True
-                    initialSession =
-                        case initialResume of
-                            Just initial
-                                | expectedCheckpoint == Nothing
-                                , maybe True (== initial) requestedSession
-                                , maybe True (== initial) checkpointSession ->
-                                    Just initial
-                            _ -> Nothing
-                    previousSession
-                        | requestedSessionSwitch =
-                            requestedSession
-                        | not checkpointMatches || not selectionsAgree =
-                            Nothing
-                        -- A missing loop continuation is an explicit host
-                        -- reset after this process has handled a turn. On the
-                        -- first turn only, the constructor's initial resume is
-                        -- still authoritative.
-                        | previous == Nothing =
-                            initialSession
-                        | Just checkpoint <- checkpointSession =
-                            Just checkpoint
-                        | Just requested <- requestedSession =
-                            Just requested
-                        | otherwise = initialSession
-                    processMatchesHost =
-                        requestedSessionSwitch
-                            || ( checkpointMatches
-                                && selectionsAgree
-                                && isJust previousSession
-                               )
+                let (previousSession, processMatchesHost) =
+                        selectClaudeTurnSession
+                            snapshot previous initialResume expectedCheckpoint
                     history = filter (not . isModelContextItem) snapshot.backendItems
                 result <- withClaudeSDKTurn
                     session
@@ -479,7 +430,8 @@ submitClaudeCodeTurn
                                     Right completed -> do
                                         finalEventState <-
                                             readIORef eventState
-                                        completeTurn
+                                        completeClaudeCodeTurn
+                                            transcript
                                             turn
                                             completed
                                             result
@@ -496,45 +448,107 @@ submitClaudeCodeTurn
     cleanupCollectedTurnInputs = mapM_ \path ->
         void (tryAny (Directory.removeFile path))
 
-    completeTurn
-        :: ClaudeSDKTurn
-        -> CompletedClaudeTurn
-        -> ResultMessage
-        -> [TurnInput]
-        -> [ResponseItem]
-        -> ClaudeEventState
-        -> (LoopEvent -> IO ())
-        -> IO (Either ClaudeSDKError ((TurnOutput, [ResponseItem]), IO ()))
-    completeTurn turn completed result inputs history eventState onEvent = do
-        usage <- resolveTurnUsage
-            turn
-            completed.tokenUsage
-            result.modelUsage
-        let output = TurnOutput
-                { responseId = completed.sessionId
-                -- Claude Code executes its own local tools. Returning them
-                -- here would execute each call a second time in the host loop.
-                , toolCalls = []
-                , assistantText = completed.assistantText
-                , tokenUsage = sdkUsageToTokenUsage usage
-                , contextUsage = sdkUsageToTokenUsage <$> completed.contextUsage
-                , providerTelemetry = claudeResultTelemetry result
-                , completion = TurnCompleted
-                }
-            commit =
-                commitHostTranscript
-                    transcript
-                    completed.sessionId
-                    inputs
-                    completed.turnItems
-        mapM_ onEvent (remainingClaudeEvents eventState completed)
-        pure
-            (Right
-                ( ( output
-                  , history <> turnInputsToItems inputs <> completed.turnItems
-                  )
-                , commit
-                ))
+selectClaudeTurnSession
+    :: BackendSnapshot
+    -> Maybe Text
+    -> Maybe Text
+    -> Maybe BackendSnapshot
+    -> (Maybe Text, Bool)
+selectClaudeTurnSession snapshot previous initialResume expectedCheckpoint =
+    let checkpointMatches =
+            maybe True (== snapshot) expectedCheckpoint
+        checkpointSession =
+            backendContinuationToken
+                claudeProviderNamespace
+                snapshot
+        requestedSession =
+            previous >>= canonicalClaudeSessionId
+        runningSession =
+            expectedCheckpoint >>=
+                backendContinuationToken
+                    claudeProviderNamespace
+        requestedSessionSwitch =
+            case (runningSession, requestedSession) of
+                (Just running, Just requested) ->
+                    running /= requested
+                _ -> False
+        selectionsAgree =
+            case (checkpointSession, requestedSession) of
+                (Just checkpoint, Just requested) ->
+                    checkpoint == requested
+                _ -> True
+        initialSession =
+            case initialResume of
+                Just initial
+                    | expectedCheckpoint == Nothing
+                    , maybe True (== initial) requestedSession
+                    , maybe True (== initial) checkpointSession ->
+                        Just initial
+                _ -> Nothing
+        previousSession
+            | requestedSessionSwitch =
+                requestedSession
+            | not checkpointMatches || not selectionsAgree =
+                Nothing
+            -- A missing loop continuation is an explicit host
+            -- reset after this process has handled a turn. On the
+            -- first turn only, the constructor's initial resume is
+            -- still authoritative.
+            | previous == Nothing =
+                initialSession
+            | Just checkpoint <- checkpointSession =
+                Just checkpoint
+            | Just requested <- requestedSession =
+                Just requested
+            | otherwise = initialSession
+        processMatchesHost =
+            requestedSessionSwitch
+                || ( checkpointMatches
+                    && selectionsAgree
+                    && isJust previousSession
+                   )
+    in (previousSession, processMatchesHost)
+
+completeClaudeCodeTurn
+    :: IORef [ResponseItem]
+    -> ClaudeSDKTurn
+    -> CompletedClaudeTurn
+    -> ResultMessage
+    -> [TurnInput]
+    -> [ResponseItem]
+    -> ClaudeEventState
+    -> (LoopEvent -> IO ())
+    -> IO (Either ClaudeSDKError ((TurnOutput, [ResponseItem]), IO ()))
+completeClaudeCodeTurn transcript turn completed result inputs history eventState onEvent = do
+    usage <- resolveTurnUsage
+        turn
+        completed.tokenUsage
+        result.modelUsage
+    let output = TurnOutput
+            { responseId = completed.sessionId
+            -- Claude Code executes its own local tools. Returning them
+            -- here would execute each call a second time in the host loop.
+            , toolCalls = []
+            , assistantText = completed.assistantText
+            , tokenUsage = sdkUsageToTokenUsage usage
+            , contextUsage = sdkUsageToTokenUsage <$> completed.contextUsage
+            , providerTelemetry = claudeResultTelemetry result
+            , completion = TurnCompleted
+            }
+        commit =
+            commitHostTranscript
+                transcript
+                completed.sessionId
+                inputs
+                completed.turnItems
+    mapM_ onEvent (remainingClaudeEvents eventState completed)
+    pure
+        (Right
+            ( ( output
+              , history <> turnInputsToItems inputs <> completed.turnItems
+              )
+            , commit
+            ))
 
 claudeResultTelemetry :: ResultMessage -> Maybe TurnTelemetry
 claudeResultTelemetry result
