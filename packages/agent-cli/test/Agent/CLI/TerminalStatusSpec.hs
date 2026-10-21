@@ -1,7 +1,7 @@
 module Agent.CLI.TerminalStatusSpec (spec) where
 
 import Agent.CLI.TerminalStatus
-import Control.Concurrent (yield)
+import Control.Concurrent (threadWaitRead, yield)
 import Control.Concurrent.Async (cancel, concurrently_, wait, withAsync)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception.Safe (bracket, bracket_, throwIO)
@@ -79,6 +79,12 @@ spec = describe "terminal lifecycle status" do
             (withTerminalStatus True $ withTerminalWorking $
                 throwIO (userError "test")) `shouldThrow` anyIOException
         actual `shouldBe` sequences [TerminalIdle, TerminalWorking, TerminalIdle, TerminalClear]
+    it "cancels its reader when the capture action fails before writing output" do
+        completed <- timeout 2_000_000 $
+            captureOutput createPipe
+                (replicateM_ 10 yield >> throwIO (userError "capture failed"))
+                `shouldThrow` anyIOException
+        completed `shouldBe` Just ()
     it "does not emit for noninteractive callers" do
         actual <- captureTerminal $ withTerminalStatus False $
             withTerminalWorking (pure ())
@@ -111,6 +117,9 @@ captureOutput allocate action =
     bracket allocate (\(master, slave) -> closeFd master >> closeFd slave) \(master, slave) ->
     bracket (dup stdOutput) closeFd \original -> do
         let receive accumulated = do
+                -- Keep the wait cancellable before entering the descriptor read.
+                -- Otherwise reader cleanup can block after the action fails.
+                threadWaitRead master
                 chunk <- Posix.fdRead master 4096
                 let output = accumulated <> chunk
                 if "~" `ByteString.isSuffixOf` output
