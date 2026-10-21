@@ -226,6 +226,7 @@ data AgentServerHumanRequestKind
     | AgentServerPlanEnter
     | AgentServerPlanExit
     | AgentServerPlanQuestion
+    | AgentServerLocalInput
     deriving (Eq, Show)
 
 data AgentServerHumanRequest = AgentServerHumanRequest
@@ -303,6 +304,7 @@ data AgentServerEvent = AgentServerEvent
     , agentServerEventTurnId :: !(Maybe Text)
     , agentServerEventSessionId :: !(Maybe Text)
     , agentServerEventPayload :: !AgentServerEventPayload
+    , agentServerEventData :: !Value
     , agentServerEventAt :: !UTCTime
     }
     deriving (Eq, Show)
@@ -330,6 +332,7 @@ instance FromJSON AgentServerEvent where
                 , agentServerEventTurnId = eventTurnId
                 , agentServerEventSessionId = eventSessionId
                 , agentServerEventPayload = eventPayload
+                , agentServerEventData = eventData
                 , agentServerEventAt = eventAt
                 }
 
@@ -396,7 +399,7 @@ instance FromJSON AgentServerErrorBody where
         AgentServerErrorBody
             <$> value .: "code"
             <*> value .: "message"
-            <*> value .: "requestId"
+            <*> value .:? "requestId"
 
 newtype AgentServerErrorEnvelope = AgentServerErrorEnvelope
     { agentServerError :: AgentServerErrorBody
@@ -583,6 +586,7 @@ parseHumanRequestKind = \case
     "plan_enter" -> pure AgentServerPlanEnter
     "plan_exit" -> pure AgentServerPlanExit
     "plan_question" -> pure AgentServerPlanQuestion
+    "local_input" -> pure AgentServerLocalInput
     other ->
         fail ("unknown agent-server request kind: " <> Text.unpack other)
 

@@ -807,6 +807,7 @@ launchAgentToolsSession codeModeResourceScope AgentToolsRequest{..} ToolStartup
     } McpRuntime
     { runtimeMcpFleet = mcpFleet
     , runtimeMcpInstructions = mcpInstructions
+    , runtimeMcpSamplingRef = mcpSamplingRef
     } CodingRuntime
     { runtimeCoding = coding
     , runtimeExtraToolGroups = extraToolGroups
@@ -883,7 +884,7 @@ launchAgentToolsSession codeModeResourceScope AgentToolsRequest{..} ToolStartup
         , mcpRegistrations
         , mcpInstructions
         , mcpTools
-        , mcpSamplingRef = processRuntime.processMcpSampling
+        , mcpSamplingRef
         , model
         , multiCtx
         , noteSessionDir

@@ -25,6 +25,23 @@ See [documentation development and hosting](docs/README.md) for details.
 nix run --accept-flake-config "github:digitallyinduced/haskell-agent"
 ```
 
+## Local CLI service
+
+The terminal CLI connects to a persistent local `agent-server`, starting it
+automatically when needed. The service owns PostgreSQL, MCP connections and
+session execution. Closing a terminal cancels its active work; other terminals
+keep running, and the saved conversation can be resumed.
+
+```bash
+agent-cli server status
+agent-cli server start
+agent-cli server stop
+agent-cli server restart
+```
+
+Stopping a service with connected clients or active work requires `--force`.
+See [local service architecture and measurements](docs/local-service.md).
+
 ## Using the Haskell libraries with Nix
 
 Use `lib.haskellPackageOverrides` to build the libraries with your application's

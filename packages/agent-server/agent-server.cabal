@@ -49,6 +49,11 @@ library
                     , Agent.Server.Auth
                     , Agent.Server.Backend
                     , Agent.Server.Config
+                    , Agent.Server.ClientRegistry
+                    , Agent.Server.LocalService
+                    , Agent.Server.LocalEvents
+                    , Agent.Server.LocalInputs
+                    , Agent.Server.AgentSessions
                     , Agent.Server.Event
                     , Agent.Server.Identifier
                     , Agent.Server.PrivateFile
@@ -62,8 +67,8 @@ library
                     , Agent.Server.Tenant
                     , Agent.Server.ToolExecution
                     , Agent.Server.Types
-    build-depends:    agent-cli >= 0.1 && < 0.2
-                    , agent-runtime >= 0.1 && < 0.2
+    build-depends:    agent-runtime >= 0.1 && < 0.2
+                    , agent-mcp >= 0.1 && < 0.2
                     , agent-core >= 0.1 && < 0.2
                     , agent-tools >= 0.1 && < 0.2
                     , agent-store >= 0.1 && < 0.2
@@ -75,9 +80,12 @@ library
                     , containers
                     , crypton
                     , directory
+                    , entropy
+                    , filelock
                     , filepath
                     , http-types
                     , memory
+                    , network
                     , optparse-applicative >= 0.18 && < 0.19
                     , process
                     , safe-exceptions
@@ -95,6 +103,7 @@ executable agent-server
     main-is:          Main.hs
     ghc-options:      -threaded -rtsopts "-with-rtsopts=-N4 -M4G"
     build-depends:    agent-server
+                    , agent-runtime
                     , base >= 4.17 && < 5
 
 executable agent-sandbox-worker
@@ -137,6 +146,8 @@ test-suite agent-server-test
                     , Agent.Server.ApprovalSpec
                     , Agent.Server.AuthSpec
                     , Agent.Server.ConfigSpec
+                    , Agent.Server.ClientRegistrySpec
+                    , Agent.Server.LocalServiceSpec
                     , Agent.Server.EventSpec
                     , Agent.Server.RepositoryCheckoutSpec
                     , Agent.Server.SessionSetupSpec

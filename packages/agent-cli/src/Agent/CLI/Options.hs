@@ -6,6 +6,7 @@ module Agent.CLI.Options
     , Override(..)
     , ResumeTarget(..)
     , Command(..)
+    , LocalServerCommand(..)
     , GatewayCommand(..)
     , McpAddCommand(..)
     , McpAddTransport(..)
@@ -77,7 +78,11 @@ data Command
     | ImportSession (Maybe OsPath)
     | Storage StorageCommand
     | Worktree WorktreeCommand
+    | LocalServer LocalServerCommand
     | RunAgent CliOptions
+    deriving (Eq, Show)
+
+data LocalServerCommand = ServerStart | ServerStatus | ServerStop | ServerRestart | ServerForceStop | ServerForceRestart
     deriving (Eq, Show)
 
 data WorktreeCommand
@@ -352,7 +357,7 @@ parseArgs args
 isRunInvocation :: [String] -> Bool
 isRunInvocation = \case
     command : _ ->
-        command `notElem` ["gateway", "login", "mcp", "sessions", "storage", "worktree"]
+        command `notElem` ["gateway", "login", "mcp", "sessions", "storage", "worktree", "server"]
     [] -> True
 
 parserPreferences :: Options.ParserPrefs
@@ -416,8 +421,20 @@ commandParser =
             <> Options.command "worktree"
                 (Options.info worktreeParser
                     (Options.progDesc "Collect and recover inactive managed worktrees"))
+            <> Options.command "server"
+                (Options.info localServerParser (Options.progDesc "Manage the local agent service"))
         )
         Options.<|> (RunAgent <$> runOptionsParser)
+
+localServerParser :: Options.Parser Command
+localServerParser = LocalServer <$> Options.hsubparser
+    (Options.command "start" (Options.info (pure ServerStart) mempty)
+    <> Options.command "status" (Options.info (pure ServerStatus) mempty)
+    <> Options.command "stop" (Options.info (force ServerStop ServerForceStop) mempty)
+    <> Options.command "restart" (Options.info (force ServerRestart ServerForceRestart) mempty))
+  where
+    force normal forced = (\enabled -> if enabled then forced else normal) <$>
+        Options.switch (Options.long "force" <> Options.help "Disconnect clients and cancel all active work")
 
 worktreeParser :: Options.Parser Command
 worktreeParser = Worktree <$> Options.hsubparser

@@ -5,6 +5,8 @@ import Agent.Server.ApplicationSpec qualified
 import Agent.Server.ApprovalSpec qualified
 import Agent.Server.AuthSpec qualified
 import Agent.Server.ConfigSpec qualified
+import Agent.Server.ClientRegistrySpec qualified
+import Agent.Server.LocalServiceSpec qualified
 import Agent.Server.EventSpec qualified
 import Agent.Server.RepositoryCheckoutSpec qualified
 import Agent.Server.SessionSetupSpec qualified
@@ -25,6 +27,8 @@ main = do
                 Agent.Server.ApprovalSpec.spec
                 Agent.Server.AuthSpec.spec
                 Agent.Server.ConfigSpec.spec
+                Agent.Server.ClientRegistrySpec.spec
+                Agent.Server.LocalServiceSpec.spec
                 Agent.Server.EventSpec.spec
                 Agent.Server.RepositoryCheckoutSpec.spec
                 Agent.Server.SessionSetupSpec.spec

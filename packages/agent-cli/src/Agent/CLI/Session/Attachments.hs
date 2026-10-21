@@ -35,7 +35,7 @@ import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
-import System.Console.ANSI (getTerminalSize)
+import Agent.CLI.TerminalSize (getTerminalSize)
 import System.Environment (lookupEnv)
 import System.IO
     ( hFlush

@@ -17,6 +17,7 @@ module Agent.CLI.MetaConsole
     , metaPlanMutates
     , redactMetaContext
     , metaConsolePrompt
+    , metaConsoleInstructions
     , runMetaConsoleWithCancel
     , formatMetaError
     ) where

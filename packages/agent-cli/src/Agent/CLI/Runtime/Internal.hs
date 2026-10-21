@@ -27,10 +27,7 @@ module Agent.CLI.Runtime.Internal
     , withRestoredCurrentDirectory
     ) where
 
-import Agent.CLI.AgentSessions
-    ( closeSessionThreadManager, newSessionThreadManager )
 import Agent.Runtime.GatewayClient (runGatewayCommand)
-import Agent.CLI.Interrupt ( catchUserInterrupt )
 import Agent.CLI.Login ( runLoginManager )
 import Agent.CLI.McpCatalog (runMcpCommand)
 import Agent.CLI.WorktreeAdmin (runWorktreeAdmin)
@@ -39,33 +36,28 @@ import Agent.CLI.McpStatus
     , formatMcpModelNoticeFor
     , formatMcpProgress
     )
-import Agent.Connectivity.NetworkPath (withNetworkRecovery)
-import Agent.Integration.API
-    ( closeIntegrationSupervisor
-    , newIntegrationSupervisor
-    , emptyIntegrationProvider
-    )
 import Agent.CLI.Options
     ( CliOptions
+    , StorageCommand(..)
+    , LocalServerCommand(..)
     , Command(..)
-    , isOneShot
     , parseArgs
     , usage
     )
 import Agent.CLI.Provider.Switch ( accountSwitchTarget )
 import Agent.CLI.Runtime.Orchestration
-    ( runAgentWithRuntime, withRestoredCurrentDirectory )
-import Agent.CLI.Runtime.Orchestration.Types
-    ( AgentProcessRuntime(..), foregroundRunMode )
+    ( withRestoredCurrentDirectory )
 import Agent.CLI.Runtime.Types ( DevResult(..) )
-import Agent.Runtime.Session ( sessionsRoot )
+import Agent.CLI.Remote.Session (runRemoteSession)
+import Agent.CLI.Remote.Transport (RemoteFailure(..))
+import Control.Exception.Safe (catch)
+import Agent.CLI.Remote.Service (runLocalServerCommand)
+import Agent.CLI.Remote.Development (configureDevelopmentService, stopDevelopmentService)
+import Agent.CLI.Remote.Admin (runRemoteList, runRemoteShow, runRemoteWait)
 import Agent.CLI.Session.Interaction ( buildPromptState )
 import Agent.CLI.SessionAdmin
     ( runImportSession
-    , runListSessions
-    , runShowSession
     , runStorageAdmin
-    , runWaitSession
     )
 import Agent.CLI.Startup.Auth ( learnAboutUserOnboardingPrompt )
 import Agent.CLI.Startup.Format
@@ -85,17 +77,7 @@ import Agent.CLI.Status
     , formatUsageWithRate
     )
 import Agent.CLI.Terminal ( resolveColor )
-import Agent.CLI.TerminalDiagnostics (getTerminalStderr, withInteractiveDiagnostics)
-import Agent.CLI.TerminalStatus (withTerminalStatus)
-import Agent.Runtime.Host (AgentRunMode(..))
 import Agent.CLI.Worktree ( isUnderWorktreeRoot, worktreeRoot )
-import Agent.ResourceScope (logSlowCleanup)
-import Agent.Tools.Types (defaultToolEnv)
-import Agent.Tools.ResourceArbiter
-    ( newToolResourceArbiter, closeToolResourceArbiter )
-import Control.Concurrent.Async ( withAsync )
-import Control.Concurrent.MVar ( newEmptyMVar, putMVar, takeMVar )
-import Control.Exception.Safe ( finally, mask_, onException )
 import Data.Text ( Text )
 import System.Directory.OsPath
     ( getCurrentDirectory, getHomeDirectory, makeAbsolute )
@@ -103,10 +85,6 @@ import System.Environment ( getArgs, setEnv )
 import System.Exit ( die )
 import System.IO ( stderr )
 
-import qualified Agent.MCP as MCP
-import Agent.Runtime.McpConnectionRuntime (mcpConnectionCredentials)
-import Agent.Runtime.McpConnectionCredentials (newCredentialRuntime)
-import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import qualified Data.Text as Text
 
 -- | GHCi @:cmd@ helper: on 'DevReload', reload modules and resume that exact
@@ -115,13 +93,13 @@ import qualified Data.Text as Text
 afterDev :: DevResult -> IO String
 afterDev = \case
     DevQuit -> pure ""
-    DevReload sessionId -> pure $ unlines
+    DevReload sessionId -> stopDevelopmentService >> (pure $ unlines
         [ ":reload"
         , ":module +Agent.CLI"
         , ":cmd afterDev =<< devMainResume (Just "
             <> show (Text.unpack sessionId)
             <> ")"
-        ]
+        ])
 
 -- | Arguments used by the development @repl@ launcher.
 --
@@ -150,6 +128,7 @@ devMain = devMainResume Nothing
 devMainResume :: Maybe Text -> IO DevResult
 devMainResume resumeId = do
     configureClientIdentity
+    configureDevelopmentService
     home <- getHomeDirectory
     underWorktree <- case resumeId of
         Just _ -> pure True
@@ -170,15 +149,16 @@ devMainResume resumeId = do
         Right (Gateway command) -> runGatewayCommand command >> pure DevQuit
         Right (Mcp command) -> runMcpCommand command >> pure DevQuit
         Right (ListSessions outputFormat) ->
-            runListSessions outputFormat >> pure DevQuit
+            runRemoteList outputFormat >> pure DevQuit
         Right (ShowSession sessionId outputFormat pageRequest) ->
-            runShowSession sessionId outputFormat pageRequest >> pure DevQuit
-        Right (WaitSession sessionId) -> runWaitSession sessionId >> pure DevQuit
+            runRemoteShow sessionId outputFormat pageRequest >> pure DevQuit
+        Right (WaitSession sessionId) -> runRemoteWait sessionId >> pure DevQuit
         Right (ImportSession cwd) -> runImportSession cwd >> pure DevQuit
         Right (Storage command) ->
-            runStorageAdmin command >> pure DevQuit
+            runStorageAdminSafely command >> pure DevQuit
         Right (Worktree command) ->
             runWorktreeAdmin command >> pure DevQuit
+        Right (LocalServer command) -> runLocalServerCommand command >> pure DevQuit
         Right (RunAgent options) -> do
             result <- runAgentWithRestarts options
             case result of
@@ -186,7 +166,10 @@ devMainResume resumeId = do
                 DevReload sessionId -> pure (DevReload sessionId)
 
 run :: IO ()
-run = do
+run = runCommand `catch` \(RemoteFailure message) -> die (Text.unpack message)
+
+runCommand :: IO ()
+runCommand = do
     configureClientIdentity
     args <- getArgs
     case parseArgs args of
@@ -199,13 +182,14 @@ run = do
             runLoginManager color
         Right (Gateway command) -> runGatewayCommand command
         Right (Mcp command) -> runMcpCommand command
-        Right (ListSessions outputFormat) -> runListSessions outputFormat
+        Right (ListSessions outputFormat) -> runRemoteList outputFormat
         Right (ShowSession sessionId outputFormat pageRequest) ->
-            runShowSession sessionId outputFormat pageRequest
-        Right (WaitSession sessionId) -> runWaitSession sessionId
+            runRemoteShow sessionId outputFormat pageRequest
+        Right (WaitSession sessionId) -> runRemoteWait sessionId
         Right (ImportSession cwd) -> runImportSession cwd
-        Right (Storage command) -> runStorageAdmin command
+        Right (Storage command) -> runStorageAdminSafely command
         Right (Worktree command) -> runWorktreeAdmin command
+        Right (LocalServer command) -> runLocalServerCommand command
         Right (RunAgent options) -> do
             result <- runAgentWithRestarts options
             case result of
@@ -217,86 +201,14 @@ configureClientIdentity :: IO ()
 configureClientIdentity =
     setEnv "AGENT_BUILD_COMMIT" (Text.unpack agentBuildInfo.buildCommit)
 
--- | Tear down and rebuild provider-specific auth, tools, prompt, and transport.
--- Automatic transitions carry the exact failed turn in memory and commit
--- persisted provider metadata only after the replacement backend succeeds.
+runStorageAdminSafely :: StorageCommand -> IO ()
+runStorageAdminSafely command = do
+    case command of
+        StorageStop -> runLocalServerCommand ServerStop
+        _ -> pure ()
+    runStorageAdmin command
+
+-- | The frontend leaves process resources and teardown with the local service.
 runAgentWithRestarts :: CliOptions -> IO DevResult
-runAgentWithRestarts options =
-    withTerminalStatus (not (isOneShot options)) $
-    withInteractiveDiagnostics (not (isOneShot options)) $
-    catchUserInterrupt
-        (do
-            terminalStderr <- getTerminalStderr
-            home <- getHomeDirectory
-            let root = sessionsRoot home
-            withNetworkRecovery \networkRecovery -> do
-                elicitationRef <- newIORef Nothing
-                rootsRef <- newIORef Nothing
-                samplingRef <- newIORef Nothing
-                toolResourceArbiter <- newToolResourceArbiter 1024
-                -- Shared by the application supervisor, including background
-                -- sessions and restarts; CLI has no protected native store.
-                credentials <- newCredentialRuntime Nothing
-                cleanupStarted <- newIORef False
-                cleanupRequest <- newEmptyMVar
-                -- Cleanup is intentionally process-scoped rather than
-                -- session-scoped: provider restarts must not rescan every
-                -- worktree. 'withAsync' owns and joins the worker on shutdown.
-                withAsync (takeMVar cleanupRequest >>= id) \_ -> do
-                    integrationToolEnv <- defaultToolEnv root
-                    integrationSupervisor <-
-                        newIntegrationSupervisor emptyIntegrationProvider integrationToolEnv
-                    mcpSupervisor <-
-                        MCP.newMcpSupervisorWith
-                            MCP.defaultMcpHostHooks
-                                { MCP.mcpHostElicit = readIORef elicitationRef
-                                , MCP.mcpHostRoots = readIORef rootsRef
-                                , MCP.mcpHostSample = readIORef samplingRef
-                                , MCP.mcpHostCredentials = mcpConnectionCredentials credentials
-                                }
-                            `onException`
-                                closeIntegrationSupervisor integrationSupervisor
-                    sessionThreads <-
-                        newSessionThreadManager root
-                            `onException`
-                                (closeIntegrationSupervisor integrationSupervisor
-                                    `finally`
-                                        MCP.closeMcpSupervisor mcpSupervisor)
-                    let startCleanup action = mask_ do
-                            shouldStart <- atomicModifyIORef'
-                                cleanupStarted
-                                (\started -> (True, not started))
-                            if shouldStart
-                                then putMVar cleanupRequest action
-                                else pure ()
-                        processRuntime = AgentProcessRuntime
-                            { processMcpSupervisor = mcpSupervisor
-                            , processIntegrationSupervisor =
-                                integrationSupervisor
-                            , processSessionThreads = sessionThreads
-                            , processToolResourceArbiter = toolResourceArbiter
-                            , processStartCleanup = startCleanup
-                            , processMcpElicitation = elicitationRef
-                            , processMcpRoots = rootsRef
-                            , processMcpSampling = samplingRef
-                            , processNetworkRecovery = networkRecovery
-                            }
-                    withRestoredCurrentDirectory
-                        (runAgentWithRuntime
-                            processRuntime
-                            (foregroundRunMode { runStderr = terminalStderr })
-                            options)
-                        `finally`
-                            (logSlowCleanup "tool resource arbiter"
-                                (closeToolResourceArbiter toolResourceArbiter)
-                                `finally` logSlowCleanup "session thread manager"
-                                    (closeSessionThreadManager sessionThreads)
-                                `finally`
-                                    (logSlowCleanup "MCP supervisor"
-                                        (MCP.closeMcpSupervisor mcpSupervisor)
-                                        `finally`
-                                            logSlowCleanup "integration supervisor"
-                                                (closeIntegrationSupervisor
-                                                    integrationSupervisor))))
-        (pure DevQuit)
+runAgentWithRestarts = runRemoteSession
 

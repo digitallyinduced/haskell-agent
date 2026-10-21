@@ -42,15 +42,17 @@ import Control.Monad (void)
 import Data.Aeson (Value, object, (.=))
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Agent.Runtime.AgentSessions (AgentSessionActions)
 import Data.Text (Text)
 import Data.Text qualified as Text
 
 data SessionEventSink = SessionEventSink
     { emitSessionEvent :: AccessBoundary -> Text -> Text -> Value -> IO ()
+    , sessionAgentActions :: AccessBoundary -> Maybe AgentSessionActions
     }
 
 noopSessionEventSink :: SessionEventSink
-noopSessionEventSink = SessionEventSink \_ _ _ _ -> pure ()
+noopSessionEventSink = SessionEventSink (\_ _ _ _ -> pure ()) (const Nothing)
 
 newtype SessionSetupRegistry = SessionSetupRegistry (MVar (Map Text SessionSetup))
 

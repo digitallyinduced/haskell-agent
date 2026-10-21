@@ -970,7 +970,7 @@
                     agentWebRTCSource agentCoreSource agentToolsSource
                     agentCliProductionSource agentNativeBridgeCheckSource
                     agentRuntimeProductionSource agentTelegramCheckSource
-                    agentServerCheckSource skylightingSyntaxes skylightingSyntaxDirectory;
+                    agentServerProductionSource agentServerCheckSource skylightingSyntaxes skylightingSyntaxDirectory;
             };
         in
         flake-utils.lib.eachDefaultSystem (
@@ -982,7 +982,7 @@
                     agentWebRTCSource agentCoreSource agentToolsSource
                     agentCliProductionSource agentNativeBridgeCheckSource
                     agentRuntimeProductionSource agentTelegramCheckSource
-                    agentServerCheckSource skylightingSyntaxes skylightingSyntaxDirectory;
+                    agentServerProductionSource agentServerCheckSource skylightingSyntaxes skylightingSyntaxDirectory;
                 mkHaskellPackages = foreignPackages: baseHaskellPackages: packageMode:
                     baseHaskellPackages.extend (haskellPackageOverrides foreignPackages packageMode);
 
@@ -1144,6 +1144,7 @@
                         inherit pkgs appleSessionTitle;
                         syntaxDirectory = skylightingSyntaxDirectory;
                         postgresBin = "${pkgs.postgresql_18}/bin";
+                        serverExecutable = "${agentServerExecutable}/bin/agent-server";
                         runtimeTools = agentCliRuntimeTools;
                         gstreamerPlugins = agentCliGstreamerPlugins;
                         mediaHelper = if mediaHelper then agentMediaHelper else null;
@@ -1192,7 +1193,10 @@
                         import ./nix/macos-bundle.nix {
                             inherit pkgs skylightingSyntaxes appleSessionTitle;
                             agentCli = agentCliBareExecutable;
+                            agentServer = pkgs.haskell.lib.justStaticExecutables
+                                agentServerPackage;
                             agentCliSource = agentCliProductionSource;
+                            agentServerSource = agentServerProductionSource;
                             agentRuntimeSource =
                                 agentRuntimeProductionSource;
                             inherit agentToolsSource;
@@ -1321,6 +1325,8 @@
                                 (old.postInstall or "")
                                 + ''
                                     wrapProgram "$out/bin/agent-server" \
+                                        --set-default HASKELL_AGENT_SKILLS_DIR \
+                                            "${./packages/agent-cli/skills}" \
                                         --set-default AGENT_SYNTAX_DIR \
                                             "${skylightingSyntaxDirectory}" \
                                         --set-default AGENT_POSTGRES_BIN \
@@ -1454,6 +1460,10 @@
                     export AGENT_REPL_SCRIPT="$script"
                     export AGENT_REPL_CABAL="$cabal"
                     export AGENT_REPL_STTY="$stty_bin"
+                    export HASKELL_AGENT_DEV_ROOT="$root"
+                    export HASKELL_AGENT_DEV_SERVER="${pkgs.writeShellScript "agent-development-server" ''
+                        exec env -u GHCRTS runghc -package=async -package=safe-exceptions "$HASKELL_AGENT_DEV_ROOT/scripts/LocalServer.hs" "$@"
+                    ''}"
                     exec "$expect_bin" -c '
                       set timeout -1
                       set cabal $env(AGENT_REPL_CABAL)

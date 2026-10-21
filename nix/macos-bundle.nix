@@ -1,7 +1,9 @@
 {
     pkgs,
     agentCli,
+    agentServer,
     agentCliSource,
+    agentServerSource,
     agentRuntimeSource,
     agentToolsSource,
     agentCoreSource,
@@ -90,6 +92,7 @@ let
                 "$postgresRoot/lib" \
                 "$postgresRoot/share" \
                 "$out/share/agent-cli" \
+                "$out/share/agent-server" \
                 "$out/share/agent-runtime" \
                 "$out/share/agent-tools" \
                 "$out/share/agent-core" \
@@ -100,6 +103,7 @@ let
 
             # Keep the real Mach-O rather than the Nix shell wrapper.
             install -m 755 ${agentCli}/bin/agent-cli "$out/bin/agent-cli"
+            install -m 755 ${agentServer}/bin/agent-server "$out/bin/agent-server"
             install -m 755 ${appleSessionTitle}/bin/apple-session-title \
                 "$out/bin/apple-session-title"
 
@@ -121,6 +125,8 @@ let
 
             cp -R ${agentCliSource}/data "$out/share/agent-cli/"
             cp -R ${agentCliSource}/skills "$out/share/agent-cli/"
+            install -m 644 ${agentServerSource}/openapi.json \
+                "$out/share/agent-server/openapi.json"
             cp -R ${agentRuntimeSource}/config \
                 "$out/share/agent-runtime/"
             cp -R ${agentToolsSource}/data "$out/share/agent-tools/"
@@ -190,6 +196,7 @@ let
                 --destination "$out/lib/deps" \
                 --install-prefix '@executable_path/../lib/deps/' \
                 "$out/bin/agent-cli" \
+                "$out/bin/agent-server" \
                 "$out/bin/ffmpeg" \
                 "$out/bin/bun" \
                 "$out/bin/rg" \
@@ -259,6 +266,7 @@ let
             }
 
             run_clean "$out/bin/agent-cli" --version
+            run_clean "$out/bin/agent-server" --help
             run_clean "$out/bin/ffmpeg" -version
             run_clean "$out/bin/ffmpeg" \
                 -v error \
@@ -283,6 +291,7 @@ let
                 --auth=trust
 
             test -f "$out/share/agent-runtime/config/models.default.json"
+            test -f "$out/share/agent-server/openapi.json"
             test -f "$out/share/agent-tools/data/code-mode/worker.mjs"
             test -f "$out/share/haskell-agent/portable"
 

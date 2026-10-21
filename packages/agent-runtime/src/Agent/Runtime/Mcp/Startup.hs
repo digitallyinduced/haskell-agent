@@ -8,6 +8,7 @@ module Agent.Runtime.Mcp.Startup
     , startupServerConfigs
     , integrationsMcpConfig
     , acquireMcpStartup
+    , acquireMcpSessionStartup
     ) where
 
 import qualified Agent.MCP as MCP
@@ -117,6 +118,25 @@ acquireMcpStartup supervisor request hooks finish =
         | otherwise =
             MCP.acquireMcpFleetWithInMemory supervisor mcpReportBlocking
                 mcpStartupTransportServers mcpStartupInMemoryServers
+
+-- | Lease transports with callbacks owned by this session. Idle transports
+-- may be rebound, while callbacks of concurrently active sessions stay apart.
+acquireMcpSessionStartup
+    :: MCP.McpSupervisor
+    -> MCP.McpSessionHooks
+    -> McpStartupRequest
+    -> ([MCP.McpServerStatus] -> IO ())
+    -> (MCP.McpFleet -> IO () -> IO a)
+    -> IO a
+acquireMcpSessionStartup supervisor session request report finish =
+    bracketOnError acquire MCP.releaseMcpFleetLease $ \lease ->
+        finish lease.mcpLeaseFleet (MCP.releaseMcpFleetLease lease)
+  where
+    acquire = try
+        (MCP.acquireMcpFleetForSession supervisor session
+            request.mcpStartupProgressive report
+            request.mcpStartupTransportServers request.mcpStartupInMemoryServers)
+        >>= either (throwIO . McpStartupError) pure
 
 integrationsMcpConfig :: Text -> MCP.McpServerConfig
 integrationsMcpConfig serverName = MCP.McpServerConfig

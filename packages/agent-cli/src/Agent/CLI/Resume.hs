@@ -87,7 +87,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Clock (UTCTime, diffUTCTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
-import System.Console.ANSI (getTerminalSize)
+import Agent.CLI.TerminalSize (getTerminalSize)
 import System.Directory.OsPath (canonicalizePath)
 import System.OsPath (OsPath, takeDirectory, takeFileName)
 import Agent.CLI.TerminalDiagnostics (getTerminalStderr)

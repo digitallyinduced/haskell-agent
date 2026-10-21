@@ -2,6 +2,7 @@
 module Agent.Server.Application
     ( ApplicationConfig(..)
     , newApplication
+    , createTurn
     ) where
 
 import Agent.Server.Auth
@@ -113,6 +114,7 @@ import Text.Read (readMaybe)
 data ApplicationConfig = ApplicationConfig
     { applicationMaximumRequestBytes :: !Int
     , applicationOpenApiDocument :: !LazyByteString.ByteString
+    , applicationLocalService :: !Bool
     }
 
 newApplication
@@ -364,6 +366,7 @@ patchSessionResponse
     withJsonBody config request \(body :: PatchSessionRequest) ->
         if body.patchSessionTitle == Nothing
             && body.patchSessionArchived == Nothing
+            && body.patchSessionControl == Nothing
             then
                 pure
                     (Left ApiError
@@ -374,8 +377,8 @@ patchSessionResponse
                             "at least one patch field is required"
                         , apiErrorDetails = Nothing
                         })
-            else if body.patchSessionTitle /= Nothing
-                && body.patchSessionArchived /= Nothing
+            else if length (filter id [body.patchSessionTitle /= Nothing,
+                    body.patchSessionArchived /= Nothing, body.patchSessionControl /= Nothing]) > 1
                 then
                     pure
                         (Left ApiError
@@ -386,6 +389,8 @@ patchSessionResponse
                                 "title and archived must be patched in separate requests"
                             , apiErrorDetails = Nothing
                             })
+                else if body.patchSessionControl /= Nothing && not config.applicationLocalService
+                    then pure (Left (ApiError 422 "local_options_unavailable" "session control requires the local service profile" Nothing))
                 else
                     runSessionMutation
                         backend
@@ -442,12 +447,15 @@ sessionHistoryResponse backend supervisor boundary sessionId headers request = d
                     queryOptionalInteger "before" request
                 value -> Right value
         limit = queryLimit "limit" 50 100 request
-    case (before, limit) of
-        (Right cursor, Right pageLimit) ->
+        after = queryOptionalInteger "after" request
+    case (before, after, limit) of
+        (Right (Just _), Right (Just _), _) -> pure (Left (ApiError 422 "invalid_cursor" "before and after cannot be combined" Nothing))
+        (Right cursor, Right afterCursor, Right pageLimit) ->
             backend.backendSessionHistory
                 boundary
                 sessionId
                 cursor
+                afterCursor
                 pageLimit
                 >>= \case
                     Left err -> pure (Left err)
@@ -474,7 +482,7 @@ sessionHistoryResponse backend supervisor boundary sessionId headers request = d
         _ -> pure $
             Left $
                 firstQueryError
-                    [() <$ before, () <$ limit]
+                    [() <$ before, () <$ after, () <$ limit]
 
 forkSessionResponse
     :: ApplicationConfig
@@ -513,9 +521,10 @@ createTurnResponse
 createTurnResponse
         config backend supervisor boundary sessionId headers request =
     withJsonBody config request \body ->
-        createTurn backend supervisor boundary sessionId body
-            >>= pure
-                . fmap (jsonResponse status202 headers . toJSONValue)
+        if body.createTurnLocalOptions /= Nothing && not config.applicationLocalService
+            then pure (Left (ApiError 422 "local_options_unavailable" "localOptions require the local service profile" Nothing))
+            else createTurn backend supervisor boundary sessionId body
+                >>= pure . fmap (jsonResponse status202 headers . toJSONValue)
 
 listTurnsResponse
     :: Backend
@@ -723,6 +732,8 @@ resolveHumanRequestResponse
 
 turnReservationInput :: CreateTurnRequest -> Text
 turnReservationInput request
+    | Just options <- request.createTurnLocalOptions =
+        "local-turn-v1:" <> Text.pack (show (hash (payload <> LazyByteString.toStrict (encode options)) :: Digest SHA256))
     | null request.createTurnImages && null request.createTurnFiles =
         request.createTurnInput
     | null request.createTurnFiles =
@@ -791,6 +802,7 @@ createTurn backend supervisor boundary sessionId request
                 , turnSpecFiles = request.createTurnFiles
                 , turnSpecBoundary = boundary
                 , turnSpecMessageClock = request.createTurnMessageClock
+                , turnSpecLocalOptions = request.createTurnLocalOptions
                 }
             validateSession =
                 fmap (fmap (const ())) $

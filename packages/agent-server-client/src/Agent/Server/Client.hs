@@ -9,6 +9,11 @@ module Agent.Server.Client (
     AgentServerClientError (..),
     AgentServerStreamResult (..),
     newAgentServerClient,
+    newAgentServerClientRequestId,
+    withAgentServerClientIdentity,
+    performAgentServerJsonRequest,
+    getAgentServerLocalEventPayload,
+    getAgentServerLocalTurnResult,
     createAgentServerSession,
     getAgentServerSessionReadState,
     updateAgentServerSessionReadState,
@@ -23,6 +28,7 @@ module Agent.Server.Client (
     resolveAgentServerRequest,
     getAgentServerHistory,
     streamAgentServerTurn,
+    streamAgentServerTurnWithKnownRequests,
 )
 where
 
@@ -34,6 +40,7 @@ import Control.Exception (IOException)
 import Control.Exception.Safe qualified as Exception
 import Control.Monad (when)
 import Data.Aeson (FromJSON)
+import GHC.Clock (getMonotonicTimeNSec)
 import Data.Aeson qualified as Aeson
 import Data.Bifunctor qualified as Bifunctor
 import Data.Bits qualified as Bits
@@ -42,7 +49,9 @@ import Data.ByteString.Char8 qualified as ByteString8
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Char (toLower)
 import Data.Int (Int64)
-import Data.IORef (atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef, writeIORef)
+import Data.UUID qualified as UUID
+import Data.UUID.V4 qualified as UUID
 import Data.List (minimumBy)
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
@@ -85,6 +94,7 @@ data AgentServerClient = AgentServerClient
     { clientManager :: !Manager
     , clientBaseUrl :: !Text
     , clientBearerToken :: !ByteString.ByteString
+    , clientFrontendIdentity :: !(Maybe Text)
     }
 
 data AgentServerClientError
@@ -102,6 +112,9 @@ data AgentServerStreamResult
     | AgentServerStreamNeedsRefetch !Int64
     deriving (Eq, Show)
 
+newAgentServerClientRequestId :: IO Text
+newAgentServerClientRequestId = UUID.toText <$> UUID.nextRandom
+
 newAgentServerClient ::
     AgentServerClientConfig ->
     IO (Either AgentServerClientError AgentServerClient)
@@ -118,7 +131,20 @@ newAgentServerClient config =
                             { clientManager = manager
                             , clientBaseUrl = baseUrl
                             , clientBearerToken = token
+                            , clientFrontendIdentity = Nothing
                             }
+
+-- | Associate mutations with one frontend lease. Event-stream reconnects use
+-- the same immutable identity and never create a new execution owner.
+withAgentServerClientIdentity :: Text -> AgentServerClient -> AgentServerClient
+withAgentServerClientIdentity identifier client =
+    client { clientFrontendIdentity = Just identifier }
+
+performAgentServerJsonRequest :: FromJSON value =>
+    AgentServerClient -> ByteString.ByteString -> Text -> [Int] -> Maybe Aeson.Value ->
+    IO (Either AgentServerClientError value)
+performAgentServerJsonRequest client method path statuses body =
+    performJsonRequest client method path statuses (Aeson.encode <$> body)
 
 createAgentServerSession ::
     AgentServerClient ->
@@ -290,12 +316,35 @@ streamAgentServerTurn ::
     Maybe Int64 ->
     (AgentServerEvent -> IO (Either AgentServerClientError ())) ->
     IO (Either AgentServerClientError AgentServerStreamResult)
-streamAgentServerTurn client expectedTurnId lastEventId onEvent = do
+streamAgentServerTurn client expectedTurnId lastEventId =
+    streamAgentServerTurnWithKnownRequests client expectedTurnId lastEventId (pure [])
+
+-- | A frontend may handle prompts in a separate worker. Keep its known
+-- pending requests across reconnects so durable polling does not repeatedly
+-- replace a healthy stream while the user is still answering a dialog.
+streamAgentServerTurnWithKnownRequests ::
+    AgentServerClient -> Text -> Maybe Int64 -> IO [Text] ->
+    (AgentServerEvent -> IO (Either AgentServerClientError ())) ->
+    IO (Either AgentServerClientError AgentServerStreamResult)
+streamAgentServerTurnWithKnownRequests client expectedTurnId lastEventId knownRequests onEvent = do
     cursorRef <- newIORef (fromMaybe 0 lastEventId)
-    race (consumeStream cursorRef) (monitorDurableTurn cursorRef)
+    deliveredRequests <- newIORef []
+    now <- getMonotonicTimeNSec
+    activity <- newIORef (False, now)
+    let callback event = Exception.bracket_
+            (getMonotonicTimeNSec >>= \time -> writeIORef activity (True, time))
+            (getMonotonicTimeNSec >>= \time -> writeIORef activity (False, time))
+            (do
+                result <- onEvent event
+                case (result, event.agentServerEventPayload) of
+                    (Right (), AgentServerRequestCreated request) ->
+                        atomicModifyIORef' deliveredRequests (\seen -> (take 4096 (request.agentServerRequestId : seen), ()))
+                    _ -> pure ()
+                pure result)
+    race (consumeStream cursorRef callback) (monitorDurableTurn cursorRef activity deliveredRequests)
         >>= pure . either id id
   where
-    consumeStream cursorRef = do
+    consumeStream cursorRef callback = do
         outcome <- Exception.try @IO @HttpException do
             request <- authenticatedRequest client "GET" "/v1/events"
             cursor <- readIORef cursorRef
@@ -319,7 +368,7 @@ streamAgentServerTurn client expectedTurnId lastEventId onEvent = do
                     then decodeErrorResponse response
                     else
                         consumeEventStream
-                            cursorRef
+                            cursorRef callback
                             ByteString.empty
                             response.responseBody
         pure case outcome of
@@ -330,30 +379,37 @@ streamAgentServerTurn client expectedTurnId lastEventId onEvent = do
                     )
             Right result -> result
 
-    monitorDurableTurn cursorRef = do
+    monitorDurableTurn cursorRef activity deliveredRequests = do
         threadDelay durableTurnPollIntervalMicros
         getAgentServerTurn client expectedTurnId >>= \case
             Right turn
                 | isTerminalTurnStatus turn.agentServerTurnStatus ->
-                    refetch cursorRef
+                    refetchWhenQuiet cursorRef activity deliveredRequests
             Left (AgentServerHttpError 404 _ _) ->
-                refetch cursorRef
-            _ ->
+                refetchWhenQuiet cursorRef activity deliveredRequests
+            _ -> do
+                known <- (<>) <$> knownRequests <*> readIORef deliveredRequests
                 listAgentServerRequestsForTurn client expectedTurnId >>= \case
                     Right requests
                         | any
-                            ( (== expectedTurnId)
-                                . (.agentServerRequestTurnId)
-                            )
+                            (\request -> request.agentServerRequestTurnId == expectedTurnId
+                                && request.agentServerRequestId `notElem` known)
                             requests.agentServerRequests ->
-                            refetch cursorRef
-                    _ -> monitorDurableTurn cursorRef
+                            refetchWhenQuiet cursorRef activity deliveredRequests
+                    _ -> monitorDurableTurn cursorRef activity deliveredRequests
+
+    refetchWhenQuiet cursorRef activity deliveredRequests = do
+        now <- getMonotonicTimeNSec
+        (busy, lastCallback) <- readIORef activity
+        if busy || now - lastCallback < 250_000_000
+            then monitorDurableTurn cursorRef activity deliveredRequests
+            else refetch cursorRef
 
     refetch cursorRef = do
         cursor <- readIORef cursorRef
         pure (Right (AgentServerStreamNeedsRefetch cursor))
 
-    consumeEventStream cursorRef buffered bodyReader = do
+    consumeEventStream cursorRef callback buffered bodyReader = do
         chunk <- brRead bodyReader
         if ByteString.null chunk
             then
@@ -374,35 +430,35 @@ streamAgentServerTurn client expectedTurnId lastEventId onEvent = do
                                 )
                             )
                     else
-                        processFrames cursorRef combined >>= \case
+                        processFrames cursorRef callback combined >>= \case
                             Left err -> pure (Left err)
                             Right (remaining, Nothing) ->
-                                consumeEventStream cursorRef remaining bodyReader
+                                consumeEventStream cursorRef callback remaining bodyReader
                             Right (_, Just terminal) ->
                                 pure (Right terminal)
 
-    processFrames cursorRef buffered =
+    processFrames cursorRef callback buffered =
         case takeSseFrame buffered of
             Nothing -> pure (Right (buffered, Nothing))
             Just (frame, rest) ->
                 case parseAgentServerSseFrame frame of
                     Left message ->
                         pure (Left (AgentServerProtocolError message))
-                    Right Nothing -> processFrames cursorRef rest
+                    Right Nothing -> processFrames cursorRef callback rest
                     Right (Just (AgentServerSseReplayReset _)) ->
                         refetch cursorRef
                             >>= \refetchResult ->
                                 pure (fmap (\terminal -> (rest, Just terminal)) refetchResult)
                     Right (Just (AgentServerSseEvent event)) -> do
-                        atomicModifyIORef'
-                            cursorRef
-                            (\seen -> (max seen event.agentServerEventId, ()))
+                        let acknowledge = atomicModifyIORef' cursorRef
+                                (\seen -> (max seen event.agentServerEventId, ()))
                         if event.agentServerEventTurnId /= Just expectedTurnId
-                            then processFrames cursorRef rest
+                            then acknowledge >> processFrames cursorRef callback rest
                             else
-                                onEvent event >>= \case
+                                callback event >>= \case
                                     Left err -> pure (Left err)
-                                    Right () ->
+                                    Right () -> do
+                                        acknowledge
                                         case event.agentServerEventPayload of
                                             AgentServerTurnCompletedEvent ->
                                                 pure
@@ -430,7 +486,20 @@ streamAgentServerTurn client expectedTurnId lastEventId onEvent = do
                                                             AgentServerStreamCancelled
                                                         )
                                                     )
-                                            _ -> processFrames cursorRef rest
+                                            _ -> processFrames cursorRef callback rest
+
+-- | Large local display events are fetched outside the SSE replay window.
+getAgentServerLocalEventPayload
+    :: AgentServerClient -> Text -> Text -> IO (Either AgentServerClientError Aeson.Value)
+getAgentServerLocalEventPayload client turnId identifier =
+    performJsonRequestWithLimit (128 * 1024 * 1024) client "GET"
+        ("/v1/local/event-payloads/" <> encodePathSegment turnId <> "/" <> encodePathSegment identifier)
+        [200] Nothing
+
+getAgentServerLocalTurnResult :: AgentServerClient -> Text -> IO (Either AgentServerClientError Aeson.Value)
+getAgentServerLocalTurnResult client turnId =
+    performJsonRequestWithLimit (128 * 1024 * 1024) client "GET"
+        ("/v1/local/turns/" <> encodePathSegment turnId <> "/result") [200] Nothing
 
 isTerminalTurnStatus :: AgentServerTurnStatus -> Bool
 isTerminalTurnStatus = \case
@@ -491,7 +560,7 @@ performJsonRequestWithLimit
                                     pure $
                                         Bifunctor.first
                                             (AgentServerDecodeError . Text.pack)
-                                            (Aeson.eitherDecodeStrict' bytes)
+                                            (Aeson.eitherDecodeStrict' (if statusCode response.responseStatus == 204 then "null" else bytes))
                     else decodeErrorResponse response
         pure case outcome of
             Left _ ->
@@ -517,7 +586,9 @@ authenticatedRequest client method path = do
                     , "Bearer " <> client.clientBearerToken
                     )
                 , (hAccept, "application/json")
-                ]
+                ] <> maybe []
+                    (\identifier -> [("X-Agent-Client-Id", TextEncoding.encodeUtf8 identifier)])
+                    client.clientFrontendIdentity
             , redirectCount = 0
             , responseTimeout = responseTimeoutMicro 30_000_000
             , checkResponse = \_ _ -> pure ()

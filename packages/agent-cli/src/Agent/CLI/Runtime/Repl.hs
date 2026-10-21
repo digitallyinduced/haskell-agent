@@ -122,7 +122,7 @@ import Data.IORef ( atomicModifyIORef', readIORef, writeIORef )
 import Data.Maybe ( fromMaybe, isJust )
 import Data.Text ( Text )
 import Data.Time.Clock (getCurrentTime)
-import System.Console.ANSI ( getTerminalSize )
+import Agent.CLI.TerminalSize (getTerminalSize)
 import System.Console.ANSI.Codes ( clearFromCursorToLineEndCode )
 import System.IO ( stdout, hFlush )
 import qualified Agent.OpenRouter.Usage as OpenRouterUsage

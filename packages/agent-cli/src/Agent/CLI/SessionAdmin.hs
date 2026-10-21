@@ -8,6 +8,8 @@ module Agent.CLI.SessionAdmin
     , runShowSession
     , runStorageAdmin
     , runWaitSession
+    , renderFullSession
+    , renderSessionPage
     , sessionSummaryJSON
     , sessionSummaryWithStatusJSON
     , sessionToolEvent

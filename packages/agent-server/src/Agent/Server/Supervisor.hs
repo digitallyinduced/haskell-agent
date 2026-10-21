@@ -28,9 +28,11 @@ module Agent.Server.Supervisor
     , trySubmitReservedTurnChecked
     , steerTurn
     , cancelTurn
+    , requestTurnCancellation
     , lookupTurn
     , listTurns
     , sessionHasActiveTurn
+    , supervisorHasActiveTurns
     , withSessionCleanup
     , withSessionMutation
     , listHumanRequests
@@ -750,6 +752,14 @@ cancelTurn supervisor boundary turnId = mask \restore -> do
                     when transitioned
                         (atomically (releaseCancellationClaim supervisor record))
 
+-- | Schedule cancellation under the supervisor's tracked worker ownership.
+-- Frontend disconnects acknowledge the request without waiting for cleanup.
+requestTurnCancellation :: Supervisor -> AccessBoundary -> TurnId -> IO Bool
+requestTurnCancellation supervisor boundary turnId =
+    lookupTurn supervisor boundary turnId >>= \case
+        Nothing -> pure False
+        Just record -> spawnCancellationTask supervisor record >> pure True
+
 lookupTurn
     :: Supervisor
     -> AccessBoundary
@@ -780,6 +790,14 @@ listTurns supervisor boundary sessionId =
                 , record.turnRecordBoundary == boundary
                 , maybe True (== record.turnRecordSessionId) sessionId
                 ]
+
+supervisorHasActiveTurns :: Supervisor -> IO Bool
+supervisorHasActiveTurns supervisor = atomically do
+    state <- readTVar supervisor.supervisorState
+    pure (not (Set.null state.stateActiveSessions)
+        || any (\slot -> slot.turnSlotRecord.turnRecordStatus
+                `elem` [TurnQueued, TurnRunning, TurnWaitingForInput])
+            (Map.elems state.stateTurns))
 
 sessionHasActiveTurn
     :: Supervisor

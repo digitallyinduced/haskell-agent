@@ -3,6 +3,8 @@ module Agent.CLI.Runtime.Orchestration.Session
     , runAgentSession
     ) where
 
+import Agent.Runtime.Options (SubagentSettings(..))
+import Agent.CLI.Options (CliOptions(optMaxTurns))
 import Agent.Runtime.Session.Request
     ( SessionRequestState
     , newSessionRequestState
@@ -209,6 +211,7 @@ import Agent.CLI.TUI.App
 import Agent.CLI.Terminal ( resolveColor )
 import Agent.CLI.Tools
     ( codexToolsForModel
+    , isClaudeBridgeTool
     , schemasFromAppToolsCodeModeWithHostedSearchAndAsyncCapability
     , schemasFromAppToolsWithHostedSearchAndAsyncCapability
     )
@@ -254,7 +257,7 @@ import Agent.Tools.MultiAgents
 import Agent.XAI.LoopBackend (xaiBackendWithClientOptions)
 import qualified Agent.XAI.Options as XAI
 import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks)
-import Agent.ToolDispatch (canonicalToolName, ToolDispatchConfig(..))
+import Agent.ToolDispatch (ToolDispatchConfig(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ToolSchema(..)
@@ -697,20 +700,6 @@ prepareSessionPromptRuntime AgentSessionRequest
         newIORef (\_outcome _inputs -> pure CompactionNotInstalled)
     pure SessionPromptRuntime{..}
 
-isClaudeBridgeTool :: AppTool -> Bool
-isClaudeBridgeTool tool =
-    canonicalToolName tool.appToolName
-        `notElem`
-            [ "shell_command", "run_terminal_cmd"
-            , "read_file", "write_file", "grep", "glob"
-            , "search_replace", "apply_patch", "write_stdin"
-            , "web_fetch", "web_search"
-            ]
-        && case tool.appToolSchema of
-            JsonFunctionSchema{} -> True
-            RawJsonFunctionSchema{} -> True
-            _ -> False
-
 sessionCatalogContextWindowForParams
     :: AgentSessionRequest windowTitleResult
     -> (Text -> Text)
@@ -786,7 +775,11 @@ buildSessionSubagentRuntime AgentSessionRequest
     , stateDirectory
     } promptRuntime =
     SubagentRuntime
-        { subagentOptions = options
+        { subagentOptions = SubagentSettings
+            { subagentShowRawReasoning = options.optShowRawReasoning
+            , subagentCompactThreshold = options.optCompactThreshold
+            , subagentMaxTurns = options.optMaxTurns
+            }
         , subagentCodexModelInfo =
             \tokenProvider -> loadCodexCatalogModelInfo
                 stateDirectory OpenAIProvider codexDialect (Just tokenProvider)

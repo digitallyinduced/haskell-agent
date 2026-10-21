@@ -11,7 +11,9 @@ module Agent.Server
 
 import Agent.Server.Application
 import Agent.Server.Backend
+import Agent.Server.AgentSessions (serverAgentSessionActions)
 import Agent.Server.Config
+import Agent.Server.LocalService
 import Agent.Server.Runtime
     ( closeServerRuntime
     , installSessionEventSink
@@ -36,6 +38,9 @@ import System.IO (stderr)
 import Network.Wai.Handler.Warp
     ( defaultSettings
     , runSettings
+    , runSettingsSocket
+    , setBeforeMainLoop
+    , setInstallShutdownHandler
     , setGracefulShutdownTimeout
     , setHost
     , setPort
@@ -45,6 +50,13 @@ import Network.Wai.Handler.Warp
 runServer :: IO ()
 runServer = do
     rawConfig <- parseServerConfig
+    if rawConfig.serverLocal
+        then withLocalService rawConfig \ownedConfig service ->
+            runConfiguredServer ownedConfig (Just service)
+        else runConfiguredServer rawConfig Nothing
+
+runConfiguredServer :: ServerConfig -> Maybe LocalService -> IO ()
+runConfiguredServer rawConfig localService =
     resolveServerConfig rawConfig >>= \case
         Left err -> die ("agent-server: " <> show err)
         Right config -> do
@@ -102,11 +114,16 @@ runServer = do
                                                         Nothing
                                                         (Just sessionId)
                                                         payload
+                                            , sessionAgentActions =
+                                                if rawConfig.serverLocal
+                                                    then Just . serverAgentSessionActions backend supervisor
+                                                    else const Nothing
                                             }
                                     application <-
                                         newApplication
                                             ApplicationConfig
-                                                { applicationMaximumRequestBytes =
+                                                { applicationLocalService = rawConfig.serverLocal
+                                                , applicationMaximumRequestBytes =
                                                     config.resolvedMaximumRequestBytes
                                                 , applicationOpenApiDocument =
                                                     openApi
@@ -119,8 +136,15 @@ runServer = do
                                             <> config.resolvedHost
                                             <> ":"
                                             <> show config.resolvedPort)
-                                    runSettings
-                                        ( setGracefulShutdownTimeout (Just 10)
+                                    let settings =
+                                            -- Local admission is already closed
+                                            -- before stop is acknowledged. Drop
+                                            -- idle keep-alive HTTP connections;
+                                            -- the supervisor and runtime below
+                                            -- still join all owned work.
+                                            setGracefulShutdownTimeout (Just (case localService of
+                                                Nothing -> 10
+                                                Just _ -> 0))
                                             $ setTimeout 30
                                             $ setHost
                                                 (fromString
@@ -128,8 +152,17 @@ runServer = do
                                             $ setPort
                                                 config.resolvedPort
                                                 defaultSettings
-                                        )
-                                        application
+                                    case localService of
+                                        Nothing -> runSettings settings application
+                                        Just service ->
+                                            withLocalApplication service config backend supervisor application \localApplication ->
+                                                runSettingsSocket
+                                                    (setBeforeMainLoop (localServiceReady service)
+                                                        $ setInstallShutdownHandler
+                                                            (localServiceInstallShutdown service)
+                                                            settings)
+                                                    (localServiceSocket service)
+                                                    localApplication
 
 {- | Leave the process once a turn owner has lost its liveness fence.
 

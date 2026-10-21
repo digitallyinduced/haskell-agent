@@ -97,6 +97,7 @@ toHumanRequest request = HumanRequest
         AgentServerPlanEnter -> "AgentServerPlanEnter"
         AgentServerPlanExit -> "AgentServerPlanExit"
         AgentServerPlanQuestion -> "AgentServerPlanQuestion"
+        AgentServerLocalInput -> "AgentServerLocalInput"
     , humanRequestPrompt = request.agentServerRequestPrompt
     , humanRequestOptions = request.agentServerRequestOptions
     }

@@ -1,4 +1,4 @@
-module Agent.Server.ApplicationSpec (spec) where
+module Agent.Server.ApplicationSpec (spec, fakeBackend, immediateRunner) where
 
 import Agent.Server.Application (
     ApplicationConfig (..),
@@ -1272,7 +1272,8 @@ withDurableApplication runner action = do
             application <-
                 newApplication
                     ApplicationConfig
-                        { applicationMaximumRequestBytes = 256
+                        { applicationLocalService = False
+                        , applicationMaximumRequestBytes = 256
                         , applicationOpenApiDocument = "{}"
                         }
                     auth
@@ -1316,7 +1317,8 @@ withBackendApplication backend runner action =
             application <-
                 newApplication
                     ApplicationConfig
-                        { applicationMaximumRequestBytes = 256
+                        { applicationLocalService = False
+                        , applicationMaximumRequestBytes = 256
                         , applicationOpenApiDocument = "{}"
                         }
                     auth
@@ -1355,7 +1357,8 @@ withApplicationAuth auth runner action =
             application <-
                 newApplication
                     ApplicationConfig
-                        { applicationMaximumRequestBytes = 256
+                        { applicationLocalService = False
+                        , applicationMaximumRequestBytes = 256
                         , applicationOpenApiDocument = "{}"
                         }
                     auth
@@ -1402,7 +1405,7 @@ fakeBackend =
         , backendDeleteSession =
             \_ _ -> pure (Right ())
         , backendSessionHistory =
-            \_ _ _ _ ->
+            \_ _ _ _ _ ->
                 pure (Right (object ["turns" .= ([] :: [Int])]))
         , backendForkSession =
             \_ _ _ -> pure (Right sessionValue)

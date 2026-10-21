@@ -298,6 +298,23 @@ defaultMcpHostHooks = McpHostHooks
     , mcpHostServerInfo = \_ _ -> pure ()
     }
 
+-- | Session-owned callbacks. A cached transport may be rebound after its last
+-- lease is released, but two sessions must never overwrite one another's
+-- interactive handlers while either still owns the transport.
+data McpSessionHooks = McpSessionHooks
+    { mcpSessionIdentity :: !Text
+    , mcpSessionElicit :: !(Maybe (McpElicitRequest -> IO McpElicitResult))
+    , mcpSessionRoots :: !(Maybe (Text -> IO [McpRoot]))
+    , mcpSessionSample ::
+        !(Maybe (McpSamplingRequest -> IO (Either Text McpSamplingResult)))
+    }
+
+data McpSessionHookSlot = McpSessionHookSlot
+    { sessionHookIdentity :: !Text
+    , sessionHookCapabilities :: !(Bool, Bool, Bool)
+    , sessionHookCallbacks :: !(IORef (Maybe McpSessionHooks))
+    }
+
 -- | A server's request for user input, delivered either as a legacy
 -- server-initiated @elicitation/create@ request or inside a multi round-trip
 -- @input_required@ result.
@@ -711,6 +728,7 @@ data McpSupervisorEntry = McpSupervisorEntry
         :: ![StableName McpToolServer]
     , supervisorEntryFleet :: !McpFleet
     , supervisorEntryLeases :: !Int
+    , supervisorEntrySessionHooks :: !(Maybe McpSessionHookSlot)
     }
 
 data McpSupervisorPending = McpSupervisorPending
@@ -723,6 +741,7 @@ data McpSupervisorPending = McpSupervisorPending
     , supervisorPendingWorker ::
         !(TMVar (Async (Either Text McpFleet)))
     , supervisorPendingLeases :: !Int
+    , supervisorPendingSessionHooks :: !(Maybe McpSessionHookSlot)
     }
 
 data McpAcquireDecision

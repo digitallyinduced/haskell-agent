@@ -37,6 +37,7 @@ import Network.Wai
 data AuthMode
     = LoopbackHostAuth !(Set ByteString)
     | BearerTokenAuth !ByteString
+    | LoopbackBearerAuth !(Set ByteString) !ByteString
     | TenantBearerAuth ![TenantCredential]
 
 -- Deliberately omit Show: this carries a digest derived from a secret.
@@ -108,6 +109,8 @@ authorizePreflight config request = do
         LoopbackHostAuth allowedHosts ->
             () <$ authorizeMode (LoopbackHostAuth allowedHosts) request
         BearerTokenAuth _ -> Right ()
+        LoopbackBearerAuth allowedHosts _ ->
+            () <$ authorizeMode (LoopbackHostAuth allowedHosts) request
         TenantBearerAuth _ -> Right ()
     pure (corsResponseHeaders config request)
 
@@ -130,6 +133,9 @@ authorizeMode mode request = case mode of
                 | secureTokenEqual supplied expected ->
                     Right localPrincipal
             _ -> unauthorized
+    LoopbackBearerAuth allowedHosts expected -> do
+        _ <- authorizeMode (LoopbackHostAuth allowedHosts) request
+        authorizeMode (BearerTokenAuth expected) request
     TenantBearerAuth credentials ->
         case bearerToken request >>= matchingPrincipal credentials of
             Just principal -> Right principal

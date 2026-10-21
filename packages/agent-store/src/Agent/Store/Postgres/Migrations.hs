@@ -595,6 +595,14 @@ sessionPersistenceMigrations =
         , migrationName = "durable session read state"
         , migrationStatements = sessionReadStateSchemaStatements
         }
+    , Migration
+        { migrationVersion = 124
+        , migrationName = "local frontend input requests"
+        , migrationStatements =
+            [ "ALTER TABLE harness.server_human_requests DROP CONSTRAINT server_human_requests_kind_check"
+            , "ALTER TABLE harness.server_human_requests ADD CONSTRAINT server_human_requests_kind_check CHECK (kind IN ('tool_approval', 'root_access', 'plan_enter', 'plan_exit', 'plan_question', 'local_input'))"
+            ]
+        }
     ]
 
 -- | Specialize all runtime grants for a validated cluster-global role.
