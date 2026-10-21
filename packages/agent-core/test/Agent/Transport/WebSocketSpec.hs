@@ -14,7 +14,7 @@ import Control.Concurrent
     , takeMVar
     , writeChan
     )
-import Control.Exception (Exception, SomeException, finally, throwIO, toException)
+import Control.Exception (AsyncException(..), Exception, SomeException, finally, throwIO, toException)
 import Control.Concurrent.Async (cancel, wait, withAsync)
 import qualified Control.Exception.Safe as Safe
 import Control.Retry
@@ -50,6 +50,79 @@ spec = describe "Agent.Transport.WebSocket" do
     it "classifies websocket connection timeouts" do
         transientWsConnectFailureLabel (toException WS.ConnectionTimeout :: SomeException)
             `shouldBe` Just "WebSocket handshake timed out"
+
+    it "reproduces a parse exception from an incomplete HTTP upgrade response" do
+        input <- newIORef ["HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"]
+        Safe.bracket
+            (WSStream.makeStream
+                (atomicModifyIORef' input \case
+                    chunk : rest -> (rest, Just chunk)
+                    [] -> ([], Nothing))
+                (const (pure ())))
+            WSStream.close \stream -> do
+                result <- Safe.tryAny $ WS.runClientWithStream stream "example.com" "/" WS.defaultConnectionOptions []
+                    (const (expectationFailure "incomplete handshake started the session"))
+                case result of
+                    Left exception -> case Safe.fromException exception of
+                        Just (WS.ParseException message) -> message `shouldBe` "not enough input"
+                        _ -> expectationFailure "expected handshake ParseException"
+                    Right () -> expectationFailure "expected incomplete upgrade to fail"
+
+    it "classifies handshake parse failures without including response content" do
+        transientWsConnectFailureLabel (toException (WS.ParseException "not enough input"))
+            `shouldBe` Just "WebSocket handshake response could not be parsed"
+        transientWsConnectFailureLabel (toException (WS.ParseException "untrusted response content"))
+            `shouldBe` Just "WebSocket handshake response could not be parsed"
+
+    it "releases failed handshake acquisitions before retrying and starts the callback once" do
+        acquisitions <- newIORef (0 :: Int)
+        resources <- newIORef (0 :: Int)
+        callbacks <- newIORef (0 :: Int)
+        result <- retryTransientWsConnectWithPolicy (constantDelay 0 <> limitRetries 2) \connected -> do
+            readIORef resources `shouldReturn` 0
+            Safe.bracket_ (modifyIORef' resources (+ 1)) (modifyIORef' resources (subtract 1)) do
+                attempt <- atomicModifyIORef' acquisitions \count -> (count + 1, count + 1)
+                if attempt == 1
+                    then Safe.throwIO (WS.ParseException "not enough input")
+                    else do
+                        connected
+                        modifyIORef' callbacks (+ 1)
+                        pure (Right ())
+        result `shouldBe` Right ()
+        readIORef acquisitions `shouldReturn` 2
+        readIORef callbacks `shouldReturn` 1
+        readIORef resources `shouldReturn` 0
+
+    it "returns a transport error after exhausting the handshake parse retry budget" do
+        attempts <- newIORef (0 :: Int)
+        result <- retryTransientWsConnectWithPolicy (constantDelay 0 <> limitRetries 2) \_ -> do
+            modifyIORef' attempts (+ 1)
+            Safe.throwIO (WS.ParseException "not enough input")
+        result `shouldBe`
+            (Left (ConnectionError "WebSocket handshake response could not be parsed") :: Either ApiError ())
+        readIORef attempts `shouldReturn` 3
+
+    it "does not repeat callback effects after a parse exception" do
+        effects <- newIORef (0 :: Int)
+        result <- Safe.tryAny $ retryTransientWsConnectWithPolicy (constantDelay 0 <> limitRetries 2) \connected -> do
+            connected
+            modifyIORef' effects (+ 1)
+            Safe.throwIO (WS.ParseException "not enough input")
+        case result of
+            Left exception -> case Safe.fromException exception of
+                Just (WS.ParseException message) -> message `shouldBe` "not enough input"
+                _ -> expectationFailure "expected the original parse exception"
+            Right (_ :: Either ApiError ()) -> expectationFailure "expected callback failure"
+        readIORef effects `shouldReturn` 1
+
+    it "propagates handshake cancellation without retrying" do
+        attempts <- newIORef (0 :: Int)
+        result <- Safe.tryAsync $
+            retryTransientWsConnectWithPolicy (constantDelay 0 <> limitRetries 2) \_ -> do
+                modifyIORef' attempts (+ 1)
+                throwIO ThreadKilled
+        result `shouldBe` (Left ThreadKilled :: Either AsyncException (Either ApiError ()))
+        readIORef attempts `shouldReturn` 1
 
     it "classifies connection resets wrapped by the TLS handshake" do
         let exception = TLS.HandshakeFailed $ TLS.Error_Misc

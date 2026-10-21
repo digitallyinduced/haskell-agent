@@ -587,6 +587,12 @@ wsConnectExceptionRetry exception
                 (webSocketHandshakeFailure (WS.responseCode responseHead))
     | Just WS.ConnectionTimeout <- Exception.fromException exception =
         retryConnection "WebSocket handshake timed out"
+    | Just (WS.ParseException _) <- Exception.fromException exception =
+        -- A truncated or malformed upgrade response has no authenticated
+        -- HTTP status. Retry only before the session callback starts; the
+        -- existing commit boundary propagates later exceptions unchanged.
+        -- Do not include arbitrary response content in the diagnostic.
+        retryConnection "WebSocket handshake response could not be parsed"
     | Just (Connection.HostNotResolved host) <-
         Exception.fromException exception =
             retryConnection
