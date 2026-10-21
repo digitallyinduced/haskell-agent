@@ -66,6 +66,7 @@ library
                     , Agent.Runtime.AgentSnapshot
                     , Agent.Runtime.Browser
                     , Agent.Runtime.Config
+                    , Agent.Runtime.CodeMode
                     , Agent.Runtime.Collaboration
                     , Agent.Runtime.Compaction
                     , Agent.Runtime.Compaction.Provider
@@ -81,7 +82,9 @@ library
                     , Agent.Runtime.GatewayBoundary
                     , Agent.Runtime.GatewayBridge
                     , Agent.Runtime.GatewayClient
+                    , Agent.Runtime.Gateway.Models
                     , Agent.Runtime.Host
+                    , Agent.Runtime.IntegrationGateway
                     , Agent.Runtime.Json
                     , Agent.Runtime.ManagedTurn
                     , Agent.Runtime.McpConnectionCredentials
@@ -89,15 +92,23 @@ library
                     , Agent.Runtime.McpOAuth
                     , Agent.Runtime.McpOAuthStore
                     , Agent.Runtime.Mcp.Startup
+                    , Agent.Runtime.Mcp.Sampling
                     , Agent.Runtime.ModelConfig
                     , Agent.Runtime.Models
                     , Agent.Runtime.NativeProcess
+                    , Agent.Runtime.Process
                     , Agent.Runtime.Options
                     , Agent.Runtime.Permission.Types
+                    , Agent.Runtime.Permission.Child
+                    , Agent.Runtime.Permission.Decision
+                    , Agent.Runtime.Permission.Approval
                     , Agent.Runtime.Project
+                    , Agent.Runtime.Prompt
                     , Agent.Runtime.ProviderRequest
                     , Agent.Runtime.Providers
                     , Agent.Runtime.Providers.Types
+                    , Agent.Runtime.Providers.ClaudeControl
+                    , Agent.Runtime.Providers.ClaudeGatewayProxy
                     , Agent.Runtime.Provider.OpenAI.Fresh
                     , Agent.Runtime.Session.Backend
                     , Agent.Runtime.Session
@@ -106,6 +117,28 @@ library
                     , Agent.Runtime.Session.History
                     , Agent.Runtime.Session.Preparation
                     , Agent.Runtime.Session.Resources
+                    , Agent.Runtime.Session.Settings
+                    , Agent.Runtime.Session.Interaction
+                    , Agent.Runtime.Session.SecretExchange
+                    , Agent.Runtime.Session.SideQuestion
+                    , Agent.Runtime.Session.Engine.Context
+                    , Agent.Runtime.Session.Engine
+                    , Agent.Runtime.Session.Engine.Tools
+                    , Agent.Runtime.Session.Engine.Commands
+                    , Agent.Runtime.Portable
+                    , Agent.Runtime.Worktree
+                    , Agent.Runtime.Worktree.ReadOnlyLock
+                    , Agent.Runtime.Worktree.Incorporation
+                    , Agent.Runtime.Worktree.Snapshot
+                    , Agent.Runtime.Worktree.Provenance
+                    , Agent.Runtime.Worktree.Clean
+                    , Agent.Runtime.Worktree.Ignored
+                    , Agent.Runtime.Worktree.Registry
+                    , Agent.Runtime.AgentSessions
+                    , Agent.Runtime.AgentSessions.Render
+                    , Agent.Runtime.AgentSessions.WaitGraph
+                    , Agent.Runtime.Session.Events
+                    , Agent.Runtime.Session.PendingInputs
                     , Agent.Runtime.Session.Inbox
                     , Agent.Runtime.Session.Observation
                     , Agent.Runtime.Session.PullRequest
@@ -116,8 +149,18 @@ library
                     , Agent.Runtime.Session.TitlePolicy
                     , Agent.Runtime.Session.TurnRecord
                     , Agent.Runtime.Session.Types
+                    , Agent.Runtime.Skills.Content
+                    , Agent.Runtime.Skills.LearnedSkills
+                    , Agent.Runtime.Skills.LearnedSkills.Store
+                    , Agent.Runtime.Subagents.Store
+                    , Agent.Runtime.Subagents.Runtime
+                    , Agent.Runtime.Subagents.Runtime.Types
+                    , Agent.Runtime.Subagents.Runtime.Storage
+                    , Agent.Runtime.Subagents.Runtime.Identity
+                    , Agent.Runtime.Subagents.Runtime.Target
                     , Agent.Runtime.SessionLock
                     , Agent.Runtime.Transcription
+                    , Agent.Runtime.Timestamp
                     , Agent.Runtime.TurnRecord
                     , Agent.Runtime.ConversationStore
                     , Agent.Runtime.Request
@@ -135,6 +178,7 @@ library
                     , Agent.Runtime.Tools.LocalStartup
                     , Agent.Runtime.Tools.Resources
                     , Agent.Runtime.Tools.Startup
+                    , Agent.Runtime.Tools.Schema
     build-depends:    agent-accounts >= 0.1 && < 0.2
                     , agent-audio >= 0.1 && < 0.2
                     , agent-codex-dialect >= 0.1 && < 0.2
@@ -143,6 +187,7 @@ library
                     , agent-connectivity >= 0.1 && < 0.2
                     , agent-computer-use >= 0.1 && < 0.2
                     , agent-core >= 0.1 && < 0.2
+                    , agent-external-session >= 0.1 && < 0.2
                     , agent-gemini >= 0.1 && < 0.2
                     , agent-integration-api >= 0.1 && < 0.2
                     , agent-json >= 0.1 && < 0.2
@@ -245,6 +290,7 @@ test-suite agent-runtime-test
     main-is:          Spec.hs
     ghc-options:      -threaded
     other-modules:    Agent.Runtime.RequestSpec
+                    , Agent.Runtime.LocalProtocolSpec
                     , Agent.Runtime.CollaborationSpec
                     , Agent.Runtime.Mcp.StartupSpec
                     , Agent.Runtime.Tools.DialectsSpec

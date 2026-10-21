@@ -6,6 +6,7 @@
 , mediaHelper ? null
 , appleSessionTitle ? null
 , wrapperTool ? null
+, serverExecutable ? null
 }:
 
 let
@@ -28,6 +29,9 @@ let
     "--set-default" "AGENT_SYNTAX_DIR" syntaxDirectory
     "--set-default" "AGENT_POSTGRES_BIN" postgresBin
   ]
+    ++ pkgs.lib.optionals (serverExecutable != null) [
+      "--set-default" "HASKELL_AGENT_SERVER" serverExecutable
+    ]
     ++ prefixDirectories "PATH"
       (pkgs.lib.splitString ":" (pkgs.lib.makeBinPath runtimeTools))
     ++ pkgs.lib.optionals (mediaHelper != null) [

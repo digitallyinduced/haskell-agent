@@ -38,6 +38,7 @@ library
     import:           common-options
     hs-source-dirs:   src
     exposed-modules:  Agent.CLI.ExternalSession
+                    , Agent.ExternalSession
     other-modules:    Agent.CLI.ExternalSession.Content
                     , Agent.CLI.ExternalSession.JSONL
                     , Agent.CLI.ExternalSession.Paths

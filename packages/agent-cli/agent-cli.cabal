@@ -83,6 +83,18 @@ library
                     , Agent.CLI.Provider.Switch
                     , Agent.CLI.Runtime
                     , Agent.CLI.Runtime.Internal
+                    , Agent.CLI.Remote.Transport
+                    , Agent.CLI.Remote.Turn
+                    , Agent.CLI.Remote.Session
+                    , Agent.CLI.Remote.Commands
+                    , Agent.CLI.Remote.Meta
+                    , Agent.CLI.Remote.Voice
+                    , Agent.CLI.Remote.Development
+                    , Agent.CLI.Remote.Admin
+                    , Agent.CLI.TerminalSize
+                    , Agent.CLI.Remote.History
+                    , Agent.CLI.Remote.Service
+                    , Agent.CLI.Remote.Ui
                     , Agent.CLI.Runtime.Orchestration
                     , Agent.CLI.Runtime.Orchestration.Background
                     , Agent.CLI.Runtime.Orchestration.Flow
@@ -299,6 +311,7 @@ library
     reexported-modules:
                       agent-external-session:Agent.CLI.ExternalSession as Agent.CLI.ExternalSession
     build-depends:    agent-runtime >= 0.1 && < 0.2
+                    , agent-server-client >= 0.1 && < 0.2
                     , agent-tools >= 0.1 && < 0.2
                     , agent-accounts >= 0.1 && < 0.2
                     , agent-external-session >= 0.1 && < 0.2
@@ -367,6 +380,7 @@ library
                     , terminfo
                     , wai
                     , warp
+    c-sources:        cbits/TerminalSize.c
     if os(darwin)
         c-sources:    cbits/ClipboardTypes.c
         frameworks:   ApplicationServices CoreServices
@@ -379,6 +393,7 @@ executable agent-cli
     -- the RTS allocation area by every host core.
     ghc-options:      -threaded -rtsopts "-with-rtsopts=-N4 -M8G"
     build-depends:    agent-cli
+                    , agent-runtime
                     , async
                     , base >= 4.17 && < 5
                     , directory

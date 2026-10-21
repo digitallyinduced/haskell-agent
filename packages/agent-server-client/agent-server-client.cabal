@@ -34,6 +34,7 @@ library
         Agent.Server.Client
       , Agent.Server.Client.GatewayIdentity
       , Agent.Server.Client.Protocol
+      , Agent.Server.Client.Local
     hs-source-dirs:   src
     build-depends:
         aeson >=2.0
@@ -42,10 +43,14 @@ library
       , base64-bytestring
       , bytestring
       , crypton
+      , directory
+      , filelock
+      , filepath
       , http-client
       , http-client-tls
       , http-types
       , network-uri
+      , process
       , safe-exceptions
       , text >=2.0
       , time
@@ -69,7 +74,9 @@ test-suite agent-server-client-tests
       , bytestring
       , directory
       , hspec >=2.11 && <2.12
+      , filepath
       , http-types
+      , safe-exceptions
       , text
       , unix
       , wai

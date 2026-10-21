@@ -1,6 +1,7 @@
 module Main (main) where
 
 import qualified Agent.Runtime.RequestSpec as Request
+import qualified Agent.Runtime.LocalProtocolSpec as LocalProtocol
 import qualified Agent.Runtime.Tools.ResourcesSpec as ToolResources
 import qualified Agent.Runtime.Tools.DialectsSpec as ToolDialects
 import qualified Agent.Runtime.Tools.StartupSpec as ToolStartup
@@ -63,6 +64,7 @@ main = hspec do
     Collaboration.spec
     StartupContext.spec
     Request.spec
+    LocalProtocol.spec
     ProviderRuntime.spec
     Compaction.spec
     StartupPolicy.spec

@@ -1,5 +1,9 @@
 # In-process session worker ownership
 
+For the current terminal lifecycle and server-owned execution, see
+[Local CLI service](local-service.md). The server-to-CLI dependency described
+in the earlier migration notes below has been removed.
+
 `Agent.Runtime.SessionOwner` owns background session-turn workers without
 depending on CLI, TUI, filesystem layout, providers, or transport messages.
 `Agent.Runtime.Session.Threads` uses it in production and remains the compatibility

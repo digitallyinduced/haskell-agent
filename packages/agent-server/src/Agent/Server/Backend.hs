@@ -70,6 +70,7 @@ data Backend = Backend
         :: !( AccessBoundary
             -> Text
             -> Maybe Integer
+            -> Maybe Integer
             -> Int
             -> IO (Either ApiError Value)
             )

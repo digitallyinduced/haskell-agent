@@ -1,9 +1,9 @@
-{ mkDerivation, aeson, agent-cli, agent-core, agent-runtime
+{ mkDerivation, aeson, agent-core, agent-mcp, agent-runtime
 , agent-store, agent-tools, async, base, base64-bytestring
-, bytestring, containers, crypton, directory, filepath, hspec
-, http-client, http-types, lib, memory, optparse-applicative
-, process, safe-exceptions, stm, temporary, text, time, unix
-, uuid-types, wai, wai-extra, warp
+, bytestring, containers, crypton, directory, entropy, filelock
+, filepath, hspec, http-client, http-types, lib, memory, network
+, optparse-applicative, process, safe-exceptions, stm, temporary
+, text, time, unix, uuid-types, wai, wai-extra, warp
 }:
 mkDerivation {
   pname = "agent-server";
@@ -13,12 +13,13 @@ mkDerivation {
   isExecutable = true;
   enableSeparateDataOutput = true;
   libraryHaskellDepends = [
-    aeson agent-cli agent-core agent-runtime agent-store agent-tools
+    aeson agent-core agent-mcp agent-runtime agent-store agent-tools
     async base base64-bytestring bytestring containers crypton
-    directory filepath http-types memory optparse-applicative process
-    safe-exceptions stm text time unix uuid-types wai warp
+    directory entropy filelock filepath http-types memory network
+    optparse-applicative process safe-exceptions stm text time unix
+    uuid-types wai warp
   ];
-  executableHaskellDepends = [ base ];
+  executableHaskellDepends = [ agent-runtime base ];
   testHaskellDepends = [
     aeson agent-core agent-runtime agent-tools async base
     base64-bytestring bytestring containers crypton directory filepath

@@ -1,5 +1,10 @@
 # Shared session engine boundary
 
+The local CLI now runs through the shared headless engine in
+`Agent.Runtime.Session.Engine`; `agent-server` no longer depends on `agent-cli`.
+See [the current local-service architecture](local-service.md). The extraction
+notes below describe the earlier migration stages and their former boundaries.
+
 ## Typed turn persistence records
 
 `Agent.Runtime.TurnRecord` carries the engine's opaque `ModelItems` and

@@ -35,6 +35,7 @@ module Agent.Server.Types
     , RepositoryDescriptor(..)
     , CreateSessionRequest(..)
     , PatchSessionRequest(..)
+    , LocalSessionMutation(..)
     , UpdateSessionReadStateRequest(..)
     , ForkSessionRequest(..)
     , CreateTurnRequest(..)
@@ -47,6 +48,7 @@ module Agent.Server.Types
     ) where
 
 import Agent.Runtime.GatewayBoundary (GatewayBoundary(..))
+import Agent.Runtime.Session.Settings (SessionSettings)
 import Agent.Loop (ImageAttachment(..))
 import Agent.Server.Identifier (isUUIDText)
 import Control.Monad (unless, when)
@@ -166,6 +168,7 @@ data TurnSpec = TurnSpec
     , turnSpecFiles :: ![FileAttachment]
     , turnSpecBoundary :: !AccessBoundary
     , turnSpecMessageClock :: !(Maybe TurnMessageClock)
+    , turnSpecLocalOptions :: !(Maybe SessionSettings)
     }
     deriving (Eq, Show)
 
@@ -273,6 +276,7 @@ data HumanRequestKind
     | PlanEnterRequest
     | PlanExitRequest
     | PlanQuestionRequest
+    | LocalInputRequest
     deriving (Eq, Ord, Show)
 
 humanRequestKindText :: HumanRequestKind -> Text
@@ -282,6 +286,7 @@ humanRequestKindText = \case
     PlanEnterRequest -> "plan_enter"
     PlanExitRequest -> "plan_exit"
     PlanQuestionRequest -> "plan_question"
+    LocalInputRequest -> "local_input"
 
 data HumanRequestSpec = HumanRequestSpec
     { humanRequestSpecKind :: !HumanRequestKind
@@ -422,6 +427,7 @@ instance FromJSON UpdateSessionReadStateRequest where
 data PatchSessionRequest = PatchSessionRequest
     { patchSessionTitle :: !(Maybe Text)
     , patchSessionArchived :: !(Maybe Bool)
+    , patchSessionControl :: !(Maybe LocalSessionMutation)
     }
     deriving (Eq, Show)
 
@@ -429,11 +435,31 @@ instance FromJSON PatchSessionRequest where
     parseJSON = withObject "PatchSessionRequest" \value -> do
         rejectUnknownFields
             "PatchSessionRequest"
-            ["title", "archived"]
+            ["title", "archived", "control"]
             value
         PatchSessionRequest
             <$> value .:? "title"
             <*> value .:? "archived"
+            <*> value .:? "control"
+
+data LocalSessionMutation
+    = SelectSessionModel !Text
+    | SelectSessionEffort !Text
+    | ClearSessionContext
+    | RewindSessionContext !Int
+    deriving (Eq, Show)
+
+instance FromJSON LocalSessionMutation where
+    parseJSON = withObject "local session control" \value -> do
+        operation <- value .: "operation"
+        case (operation :: Text) of
+            "model" -> SelectSessionModel <$> value .: "value"
+            "effort" -> SelectSessionEffort <$> value .: "value"
+            "clear" -> pure ClearSessionContext
+            "rewind" -> do
+                index <- value .: "value"
+                if index < 0 then fail "rewind index must be nonnegative" else pure (RewindSessionContext index)
+            _ -> fail "unknown local session control"
 
 data ForkSessionRequest = ForkSessionRequest
     { forkSessionThroughTurn :: !(Maybe Integer)
@@ -459,6 +485,7 @@ data CreateTurnRequest = CreateTurnRequest
     , createTurnImages :: ![ImageAttachment]
     , createTurnFiles :: ![FileAttachment]
     , createTurnMessageClock :: !(Maybe TurnMessageClock)
+    , createTurnLocalOptions :: !(Maybe SessionSettings)
     }
     deriving (Eq, Show)
 
@@ -473,6 +500,7 @@ instance FromJSON CreateTurnRequest where
             , "hourCycle"
             , "timeZoneName"
             , "timeZoneOffsetMinutes"
+            , "localOptions"
             ]
             value
         rawRequestId <- value .:? "clientRequestId"
@@ -501,7 +529,8 @@ instance FromJSON CreateTurnRequest where
             )
             (fail "images and files are limited to 20 MiB decoded in total")
         clock <- parseTurnMessageClock value
-        pure (CreateTurnRequest requestId input images files clock)
+        options <- value .:? "localOptions"
+        pure (CreateTurnRequest requestId input images files clock options)
 
 parseTurnMessageClock :: Object -> Parser (Maybe TurnMessageClock)
 parseTurnMessageClock value = do

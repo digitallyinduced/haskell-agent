@@ -18,9 +18,12 @@ import Agent.Runtime.GatewayBoundary
     , withExpectedGatewayBoundaryAt
     , withGatewayTurnBoundaryAt
     )
+import Data.Aeson.KeyMap qualified as KeyMap
 import Agent.Tools.Types (appToolsFromGroups)
 import Agent.Runtime.Host (McpCallContext(..))
-import Agent.CLI.GatewayModels
+import Agent.Server.LocalEvents (localLoopEvent, localValueEnvelope)
+import Agent.Server.Auth (AuthConfig(..), AuthMode(..))
+import Agent.Runtime.Gateway.Models
     ( loadGatewayModelOptionsWithCredentialAt )
 import Agent.Runtime.ModelConfig
     ( ModelCatalog
@@ -32,17 +35,22 @@ import Agent.Runtime.Models
     , defaultModelOptionFor
     , modelCatalog
     )
-import Agent.CLI.NativeRuntime
+import Agent.Runtime.Process
     ( NativeProcessRuntime
-    , NativeDiscoveryContext(..)
+    , closeNativeProcessRuntime
+    , newNativeProcessRuntime
+    )
+import Agent.Runtime.Host
+    ( NativeDiscoveryContext(..)
     , NativeWorkspaceDiscovery(..)
     , NativeRunCapabilities(..)
     , NativeRunHooks(..)
     , fullNativeRunCapabilities
-    , closeNativeProcessRuntime
-    , newNativeProcessRuntime
-    , runNativeTurn
     )
+import Agent.Runtime.Session.Engine
+    ( runNativeSessionTurn, SessionCallbacks(..), defaultSessionCallbacks, defaultSessionSettings )
+import Agent.Server.LocalInputs (localSessionCallbacks)
+import Agent.Runtime.Session.Settings (SessionSettings(..), SessionOperation(..))
 import Agent.Runtime.Request
     ( NativeInteractionMode(..)
     , NativeMessageClock(..)
@@ -52,7 +60,7 @@ import Agent.Runtime.Request
     )
 import Agent.Runtime.StartupPolicy
     ( hostNativeStartupPolicy, restrictedNativeStartupPolicy )
-import Agent.CLI.Project (defaultProjectSettings)
+import Agent.Runtime.Project (defaultProjectSettings)
 import Agent.Runtime.Permission.Types (PermissionChoice(..))
 import Agent.Runtime.Options (defaultEffortFor)
 import Agent.Runtime.Session
@@ -66,10 +74,17 @@ import Agent.Runtime.Session
     , isValidSessionId
     , loadRecentSessionHistoryTurns
     , loadSessionHandle
+    , loadActiveSession
+    , rewindSession
+    , sessionRewindChoices
+    , sessionLegacySubagentTarget
     , loadSessionHistoryTurnsBefore
+    , loadSessionHistoryTurnsRange
+    , SessionTurnPage(..)
     , renameSession
     , sessionsRoot
     , setSessionArchived
+    , writeSessionMeta
     )
 import Agent.Runtime.Session.Codec (fromStoredMetadata)
 import Agent.Dialect
@@ -100,6 +115,7 @@ import Agent.Server.Event
     ( boundedPublicText
     , projectAgentEntries
     , projectLoopEvent
+    , projectPublicValue
     )
 import Agent.Server.Identifier (newUUIDv7Text)
 import Agent.Server.Runtime.SessionCodec
@@ -179,8 +195,9 @@ import Control.Concurrent.MVar
     )
 import Control.Monad (forM_, void)
 import Data.Aeson
-    ( Value
+    ( Value(..)
     , object
+    , toJSON
     , (.=)
     )
 import Data.Bifunctor (first)
@@ -191,10 +208,6 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import System.IO
-    ( IOMode(WriteMode)
-    , withFile
-    )
 import System.OsPath (OsPath, unsafeEncodeUtf)
 
 data ServerRuntime = ServerRuntime
@@ -740,9 +753,9 @@ multiTenantBackend instanceId manager = Backend
     , backendDeleteSession = \boundary sessionId ->
         withBoundaryBackend instanceId manager boundary \backend ->
             backend.backendDeleteSession boundary sessionId
-    , backendSessionHistory = \boundary sessionId before limit ->
+    , backendSessionHistory = \boundary sessionId before after limit ->
         withBoundaryBackend instanceId manager boundary \backend ->
-            backend.backendSessionHistory boundary sessionId before limit
+            backend.backendSessionHistory boundary sessionId before after limit
     , backendForkSession = \boundary sessionId request ->
         withBoundaryBackend instanceId manager boundary \backend ->
             backend.backendForkSession boundary sessionId request
@@ -1249,7 +1262,10 @@ getSessionForBoundary environment boundary sessionId =
     fmap
         (fmap
             (\(meta, archived) ->
-                sessionValue archived meta Nothing)) $
+                case (environment.environmentConfig.resolvedAuth.authMode, sessionValue archived meta Nothing) of
+                    (LoopbackBearerAuth{}, Object fields) ->
+                        Object (KeyMap.insert "localMeta" (toJSON meta) fields)
+                    (_, value) -> value)) $
         loadAuthorizedSession environment boundary sessionId
 
 sessionReadStateValue :: StoreSession.SessionReadState -> Value
@@ -1297,6 +1313,50 @@ patchSessionForBoundary
     -> PatchSessionRequest
     -> IO (Either ApiError Value)
 patchSessionForBoundary environment boundary sessionId request =
+    case request.patchSessionControl of
+        Just operation -> localSessionMutation environment boundary sessionId operation >>= \case
+            Left err -> pure (Left err)
+            Right () -> getSessionForBoundary environment boundary sessionId
+        Nothing -> patchSessionMetadataForBoundary environment boundary sessionId request
+
+localSessionMutation :: RuntimeEnvironment -> AccessBoundary -> Text -> LocalSessionMutation -> IO (Either ApiError ())
+localSessionMutation environment boundary sessionId operation =
+    loadAuthorizedMeta environment boundary sessionId >>= \case
+        Left err -> pure (Left err)
+        Right meta -> loadSessionHandle pool root sessionId >>= \case
+            Left err -> pure (Left (sessionOperationError err))
+            Right (handle, _) -> case operation of
+                SelectSessionModel name -> loadModelOptions environment boundary (unsafeToFilePath meta.metaCwd) >>= \case
+                    Left err -> pure (Left err)
+                    Right (catalog, options) -> case selectModel boundary catalog options (Just name) of
+                        Left err -> pure (Left err)
+                        Right option -> do
+                            let target = option.modelTarget
+                            writeSessionMeta pool handle.sessionMetaPath meta
+                                { metaProvider = target.targetProvider, metaConnection = target.targetConnectionId
+                                , metaModel = target.targetModelId, metaTransportModel = Just target.targetWireModelId
+                                , metaDialect = target.targetDialect, metaLastResponseId = Nothing
+                                , metaProviderState = Nothing, metaPromptSnapshot = Nothing
+                                , metaLegacySubagentTarget = Just (sessionLegacySubagentTarget meta) }
+                            pure (Right ())
+                SelectSessionEffort value -> case resolveEffort meta.metaProvider (Just value) of
+                    Left err -> pure (Left err)
+                    Right effort -> do
+                        writeSessionMeta pool handle.sessionMetaPath meta
+                            { metaEffort = reasoningEffortText effort, metaPromptSnapshot = Nothing }
+                        pure (Right ())
+                ClearSessionContext -> fmap (first sessionOperationError . fmap (const ())) (rewindSession handle [])
+                RewindSessionContext index -> loadActiveSession pool root sessionId >>= \case
+                    Left err -> pure (Left (sessionOperationError err))
+                    Right (_, turns) -> case drop index (sessionRewindChoices turns) of
+                        [] -> pure (Left (sessionOperationError "rewind prompt not found"))
+                        (_, retained) : _ -> fmap (first sessionOperationError . fmap (const ())) (rewindSession handle retained)
+  where
+    pool = trustedPool environment.environmentStore
+    root = environment.environmentRoot
+
+patchSessionMetadataForBoundary :: RuntimeEnvironment -> AccessBoundary -> Text -> PatchSessionRequest -> IO (Either ApiError Value)
+patchSessionMetadataForBoundary environment boundary sessionId request =
     loadAuthorizedMeta environment boundary sessionId >>= \case
         Left err -> pure (Left err)
         Right _ -> do
@@ -1355,31 +1415,40 @@ sessionHistoryForBoundary
     -> AccessBoundary
     -> Text
     -> Maybe Integer
+    -> Maybe Integer
     -> Int
     -> IO (Either ApiError Value)
-sessionHistoryForBoundary environment boundary sessionId before limit =
+sessionHistoryForBoundary environment boundary sessionId before after limit =
     loadAuthorizedSession environment boundary sessionId >>= \case
         Left err -> pure (Left err)
         Right (meta, archived) ->
-            case traverse integerToInt64 before of
+            case traverse integerToInt64 after of
                 Left err -> pure (Left err)
-                Right Nothing -> do
-                    page <-
-                        loadRecentSessionHistoryTurns
-                            pool root sessionId limit
-                    pure $
-                        first sessionOperationError
-                            (historyValue meta archived <$> page)
-                Right (Just cursor) -> do
-                    page <-
-                        loadSessionHistoryTurnsBefore
-                            pool root sessionId cursor limit
-                    pure $
-                        first sessionOperationError
-                            (historyValue meta archived <$> page)
+                Right (Just cursor) | cursor < maxBound -> do
+                    page <- loadSessionHistoryTurnsRange pool root sessionId (cursor + 1) limit
+                    finish meta archived page
+                Right (Just _) -> pure (Left (sessionOperationError "history cursor is out of range"))
+                Right Nothing -> case traverse integerToInt64 before of
+                    Left err -> pure (Left err)
+                    Right Nothing -> do
+                        page <- loadRecentSessionHistoryTurns pool root sessionId limit
+                        finish meta archived page
+                    Right (Just cursor) -> do
+                        page <- loadSessionHistoryTurnsBefore pool root sessionId cursor limit
+                        finish meta archived page
   where
     pool = trustedPool environment.environmentStore
     root = environment.environmentRoot
+    finish meta archived = traverse (render meta archived) . first sessionOperationError
+    render meta archived page = case environment.environmentConfig.resolvedAuth.authMode of
+        LoopbackBearerAuth{} -> do
+            rows <- traverse (\(index, turn) -> do
+                envelope <- localValueEnvelope (toJSON turn)
+                pure (object ["index" .= index, "turn" .= projectPublicValue (toJSON turn), "localTurn" .= envelope])) page.pageTurns
+            pure $ case historyValue meta archived page of
+                Object fields -> Object (KeyMap.insert "data" (toJSON rows) fields)
+                value -> value
+        _ -> pure (historyValue meta archived page)
 
 forkSessionForBoundary
     :: RuntimeEnvironment
@@ -1481,8 +1550,9 @@ runTurn environment control spec =
                                         Left err -> pure (Left err)
                                         Right effort ->
                                             withTurnModelInput environment cwd spec \turnInput ->
-                                                withFile "/dev/null" WriteMode \output -> do
+                                                do
                                                     finalOutput <- newIORef Nothing
+                                                    events <- readIORef environment.environmentSessionEvents
                                                     let baseHooks =
                                                             nativeHooks
                                                                 environment
@@ -1501,10 +1571,14 @@ runTurn environment control spec =
                                                                         _ -> pure ()
                                                                     baseHooks.nativeOnLoopEvent event
                                                                 }
-                                                    runNativeTurn
+                                                    runNativeSessionTurn
                                                         environment.environmentNative
-                                                        output
                                                         hooks
+                                                        (case environment.environmentConfig.resolvedAuth.authMode of
+                                                            LoopbackBearerAuth{} -> (localSessionCallbacks control)
+                                                                { sessionAgents = events.sessionAgentActions spec.turnSpecBoundary }
+                                                            _ -> defaultSessionCallbacks)
+                                                        (fromMaybe defaultSessionSettings spec.turnSpecLocalOptions)
                                                         NativeTurnRequest
                                                             { nativeTurnPrompt =
                                                                 turnInput.modelPrompt
@@ -1522,10 +1596,11 @@ runTurn environment control spec =
                                                             , nativeTurnEffort =
                                                                 Just effort
                                                             , nativeTurnInteractionMode =
-                                                                serverInteractionMode
-                                                                    environment
+                                                                maybe (serverInteractionMode environment)
+                                                                    (.sessionInteractionMode) spec.turnSpecLocalOptions
                                                             , nativeTurnShellMode =
-                                                                tenantShellMode environment
+                                                                maybe (tenantShellMode environment)
+                                                                    (.sessionShellMode) spec.turnSpecLocalOptions
                                                             , nativeTurnMessageClock =
                                                                 fmap nativeClock
                                                                     spec.turnSpecMessageClock
@@ -1536,9 +1611,9 @@ runTurn environment control spec =
                                                                 readIORef finalOutput
                                                                     >>= pure
                                                                         . maybe
-                                                                            ( Left
-                                                                                "agent turn completed without a terminal output"
-                                                                            )
+                                                                            (if maybe ConversationTurn (.sessionOperation) spec.turnSpecLocalOptions /= ConversationTurn
+                                                                                then Right (TurnExecutionOutput control.turnControlId.unTurnId Nothing False TurnCompletionComplete)
+                                                                                else Left "agent turn completed without a terminal output")
                                                                             ( Right
                                                                                 . turnExecutionOutput
                                                                             )
@@ -1599,8 +1674,11 @@ nativeHooks
     -> NativeRunHooks
 nativeHooks environment control sessionId cwd dialect = NativeRunHooks
     { nativeOnLoopEvent = \event ->
-        let (eventType, value) = projectLoopEvent event
-        in control.turnControlEmit eventType value
+        do
+            (eventType, value) <- case environment.environmentConfig.resolvedAuth.authMode of
+                LoopbackBearerAuth{} -> localLoopEvent control.turnControlId.unTurnId event
+                _ -> pure (projectLoopEvent event)
+            control.turnControlEmit eventType value
     , nativeInitialTurnInputs = Nothing
     , nativeMcpCallContext = Just McpCallContext
         { mcpCallTurnId = control.turnControlId.unTurnId
@@ -1815,10 +1893,11 @@ planHooks control = PlanModeHooks
         control.turnControlRequestInput HumanRequestSpec
             { humanRequestSpecKind = PlanQuestionRequest
             , humanRequestSpecPrompt = question
-            , humanRequestSpecOptions = options <> ["custom"]
+            , humanRequestSpecOptions = options <> ["custom", "cancel"]
             } >>= \case
                 Left _ -> pure Nothing
                 Right response
+                    | response.humanResponseDecision == "cancel" -> pure Nothing
                     | response.humanResponseDecision == "custom" ->
                         pure response.humanResponseValue
                     | otherwise ->

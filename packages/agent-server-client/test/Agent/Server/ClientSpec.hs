@@ -1,11 +1,14 @@
 module Agent.Server.ClientSpec (spec) where
 
 import Agent.Server.Client
+import Agent.Server.Client.Local
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
 import Control.Exception (bracket)
+import Control.Exception.Safe qualified as Safe
 import Data.Aeson qualified as Aeson
 import Data.ByteString qualified as ByteString
+import Data.ByteString.Builder (lazyByteString)
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.IORef
 import Data.Text (Text)
@@ -13,7 +16,9 @@ import Data.Text qualified as Text
 import Network.HTTP.Types
 import Network.Wai
 import Network.Wai.Handler.Warp (testWithApplication)
-import System.Directory (getTemporaryDirectory, removeFile)
+import System.Directory (getTemporaryDirectory, removeFile, createDirectory, removePathForcibly)
+import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.FilePath ((</>))
 import System.IO (hClose, openBinaryTempFile)
 import System.Posix.Files (setFileMode)
 import System.Timeout (timeout)
@@ -21,6 +26,85 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "agent-server HTTP client" do
+    it "reads a private local descriptor through EOF and validates its protocol" do
+        parent <- getTemporaryDirectory
+        let allocate = do
+                (directory, handle) <- openBinaryTempFile parent "local-service-descriptor"
+                hClose handle
+                removeFile directory
+                createDirectory directory
+                pure directory
+        bracket allocate removePathForcibly \directory -> do
+            let path = directory </> "local-server.json"
+                credential = directory </> "server.token"
+                write version = do
+                    LazyByteString.writeFile path (Aeson.encode (Aeson.object
+                        [ "protocolVersion" Aeson..= (version :: Int)
+                        , "serverInstanceId" Aeson..= ("fixture" :: Text)
+                        , "buildCommit" Aeson..= ("test" :: Text)
+                        , "baseUrl" Aeson..= ("http://127.0.0.1:4096" :: Text)
+                        , "credentialFile" Aeson..= credential ]))
+                    setFileMode path 0o600
+            bracket (lookupEnv "HASKELL_AGENT_RUNTIME_DIR" <* setEnv "HASKELL_AGENT_RUNTIME_DIR" directory)
+                (maybe (unsetEnv "HASKELL_AGENT_RUNTIME_DIR") (setEnv "HASKELL_AGENT_RUNTIME_DIR")) \_ -> do
+                readLocalServiceDescriptor `shouldReturn` Left LocalServiceAbsent
+                write 1
+                readLocalServiceDescriptor `shouldReturn` Right (LocalServiceDescriptor
+                    1 "fixture" "test" "http://127.0.0.1:4096" credential)
+                write 2
+                readLocalServiceDescriptor `shouldReturn` Left (LocalServiceIncompatible 2)
+
+    it "accepts an empty successful delete response" do
+        withTestClient (\_ respond -> respond (responseLBS status204 [] "")) \client ->
+            (performAgentServerJsonRequest client "DELETE" "/v1/sessions/fixture" [204] Nothing
+                :: IO (Either AgentServerClientError Aeson.Value)) `shouldReturn` Right Aeson.Null
+
+    it "binds frontend requests to a lease and releases it after the client exits" do
+        observed <- newIORef []
+        let application request respond = do
+                atomicModifyIORef' observed \requests ->
+                    (requests <> [(request.requestMethod, rawPathInfo request,
+                        lookup "X-Agent-Client-Id" request.requestHeaders)], ())
+                respond $ responseLBS
+                    (if request.pathInfo == ["v1", "clients"] then status201
+                        else if request.requestMethod == "DELETE" then status202 else status200)
+                    [(hContentType, "application/json")]
+                    (if request.pathInfo == ["v1", "clients"]
+                        then "{\"id\":\"frontend-1\",\"heartbeatIntervalMs\":100,\"leaseTimeoutMs\":500}"
+                        else "{}")
+        withTestClient application \client -> do
+            result <- withLocalClientLease client \owned lease -> do
+                attachLocalClientSession owned lease "session/a" >>= \case
+                    Right _ -> pure ()
+                    Left err -> expectationFailure (show err)
+            result `shouldBe` Right ()
+        readIORef observed `shouldReturn`
+            [ ("POST", "/v1/clients", Nothing)
+            , ("POST", "/v1/clients/frontend-1/sessions/session%2Fa", Just "frontend-1")
+            , ("DELETE", "/v1/clients/frontend-1", Nothing)
+            ]
+
+    it "cancels the frontend action and releases ownership after a heartbeat failure" do
+        cancelled <- newEmptyMVar
+        block <- newEmptyMVar
+        released <- newIORef False
+        let application request respond = case request.pathInfo of
+                ["v1", "clients"] -> respond (responseLBS status201 [(hContentType, "application/json")]
+                    "{\"id\":\"frontend-1\",\"heartbeatIntervalMs\":100,\"leaseTimeoutMs\":500}")
+                ["v1", "clients", _, "heartbeat"] -> respond (responseLBS status503 [(hContentType, "application/json")]
+                    "{\"error\":{\"code\":\"unavailable\",\"message\":\"unavailable\"}}")
+                _ -> do
+                    writeIORef released True
+                    respond (responseLBS status202 [(hContentType, "application/json")] "{}")
+        withTestClient application \client -> do
+            result <- timeout 1_000_000 $ withLocalClientLease client \_ _ ->
+                (takeMVar block :: IO ()) `Safe.finally` putMVar cancelled ()
+            case result of
+                Just (Left (AgentServerHttpError 503 _ _)) -> pure ()
+                other -> expectationFailure (show other)
+        takeMVar cancelled
+        readIORef released `shouldReturn` True
+
     it "fetches and acknowledges read receipts without retrying conflicts" do
         observed <- newEmptyMVar
         let receipt = "{\"revision\":\"revision-1\",\"unread\":true,\"first_unread_turn\":0}"
@@ -334,6 +418,20 @@ spec = describe "agent-server HTTP client" do
             readIORef seen `shouldReturn` 1
             takeMVar cursor `shouldReturn` Just "0"
 
+    it "finishes a slow presentation callback before durable terminal refetch" do
+        delivered <- newIORef False
+        let application request respond
+                | request.pathInfo == ["v1", "events"] =
+                    respond (responseLBS status200 [(hContentType, "text/event-stream")] completedEvent)
+                | otherwise = respond (responseLBS status200 [(hContentType, "application/json")]
+                    completedTurnPayload)
+        withTestClient application \client -> do
+            streamAgentServerTurn client validTurnId Nothing (\_ -> do
+                threadDelay 1200000
+                writeIORef delivered True
+                pure (Right ())) `shouldReturn` Right AgentServerStreamCompleted
+            readIORef delivered `shouldReturn` True
+
     it "surfaces replay resets from the live stream" do
         let application _ respond =
                 respond $
@@ -467,6 +565,26 @@ spec = describe "agent-server HTTP client" do
                 `shouldBe` Just (Right (AgentServerStreamNeedsRefetch 0))
             takeMVar requestQuery
                 `shouldReturn` "?turnId=01991f6d-7200-7000-8000-000000000001"
+
+    it "keeps a known pending dialog on one healthy stream across durable polls" do
+        subscriptions <- newIORef (0 :: Int)
+        let application request respond
+                | rawPathInfo request == "/v1/events" = do
+                    modifyIORef' subscriptions (+ 1)
+                    respond $ responseStream status200 [(hContentType, "text/event-stream")] \write flush -> do
+                        write ": connected\n\n"
+                        flush
+                        threadDelay 1200000
+                        write (lazyByteString completedEvent)
+                        flush
+                | rawPathInfo request == "/v1/requests" =
+                    respond (responseLBS status200 [(hContentType, "application/json")] pendingRequestPayload)
+                | otherwise = respond (responseLBS status200 [(hContentType, "application/json")] turnPayload)
+        withTestClient application \client -> do
+            streamAgentServerTurnWithKnownRequests client validTurnId Nothing
+                (pure ["01991f6d-7200-7000-8000-000000000004"]) (const (pure (Right ())))
+                `shouldReturn` Right AgentServerStreamCompleted
+            readIORef subscriptions `shouldReturn` 1
 
     it "bounds an unterminated SSE frame" do
         let application _ respond =

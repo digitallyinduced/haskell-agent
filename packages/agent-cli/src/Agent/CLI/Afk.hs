@@ -49,11 +49,17 @@ parseAfkTarget (Just raw) =
 handoffLocal :: Text -> OsPath -> IO (Either Text Text)
 handoffLocal sessionId cwd = do
     executable <- localExecutable
+    profile <- mapM (\name -> fmap ((name <>) . ("=" <>)) <$> lookupEnv name)
+        [ "HASKELL_AGENT_HOME", "HASKELL_AGENT_RUNTIME_DIR", "HASKELL_AGENT_SERVER"
+        , "AGENT_SERVER_STATE_DIRECTORY", "agent_server_datadir"
+        , "HASKELL_AGENT_DEV_ROOT", "HASKELL_AGENT_DEV_OWNER"
+        , "HASKELL_AGENT_SERVER_STARTUP_TIMEOUT_SECONDS" ]
     let name = tmuxName sessionId
+        command = "env " <> concat [quote value <> " " | Just value <- profile] <> quote executable
         script =
-            quote executable
+            command
                 <> " sessions wait " <> quote (Text.unpack sessionId)
-                <> " && exec " <> quote executable
+                <> " && exec " <> command
                 <> " --resume " <> quote (Text.unpack sessionId)
                 <> " --cwd " <> quote (unsafeToFilePath cwd)
     runChecked "tmux"

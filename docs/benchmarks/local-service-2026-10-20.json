@@ -1,0 +1,368 @@
+[
+  {
+    "baseline": {
+      "medianAfterAnswerExitMs": 80.854,
+      "medianAllocatedBytes": 53192048,
+      "medianCpuSeconds": 0.14,
+      "medianElapsedMs": 333.508,
+      "runs": [
+        {
+          "afterAnswerExitMs": 72.494,
+          "allocatedBytes": 53235360,
+          "cpuSeconds": 0.14,
+          "elapsedMs": 313.771
+        },
+        {
+          "afterAnswerExitMs": 72.784,
+          "allocatedBytes": 53192048,
+          "cpuSeconds": 0.13,
+          "elapsedMs": 320.722
+        },
+        {
+          "afterAnswerExitMs": 82.397,
+          "allocatedBytes": 53154344,
+          "cpuSeconds": 0.13,
+          "elapsedMs": 324.821
+        },
+        {
+          "afterAnswerExitMs": 80.854,
+          "allocatedBytes": 53150776,
+          "cpuSeconds": 0.15,
+          "elapsedMs": 344.519
+        },
+        {
+          "afterAnswerExitMs": 83.309,
+          "allocatedBytes": 53025968,
+          "cpuSeconds": 0.15000000000000002,
+          "elapsedMs": 346.737
+        },
+        {
+          "afterAnswerExitMs": 78.526,
+          "allocatedBytes": 53238560,
+          "cpuSeconds": 0.15000000000000002,
+          "elapsedMs": 333.508
+        },
+        {
+          "afterAnswerExitMs": 83.342,
+          "allocatedBytes": 53215424,
+          "cpuSeconds": 0.14,
+          "elapsedMs": 342.997
+        }
+      ]
+    },
+    "baselineCold": {
+      "afterAnswerExitMs": 79.879,
+      "allocatedBytes": 53339392,
+      "cpuSeconds": 0.29,
+      "elapsedMs": 715.135
+    },
+    "baselineMcpStarts": 8,
+    "mcpServers": 1,
+    "samples": 7,
+    "serverAllocatedBytesIncludingStartupEightTurns": 215012928,
+    "serverCpuSecondsIncludingStartupEightTurns": 0.319,
+    "serverResidentKiB": 100640,
+    "serverStopAndCleanupMs": 142.719,
+    "service": {
+      "medianAfterAnswerExitMs": 13.302,
+      "medianAllocatedBytes": 34377976,
+      "medianCpuSeconds": 0.1,
+      "medianElapsedMs": 180.832,
+      "runs": [
+        {
+          "afterAnswerExitMs": 12.375,
+          "allocatedBytes": 33486632,
+          "cpuSeconds": 0.1,
+          "elapsedMs": 163.066
+        },
+        {
+          "afterAnswerExitMs": 27.357,
+          "allocatedBytes": 33789432,
+          "cpuSeconds": 0.1,
+          "elapsedMs": 191.73
+        },
+        {
+          "afterAnswerExitMs": 11.234,
+          "allocatedBytes": 34084896,
+          "cpuSeconds": 0.11,
+          "elapsedMs": 189.548
+        },
+        {
+          "afterAnswerExitMs": 27.429,
+          "allocatedBytes": 34377976,
+          "cpuSeconds": 0.11,
+          "elapsedMs": 222.683
+        },
+        {
+          "afterAnswerExitMs": 19.06,
+          "allocatedBytes": 34618848,
+          "cpuSeconds": 0.1,
+          "elapsedMs": 178.968
+        },
+        {
+          "afterAnswerExitMs": 10.105,
+          "allocatedBytes": 34985176,
+          "cpuSeconds": 0.1,
+          "elapsedMs": 165.394
+        },
+        {
+          "afterAnswerExitMs": 13.302,
+          "allocatedBytes": 35282648,
+          "cpuSeconds": 0.1,
+          "elapsedMs": 180.832
+        }
+      ]
+    },
+    "serviceCold": {
+      "afterAnswerExitMs": 25.445,
+      "allocatedBytes": 45244840,
+      "cpuSeconds": 0.12,
+      "elapsedMs": 3418.371
+    },
+    "serviceMcpStarts": 1
+  },
+  {
+    "baseline": {
+      "medianAfterAnswerExitMs": 81.668,
+      "medianAllocatedBytes": 83399616,
+      "medianCpuSeconds": 0.22999999999999998,
+      "medianElapsedMs": 365.862,
+      "runs": [
+        {
+          "afterAnswerExitMs": 79.344,
+          "allocatedBytes": 83399616,
+          "cpuSeconds": 0.24,
+          "elapsedMs": 373.387
+        },
+        {
+          "afterAnswerExitMs": 83.244,
+          "allocatedBytes": 83112784,
+          "cpuSeconds": 0.22999999999999998,
+          "elapsedMs": 378.647
+        },
+        {
+          "afterAnswerExitMs": 81.668,
+          "allocatedBytes": 83477864,
+          "cpuSeconds": 0.21000000000000002,
+          "elapsedMs": 354.41
+        },
+        {
+          "afterAnswerExitMs": 83.739,
+          "allocatedBytes": 83444248,
+          "cpuSeconds": 0.21000000000000002,
+          "elapsedMs": 353.087
+        },
+        {
+          "afterAnswerExitMs": 80.776,
+          "allocatedBytes": 83384200,
+          "cpuSeconds": 0.22999999999999998,
+          "elapsedMs": 365.862
+        },
+        {
+          "afterAnswerExitMs": 73.416,
+          "allocatedBytes": 83454616,
+          "cpuSeconds": 0.22999999999999998,
+          "elapsedMs": 368.008
+        },
+        {
+          "afterAnswerExitMs": 83.412,
+          "allocatedBytes": 83395264,
+          "cpuSeconds": 0.19,
+          "elapsedMs": 342.838
+        }
+      ]
+    },
+    "baselineCold": {
+      "afterAnswerExitMs": 88.953,
+      "allocatedBytes": 83508544,
+      "cpuSeconds": 0.24,
+      "elapsedMs": 371.026
+    },
+    "baselineMcpStarts": 32,
+    "mcpServers": 4,
+    "samples": 7,
+    "serverAllocatedBytesIncludingStartupEightTurns": 246173136,
+    "serverCpuSecondsIncludingStartupEightTurns": 0.271,
+    "serverResidentKiB": 113152,
+    "serverStopAndCleanupMs": 159.731,
+    "service": {
+      "medianAfterAnswerExitMs": 13.567,
+      "medianAllocatedBytes": 34379912,
+      "medianCpuSeconds": 0.1,
+      "medianElapsedMs": 157.549,
+      "runs": [
+        {
+          "afterAnswerExitMs": 12.276,
+          "allocatedBytes": 33464008,
+          "cpuSeconds": 0.1,
+          "elapsedMs": 160.405
+        },
+        {
+          "afterAnswerExitMs": 13.567,
+          "allocatedBytes": 33784880,
+          "cpuSeconds": 0.09,
+          "elapsedMs": 150.971
+        },
+        {
+          "afterAnswerExitMs": 17.567,
+          "allocatedBytes": 34085408,
+          "cpuSeconds": 0.1,
+          "elapsedMs": 162.78
+        },
+        {
+          "afterAnswerExitMs": 10.865,
+          "allocatedBytes": 34379912,
+          "cpuSeconds": 0.1,
+          "elapsedMs": 161.102
+        },
+        {
+          "afterAnswerExitMs": 13.192,
+          "allocatedBytes": 34683296,
+          "cpuSeconds": 0.09,
+          "elapsedMs": 148.48
+        },
+        {
+          "afterAnswerExitMs": 15.428,
+          "allocatedBytes": 34945864,
+          "cpuSeconds": 0.1,
+          "elapsedMs": 157.549
+        },
+        {
+          "afterAnswerExitMs": 14.627,
+          "allocatedBytes": 35280400,
+          "cpuSeconds": 0.1,
+          "elapsedMs": 155.827
+        }
+      ]
+    },
+    "serviceCold": {
+      "afterAnswerExitMs": 22.226,
+      "allocatedBytes": 43068360,
+      "cpuSeconds": 0.11,
+      "elapsedMs": 498.143
+    },
+    "serviceMcpStarts": 4
+  },
+  {
+    "baseline": {
+      "medianAfterAnswerExitMs": 76.679,
+      "medianAllocatedBytes": 53225536,
+      "medianCpuSeconds": 0.13,
+      "medianElapsedMs": 325.824,
+      "runs": [
+        {
+          "afterAnswerExitMs": 76.651,
+          "allocatedBytes": 53242088,
+          "cpuSeconds": 0.14,
+          "elapsedMs": 339.801
+        },
+        {
+          "afterAnswerExitMs": 73.754,
+          "allocatedBytes": 53236320,
+          "cpuSeconds": 0.13,
+          "elapsedMs": 320.836
+        },
+        {
+          "afterAnswerExitMs": 81.794,
+          "allocatedBytes": 53234968,
+          "cpuSeconds": 0.13,
+          "elapsedMs": 333.541
+        },
+        {
+          "afterAnswerExitMs": 69.637,
+          "allocatedBytes": 53167512,
+          "cpuSeconds": 0.13,
+          "elapsedMs": 317.904
+        },
+        {
+          "afterAnswerExitMs": 80.203,
+          "allocatedBytes": 53225536,
+          "cpuSeconds": 0.14,
+          "elapsedMs": 325.122
+        },
+        {
+          "afterAnswerExitMs": 80.785,
+          "allocatedBytes": 53128856,
+          "cpuSeconds": 0.13,
+          "elapsedMs": 325.824
+        },
+        {
+          "afterAnswerExitMs": 76.679,
+          "allocatedBytes": 53064624,
+          "cpuSeconds": 0.14,
+          "elapsedMs": 326.675
+        }
+      ]
+    },
+    "baselineCold": {
+      "afterAnswerExitMs": 72.486,
+      "allocatedBytes": 52990616,
+      "cpuSeconds": 0.14,
+      "elapsedMs": 320.784
+    },
+    "baselineMcpStarts": 8,
+    "mcpServers": 1,
+    "samples": 7,
+    "serverAllocatedBytesIncludingStartupEightTurns": 215806352,
+    "serverCpuSecondsIncludingStartupEightTurns": 0.289,
+    "serverResidentKiB": 101584,
+    "serverStopAndCleanupMs": 147.892,
+    "service": {
+      "medianAfterAnswerExitMs": 19.855,
+      "medianAllocatedBytes": 34091392,
+      "medianCpuSeconds": 0.1,
+      "medianElapsedMs": 172.785,
+      "runs": [
+        {
+          "afterAnswerExitMs": 13.176,
+          "allocatedBytes": 33482624,
+          "cpuSeconds": 0.1,
+          "elapsedMs": 172.785
+        },
+        {
+          "afterAnswerExitMs": 20.034,
+          "allocatedBytes": 33760248,
+          "cpuSeconds": 0.11,
+          "elapsedMs": 359.076
+        },
+        {
+          "afterAnswerExitMs": 45.106,
+          "allocatedBytes": 33431416,
+          "cpuSeconds": 0.14,
+          "elapsedMs": 791.975
+        },
+        {
+          "afterAnswerExitMs": 19.855,
+          "allocatedBytes": 34091392,
+          "cpuSeconds": 0.13,
+          "elapsedMs": 434.178
+        },
+        {
+          "afterAnswerExitMs": 19.884,
+          "allocatedBytes": 34673488,
+          "cpuSeconds": 0.1,
+          "elapsedMs": 171.117
+        },
+        {
+          "afterAnswerExitMs": 17.651,
+          "allocatedBytes": 34990840,
+          "cpuSeconds": 0.1,
+          "elapsedMs": 162.886
+        },
+        {
+          "afterAnswerExitMs": 19.09,
+          "allocatedBytes": 35297408,
+          "cpuSeconds": 0.1,
+          "elapsedMs": 158.428
+        }
+      ]
+    },
+    "serviceCold": {
+      "afterAnswerExitMs": 15.273,
+      "allocatedBytes": 43043992,
+      "cpuSeconds": 0.1,
+      "elapsedMs": 398.501
+    },
+    "serviceMcpStarts": 1
+  }
+]

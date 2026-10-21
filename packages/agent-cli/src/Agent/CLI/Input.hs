@@ -42,6 +42,7 @@ import Agent.CLI.Clipboard
     ( nonEmptyClipboardText
     , readClipboardText
     )
+import Agent.CLI.TerminalSize (getTerminalSize)
 import Agent.CLI.Dictation
     ( DictationTarget(..)
     , dictateForTarget
@@ -96,8 +97,7 @@ import qualified Data.Text.IO as Text
 import qualified Data.Text.Lazy as LazyText
 import qualified Data.Text.Lazy.Builder as TextBuilder
 import System.Console.ANSI
-    ( getTerminalSize
-    , hHideCursor
+    ( hHideCursor
     , hShowCursor
     )
 import System.Console.ANSI.Codes

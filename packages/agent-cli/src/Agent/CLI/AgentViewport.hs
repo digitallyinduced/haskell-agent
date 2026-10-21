@@ -83,7 +83,7 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
-import System.Console.ANSI (getTerminalSize)
+import Agent.CLI.TerminalSize (getTerminalSize)
 import Agent.CLI.TerminalDiagnostics (getTerminalStderr)
 import System.IO (hFlush, hIsTerminalDevice, stdin)
 

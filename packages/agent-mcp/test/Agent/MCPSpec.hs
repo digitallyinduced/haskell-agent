@@ -2280,6 +2280,74 @@ spec = describe "Agent.MCP" do
                     releaseMcpFleetLease second
                     countStarts counter `shouldReturn` 2
 
+        it "retains idle fleets when switching between workspaces" $
+            withCountingFakeServer \script counter -> do
+                supervisor <- newMcpSupervisor
+                bracket (pure supervisor) closeMcpSupervisor \_ -> do
+                    let firstConfig = (baseConfig "first-workspace" script)
+                            { mcpServerArgs = [counter] }
+                        secondConfig = firstConfig { mcpServerName = "second-workspace" }
+                    first <- acquireMcpFleet supervisor [firstConfig]
+                    releaseMcpFleetLease first
+                    second <- acquireMcpFleet supervisor [secondConfig]
+                    releaseMcpFleetLease second
+                    resumed <- acquireMcpFleet supervisor [firstConfig]
+                    releaseMcpFleetLease resumed
+                    countStarts counter `shouldReturn` 2
+
+        it "bounds idle fleets without evicting an active lease" $
+            withCountingFakeServer \script counter -> do
+                supervisor <- newMcpSupervisor
+                bracket (pure supervisor) closeMcpSupervisor \_ -> do
+                    let config index = (baseConfig ("workspace-" <> Text.pack (show index)) script)
+                            { mcpServerArgs = [counter] }
+                    active <- acquireMcpFleet supervisor [config (0 :: Int)]
+                    forM_ [1 .. 9 :: Int] \index -> do
+                        lease <- acquireMcpFleet supervisor [config index]
+                        releaseMcpFleetLease lease
+                    sameActive <- acquireMcpFleet supervisor [config (0 :: Int)]
+                    releaseMcpFleetLease sameActive
+                    countStarts counter `shouldReturn` 10
+                    replaced <- acquireMcpFleet supervisor [config (1 :: Int)]
+                    releaseMcpFleetLease replaced
+                    countStarts counter `shouldReturn` 11
+                    releaseMcpFleetLease active
+
+        it "isolates active session callbacks and rebinds idle transports" $
+            withCountingFakeServer \script counter -> do
+                supervisor <- newMcpSupervisor
+                bracket (pure supervisor) closeMcpSupervisor \_ -> do
+                    let config = (baseConfig "interactive" script)
+                            { mcpServerArgs = [counter] }
+                        hooks identity uri = McpSessionHooks
+                            { mcpSessionIdentity = identity
+                            , mcpSessionElicit = Nothing
+                            , mcpSessionRoots = Just (\_ -> pure [McpRoot uri Nothing])
+                            , mcpSessionSample = Nothing
+                            }
+                        acquire identity uri = acquireMcpFleetForSession
+                            supervisor (hooks identity uri) False (const (pure ())) [config] []
+                        roots :: McpFleetLease -> IO [McpRoot]
+                        roots lease = lease.mcpLeaseFleet.mcpFleetHooks.mcpHostRoots
+                            >>= maybe (pure []) (\callback -> callback "interactive")
+                    first <- acquire "first-session" "file:///first"
+                    shared <- acquire "first-session" "file:///first"
+                    roots first `shouldReturn` [McpRoot "file:///first" Nothing]
+                    releaseMcpFleetLease shared
+                    roots first `shouldReturn` [McpRoot "file:///first" Nothing]
+                    second <- acquire "second-session" "file:///second"
+                    roots first `shouldReturn` [McpRoot "file:///first" Nothing]
+                    roots second `shouldReturn` [McpRoot "file:///second" Nothing]
+                    countStarts counter `shouldReturn` 2
+                    releaseMcpFleetLease first
+                    roots first `shouldReturn` []
+                    resumed <- acquire "third-session" "file:///third"
+                    roots resumed `shouldReturn` [McpRoot "file:///third" Nothing]
+                    roots second `shouldReturn` [McpRoot "file:///second" Nothing]
+                    countStarts counter `shouldReturn` 2
+                    releaseMcpFleetLease resumed
+                    releaseMcpFleetLease second
+
         it "discards an idle fleet when restarted" $
             withCountingFakeServer \script counter -> do
                 supervisor <- newMcpSupervisor
@@ -2345,6 +2413,13 @@ spec = describe "Agent.MCP" do
                                 takeMVar obsoleteCleanupRelease
                     takeMVar obsoleteStarted
                     releaseMcpFleetLease oldLease
+                    -- Fill the bounded idle cache so the next acquisition
+                    -- retires the oldest transport while its startup runs.
+                    forM_ [1 .. 7 :: Int] \index -> do
+                        retained <- acquireMcpFleetWith supervisor False
+                            (const (startMcpFleet []))
+                            [baseConfig ("retained-" <> Text.pack (show index)) "/unused"]
+                        releaseMcpFleetLease retained
                     let startReplacement _ =
                             (putMVar startupStarted ()
                                 >> takeMVar startupBlock

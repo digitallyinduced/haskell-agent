@@ -29,22 +29,20 @@ module Agent.CLI.NativeRuntime
     , runNativeTurn
     ) where
 
-import qualified Agent.Runtime.NativeProcess as NativeProcess
+import Agent.Runtime.Process
+    ( NativeProcessRuntime
+    , newNativeProcessRuntime
+    , newNativeProcessRuntimeWithIntegrations
+    , newNativeProcessRuntimeWithOrganizationIntegrations
+    , newNativeProcessRuntimeWithCredentialRuntime
+    , closeNativeProcessRuntime
+    , restartNativeMcpRuntime
+    , nativeProcessIntegrationSupervisor
+    , acquireNativeLocalIntegrationRuntime
+    , nativeAgentProcessRuntime
+    )
 import Agent.CLI.Session.Lifecycle (exitFailedTurn)
 import Agent.CLI.Session.Runner.Execution (applyNativeInteractionMode)
-import Agent.Integration.API
-    ( IntegrationSupervisor
-    , IntegrationRuntime(..)
-    , IntegrationAuthority(..)
-    , acquireIntegrationRuntime
-    , newIntegrationSupervisor
-    , closeIntegrationSupervisor
-    , newIntegrationSupervisorWithOrganizationProvider
-    , resetIntegrationSupervisor
-    , IntegrationProvider
-    , OrganizationIntegrationProvider
-    , emptyIntegrationProvider
-    )
 import Agent.Runtime.StartupPolicy
     ( NativeStartupPolicy(..)
     , NativeContextSources(..)
@@ -64,11 +62,9 @@ import Agent.CLI.Options
     , defaultCliOptions
     , parseArgs
     )
-import Agent.Connectivity.NetworkPath (networkRecovery)
 import Agent.CLI.Runtime.Orchestration (runAgentWithRuntime)
 import Agent.CLI.Runtime.Orchestration.Types
-    ( AgentProcessRuntime(..)
-    , NativeInteractionMode(..)
+    ( NativeInteractionMode(..)
     , NativeDiscoveryContext(..)
     , NativeWorkspaceDiscovery(..)
     , NativeRunCapabilities(..)
@@ -88,103 +84,10 @@ import Agent.Runtime.Request
     )
 import Agent.CLI.Timestamp (MessageClock, parseMessageClock)
 import Agent.TUI.Motion (MotionMode(..))
-import Agent.Tools.Types (defaultToolEnv)
-import qualified Agent.MCP as MCP
-import Agent.Runtime.McpConnectionRuntime (mcpConnectionCredentials, registerMcpConnectionRuntime, observeMcpConnectionInfo)
-import Agent.Runtime.McpConnectionCredentials (CredentialRuntime, newCredentialRuntime)
-import Control.Exception.Safe (finally, mask, onException)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.IO (Handle)
 import System.OsPath (OsPath)
-
--- | Native process resources, including the shared in-memory integrations
--- host. Shared process resources live in @agent-runtime@; frontend lifecycle
--- wiring remains here.
-data NativeProcessRuntime = NativeProcessRuntime
-    { nativeProcessCore :: !NativeProcess.NativeProcessRuntime
-    , nativeIntegrationSupervisor :: !IntegrationSupervisor
-    , nativeLocalIntegrationSupervisor :: !IntegrationSupervisor
-    , nativeUnregisterMcpConnections :: !(IO ())
-    }
-
-newNativeProcessRuntime :: OsPath -> IO NativeProcessRuntime
-newNativeProcessRuntime = newNativeProcessRuntimeWithIntegrations emptyIntegrationProvider
-
-newNativeProcessRuntimeWithIntegrations
-    :: IntegrationProvider -> OsPath -> IO NativeProcessRuntime
-newNativeProcessRuntimeWithIntegrations provider =
-    newNativeProcessRuntimeWithOrganizationIntegrations provider Nothing
-
--- | Organization-local execution is a separate distribution opt-in; supplying
--- an ordinary local provider alone never enables it for gateway users.
-newNativeProcessRuntimeWithOrganizationIntegrations
-    :: IntegrationProvider -> Maybe OrganizationIntegrationProvider
-    -> OsPath -> IO NativeProcessRuntime
-newNativeProcessRuntimeWithOrganizationIntegrations provider organizationProvider root = do
-    credentials <- newCredentialRuntime Nothing
-    newNativeProcessRuntimeWithCredentialRuntime credentials provider organizationProvider root
-
--- | The application supplies one credential runtime shared by every process
--- owner and catalog operation. Never allocate its lock registries per session.
-newNativeProcessRuntimeWithCredentialRuntime
-    :: CredentialRuntime -> IntegrationProvider -> Maybe OrganizationIntegrationProvider
-    -> OsPath -> IO NativeProcessRuntime
-newNativeProcessRuntimeWithCredentialRuntime credentials provider organizationProvider root = mask \restore -> do
-    integrationToolEnv <- restore (defaultToolEnv root)
-    localIntegrations <- restore (newIntegrationSupervisor provider integrationToolEnv)
-    -- Direct turns borrow the same local owner used by native account settings.
-    -- Changing gateway identity must retire banking, not an ongoing mail OAuth flow.
-    let borrowedLocalProvider _ =
-            fmap (fmap (\runtime -> runtime { closeIntegrationRuntime = pure () }))
-                (acquireIntegrationRuntime localIntegrations LocalIntegrationAuthority)
-    integrations <-
-        restore (newIntegrationSupervisorWithOrganizationProvider
-            borrowedLocalProvider organizationProvider integrationToolEnv)
-            `onException` closeIntegrationSupervisor localIntegrations
-    core <- restore (NativeProcess.newNativeProcessRuntimeWithMcpHooks
-        MCP.defaultMcpHostHooks
-            { MCP.mcpHostCredentials = mcpConnectionCredentials credentials
-            , MCP.mcpHostServerInfo = observeMcpConnectionInfo
-            }
-        root) `onException` (closeIntegrationSupervisor integrations
-            `finally` closeIntegrationSupervisor localIntegrations)
-    unregister <- registerMcpConnectionRuntime (NativeProcess.restartNativeMcpRuntime core)
-        `onException` (NativeProcess.closeNativeProcessRuntime core
-            `finally` closeIntegrationSupervisor integrations
-            `finally` closeIntegrationSupervisor localIntegrations)
-    pure NativeProcessRuntime
-        { nativeProcessCore = core
-        , nativeIntegrationSupervisor = integrations
-        , nativeLocalIntegrationSupervisor = localIntegrations
-        , nativeUnregisterMcpConnections = unregister
-        }
-
-closeNativeProcessRuntime :: NativeProcessRuntime -> IO ()
-closeNativeProcessRuntime runtime =
-    runtime.nativeUnregisterMcpConnections
-        `finally` NativeProcess.closeNativeProcessRuntime runtime.nativeProcessCore
-        `finally`
-            closeIntegrationSupervisor runtime.nativeIntegrationSupervisor
-                `finally` closeIntegrationSupervisor runtime.nativeLocalIntegrationSupervisor
-
-restartNativeMcpRuntime :: NativeProcessRuntime -> IO ()
-restartNativeMcpRuntime runtime =
-    NativeProcess.restartNativeMcpRuntime runtime.nativeProcessCore
-        `finally` resetIntegrationSupervisor runtime.nativeIntegrationSupervisor
-
-nativeProcessIntegrationSupervisor
-    :: NativeProcessRuntime
-    -> IntegrationSupervisor
-nativeProcessIntegrationSupervisor = (.nativeIntegrationSupervisor)
-
--- | Native account administration is always device-local. It neither changes
--- the turn's authority nor acquires/exposes local tools to organization turns.
-acquireNativeLocalIntegrationRuntime
-    :: NativeProcessRuntime -> IO (Either Text IntegrationRuntime)
-acquireNativeLocalIntegrationRuntime runtime =
-    acquireIntegrationRuntime runtime.nativeLocalIntegrationSupervisor
-        LocalIntegrationAuthority
 
 -- | Execute one typed native turn without reconstructing command-line
 -- arguments.
@@ -288,26 +191,7 @@ runNativeOptions
     -> IO (Either Text ())
 runNativeOptions runtime output cwd hooks options =
     runAgentWithRuntime
-        AgentProcessRuntime
-            { processMcpSupervisor =
-                runtime.nativeProcessCore.nativeMcpSupervisor
-            , processIntegrationSupervisor =
-                runtime.nativeIntegrationSupervisor
-            , processSessionThreads =
-                runtime.nativeProcessCore.nativeSessionThreads
-            , processToolResourceArbiter =
-                runtime.nativeProcessCore.nativeToolResourceArbiter
-            , processStartCleanup =
-                runtime.nativeProcessCore.nativeStartCleanup
-            , processMcpElicitation =
-                runtime.nativeProcessCore.nativeMcpElicitation
-            , processMcpRoots =
-                runtime.nativeProcessCore.nativeMcpRoots
-            , processMcpSampling =
-                runtime.nativeProcessCore.nativeMcpSampling
-            , processNetworkRecovery =
-                networkRecovery runtime.nativeProcessCore.nativeNetworkRecovery
-            }
+        (nativeAgentProcessRuntime runtime)
         (nativeRunMode output cwd hooks)
         (applyNativeStartupPolicy hooks.nativeStartupPolicy cwd
             (shellOptions options)) >>= \case

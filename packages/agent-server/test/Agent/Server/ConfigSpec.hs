@@ -100,6 +100,9 @@ spec = describe "server configuration" do
                             LoopbackHostAuth _ ->
                                 expectationFailure
                                     "token file did not enable bearer mode"
+                            LoopbackBearerAuth _ _ ->
+                                expectationFailure
+                                    "ordinary token mode unexpectedly enabled the local service profile"
                             TenantBearerAuth _ ->
                                 expectationFailure
                                     "token file enabled tenant bearer mode"

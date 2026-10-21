@@ -41,6 +41,16 @@ spec = describe "HTTP boundary authentication" do
             `shouldSatisfy` isRight
         authorizeRequest loopback defaultRequest
             `shouldSatisfy` isLeft
+
+    it "requires both a loopback Host and the bearer for the local service" do
+        let local = AuthConfig
+                { authMode = LoopbackBearerAuth (Set.singleton "127.0.0.1:4096") "correct-token"
+                , authCorsOrigins = Set.empty }
+            request host token = defaultRequest
+                { requestHeaders = [("Host", host), ("Authorization", "Bearer " <> token)] }
+        authorizeRequest local (request "127.0.0.1:4096" "correct-token") `shouldSatisfy` isRight
+        authorizeRequest local (request "127.0.0.1:4096" "incorrect-token") `shouldSatisfy` isLeft
+        authorizeRequest local (request "external.example" "correct-token") `shouldSatisfy` isLeft
         authorizeRequest
             loopback
             defaultRequest

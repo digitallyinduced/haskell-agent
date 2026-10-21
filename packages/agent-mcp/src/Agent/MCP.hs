@@ -16,6 +16,7 @@ module Agent.MCP
     , McpListCapability(..)
     , McpResourcesCapability(..)
     , McpHostHooks(..)
+    , McpSessionHooks(..)
     , McpCredentialProvider(..)
     , defaultMcpHostHooks
     , McpLogLevel(..)
@@ -67,6 +68,7 @@ module Agent.MCP
     , acquireMcpFleetProgressive
     , acquireMcpFleetWithInMemory
     , acquireMcpFleetProgressiveWithInMemory
+    , acquireMcpFleetForSession
     , releaseMcpFleetLease
     , closeMcpSupervisor
     , restartMcpSupervisor
@@ -175,6 +177,7 @@ import Agent.MCP.Fleet
     )
 import Agent.MCP.Supervisor
     ( acquireMcpFleet
+    , acquireMcpFleetForSession
     , acquireMcpFleetProgressive
     , acquireMcpFleetProgressiveWithInMemory
     , acquireMcpFleetWithInMemory
@@ -188,6 +191,7 @@ import Agent.MCP.Supervisor
 import Agent.MCP.Types
     ( McpToolServer(..)
     , McpCallContext(..)
+    , McpSessionHooks(..)
     , McpCredentialProvider(..)
     , McpTool(..)
     , emptyServerCapabilities

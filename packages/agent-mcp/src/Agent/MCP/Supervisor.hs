@@ -7,6 +7,7 @@ module Agent.MCP.Supervisor
     , acquireMcpFleetWithInMemory
     , acquireMcpFleetProgressiveWithInMemory
     , acquireMcpFleetWith
+    , acquireMcpFleetForSession
     , releaseMcpFleetLease
     , closeMcpSupervisor
     , restartMcpSupervisor
@@ -53,8 +54,11 @@ import Control.Monad (unless, void)
 import Data.IORef
     ( atomicModifyIORef'
     , newIORef
+    , readIORef
+    , writeIORef
     )
 import Data.List (find)
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import GHC.StableName (StableName, makeStableName)
@@ -161,7 +165,56 @@ data McpAcquireRequest = McpAcquireRequest
     , acquireStart :: [McpServerConfig] -> IO McpFleet
     , acquireConfigs :: [McpServerConfig]
     , acquireInMemoryIdentities :: ![StableName McpToolServer]
+    , acquireSessionHooks :: !(Maybe McpSessionHookSlot)
     }
+
+-- | Retain transport resources without retaining an ended session's callbacks.
+-- Unsolicited server requests cannot reliably identify an originating session,
+-- so active interactive transports are shared only within that session.
+acquireMcpFleetForSession
+    :: McpSupervisor
+    -> McpSessionHooks
+    -> Bool
+    -> ([McpServerStatus] -> IO ())
+    -> [McpServerConfig]
+    -> [(McpServerConfig, McpToolServer)]
+    -> IO McpFleetLease
+acquireMcpFleetForSession supervisor session progressive report external inMemory
+    | Text.null session.mcpSessionIdentity =
+        ioError (userError "MCP session identity must not be empty")
+    | otherwise = do
+        callbacks <- newIORef (Just session)
+        let slot = McpSessionHookSlot
+                { sessionHookIdentity = session.mcpSessionIdentity
+                , sessionHookCapabilities =
+                    ( isJust session.mcpSessionElicit
+                    , isJust session.mcpSessionRoots
+                    , isJust session.mcpSessionSample
+                    )
+                , sessionHookCallbacks = callbacks
+                }
+            hooks = supervisor.supervisorHooks
+                { mcpHostElicit = fmap (>>= (.mcpSessionElicit)) (readIORef callbacks)
+                , mcpHostRoots = fmap (>>= (.mcpSessionRoots)) (readIORef callbacks)
+                , mcpHostSample = fmap (>>= (.mcpSessionSample)) (readIORef callbacks)
+                }
+        resolvedExternal <- resolveEffectiveCwds external
+        resolvedInMemory <- resolveEffectiveCwds (map fst inMemory)
+        let servers = zip resolvedInMemory (map snd inMemory)
+            configs = resolvedExternal <> resolvedInMemory
+        identities <- mapM (\(_, server) -> makeStableName $! server) servers
+        lease <- acquireMcpFleetWithIdentityAndHooks
+            supervisor progressive identities (Just slot)
+            (\_ ->
+                if progressive
+                    then startMcpFleetProgressiveWithInMemoryHooks
+                        hooks report resolvedExternal servers
+                    else startMcpFleetWithInMemory
+                        hooks (const (pure ())) resolvedExternal servers)
+            configs
+        (mcpFleetStatuses lease.mcpLeaseFleet >>= report)
+            `onException` releaseMcpFleetLease lease
+        pure lease
 
 data McpAcquirePlan = McpAcquirePlan
     { acquireDecision :: McpAcquireDecision
@@ -186,12 +239,26 @@ acquireMcpFleetWithIdentity
     -> IO McpFleetLease
 acquireMcpFleetWithIdentity
     supervisor progressive identities start configs =
+    acquireMcpFleetWithIdentityAndHooks
+        supervisor progressive identities Nothing start configs
+
+acquireMcpFleetWithIdentityAndHooks
+    :: McpSupervisor
+    -> Bool
+    -> [StableName McpToolServer]
+    -> Maybe McpSessionHookSlot
+    -> ([McpServerConfig] -> IO McpFleet)
+    -> [McpServerConfig]
+    -> IO McpFleetLease
+acquireMcpFleetWithIdentityAndHooks
+    supervisor progressive identities sessionHooks start configs =
   mask \restore -> do
     let request = McpAcquireRequest
             { acquireProgressive = progressive
             , acquireStart = start
             , acquireConfigs = configs
             , acquireInMemoryIdentities = identities
+            , acquireSessionHooks = sessionHooks
             }
     plan <- prepareMcpAcquire supervisor request
     case plan.acquireDecision of
@@ -226,20 +293,21 @@ prepareMcpAcquire supervisor request =
                 matching <- findMatchingMcpEntry request healthyEntries
                 case matching of
                     Just entry -> do
+                        rebound <- rebindSessionHooks
+                            entry.supervisorEntrySessionHooks
+                            request.acquireSessionHooks
                         let retained = entry
                                 { supervisorEntryLeases =
                                     entry.supervisorEntryLeases + 1
+                                , supervisorEntrySessionHooks = rebound
                                 }
-                            otherIdle =
-                                idleMcpEntriesExcept entry.supervisorEntryId
-                                    healthyEntries
-                            removed = failedIdle <> otherIdle
+                            removed = failedIdle
                         pure
                             ( state
                                 { supervisorEntries =
-                                    replaceMcpEntry retained
-                                        (withoutMcpEntries removed
-                                            healthyEntries)
+                                    retained : filter
+                                        ((/= retained.supervisorEntryId) . (.supervisorEntryId))
+                                        healthyEntries
                                 }
                             , McpAcquirePlan
                                 { acquireDecision =
@@ -296,15 +364,17 @@ preparePendingMcpAcquire request state healthyEntries failedIdle =
                     , supervisorPendingResult = completion
                     , supervisorPendingWorker = workerSlot
                     , supervisorPendingLeases = 1
+                    , supervisorPendingSessionHooks = request.acquireSessionHooks
                     }
                 healthyIdle = filter isIdleMcpEntry healthyEntries
-                removed = failedIdle <> healthyIdle
+                obsoleteIdle = drop (maximumIdleMcpFleets - 1) healthyIdle
+                removed = failedIdle <> obsoleteIdle
             pure
                 ( state
                     { supervisorNextLeaseId =
                         state.supervisorNextLeaseId + 1
                     , supervisorEntries =
-                        filter (not . isIdleMcpEntry) healthyEntries
+                        withoutMcpEntries obsoleteIdle healthyEntries
                     , supervisorPending =
                         pending : state.supervisorPending
                     }
@@ -424,6 +494,8 @@ findPendingMcpAcquire request = go
             pending.supervisorPendingConfigs request.acquireConfigs =
             if pending.supervisorPendingInMemoryIdentities
                 == request.acquireInMemoryIdentities
+                && matchingSessionHooks False
+                    pending.supervisorPendingSessionHooks request.acquireSessionHooks
                 then Just pending
                 else go rest
         | otherwise = go rest
@@ -497,6 +569,7 @@ publishMcpPending supervisor request entryId completion fleet =
                             , supervisorEntryFleet = fleet
                             , supervisorEntryLeases =
                                 pending.supervisorPendingLeases
+                            , supervisorEntrySessionHooks = pending.supervisorPendingSessionHooks
                             }
                     atomically $
                         void (tryPutTMVar completion (Right fleet))
@@ -526,7 +599,9 @@ findMatchingMcpEntry request = go
                 (sameServerConfigs
                     entry.supervisorEntryConfigs request.acquireConfigs)
             || entry.supervisorEntryInMemoryIdentities
-                /= request.acquireInMemoryIdentities =
+                /= request.acquireInMemoryIdentities
+            || not (matchingSessionHooks (isIdleMcpEntry entry)
+                entry.supervisorEntrySessionHooks request.acquireSessionHooks) =
                 go rest
         | otherwise = do
             statuses <- mcpFleetStatuses entry.supervisorEntryFleet
@@ -534,26 +609,29 @@ findMatchingMcpEntry request = go
                 then pure (Just entry)
                 else go rest
 
-replaceMcpEntry
-    :: McpSupervisorEntry
-    -> [McpSupervisorEntry]
-    -> [McpSupervisorEntry]
-replaceMcpEntry replacement =
-    map \entry ->
-        if entry.supervisorEntryId == replacement.supervisorEntryId
-            then replacement
-            else entry
+maximumIdleMcpFleets :: Int
+maximumIdleMcpFleets = 8
+
+matchingSessionHooks
+    :: Bool -> Maybe McpSessionHookSlot -> Maybe McpSessionHookSlot -> Bool
+matchingSessionHooks _ Nothing Nothing = True
+matchingSessionHooks idle (Just existing) (Just requested) =
+    existing.sessionHookCapabilities == requested.sessionHookCapabilities
+        && (idle || existing.sessionHookIdentity == requested.sessionHookIdentity)
+matchingSessionHooks _ _ _ = False
+
+rebindSessionHooks
+    :: Maybe McpSessionHookSlot
+    -> Maybe McpSessionHookSlot
+    -> IO (Maybe McpSessionHookSlot)
+rebindSessionHooks (Just existing) (Just requested) = do
+    current <- readIORef requested.sessionHookCallbacks
+    writeIORef existing.sessionHookCallbacks current
+    pure (Just existing { sessionHookIdentity = requested.sessionHookIdentity })
+rebindSessionHooks existing _ = pure existing
 
 isIdleMcpEntry :: McpSupervisorEntry -> Bool
 isIdleMcpEntry entry = entry.supervisorEntryLeases == 0
-
-idleMcpEntriesExcept
-    :: Int
-    -> [McpSupervisorEntry]
-    -> [McpSupervisorEntry]
-idleMcpEntriesExcept retainedId =
-    filter \entry ->
-        isIdleMcpEntry entry && entry.supervisorEntryId /= retainedId
 
 withoutMcpEntries
     :: [McpSupervisorEntry]
@@ -601,14 +679,25 @@ releaseMcpFleetLease = (.mcpLeaseRelease)
 
 releaseSupervisorEntry :: McpSupervisor -> Int -> IO ()
 releaseSupervisorEntry supervisor entryId = do
-    modifyMVar_ supervisor.supervisorState \state ->
-        pure state
-            { supervisorEntries =
-                map releaseOne state.supervisorEntries
-            , supervisorPending =
-                map releasePending state.supervisorPending
-            }
+    obsolete <- modifyMVar supervisor.supervisorState \state -> do
+        let entries = map releaseOne state.supervisorEntries
+            removed = drop maximumIdleMcpFleets (filter isIdleMcpEntry entries)
+        mapM_ clearIdleSessionHooks entries
+        pure
+            ( state
+                { supervisorEntries = withoutMcpEntries removed entries
+                , supervisorPending = map releasePending state.supervisorPending
+                }
+            , map (.supervisorEntryFleet) removed
+            )
+    mapM_ closeMcpFleet obsolete
   where
+    clearIdleSessionHooks :: McpSupervisorEntry -> IO ()
+    clearIdleSessionHooks entry
+        | entry.supervisorEntryLeases == 0 =
+            mapM_ (\slot -> writeIORef slot.sessionHookCallbacks Nothing)
+                entry.supervisorEntrySessionHooks
+        | otherwise = pure ()
     releaseOne :: McpSupervisorEntry -> McpSupervisorEntry
     releaseOne entry
         | entry.supervisorEntryId == entryId =

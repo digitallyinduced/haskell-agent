@@ -1,6 +1,7 @@
 -- | Runtime policy values shared by non-terminal frontends.
 module Agent.Runtime.Options
     ( ApprovalPolicy(..)
+    , SubagentSettings(..)
     , GatewayCommand(..)
     , defaultEffortFor
     ) where
@@ -14,6 +15,12 @@ data ApprovalPolicy
     | DenyMutating
     | PromptMutating
     deriving (Eq, Show)
+
+data SubagentSettings = SubagentSettings
+    { subagentShowRawReasoning :: !Bool
+    , subagentCompactThreshold :: !(Maybe Int)
+    , subagentMaxTurns :: !Int
+    }
 
 data GatewayCommand
     = GatewayConnect Text

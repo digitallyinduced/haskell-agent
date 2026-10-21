@@ -49,6 +49,7 @@ sessionValue archived meta repositoryWorkingBranch = object
     , "updatedAt" .= meta.metaUpdatedAt
     , "provider" .= providerSlug meta.metaProvider
     , "connection" .= meta.metaConnection
+    , "gatewayIdentity" .= meta.metaGatewayIdentity
     , "model" .= meta.metaModel
     , "transportModel" .= meta.metaTransportModel
     , "dialect" .= dialectSlug meta.metaDialect

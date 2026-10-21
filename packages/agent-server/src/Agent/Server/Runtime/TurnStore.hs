@@ -633,6 +633,7 @@ decodeHumanRequestKind = \case
     "plan_enter" -> Right PlanEnterRequest
     "plan_exit" -> Right PlanExitRequest
     "plan_question" -> Right PlanQuestionRequest
+    "local_input" -> Right LocalInputRequest
     other ->
         Left
             ( StoreDataError

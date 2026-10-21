@@ -1,10 +1,13 @@
 -- | Frontend-independent provider operations for a live session.
 module Agent.Runtime.Session.Backend
     ( SessionBackend(..)
+    , BtwBackendFactory
     ) where
 
 import Agent.Loop (Backend)
 import Agent.Responses.Types (ResponseCreateParams)
+
+type BtwBackendFactory = ResponseCreateParams -> Backend
 
 -- | These operations share the provider's resource scope. Neither the backend
 -- nor side-question factories may escape the provider continuation.

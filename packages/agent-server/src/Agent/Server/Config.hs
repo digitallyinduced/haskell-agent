@@ -91,7 +91,8 @@ import System.FilePath
 import Control.Exception.Safe (tryIO)
 
 data ServerConfig = ServerConfig
-    { serverHost :: !String
+    { serverLocal :: !Bool
+    , serverHost :: !String
     , serverPort :: !Int
     , serverAllowRemote :: !Bool
     , serverTokenFile :: !(Maybe FilePath)
@@ -156,7 +157,8 @@ data ResolvedServerConfig = ResolvedServerConfig
 
 defaultServerConfig :: ServerConfig
 defaultServerConfig = ServerConfig
-    { serverHost = "127.0.0.1"
+    { serverLocal = False
+    , serverHost = "127.0.0.1"
     , serverPort = 4096
     , serverAllowRemote = False
     , serverTokenFile = Nothing
@@ -197,7 +199,9 @@ serverConfigInfo =
 serverConfigParser :: Parser ServerConfig
 serverConfigParser =
     ServerConfig
-        <$> strOption
+        <$> switch
+            (long "local" <> help "Run the authenticated per-user local service")
+        <*> strOption
             ( long "host"
                 <> metavar "HOST"
                 <> value defaultServerConfig.serverHost
@@ -344,6 +348,10 @@ resolveServerConfigWithTrustPolicy
     -> ServerConfig
     -> IO (Either Text ResolvedServerConfig)
 resolveServerConfigWithTrustPolicy trustPolicy config
+    | config.serverLocal && (config.serverHost /= "127.0.0.1"
+        || config.serverAllowRemote || config.serverTenantRegistry /= Nothing
+        || not (null config.serverCorsOrigins)) =
+        pure (Left "--local requires loopback single-user operation without CORS")
     | config.serverPort < 1 || config.serverPort > 65535 =
         pure (Left "port must be between 1 and 65535")
     | any (< 1)
@@ -378,7 +386,9 @@ resolveServerConfigWithTrustPolicy trustPolicy config
                 "a non-loopback bind requires --allow-remote and bearer authentication")
     | otherwise = do
         cwd <- getCurrentDirectory
-        home <- getHomeDirectory
+        home <- lookupEnv "HASKELL_AGENT_HOME" >>= maybe getHomeDirectory pure
+        stateDirectory <- lookupEnv "AGENT_SERVER_STATE_DIRECTORY"
+            >>= maybe (pure (home </> ".haskell-agent")) makeAbsolute
         environmentToken <- lookupEnv "AGENT_SERVER_TOKEN"
         -- Never leave the server bearer in the environment inherited by tools
         -- or microVM launchers.
@@ -407,7 +417,7 @@ resolveServerConfigWithTrustPolicy trustPolicy config
                 , resolvedWorkspaceRoots = roots
                 , resolvedDefaultCwd = cwd
                 , resolvedHome = home
-                , resolvedStateDirectory = home </> ".haskell-agent"
+                , resolvedStateDirectory = stateDirectory
                 , resolvedServerMode = mode
                 , resolvedYolo = config.serverYolo
                 , resolvedGatewayIntegrations = config.serverGatewayIntegrations
@@ -640,7 +650,10 @@ resolveLocalAuth
     -> Bool
     -> Maybe String
     -> IO (Either Text AuthConfig)
-resolveLocalAuth config loopback environmentToken =
+resolveLocalAuth config loopback environmentToken
+    | config.serverLocal && config.serverTokenFile == Nothing =
+        pure (Left "the local service requires its private bearer credential file")
+    | otherwise =
     if loopback
         && config.serverTokenFile == Nothing
         && environmentToken == Nothing
@@ -658,7 +671,11 @@ resolveLocalAuth config loopback environmentToken =
                 Right token ->
                     pure $
                         Right AuthConfig
-                            { authMode = BearerTokenAuth token
+                            { authMode =
+                                if config.serverLocal
+                                    then LoopbackBearerAuth
+                                        (allowedLoopbackHosts config.serverPort) token
+                                    else BearerTokenAuth token
                             , authCorsOrigins = corsOrigins config
                             }
 

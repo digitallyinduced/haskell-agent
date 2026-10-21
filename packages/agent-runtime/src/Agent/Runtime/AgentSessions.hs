@@ -1,0 +1,527 @@
+-- | Tools for creating, inspecting, and continuing persisted top-level agent
+-- sessions. CLI callers can run turns in tracked background threads, while
+-- gateways retain the managed @agent-cli@ process runner.
+module Agent.Runtime.AgentSessions
+    ( AgentSessionToolsEnv(..)
+    , AgentSessionActions(..)
+    , SessionThreadManager
+    , SessionProcessLifetime(..)
+    , SessionProcessManager
+    , agentSessionTools
+    , closeSessionThreadManager
+    , closeSessionProcessManager
+    , launchSessionThread
+    , launchSessionThreadNotifying
+    , formatSessionCompletionNotice
+    , launchManagedTurn
+    , launchManagedTurnBounded
+    , launchSessionTurn
+    , newSessionThreadManager
+    , newSessionProcessManager
+    , newSessionProcessManagerWithLifetime
+    , signalManagedSessionReady
+    , sessionThreadStatus
+    , prepareSessionThreadWait
+    , sessionProcessStatus
+    ) where
+
+import Agent.Runtime.AgentSessions.Process
+    ( SessionProcessLifetime(..)
+    , SessionProcessManager
+    , closeSessionProcessManager
+    , launchManagedTurn
+    , launchManagedTurnBounded
+    , launchSessionTurn
+    , newSessionProcessManager
+    , newSessionProcessManagerWithLifetime
+    , sessionProcessStatus
+    , signalManagedSessionReady
+    )
+import Agent.Runtime.Session.Settings (SessionSettings)
+import Agent.Runtime.AgentSessions.Render (renderAgentSession)
+import Agent.Runtime.AgentSessions.WaitGraph (withSessionWaitEdge)
+import Agent.Runtime.Session.Threads
+    ( SessionThreadManager
+    , closeSessionThreadManager
+    , launchSessionThread
+    , launchSessionThreadNotifying
+    , newSessionThreadManager
+    , prepareSessionThreadWait
+    , sessionThreadStatus
+    )
+import Agent.Runtime.Session
+    ( SessionCreate(..)
+    , SessionHandle(..)
+    , SessionMeta(..)
+    , SessionTurnPage(..)
+    , createSession
+    , loadSessionActivity
+    , loadRecentSessionTurns
+    , loadSessionMeta
+    , sessionTempDirForId
+    , sessionTitleFromPrompt
+    )
+import Agent.Runtime.SessionLock
+    ( sessionLockIsActive
+    , sessionLockPath
+    )
+import Agent.Store.Postgres.Connection (StorePool)
+import Agent.Runtime.Models
+    ( ModelOption(..)
+    , ModelTarget(..)
+    , resolveModelOptionDialect
+    , validateResumedGatewayBoundary
+    )
+import Agent.OsPath (fromText)
+import Agent.Dialect
+    ( DialectId
+    , dialectIdForModel
+    )
+import Agent.Provider (Provider)
+import Agent.Json.Decode (optionalKey)
+import qualified Agent.Json.Decode as Hermes
+import Agent.ToolArgs (jsonInt)
+import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
+import Agent.ToolDispatch (typedTool)
+import Agent.Tools.Types
+    ( AppTool
+    , ToolExecutionPolicy(..)
+    , jsonTool
+    )
+import Data.Maybe (fromMaybe, isJust)
+import System.Timeout (timeout)
+import Data.Text (Text)
+import qualified Data.Text as Text
+import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
+
+-- | Scheduling is supplied by the host, so persisted sessions share its
+-- admission, cancellation and durable ownership rules.
+data AgentSessionActions = AgentSessionActions
+    { agentLaunch :: !(SessionSettings -> SessionHandle -> Text -> IO (Either Text Text))
+    , agentStatus :: !(Text -> IO Text)
+    , agentPrepareWait :: !(Text -> IO (IO Text))
+    , agentDeliver :: !(Text -> Text -> IO (Maybe (Either Text ())))
+    }
+
+data AgentSessionToolsEnv = AgentSessionToolsEnv
+    { toolsPool :: !StorePool
+    , toolsRoot :: !OsPath
+    , toolsProvider :: !Provider
+    , toolsConnection :: !Text
+    , toolsModel :: !Text
+    , toolsTransportModel :: !Text
+    , toolsDialect :: !DialectId
+    , toolsAllowedModels :: !(Maybe [Text])
+    , toolsResolveModelOption :: !(Maybe (Text -> IO (Maybe ModelOption)))
+    , toolsGatewayIdentity :: !(Maybe Text)
+    , toolsCwd :: !OsPath
+    , toolsEffort :: !Text
+    , toolsCurrentSessionId :: !(IO (Maybe Text))
+    , toolsLaunchTurn :: !(SessionHandle -> Text -> IO (Either Text Text))
+    , toolsSessionStatus :: !(Text -> IO Text)
+    -- | Capture the current run now, then wait without following later runs.
+    , toolsPrepareSessionWait :: !(Text -> IO (IO Text))
+    -- | Deliver to the process that already owns the session. 'Nothing'
+    -- means no owner inbox is listening; 'Just' is that owner's reply.
+    , toolsDeliverToOwner :: !(Text -> Text -> IO (Maybe (Either Text ())))
+    }
+
+formatSessionCompletionNotice :: Text -> Text -> Text
+formatSessionCompletionNotice sessionId status =
+    "<agent_session_notification>\n"
+        <> "The agent session turn you started has finished.\n"
+        <> "Session ID: " <> sessionId <> "\n"
+        <> "Status: " <> status <> "\n"
+        <> "Use read_agent_session with this session_id to inspect its response, "
+        <> "or send_agent_session_message to provide further input.\n"
+        <> "</agent_session_notification>"
+
+agentSessionTools :: AgentSessionToolsEnv -> [AppTool]
+agentSessionTools env =
+    [ createAgentSessionTool env
+    , readAgentSessionTool env
+    , sendAgentSessionMessageTool env
+    , waitAgentSessionTool env
+    ]
+
+data WaitAgentSessionArgs = WaitAgentSessionArgs
+    { sessionId :: Text
+    , timeoutMs :: Maybe Int
+    }
+
+waitAgentSessionTool :: AgentSessionToolsEnv -> AppTool
+waitAgentSessionTool env = jsonTool
+    "wait_agent_session"
+    "Wait for another persisted session's current turn, not the lifetime of its conversation. Returns status and latest saved output, or timed_out. Already idle sessions return immediately unless they have accepted inbox messages that have not started yet. Locally managed turns report completed, failed, or cancelled; external turns report idle when their activity ends (the exit reason is unknown). Recent output may include a later resume. Use this instead of polling read_agent_session. Cancelling or timing out this wait does not cancel the target."
+    [ PropertySchema "session_id" PropertyString True $ Just
+        "Persisted target session id. Self-waits and circular waits are rejected."
+    , PropertySchema "timeout_ms" PropertyInteger False $ Just
+        "Maximum wait in milliseconds, from 1 to 300000. Defaults to 30000."
+    ]
+    True
+    ParallelSafe
+    (typedTool "wait_agent_session"
+        (Hermes.object $ WaitAgentSessionArgs
+            <$> Hermes.atKey "session_id" Hermes.text
+            <*> optionalKey "timeout_ms" jsonInt)
+        (runWaitAgentSession env))
+
+runWaitAgentSession :: AgentSessionToolsEnv -> WaitAgentSessionArgs -> IO (Either Text Text)
+runWaitAgentSession env args
+    | milliseconds < 1 || milliseconds > 300000 =
+        pure (Left "timeout_ms must be between 1 and 300000")
+    | otherwise = do
+        current <- env.toolsCurrentSessionId
+        if current == Just args.sessionId
+            then pure (Left "cannot wait for the current agent session")
+            else loadSessionMeta env.toolsPool env.toolsRoot args.sessionId >>= \case
+                Left err -> pure (Left err)
+                Right meta -> case validateToolSessionBoundary env meta of
+                    Left err -> pure (Left err)
+                    Right () -> do
+                        -- Authorization precedes all status, transcript, and
+                        -- coordination access, matching read_agent_session.
+                        result <- timeout (milliseconds * 1000) $
+                            case current of
+                                Nothing -> waitForTurn meta
+                                Just caller -> do
+                                    guarded <- withSessionWaitEdge
+                                        env.toolsRoot caller args.sessionId
+                                        (waitForTurn meta)
+                                    pure (guarded >>= id)
+                        pure $ fromMaybe
+                            (Right ("Session: " <> args.sessionId
+                                <> "\nStatus: timed_out\nThe target was not cancelled."))
+                            result
+  where
+    milliseconds = fromMaybe 30000 args.timeoutMs
+    waitForTurn meta = do
+        wait <- env.toolsPrepareSessionWait args.sessionId
+        status <- wait
+        loadRecentSessionTurns env.toolsPool env.toolsRoot args.sessionId 1 >>= \case
+            Left err -> pure (Left err)
+            Right page -> pure $ Right $
+                renderAgentSession meta status Nothing (map snd page.pageTurns)
+                    <> "\nOutput is the latest saved turn at read time; it may include a later resume."
+
+data CreateAgentSessionArgs = CreateAgentSessionArgs
+    { message :: Text
+    , title :: Maybe Text
+    , model :: Maybe Text
+    , reasoningEffort :: Maybe Text
+    }
+
+createAgentSessionArgsDecoder :: Hermes.Decoder CreateAgentSessionArgs
+createAgentSessionArgsDecoder = Hermes.object $
+    CreateAgentSessionArgs
+        <$> Hermes.atKey "message" Hermes.text
+        <*> optionalKey "title" Hermes.text
+        <*> optionalKey "model" Hermes.text
+        <*> optionalKey "reasoning_effort" Hermes.text
+
+createAgentSessionTool :: AgentSessionToolsEnv -> AppTool
+createAgentSessionTool env = jsonTool
+    "create_agent_session"
+    "Create a persisted top-level agent session and start its first turn in the background. Use only when the user explicitly requests independent/background work or a separate session; do not offload the entire current task here. For bounded subtasks, use subagents and retain responsibility for integration, verification, and the final answer. Returns the session id and status as readable text, not a completed result. The interactive parent session is notified when the background turn finishes; use read_agent_session to inspect its response or send_agent_session_message to continue it."
+    [ PropertySchema "message" PropertyString True $ Just
+        "Initial task or message for the new agent session."
+    , PropertySchema "title" PropertyString False $ Just
+        "Optional session title. Defaults to a title derived from the message."
+    , PropertySchema "model" modelPropertyType False $ Just
+        modelPropertyDescription
+    , PropertySchema "reasoning_effort" PropertyString False $ Just
+        "Optional reasoning-effort override. Defaults to the current session effort."
+    ]
+    False
+    TurnSequential
+    (typedTool "create_agent_session" createAgentSessionArgsDecoder
+        (runCreateAgentSession env))
+  where
+    modelPropertyType =
+        if isJust env.toolsResolveModelOption
+            then PropertyString
+            else
+                maybe
+                    PropertyString
+                    (PropertyEnum . normalizedAllowedModels)
+                    env.toolsAllowedModels
+    modelPropertyDescription =
+        case env.toolsAllowedModels of
+            Nothing ->
+                "Optional model override. Defaults to the current session model."
+            Just _ ->
+                "Optional organization-approved model override. Defaults to the current session model."
+
+runCreateAgentSession
+    :: AgentSessionToolsEnv
+    -> CreateAgentSessionArgs
+    -> IO (Either Text Text)
+runCreateAgentSession env args
+    | Text.null (Text.strip args.message) =
+        pure (Left "create_agent_session requires a non-empty message")
+    | maybe False ((> 100) . Text.length . Text.strip) args.title =
+        pure (Left "create_agent_session title must be at most 100 characters")
+    | otherwise = do
+        let model = fromMaybe env.toolsModel normalizedOverride
+        resolveSessionTarget env normalizedOverride model >>= \case
+            Left err -> pure (Left err)
+            Right target -> do
+                let title = case Text.strip <$> args.title of
+                        Just value | not (Text.null value) -> value
+                        _ -> sessionTitleFromPrompt args.message
+                    spec = SessionCreate
+                        { createPool = env.toolsPool
+                        , createRoot = env.toolsRoot
+                        , createTarget = target.modelTarget
+                        , createGatewayIdentity = env.toolsGatewayIdentity
+                        , createCwd = env.toolsCwd
+                        , createEffort =
+                            fromMaybe env.toolsEffort args.reasoningEffort
+                        , createTitleHint = Just title
+                        , createHeadless = True
+                        , createTitleIsManual =
+                            maybe False
+                                (not . Text.null . Text.strip)
+                                args.title
+                        }
+                handle <- createSession spec
+                launchToolSessionTurn env handle args.message >>= \case
+                    Left err -> pure $ Left $
+                        "created session " <> handle.sessionMeta.metaId
+                            <> " but failed to start it: " <> err
+                    Right result -> pure (Right result)
+  where
+    normalizedOverride = normalizeModelOverride args.model
+
+resolveSessionTarget
+    :: AgentSessionToolsEnv
+    -> Maybe Text
+    -> Text
+    -> IO (Either Text ModelOption)
+resolveSessionTarget env normalizedOverride model =
+    case normalizedOverride of
+        Just requested
+            | Just resolve <- env.toolsResolveModelOption ->
+                resolve requested >>= \case
+                    Nothing -> pure (Left notAllowed)
+                    Just option -> pure (Right option)
+        _ -> do
+            modelAllowed <- case env.toolsResolveModelOption of
+                Just resolve -> isJust <$> resolve model
+                Nothing -> pure
+                    (case normalizedOverride of
+                        Nothing -> True
+                        Just requested ->
+                            maybe
+                                True
+                                (elem requested . normalizedAllowedModels)
+                                env.toolsAllowedModels)
+            if not modelAllowed
+                then pure (Left notAllowed)
+                else Right <$> case normalizedOverride of
+                    Nothing ->
+                        pure ModelOption
+                            { modelTarget = ModelTarget
+                                { targetProvider = env.toolsProvider
+                                , targetConnectionId = env.toolsConnection
+                                , targetModelId = model
+                                , targetWireModelId = env.toolsTransportModel
+                                , targetDialect = env.toolsDialect
+                                }
+                            , modelContextWindow = Nothing
+                            , modelLabel = Nothing
+                            , modelFallbackPriority = Nothing
+                            }
+                    Just _ ->
+                        resolveModelOptionDialect ModelOption
+                            { modelTarget = ModelTarget
+                                { targetProvider = env.toolsProvider
+                                , targetConnectionId = env.toolsConnection
+                                , targetModelId = model
+                                , targetWireModelId = model
+                                , targetDialect =
+                                    dialectIdForModel env.toolsProvider model
+                                }
+                            , modelContextWindow = Nothing
+                            , modelLabel = Nothing
+                            , modelFallbackPriority = Nothing
+                            }
+  where
+    notAllowed =
+        "The requested session model is not allowed by this organization."
+
+normalizeModelOverride :: Maybe Text -> Maybe Text
+normalizeModelOverride requested = do
+    stripped <- Text.strip <$> requested
+    if Text.null stripped then Nothing else Just stripped
+
+normalizedAllowedModels :: [Text] -> [Text]
+normalizedAllowedModels =
+    filter (not . Text.null) . map Text.strip
+
+data ReadAgentSessionArgs = ReadAgentSessionArgs
+    { sessionId :: Text
+    , limit :: Maybe Int
+    }
+
+readAgentSessionArgsDecoder :: Hermes.Decoder ReadAgentSessionArgs
+readAgentSessionArgsDecoder = Hermes.object $
+    ReadAgentSessionArgs
+        <$> Hermes.atKey "session_id" Hermes.text
+        <*> optionalKey "limit" jsonInt
+
+readAgentSessionTool :: AgentSessionToolsEnv -> AppTool
+readAgentSessionTool env = jsonTool
+    "read_agent_session"
+    "Read metadata and recent user/assistant turns from a persisted agent session as readable labeled text."
+    [ PropertySchema "session_id" PropertyString True $ Just
+        "Persisted session id returned by create_agent_session or shown by /session."
+    , PropertySchema "limit" PropertyInteger False $ Just
+        "Maximum number of most recent turns to return. Defaults to 20; maximum 100."
+    ]
+    True
+    ParallelSafe
+    (typedTool "read_agent_session" readAgentSessionArgsDecoder
+        (runReadAgentSession env))
+
+runReadAgentSession
+    :: AgentSessionToolsEnv
+    -> ReadAgentSessionArgs
+    -> IO (Either Text Text)
+runReadAgentSession env args =
+    loadSessionMeta env.toolsPool env.toolsRoot args.sessionId >>= \case
+        Left err -> pure (Left err)
+        Right meta ->
+            case validateToolSessionBoundary env meta of
+                Left err -> pure (Left err)
+                Right () -> do
+                    let limit = min 100 (max 1 (fromMaybe 20 args.limit))
+                    loadRecentSessionTurns
+                        env.toolsPool env.toolsRoot args.sessionId limit >>= \case
+                            Left err -> pure (Left err)
+                            Right page -> do
+                                status <- env.toolsSessionStatus args.sessionId
+                                activity <-
+                                    if status == "running"
+                                        then loadSessionActivity
+                                            env.toolsRoot args.sessionId
+                                        else pure Nothing
+                                pure $ Right $
+                                    renderAgentSession
+                                        meta
+                                        status
+                                        activity
+                                        (map snd page.pageTurns)
+
+data SendAgentSessionMessageArgs = SendAgentSessionMessageArgs
+    { sessionId :: Text
+    , message :: Text
+    }
+
+sendAgentSessionMessageArgsDecoder
+    :: Hermes.Decoder SendAgentSessionMessageArgs
+sendAgentSessionMessageArgsDecoder = Hermes.object $
+    SendAgentSessionMessageArgs
+        <$> Hermes.atKey "session_id" Hermes.text
+        <*> Hermes.atKey "message" Hermes.text
+
+sendAgentSessionMessageTool :: AgentSessionToolsEnv -> AppTool
+sendAgentSessionMessageTool env = jsonTool
+    "send_agent_session_message"
+    "Send a message to a persisted agent session. If that session is already open, deliver the message to its owner: an idle session starts a new turn, and a session in the middle of a turn queues the message for after the current turn or receives it at a message boundary. If nobody owns the session, start a resumed background turn. Use for explicitly requested independent/background work or continuation of that separate session, not to transfer responsibility for the current task. Returns the session id and status as readable text, not a completed result. The interactive parent session is notified when a launched turn finishes."
+    [ PropertySchema "session_id" PropertyString True $ Just
+        "Persisted target session id."
+    , PropertySchema "message" PropertyString True $ Just
+        "Message or follow-up task for the target session."
+    ]
+    False
+    TurnSequential
+    (typedTool "send_agent_session_message" sendAgentSessionMessageArgsDecoder
+        (runSendAgentSessionMessage env))
+
+runSendAgentSessionMessage
+    :: AgentSessionToolsEnv
+    -> SendAgentSessionMessageArgs
+    -> IO (Either Text Text)
+runSendAgentSessionMessage env args
+    | Text.null (Text.strip args.message) =
+        pure (Left "send_agent_session_message requires a non-empty message")
+    | otherwise = do
+        current <- env.toolsCurrentSessionId
+        if current == Just args.sessionId
+            then pure (Left "cannot message the current agent session")
+            else loadSessionMeta
+                    env.toolsPool env.toolsRoot args.sessionId >>= \case
+                Left err -> pure (Left err)
+                Right meta ->
+                    case validateToolSessionBoundary env meta of
+                        Left err -> pure (Left err)
+                        Right () -> do
+                            let handle =
+                                    sessionHandle
+                                        env.toolsPool env.toolsRoot meta
+                            env.toolsDeliverToOwner
+                                args.sessionId args.message >>= \case
+                                Just (Right ()) -> do
+                                    status <- env.toolsSessionStatus args.sessionId
+                                    pure $ Right $ renderSessionLaunch
+                                        args.sessionId
+                                        (if status == "idle" then "queued" else status)
+                                Just (Left err) -> pure (Left err)
+                                Nothing -> do
+                                    locked <- sessionLockIsActive
+                                        (sessionLockPath handle.sessionDir)
+                                    if locked
+                                        then pure $ Left $
+                                            "session " <> args.sessionId
+                                                <> " is already running"
+                                        else launchToolSessionTurn env handle args.message
+
+validateToolSessionBoundary
+    :: AgentSessionToolsEnv
+    -> SessionMeta
+    -> Either Text ()
+validateToolSessionBoundary env meta =
+    validateResumedGatewayBoundary
+        env.toolsGatewayIdentity
+        meta.metaConnection
+        meta.metaGatewayIdentity
+
+launchToolSessionTurn
+    :: AgentSessionToolsEnv
+    -> SessionHandle
+    -> Text
+    -> IO (Either Text Text)
+launchToolSessionTurn env handle message =
+    env.toolsLaunchTurn handle message >>= \case
+        Left err -> pure (Left err)
+        Right launchResult -> do
+            let sessionId = handle.sessionMeta.metaId
+            status <- statusAfterLaunch env sessionId launchResult
+            pure $ Right $ renderSessionLaunch sessionId status
+
+sessionHandle :: StorePool -> OsPath -> SessionMeta -> SessionHandle
+sessionHandle pool root meta =
+    let dir = root </> fromText meta.metaId
+    in SessionHandle
+        { sessionPool = pool
+        , sessionDir = dir
+        , sessionTempDir =
+            either
+                (error . Text.unpack)
+                id
+                (sessionTempDirForId root meta.metaId)
+        , sessionMetaPath = dir </> unsafeEncodeUtf "meta.json"
+        , sessionTranscriptPath =
+            dir </> unsafeEncodeUtf "transcript.jsonl"
+        , sessionMeta = meta
+        }
+
+statusAfterLaunch :: AgentSessionToolsEnv -> Text -> Text -> IO Text
+statusAfterLaunch env sessionId launchResult
+    | "completed session " `Text.isPrefixOf` launchResult = pure "completed"
+    | otherwise = env.toolsSessionStatus sessionId
+
+renderSessionLaunch :: Text -> Text -> Text
+renderSessionLaunch sessionId status =
+    "Session: " <> sessionId <> "\nStatus: " <> status

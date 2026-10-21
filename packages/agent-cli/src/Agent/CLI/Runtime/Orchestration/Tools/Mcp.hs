@@ -19,7 +19,7 @@ import Agent.CLI.Runtime.Orchestration.Tools.Collaboration
 import Agent.CLI.Runtime.Orchestration.Tools.Model
 import Agent.CLI.Runtime.Orchestration.Tools.Request
 import Agent.CLI.Runtime.Orchestration.Tools.Scratch
-import Agent.CLI.Runtime.Orchestration.Types (AgentProcessRuntime(..), NativeRunCapabilities(..), NativeRunHooks(..))
+import Agent.CLI.Runtime.Orchestration.Types (NativeRunCapabilities(..), NativeRunHooks(..))
 import Agent.CLI.Session.Runtime.Types (StartupRuntime(..))
 import Agent.CLI.Startup.Auth (setStartupNotice, startupDie)
 import Agent.CLI.TUI.App (emitUiEvent)
@@ -27,12 +27,12 @@ import Agent.Integration.API
     (IntegrationRuntime(..))
 import Agent.Loop (TurnInput(..))
 import qualified Agent.MCP as MCP
-import Agent.OsPath (unsafeToFilePath)
+import Agent.OsPath (unsafeToFilePath, toText)
 import Agent.TUI.Model (UiEvent(..))
 import Agent.Tools.Types (withToolHumanInputWait)
 import Control.Exception.Safe (catch)
 import Control.Monad (forM_, unless, when)
-import Data.IORef (atomicModifyIORef', newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -42,6 +42,7 @@ data McpRuntime = McpRuntime
     , runtimeMcpFleet :: MCP.McpFleet
     , runtimeMcpInstructions :: [(Text, Text)]
     , runtimeCloseMcp :: IO ()
+    , runtimeMcpSamplingRef :: IORef (Maybe (MCP.McpSamplingRequest -> IO (Either Text MCP.McpSamplingResult)))
     }
 
 mcpConfiguration
@@ -73,8 +74,7 @@ acquireMcpRuntime
     -> Maybe IntegrationRuntime
     -> IO McpRuntime
 acquireMcpRuntime request@AgentToolsRequest
-    { processRuntime
-    , startup
+    { startup
     , options
     , isTty
     , stdinControl
@@ -108,14 +108,19 @@ acquireMcpRuntime request@AgentToolsRequest
     startStaleResourceCleanup request sessionTmp
     mcpStatusPhaseRef <- newIORef (Nothing :: Maybe Bool)
     mcpFleetRef <- newIORef (Nothing :: Maybe MCP.McpFleet)
-    let installMcpHostHooks = do
-            writeIORef processRuntime.processMcpElicitation
-                (if isOneShot options || not isTty
+    runtimeMcpSamplingRef <- newIORef $
+        if any (.mcpServerSamplingEnabled) runtimeMcpServerConfigs
+            then Just \_ -> pure (Left "MCP sampling is unavailable until the model session is ready")
+            else Nothing
+    let sessionHooks = MCP.McpSessionHooks
+            { MCP.mcpSessionIdentity = toText sessionTmp
+            , MCP.mcpSessionElicit =
+                if isOneShot options || not isTty
                     then Nothing
                     else Just \elicitation ->
                         withToolHumanInputWait baseToolEnv $
-                            cliMcpElicitation stdinControl uiRuntimeRef elicitation)
-            writeIORef processRuntime.processMcpRoots $
+                            cliMcpElicitation stdinControl uiRuntimeRef elicitation
+            , MCP.mcpSessionRoots =
                 Just \_serverName ->
                     pure
                         [ MCP.McpRoot
@@ -123,19 +128,14 @@ acquireMcpRuntime request@AgentToolsRequest
                             , MCP.rootName = Nothing
                             }
                         ]
-            writeIORef processRuntime.processMcpSampling $
-                if any
-                    (\MCP.McpServerConfig
-                        { MCP.mcpServerSamplingEnabled = samplingEnabled
-                        } -> samplingEnabled)
-                    runtimeMcpServerConfigs
-                    then Just \_ ->
-                        pure (Left "MCP sampling is unavailable until the model session is ready")
+            , MCP.mcpSessionSample =
+                if any (.mcpServerSamplingEnabled) runtimeMcpServerConfigs
+                    then Just \samplingRequest ->
+                        readIORef runtimeMcpSamplingRef >>= maybe
+                            (pure (Left "MCP sampling is unavailable"))
+                            ($ samplingRequest)
                     else Nothing
-    let clearMcpHostHooks = do
-            writeIORef processRuntime.processMcpElicitation Nothing
-            writeIORef processRuntime.processMcpRoots Nothing
-            writeIORef processRuntime.processMcpSampling Nothing
+            }
     let enqueueMcpSnapshot statuses =
             unless (null statuses) do
                 instructions <-
@@ -180,20 +180,8 @@ acquireMcpRuntime request@AgentToolsRequest
                 runtimeMcpFleet.mcpFleetWarnings
             setStartupNotice startup.startupFullscreen "Loading built-in tools…"
             pure McpRuntime{..}
-        reportBlockingMcp names =
-            setStartupNotice startup.startupFullscreen
-                (if null names
-                    then "Loading built-in tools…"
-                    else
-                        "Loading tools: "
-                            <> Text.intercalate ", " names
-                            <> "…")
-    acquireMcpStartup mcpSupervisor mcpRequest McpStartupHooks
-        { mcpInstallHostHooks = installMcpHostHooks
-        , mcpClearHostHooks = clearMcpHostHooks
-        , mcpReportBlocking = reportBlockingMcp
-        , mcpReportProgressive = reportProgressiveMcp
-        } finishRuntime
+    acquireMcpSessionStartup mcpSupervisor sessionHooks mcpRequest
+        reportProgressiveMcp finishRuntime
         `catch` \(McpStartupError exception) ->
             startupDie startup
                 ("Failed to initialize MCP tools: " <> Text.pack (show exception))
