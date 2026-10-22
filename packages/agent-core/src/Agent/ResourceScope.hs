@@ -31,7 +31,7 @@ import Control.Concurrent.MVar
 -- safe-exceptions makes bracket release uninterruptible.  State cleanup must
 -- retain interruptible masking so blocking finalizers can be cancelled.
 import qualified Control.Exception as Exception
-import Control.Exception.Safe (bracket, catchAny, throwIO)
+import Control.Exception.Safe (catchAny, throwIO)
 import Control.Monad (when)
 import Data.Acquire (Acquire)
 import qualified Data.Acquire as Acquire
@@ -84,7 +84,7 @@ logSlowCleanupWith clock report label action = do
 -- Resources which have not already been released are closed when the action
 -- returns or throws.
 withResourceScope :: (ResourceScope -> IO a) -> IO a
-withResourceScope = bracket newResourceScope closeResourceScope
+withResourceScope = Exception.bracket newResourceScope closeResourceScope
 
 newResourceScope :: IO ResourceScope
 newResourceScope = do
