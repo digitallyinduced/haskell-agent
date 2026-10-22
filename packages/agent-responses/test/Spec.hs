@@ -9,6 +9,7 @@ import qualified Agent.Responses.LoopBackendSpec as LoopBackendSpec
 import qualified Agent.Responses.ResponseMergeSpec as ResponseMergeSpec
 import qualified Agent.Responses.SSESpec as SSESpec
 import qualified Agent.Responses.StreamAssemblySpec as StreamAssemblySpec
+import qualified Agent.Responses.StreamPipelineSpec as StreamPipelineSpec
 
 main :: IO ()
 main = hspec do
@@ -19,3 +20,4 @@ main = hspec do
     ResponseMergeSpec.spec
     SSESpec.spec
     StreamAssemblySpec.spec
+    StreamPipelineSpec.spec
