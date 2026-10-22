@@ -4,7 +4,7 @@ module Agent.ResourceScopeSpec (spec) where
 
 import Agent.ResourceScope
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (race)
+import Control.Concurrent.Async (cancel, race, withAsync)
 import Control.Concurrent.MVar
     ( newEmptyMVar
     , putMVar
@@ -59,6 +59,29 @@ spec = describe "Agent.ResourceScope" do
             close scope
             readIORef maskingState `shouldReturn` Just Exception.MaskedInterruptible)
             [closeResourceScope, closeResourceScopeChecked]
+
+    it "keeps lexical scope cleanup interruptible on return and failure" do
+        mapM_ (\body -> do
+            maskingState <- newIORef Nothing
+            _ <- tryAny $ withResourceScope \scope -> do
+                _ <- registerResource scope $
+                    Exception.getMaskingState >>= writeIORef maskingState . Just
+                body
+            readIORef maskingState `shouldReturn` Just Exception.MaskedInterruptible)
+            [pure (), throwIO (userError "scope action failed")]
+
+    it "keeps lexical scope cleanup interruptible after cancellation" do
+        maskingState <- newIORef Nothing
+        started <- newEmptyMVar
+        blocked <- newEmptyMVar
+        withAsync (withResourceScope \scope -> do
+            _ <- registerResource scope $
+                Exception.getMaskingState >>= writeIORef maskingState . Just
+            putMVar started ()
+            takeMVar blocked) \worker -> do
+                takeMVar started
+                cancel worker
+        readIORef maskingState `shouldReturn` Just Exception.MaskedInterruptible
 
     it "does not repeat early release during checked closure" do
         released <- newIORef []
