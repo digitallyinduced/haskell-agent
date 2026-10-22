@@ -3,11 +3,12 @@ module Agent.Subagents.NotificationsSpec (spec) where
 
 import Agent.InterAgentMessage
 import Agent.Subagents.Runtime.Notifications
-import Agent.Subagents.Types (SubagentStatus (..))
+import Agent.Subagents.Types (SubagentId (..), SubagentStatus (..))
 import Control.Concurrent.Async (mapConcurrently_)
 import Control.Concurrent.MVar
 import Control.Exception (onException)
 import Data.IORef
+import qualified Data.Text as Text
 import Test.Hspec
 
 spec :: Spec
@@ -31,6 +32,35 @@ spec = describe "durable parent notifications" do
         queueParentNotification store message `shouldReturn` Right ()
         queueParentNotification store message `shouldReturn` Right ()
         readIORef state `shouldReturn` ([message, message], 2)
+
+    it "delivers complete reports with their authors even while progress is pending" do
+        (store, state) <- newStore
+        queueParentNotification store ChildProgressAvailable `shouldReturn` Right ()
+        let first = SubagentId "agent-first"
+            second = SubagentId "agent-second"
+            report = Completed (Just (Text.replicate 700 "x" <> "\nReport ending"))
+        notifyParentOfAgentSettlement store first report
+        notifyParentOfAgentSettlement store second (Completed (Just "Second report"))
+        readIORef state `shouldReturn`
+            ([ChildProgressAvailable, ChildResultAvailable first report,
+                ChildResultAvailable second (Completed (Just "Second report"))], 3)
+
+    it "preserves later reports and errors from the same agent" do
+        (store, state) <- newStore
+        let agentId = SubagentId "agent-review"
+            initial = Completed Nothing
+            revised = Completed (Just "Revised report")
+            failure = Errored "Provider failure"
+        mapM_ (notifyParentOfAgentSettlement store agentId) [initial, revised, failure]
+        readIORef state `shouldReturn`
+            (map (ChildResultAvailable agentId) [initial, revised, failure], 3)
+
+    it "rolls back an attributed result when its wake request fails" do
+        (store, state) <- newStore
+        let broken = mapTransactionStore (\bound -> bound { requestParentTurn = ioError (userError "wake write failed") }) store
+        notifyParentOfAgentSettlement broken (SubagentId "agent-review") (Completed (Just "Report"))
+            `shouldThrow` anyIOException
+        readIORef state `shouldReturn` ([], 0)
 
     it "rejects delivery without appending a message or scheduling a turn" do
         (store, state) <- newStore

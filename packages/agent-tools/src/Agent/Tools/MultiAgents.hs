@@ -580,8 +580,9 @@ waitAgentTool ctx = jsonTool "wait_agent" waitAgentDescription
 waitAgentDescription :: Text
 waitAgentDescription =
     "Wait for a mailbox update from live agents, including final-status \
-    \notifications. Returns labeled text summarizing which agents have \
-    \updates, or a timeout notice if no activity arrives before the deadline."
+    \notifications. Returns labeled text with each updated agent's status \
+    \and its complete final report when available, or a timeout notice if \
+    \no new update arrives before the deadline. Does not start or resume agents."
 
 runWait :: MultiAgentContext -> WaitAgentArgs -> IO (Either Text Text)
 runWait ctx args = do
@@ -673,7 +674,9 @@ sendMessageTool ctx = jsonTool "send_message" sendMessageDescription
 sendMessageDescription :: Text
 sendMessageDescription =
     "Send a message to an existing agent. The message will be delivered \
-    \promptly. Does not trigger a new turn."
+    \promptly. Does not trigger a new turn. For an idle child, the message \
+    \remains queued until it runs again. Use followup_task when an answer \
+    \or additional work is required."
 
 runSendMessage :: MultiAgentContext -> ToolCall -> MessageArgs -> IO (Either Text Text)
 runSendMessage ctx call args
@@ -710,7 +713,9 @@ followupDescription :: Text
 followupDescription =
     "Send a follow-up task to an existing non-root target agent and trigger a \
     \turn if it is idle. If the target is already running, deliver the task \
-    \promptly at message boundaries."
+    \promptly at message boundaries while sampling, or after the pending tool \
+    \call completes. Continues the same agent with its saved context. To read \
+    \an existing report, use its completion message or wait_agent instead."
 
 runFollowup :: MultiAgentContext -> ToolCall -> MessageArgs -> IO (Either Text Text)
 runFollowup ctx call args
@@ -830,7 +835,11 @@ listAgentsTool ctx = jsonTool "list_agents" listAgentsDescription
 
 listAgentsDescription :: Text
 listAgentsDescription =
-    "List live agents in the current root thread tree. Optionally filter by task-path prefix."
+    "List live agents in the current root thread tree. Optionally filter by \
+    \task-path prefix. Final reports, errors and suspension reasons are \
+    \previews limited to 500 characters; longer text is marked (truncated). \
+    \Read the completion message or use wait_agent for unread complete \
+    \reports. A followup_task is not needed to read an existing report."
 
 runListAgents :: MultiAgentContext -> ListAgentsArgs -> IO (Either Text Text)
 runListAgents ctx args = do

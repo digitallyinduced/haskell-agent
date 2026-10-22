@@ -6,16 +6,18 @@ module Agent.Subagents.Runtime.Notifications
     , ParentNotificationStore (..)
     , queueParentNotification
     , notifyParentOfSettlement
+    , notifyParentOfAgentSettlement
     ) where
 
 import Agent.InterAgentMessage (InterAgentMessage)
-import Agent.Subagents.Types (SubagentStatus (..))
+import Agent.Subagents.Types (SubagentId, SubagentStatus (..))
 import Control.Monad (unless, void)
 import Data.Text (Text)
 
 data ParentNotification
     = ChildProgressAvailable
     | ChildMessageAvailable !InterAgentMessage
+    | ChildResultAvailable !SubagentId !SubagentStatus
     deriving (Eq, Show)
 
 -- | Every callback runs within 'withDeliveryTransaction'. It must serialize
@@ -42,6 +44,7 @@ queueParentNotification ParentNotificationStore { withDeliveryTransaction } noti
             pending <- case notification of
                 ChildProgressAvailable -> store.hasPendingProgress
                 ChildMessageAvailable _ -> pure False
+                ChildResultAvailable _ _ -> pure False
             unless pending (store.appendNotification notification)
             -- A coalesced message still requires a durable wake request.
             store.requestParentTurn
@@ -55,3 +58,15 @@ notifyParentOfSettlement store = \case
     _ -> pure ()
   where
     notify = void (queueParentNotification store ChildProgressAvailable)
+
+-- | Deliver each terminal report with its author instead of coalescing it
+-- into a generic progress notice. The host persists the complete report and
+-- its wake request in the same transaction. Suspensions retain progress-only
+-- delivery, and execution/cancellation bookkeeping does not wake the parent.
+notifyParentOfAgentSettlement :: ParentNotificationStore -> SubagentId -> SubagentStatus -> IO ()
+notifyParentOfAgentSettlement store agentId status = case status of
+    Completed _ -> deliver
+    Errored _ -> deliver
+    _ -> notifyParentOfSettlement store status
+  where
+    deliver = void (queueParentNotification store (ChildResultAvailable agentId status))
