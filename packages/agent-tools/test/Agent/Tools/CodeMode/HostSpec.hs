@@ -493,29 +493,52 @@ spec = describe "code-mode Bun host" do
             closeCodeModeHost host
             readRunningCodeCells host `shouldReturn` []
 
+    -- Yield deadlines are host wall-clock time. On a loaded build machine,
+    -- starting the cell and streaming its first content can outlast any short
+    -- deadline. Gate the output instead, and observe it after the notification
+    -- the worker sends next: the host handles worker messages in order.
     it "retains a yielded cell until it is terminated" do
-        let config = defaultCodeModeConfig
-                "data/code-mode/worker.mjs"
-                (\_ _ -> pure $ Left "no tools")
-        host <- newCodeModeHost config
-        started <- execCodeCell
-            host
-            "text(\"partial\"); await new Promise(() => {});"
-            []
-            20
-        started `shouldBe`
-            Right CodeModeRunning
-                { cellId = "1"
-                , cellOutput = textContent "partial"
-                }
-        terminated <- terminateCodeCell host "1"
-        terminated `shouldBe`
-            Right CodeModeTerminated
-                { cellId = "1"
-                , cellValue = emptyContent
-                }
-        readRunningCodeCells host `shouldReturn` []
-        closeCodeModeHost host
+        handlerStarted <- newEmptyMVar
+        releaseHandler <- newEmptyMVar
+        notification <- newEmptyMVar
+        let handler name _
+                | name == "gate" = do
+                    putMVar handlerStarted ()
+                    readMVar releaseHandler
+                    pure (Right Null)
+                | otherwise = pure (Left "unexpected tool call")
+            config =
+                (defaultCodeModeConfig "data/code-mode/worker.mjs" handler)
+                    { notifyHandler = putMVar notification
+                    }
+        withCodeModeHost config \host -> do
+            started <- execCodeCell
+                host
+                "await tools.gate({}); text(\"partial\"); notify(\"partial-written\"); await new Promise(() => {});"
+                ["gate"]
+                1
+            started `shouldBe`
+                Right CodeModeRunning
+                    { cellId = "1"
+                    , cellOutput = emptyContent
+                    }
+            timeout 5000000 (readMVar handlerStarted) `shouldReturn` Just ()
+            putMVar releaseHandler ()
+            timeout 5000000 (takeMVar notification)
+                `shouldReturn` Just "partial-written"
+            yielded <- waitCodeCell host "1" 1
+            yielded `shouldBe`
+                Right CodeModeRunning
+                    { cellId = "1"
+                    , cellOutput = textContent "partial"
+                    }
+            terminated <- terminateCodeCell host "1"
+            terminated `shouldBe`
+                Right CodeModeTerminated
+                    { cellId = "1"
+                    , cellValue = emptyContent
+                    }
+            readRunningCodeCells host `shouldReturn` []
 
     it "returns output accumulated after the last timed yield on termination" do
         handlerStarted <- newEmptyMVar
