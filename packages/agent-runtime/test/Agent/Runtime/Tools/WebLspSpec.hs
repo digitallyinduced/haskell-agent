@@ -370,45 +370,52 @@ spec = describe "web_fetch and LSP runtime support" do
                         "failed language server must not advertise lsp"
 
     it "closes an LSP client when startup is cancelled during initialization" $
-        withTempDir "agent-lsp-cancelled-" \directory -> do
-            let root = unsafeEncodeUtf directory
-                script = directory FilePath.</> "blocking-lsp.sh"
-                started = directory FilePath.</> "initialize-started"
-                stopped = directory FilePath.</> "process-stopped"
-                source = directory FilePath.</> "Test.hs"
-            writeFile script (blockingLspScript started stopped)
-            writeFile source "module Test where\nmain = pure ()\n"
-            env <- defaultToolEnv root
-            setToolSessionTmp env (Just root)
-            let server = LspServerConfig
-                    { lspCommand = "/bin/sh"
-                    , lspArgs =
-                        [ Text.pack script
-                        , Text.pack started
-                        , Text.pack stopped
-                        ]
-                    , lspEnv = Map.empty
-                    , lspExtensionToLanguage =
-                        Map.singleton ".hs" "haskell"
-                    , lspInitializationOptions = Nothing
-                    , lspSettings = Nothing
-                    , lspWorkspaceFolder = Nothing
-                    , lspStartupTimeoutMilliseconds = 30_000
-                    , lspShutdownTimeoutMilliseconds = 100
-                    }
-                config = LspConfig
-                    { lspEnabled = True
-                    , lspServers = Map.singleton "blocking" server
-                    }
-            withAsync (newLspRuntime config env) \startup -> do
-                waitForFile started
-                cancel startup
-                waitCatch startup >>= \case
-                    Left _ -> pure ()
-                    Right _ ->
-                        expectationFailure
-                            "cancelled LSP startup unexpectedly completed"
-                waitForFile stopped
+        cancelledStartup blockingLspScript
+
+    it "terminates an LSP client that ignores stdin EOF during cancelled initialization" $
+        cancelledStartup stubbornLspScript
+
+cancelledStartup :: (FilePath -> FilePath -> String) -> IO ()
+cancelledStartup serverScript =
+    withTempDir "agent-lsp-cancelled-" \directory -> do
+        let root = unsafeEncodeUtf directory
+            script = directory FilePath.</> "blocking-lsp.sh"
+            started = directory FilePath.</> "initialize-started"
+            stopped = directory FilePath.</> "process-stopped"
+            source = directory FilePath.</> "Test.hs"
+        writeFile script (serverScript started stopped)
+        writeFile source "module Test where\nmain = pure ()\n"
+        env <- defaultToolEnv root
+        setToolSessionTmp env (Just root)
+        let server = LspServerConfig
+                { lspCommand = "/bin/sh"
+                , lspArgs =
+                    [ Text.pack script
+                    , Text.pack started
+                    , Text.pack stopped
+                    ]
+                , lspEnv = Map.empty
+                , lspExtensionToLanguage =
+                    Map.singleton ".hs" "haskell"
+                , lspInitializationOptions = Nothing
+                , lspSettings = Nothing
+                , lspWorkspaceFolder = Nothing
+                , lspStartupTimeoutMilliseconds = 30_000
+                , lspShutdownTimeoutMilliseconds = 100
+                }
+            config = LspConfig
+                { lspEnabled = True
+                , lspServers = Map.singleton "blocking" server
+                }
+        withAsync (newLspRuntime config env) \startup -> do
+            waitForFile started
+            cancel startup
+            waitCatch startup >>= \case
+                Left _ -> pure ()
+                Right _ ->
+                    expectationFailure
+                        "cancelled LSP startup unexpectedly completed"
+            waitForFile stopped
 
 configJson :: LBS.ByteString
 configJson =
@@ -512,6 +519,20 @@ blockingLspScript _started _stopped =
         , "echo started > \"$started\""
         , "while IFS= read -r line; do :; done"
         , "echo stopped > \"$stopped\""
+        ]
+
+-- Wait for the initialize request so cancellation exercises the client cleanup.
+-- This server deliberately stays alive after stdin closes, requiring escalation.
+stubbornLspScript :: FilePath -> FilePath -> String
+stubbornLspScript _started _stopped =
+    unlines
+        [ "started=$1"
+        , "stopped=$2"
+        , "trap 'echo stopped > \"$stopped\"; exit 0' INT TERM"
+        , "IFS= read -r header"
+        , "echo started > \"$started\""
+        , "while IFS= read -r line; do :; done"
+        , "while :; do sleep 1; done"
         ]
 
 callLsp :: AppTool -> Aeson.Value -> IO ToolCallResult
