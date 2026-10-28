@@ -71,6 +71,14 @@ transportSpec (transport, payloadFor) = describe transport do
         (reasoning >>= (`at` "effort"))
             `shouldBe` Just (Aeson.String "minimal")
 
+    it "normalizes GPT-6.1 Terra requests as Responses Lite" do
+        let request = (withModel (Just "gpt-6.1-terra") sampleRequest)
+                { parallelToolCalls = Just True }
+            payload = payloadFor request
+        payload `at` "parallel_tool_calls" `shouldBe` Just (Aeson.Bool False)
+        (payload `at` "reasoning" >>= (`at` "context"))
+            `shouldBe` Just (Aeson.String "all_turns")
+
     it "creates the Responses Lite reasoning context when reasoning is unset" do
         payloadFor (withReasoning Nothing sampleRequest) `at` "reasoning"
             `shouldBe` Just (Aeson.object ["context" Aeson..= ("all_turns" :: Text)])

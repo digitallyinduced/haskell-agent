@@ -36,6 +36,8 @@ codexModelMetadata modelName
     -- no auto_compact_token_limit), while the bundled catalog still listed
     -- 272000.
     | modelName == "gpt-6.1-sol" = Just (codexMetadataForWindow 373_000)
+    -- Codex catalog on 2026-10-28: default window, not max_context_window.
+    | modelName == "gpt-6.1-terra" = Just (codexMetadataForWindow 500_000)
     -- The other Lite models report context_window = 272000 in both.
     | isCodexResponsesLiteModel modelName = Just (codexMetadataForWindow 272_000)
     | otherwise = Nothing
@@ -59,7 +61,8 @@ codexMetadataForWindow window =
 isCodexResponsesLiteModel :: Text -> Bool
 isCodexResponsesLiteModel modelName =
     modelName `elem`
-        [ "gpt-6.1-sol"
+        [ "gpt-6.1-terra"
+        , "gpt-6.1-sol"
         , "gpt-6-sol"
         , "gpt-6-luna"
         , "gpt-6-astra"

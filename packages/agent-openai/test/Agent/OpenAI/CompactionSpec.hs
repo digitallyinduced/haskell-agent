@@ -1137,6 +1137,19 @@ spec = do
             estimated `shouldSatisfy` (< 11 * pdfPageBytesEstimate `div` 4)
 
     describe "Codex model metadata" do
+        it "routes GPT-6.1 Terra through Lite with its default catalog window" do
+            codexModelMetadata "gpt-6.1-terra"
+                `shouldBe` Just CodexModelMetadata
+                    { modelContextWindow = 500_000
+                    , modelEffectiveContextWindow = 475_000
+                    , modelAutoCompactTokenLimit = 450_000
+                    }
+            isCodexResponsesLiteModel "gpt-6.1-terra" `shouldBe` True
+            codexAutoCompactTokenLimitFor (Just "gpt-6.1-terra")
+                `shouldBe` 450_000
+            codexEffectiveContextWindowFor (Just "gpt-6.1-terra")
+                `shouldBe` 475_000
+
         it "uses Codex's live GPT-6.1 Sol window rather than the maximum window" do
             codexModelMetadata "gpt-6.1-sol"
                 `shouldBe` Just CodexModelMetadata
