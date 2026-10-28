@@ -64,13 +64,13 @@ import Control.Concurrent.MVar
     , newMVar
     , withMVar
     )
-import Control.Exception.Safe
+-- Cleanup waits on child processes and cancellable workers. Keep it masked but
+-- interruptible so shutdown timeouts and race cancellation can make progress.
+import Control.Exception
     ( bracketOnError
-    , finally
-    , mask
     , onException
-    , tryAny
     )
+import Control.Exception.Safe (finally, mask, tryAny)
 import Control.Monad
     ( forM
     , unless
