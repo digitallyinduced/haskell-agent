@@ -72,8 +72,8 @@ transportSpec (transport, payloadFor) = describe transport do
             `shouldBe` Just (Aeson.String "minimal")
 
     it "normalizes GPT-6.1 Terra requests as Responses Lite" do
-        let request = (withModel (Just "gpt-6.1-terra") sampleRequest)
-                { parallelToolCalls = Just True }
+        let request = withParallelToolCalls (Just True)
+                (withModel (Just "gpt-6.1-terra") sampleRequest)
             payload = payloadFor request
         payload `at` "parallel_tool_calls" `shouldBe` Just (Aeson.Bool False)
         (payload `at` "reasoning" >>= (`at` "context"))
@@ -144,6 +144,10 @@ sampleRequest = defaultResponseCreateParams
         , summary = Nothing
         }
     }
+
+withParallelToolCalls :: Maybe Bool -> ResponseCreateParams -> ResponseCreateParams
+withParallelToolCalls nextParallelToolCalls ResponseCreateParams { parallelToolCalls = _, .. } =
+    ResponseCreateParams { parallelToolCalls = nextParallelToolCalls, .. }
 
 withModel :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams
 withModel nextModel ResponseCreateParams { model = _, .. } =
