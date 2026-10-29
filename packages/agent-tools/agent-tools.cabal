@@ -240,6 +240,7 @@ test-suite agent-tools-test
                     , Agent.Tools.IOSpec
                     , Agent.Tools.LoopIntegrationSpec
                     , Agent.Tools.MultiAgentsSpec
+                    , Agent.Tools.MultiAgentsSuspensionSpec
                     , Agent.Tools.MultiAgentsLoopSpec
                     , Agent.Tools.MultiAgentsExecutionSpec
                     , Agent.Tools.OutputArtifactSpec
