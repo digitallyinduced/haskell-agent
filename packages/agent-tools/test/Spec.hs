@@ -18,6 +18,7 @@ import qualified Agent.Tools.GhciSpec as GhciSpec
 import qualified Agent.Tools.IOSpec as IOSpec
 import qualified Agent.Tools.LoopIntegrationSpec as LoopIntegrationSpec
 import qualified Agent.Tools.MultiAgentsSpec as MultiAgentsSpec
+import qualified Agent.Tools.MultiAgentsSuspensionSpec as MultiAgentsSuspensionSpec
 import qualified Agent.Tools.MultiAgentsLoopSpec as MultiAgentsLoopSpec
 import qualified Agent.Tools.MultiAgentsExecutionSpec as MultiAgentsExecutionSpec
 import qualified Agent.Tools.OutputArtifactSpec as OutputArtifactSpec
@@ -47,6 +48,7 @@ main = hspec do
     IOSpec.spec
     LoopIntegrationSpec.spec
     MultiAgentsSpec.spec
+    MultiAgentsSuspensionSpec.spec
     MultiAgentsLoopSpec.spec
     MultiAgentsExecutionSpec.spec
     OutputArtifactSpec.spec

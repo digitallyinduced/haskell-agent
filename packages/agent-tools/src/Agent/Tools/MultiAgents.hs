@@ -12,6 +12,7 @@ module Agent.Tools.MultiAgents
     , multiAgentToolNames
     , rootMultiAgentContext
     , spawnSharedSubagent
+    , parseSuspensionDeadline
     ) where
 
 import Agent.Json.Decode (Decoder)
@@ -75,9 +76,10 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , jsonTool
     )
+import Control.Applicative ((<|>))
 import Control.Concurrent.MVar (modifyMVar, newMVar)
 import Control.Exception.Safe (mask, onException)
-import Control.Monad (void)
+import Control.Monad (guard, void)
 import Data.Aeson (object, (.=))
 import Data.Bifunctor (first)
 import Data.List (sortOn)
@@ -86,6 +88,7 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Time (UTCTime, ZonedTime, defaultTimeLocale, formatTime, parseTimeM, timeZoneMinutes, zonedTimeZone, zonedTimeToUTC)
 import Data.Time.Format.ISO8601 (iso8601ParseM)
 
 data SubagentWorktree = SubagentWorktree
@@ -210,7 +213,7 @@ suspendUntilTool ctx = jsonTool "suspend_until"
     ]
     True TurnSequential
     (typedTool "suspend_until" decoder \args ->
-        case (ctx.multiSelfId, iso8601ParseM (Text.unpack args.deadline)) of
+        case (ctx.multiSelfId, parseSuspensionDeadline args.deadline) of
             (Nothing, _) -> pure (Left "Only a subagent can suspend itself.")
             (_, Nothing) -> pure (Left "deadline must be an ISO-8601 timestamp with timezone.")
             (Just agentId, Just deadline) ->
@@ -220,6 +223,26 @@ suspendUntilTool ctx = jsonTool "suspend_until"
     decoder = objectArgs \object_ -> SuspendUntilArgs
         <$> reqText object_ "deadline"
         <*> reqText object_ "reason"
+
+-- | Accept explicit ISO-8601 offsets as well as UTC's trailing Z. Parsing
+-- directly as UTCTime only accepts Z; offset timestamps must be normalized.
+parseSuspensionDeadline :: Text -> Maybe UTCTime
+parseSuspensionDeadline raw =
+    iso8601ParseM value
+        <|> offset "%Ez" "-00:00"
+        <|> offset "%z" "-0000"
+  where
+    stripped = Text.strip raw
+    value = Text.unpack stripped
+    offset zoneFormat negativeZero = do
+        parsed <- parseTimeM True defaultTimeLocale ("%Y-%m-%dT%H:%M:%S%Q" <> zoneFormat) value
+            :: Maybe ZonedTime
+        -- parseTimeM normalizes out-of-range offset minutes. Require the
+        -- original zone to round-trip, allowing either spelling of zero.
+        let zone = Text.pack (formatTime defaultTimeLocale zoneFormat parsed)
+        guard (zone `Text.isSuffixOf` stripped || negativeZero `Text.isSuffixOf` stripped)
+        guard (abs (timeZoneMinutes (zonedTimeZone parsed)) < 24 * 60)
+        pure (zonedTimeToUTC parsed)
 
 --------------------------------------------------------------------------------
 -- spawn_agent
