@@ -1549,7 +1549,9 @@ transportProbeScript =
             , "previous="
             , "for argument in \"$@\"; do"
             , "  if [ \"$previous\" = --system-prompt-file ] && [ -n \"${FAKE_SYSTEM_PROMPT-}\" ]; then"
-            , "    cat \"$argument\" > \"$FAKE_SYSTEM_PROMPT\""
+            -- Builtins only: the test environment has no PATH.
+            , "    IFS= read -r system_prompt < \"$argument\" || :"
+            , "    printf '%s' \"$system_prompt\" > \"$FAKE_SYSTEM_PROMPT\""
             , "  fi"
             , "  previous=$argument"
             , "done"
