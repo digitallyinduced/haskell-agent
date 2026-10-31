@@ -59,7 +59,9 @@ Safe mode is enabled by default. It preserves auth, model selection,
 permissions, and built-in tools while disabling Claude-specific project and
 user customizations such as `CLAUDE.md`, skills, plugins, hooks, MCP servers,
 custom commands, and custom agents. Callers can still supply harness
-instructions through `ResponseCreateParams`.
+instructions through `ResponseCreateParams`; they become Claude Code's system
+prompt (`--system-prompt-file`), and a turn with different instructions
+restarts the process and resumes its session.
 
 ```haskell
 {-# LANGUAGE BlockArguments #-}

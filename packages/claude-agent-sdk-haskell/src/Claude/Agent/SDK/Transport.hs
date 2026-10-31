@@ -8,6 +8,7 @@ module Claude.Agent.SDK.Transport
     ) where
 
 import Claude.Agent.SDK.Errors (ClaudeSDKError)
+import Claude.Agent.SDK.Types (SystemPrompt)
 import Data.ByteString (ByteString)
 import Data.Text (Text)
 import System.Exit (ExitCode)
@@ -21,10 +22,12 @@ data TransportMode
 -- | Parameters supplied whenever the client needs a new transport. A factory
 -- may therefore support fresh sessions, resumed sessions, and process
 -- restarts without exposing the SDK's internal subprocess state machine.
+-- The system prompt is fixed for a process's lifetime, like its model.
 data TransportRequest = TransportRequest
     { transportMode :: !TransportMode
     , transportModel :: !(Maybe Text)
     , transportEffort :: !(Maybe Text)
+    , transportSystemPrompt :: !SystemPrompt
     } deriving (Eq, Show)
 
 -- | Create one disconnected transport for a client start or restart. The SDK

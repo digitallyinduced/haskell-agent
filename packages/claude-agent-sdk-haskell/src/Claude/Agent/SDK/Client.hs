@@ -8,6 +8,7 @@ module Claude.Agent.SDK.Client
     , withClaudeSDKClientWithTransportAndHandlers
     , withClaudeSDKClientWithoutTools
     , withClaudeSDKTurn
+    , withClaudeSDKTurnWithSystemPrompt
     , sendQuery
     , sendQueryContent
     , receiveMessage
@@ -68,6 +69,7 @@ import Claude.Agent.SDK.Types
     , ConversationResetMessage(..)
     , Message
     , ModelUsage(..)
+    , SystemPrompt
     , UserContentBlock(..)
     , Usage(..)
     , addUsage
@@ -141,6 +143,7 @@ data RunningClient = RunningClient
     , runningStartMode :: !TransportMode
     , runningModel :: !(Maybe Text)
     , runningEffort :: !(Maybe Text)
+    , runningSystemPrompt :: !SystemPrompt
     , runningTransport :: !Transport
     , runningControlRuntime :: !(Maybe ControlRuntime)
     , runningShutdownTimeoutMicros :: !Int
@@ -272,12 +275,35 @@ withClaudeSDKTurn
     -> Maybe Text
     -> (ClaudeSDKTurn -> IO (Either ClaudeSDKError (a, IO ())))
     -> IO (Either ClaudeSDKError a)
-withClaudeSDKTurn
+withClaudeSDKTurn client hostTranscriptMatches previous model effort =
+    withClaudeSDKTurnWithSystemPrompt
+        client
+        hostTranscriptMatches
+        previous
+        model
+        effort
+        client.clientOptions.systemPrompt
+
+-- | 'withClaudeSDKTurn' with this turn's system prompt in place of the
+-- client's. Claude Code reads it when its process starts, so a different
+-- prompt than the running process's restarts it, resuming the conversation
+-- as a model change does.
+withClaudeSDKTurnWithSystemPrompt
+    :: ClaudeSDKClient
+    -> IO Bool
+    -> Maybe Text
+    -> Maybe Text
+    -> Maybe Text
+    -> SystemPrompt
+    -> (ClaudeSDKTurn -> IO (Either ClaudeSDKError (a, IO ())))
+    -> IO (Either ClaudeSDKError a)
+withClaudeSDKTurnWithSystemPrompt
     client
     hostTranscriptMatches
     previous
     model
     effort
+    systemPrompt
     callback =
     withMVar client.clientTurnLock \_ ->
         mask \restore -> do
@@ -294,6 +320,7 @@ withClaudeSDKTurn
                         selectedPrevious
                         (nonEmptyText (model <|> client.clientOptions.model))
                         (nonEmptyText (effort <|> client.clientOptions.effort))
+                        systemPrompt
                 when consumeInitialPrevious $
                     atomicModifyIORef' client.clientState \state ->
                         ( state
@@ -714,8 +741,9 @@ prepareTurn
     -> Maybe Text
     -> Maybe Text
     -> Maybe Text
+    -> SystemPrompt
     -> IO ClaudeSDKTurn
-prepareTurn client previous model effort = do
+prepareTurn client previous model effort systemPrompt = do
     oldState <- readIORef client.clientState
     transportUnavailable <- case oldState.stateRunning of
         Nothing ->
@@ -739,6 +767,7 @@ prepareTurn client previous model effort = do
             previous
             model
             effort
+            systemPrompt
     (running, newState, isNewSession) <- case decision of
         Reuse running ->
             pure (running, oldState, False)
@@ -762,6 +791,7 @@ prepareTurn client previous model effort = do
                     client.clientHandlers
                     model
                     effort
+                    systemPrompt
                     mode
             let state = ClientState
                     { stateRunning = Just running
@@ -790,8 +820,9 @@ decideProcess
     -> Maybe Text
     -> Maybe Text
     -> Maybe Text
+    -> SystemPrompt
     -> IO ProcessDecision
-decideProcess client state transportUnavailable previous model effort =
+decideProcess client state transportUnavailable previous model effort systemPrompt =
     if state.stateNeedsFreshSession
         then freshStart
         else
@@ -842,7 +873,7 @@ decideProcess client state transportUnavailable previous model effort =
                                         currentSession)
                                     True
                         else freshStart
-                else if modeChanged running model effort
+                else if modeChanged running model effort systemPrompt
                     then
                         pure $
                             Restart
@@ -918,10 +949,12 @@ modeChanged
     :: RunningClient
     -> Maybe Text
     -> Maybe Text
+    -> SystemPrompt
     -> Bool
-modeChanged running model effort =
+modeChanged running model effort systemPrompt =
     running.runningModel /= model
         || running.runningEffort /= effort
+        || running.runningSystemPrompt /= systemPrompt
 
 markTurnCompleted :: ClaudeSDKClient -> ClaudeSDKTurn -> IO ()
 markTurnCompleted client turn =
@@ -1021,14 +1054,16 @@ startRunningClient
     -> Maybe ClaudeAgentHandlers
     -> Maybe Text
     -> Maybe Text
+    -> SystemPrompt
     -> TransportMode
     -> IO RunningClient
-startRunningClient transportFactory handlers model effort mode = do
+startRunningClient transportFactory handlers model effort systemPrompt mode = do
     transport <-
         transportFactory TransportRequest
             { transportMode = mode
             , transportModel = model
             , transportEffort = effort
+            , transportSystemPrompt = systemPrompt
             }
     connected <-
         transport.transportConnect
@@ -1069,6 +1104,7 @@ startRunningClient transportFactory handlers model effort mode = do
                 , runningStartMode = mode
                 , runningModel = model
                 , runningEffort = effort
+                , runningSystemPrompt = systemPrompt
                 , runningTransport = transport
                 , runningControlRuntime = controlRuntime
                 , runningShutdownTimeoutMicros =
@@ -1086,7 +1122,7 @@ subprocessTransportFactory
     -> TransportFactory
 subprocessTransportFactory options request =
     newSubprocessCLITransport
-        options
+        options { systemPrompt = request.transportSystemPrompt }
         request.transportMode
         request.transportModel
         request.transportEffort

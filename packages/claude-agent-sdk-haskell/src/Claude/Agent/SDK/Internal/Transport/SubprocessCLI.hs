@@ -53,6 +53,7 @@ import Control.Concurrent.MVar
 import Control.Exception (Exception, IOException)
 import Control.Exception.Safe
     ( SomeException
+    , bracketOnError
     , catchAny
     , finally
     , fromException
@@ -88,6 +89,7 @@ import System.IO
     , hFlush
     , hSetBinaryMode
     , hSetBuffering
+    , openBinaryTempFile
     )
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Types (ProcessGroupID)
@@ -115,6 +117,7 @@ data RunningTransport = RunningTransport
     , inputWriterState :: !(MVar InputWriterState)
     , inputOpen :: !(IORef Bool)
     , errorDrain :: !(Async ())
+    , systemPromptFile :: !(Maybe FilePath)
     }
 
 data InputWriterState = InputWriterState
@@ -184,7 +187,12 @@ connectTransport stateRef options mode model effort = do
             case capabilityResult of
                 Left err -> pure (Left err)
                 Right () -> do
-                    created <- tryAny (startTransport options mode model effort)
+                    created <- tryAny $
+                        bracketOnError
+                            (writeSystemPromptFile options)
+                            (mapM_ removeFileQuietly . snd)
+                            \(spawnOptions, promptFile) ->
+                                startTransport spawnOptions promptFile mode model effort
                     case created of
                         Left exception ->
                             pure $
@@ -229,11 +237,12 @@ validateCapabilitiesFor options mode model effort = do
 
 startTransport
     :: ClaudeAgentOptions
+    -> Maybe FilePath
     -> TransportMode
     -> Maybe Text
     -> Maybe Text
     -> IO RunningTransport
-startTransport options mode model effort =
+startTransport options systemPromptFile mode model effort =
     mask \restore -> do
         workingDirectoryExists <-
             Directory.doesDirectoryExist options.cwd
@@ -319,6 +328,7 @@ startTransport options mode model effort =
                 , inputWriterState
                 , inputOpen = inputOpenRef
                 , errorDrain
+                , systemPromptFile
                 }
         restore (pure running)
             `onException` stopRunningTransport running
@@ -645,6 +655,7 @@ stopRunningTransport running = do
     void (waitCatch running.errorDrain)
     closeHandleQuietly running.errorHandle
     waitForProcessQuietly running.processHandle
+    mapM_ removeFileQuietly running.systemPromptFile
 
 waitForProcessQuietly :: ProcessHandle -> IO ()
 waitForProcessQuietly processHandle =
@@ -688,6 +699,33 @@ diagnosticByteLimit = 65_536
 closeHandleQuietly :: Handle -> IO ()
 closeHandleQuietly handle =
     void (tryAny (hClose handle))
+
+-- | Hand a text system prompt to Claude Code in a private file. Linux limits
+-- a single argument to 128 KiB, and agent harness instructions exceed that.
+-- The file is removed when the transport stops.
+writeSystemPromptFile
+    :: ClaudeAgentOptions
+    -> IO (ClaudeAgentOptions, Maybe FilePath)
+writeSystemPromptFile options =
+    case options.systemPrompt of
+        SystemPromptText prompt -> do
+            directory <- Directory.getTemporaryDirectory
+            bracketOnError
+                (openBinaryTempFile directory "claude-system-prompt.txt")
+                (\(path, handle) -> closeHandleQuietly handle >> removeFileQuietly path)
+                \(path, handle) -> do
+                    ByteString.hPut handle (TextEncoding.encodeUtf8 prompt)
+                    hClose handle
+                    pure
+                        ( options { systemPrompt = SystemPromptFile path }
+                        , Just path
+                        )
+        _ ->
+            pure (options, Nothing)
+
+removeFileQuietly :: FilePath -> IO ()
+removeFileQuietly path =
+    void (tryAny (Directory.removeFile path))
 
 connectionException :: FilePath -> SomeException -> ClaudeSDKError
 connectionException executable exception =
@@ -785,6 +823,8 @@ systemPromptArguments = \case
     SystemPromptNone -> ["--system-prompt", ""]
     SystemPromptText prompt ->
         ["--system-prompt", Text.unpack prompt]
+    SystemPromptFile path ->
+        ["--system-prompt-file", path]
     SystemPromptClaudeCode -> []
 
 startArguments :: TransportMode -> [String]

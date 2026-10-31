@@ -67,8 +67,12 @@ data SystemPrompt
     -- | Use the minimal Agent SDK prompt rather than Claude Code's built-in
     -- coding-agent prompt.
     = SystemPromptNone
-    -- | Replace the system prompt with the supplied text.
+    -- | Replace the system prompt with the supplied text. The subprocess
+    -- transport hands it to Claude Code in a private file, so its size is
+    -- not limited by the operating system's argument length.
     | SystemPromptText !Text
+    -- | Replace the system prompt with the contents of an existing file.
+    | SystemPromptFile !FilePath
     -- | Use Claude Code's built-in coding-agent system prompt.
     | SystemPromptClaudeCode
     deriving (Eq, Show)

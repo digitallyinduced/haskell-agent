@@ -251,8 +251,15 @@ and shutdown, and terminates the child process group on release. The public
 replaceable. Use `withClaudeSDKClientWithTransport` to supply an in-memory,
 remote, or otherwise custom transport. The factory receives a
 `TransportRequest` for every fresh start or resume, including the session ID,
-resume flag, model, and effort. The SDK connects, closes, and otherwise owns
-the lifecycle of each returned transport.
+resume flag, model, effort, and system prompt. The SDK connects, closes, and
+otherwise owns the lifecycle of each returned transport.
+
+A custom system prompt (`SystemPromptText`) reaches Claude Code through a
+private temporary file and `--system-prompt-file`, so prompts larger than the
+operating system's per-argument limit work; the file is removed when the
+transport stops. `withClaudeSDKTurnWithSystemPrompt` sets the prompt for one
+turn; a prompt that differs from the running process's restarts it and resumes
+the conversation, as a model or effort change does.
 
 ## Errors
 

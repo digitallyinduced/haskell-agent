@@ -99,7 +99,7 @@ import Claude.Agent.SDK.Client
     , abort
     , withClaudeSDKClient
     , withClaudeSDKClientWithHandlers
-    , withClaudeSDKTurn
+    , withClaudeSDKTurnWithSystemPrompt
     )
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as ByteString
@@ -149,6 +149,7 @@ import Claude.Agent.SDK.Types
     , ModelUsage(..)
     , ResultMessage(..)
     , SystemMessage(..)
+    , SystemPrompt(..)
     , UserContentBlock(..)
     , Usage(..)
     , messageHasParentToolUseId
@@ -336,12 +337,13 @@ submitClaudeCodeTurn
                         selectClaudeTurnSession
                             snapshot previous initialResume expectedCheckpoint
                     history = filter (not . isModelContextItem) snapshot.backendItems
-                result <- withClaudeSDKTurn
+                result <- withClaudeSDKTurnWithSystemPrompt
                     session
                     (pure processMatchesHost)
                     previousSession
                     params.model
                     (params.reasoning >>= (.effort))
+                    (claudeSystemPrompt params)
                     \turn -> do
                         -- The snapshot is authoritative. Keep the compatibility
                         -- transcript reference aligned after compaction/reset
@@ -351,7 +353,6 @@ submitClaudeCodeTurn
                         recoveryState <- newIORef emptyRecovery
                         let content =
                                 buildClaudePrompt
-                                    params
                                     (turnIsNewSession turn)
                                     history
                                     inputImages
@@ -661,40 +662,36 @@ claudeUserContent images prompt =
             , imageBytes
             }
 
+-- | The harness's instructions are Claude's system prompt, as they are the
+-- instructions of a Responses request. Inside the first user message, Claude
+-- treated them as a request from the harness and reported back to it, e.g.
+-- summarizing a reply it had already delivered through a tool.
+claudeSystemPrompt :: ResponseCreateParams -> SystemPrompt
+claudeSystemPrompt params =
+    case params.instructions of
+        Just instructions
+            | not (Text.null (Text.strip instructions)) ->
+                SystemPromptText instructions
+        _ ->
+            SystemPromptNone
+
 buildClaudePrompt
-    :: ResponseCreateParams
-    -> Bool
+    :: Bool
     -> [ResponseItem]
     -> [ImageAttachment]
     -> Text
     -> [UserContentBlock]
-buildClaudePrompt params isNewSession history currentImages currentInput =
-    coalesceTextBlocks $ case contextSections of
-        [] -> claudeUserContent currentImages currentInput
-        sections ->
-            concat (intersperse [UserTextBlock "\n\n"] sections)
+buildClaudePrompt isNewSession history currentImages currentInput =
+    coalesceTextBlocks $ case priorConversation of
+        Just section | isNewSession ->
+            section
                 <> [UserTextBlock "\n\nCurrent request:\n<current_request>\n"]
                 <> claudeUserContent currentImages currentInput
                 <> [UserTextBlock "\n</current_request>\n"]
+        _ -> claudeUserContent currentImages currentInput
   where
-    contextSections
-        | isNewSession =
-            catMaybes
-                [ harnessInstructions params.instructions
-                , priorConversation history
-                ]
-        | otherwise =
-            []
-    harnessInstructions = fmap \instructions ->
-        [UserTextBlock $ Text.unlines
-            [ "Instructions supplied by the outer agent harness:"
-            , "<harness_instructions>"
-            , instructions
-            , "</harness_instructions>"
-            ]]
-    priorConversation [] = Nothing
-    priorConversation items =
-        let rendered = renderPriorConversation items
+    priorConversation =
+        let rendered = renderPriorConversation history
         in if null rendered
             then Nothing
             else Just $
