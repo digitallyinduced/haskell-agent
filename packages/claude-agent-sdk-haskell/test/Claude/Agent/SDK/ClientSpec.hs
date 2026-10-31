@@ -52,6 +52,7 @@ spec = describe "ClaudeSDKClient subprocess transport" do
             let argsPath = directory </> "args"
                 environmentPath = directory </> "environment"
                 inputPath = directory </> "input"
+                systemPromptPath = directory </> "system-prompt"
                 options =
                     (testOptions executable directory)
                         { systemPrompt =
@@ -74,6 +75,7 @@ spec = describe "ClaudeSDKClient subprocess transport" do
                                 [ ("FAKE_ARGS", argsPath)
                                 , ("FAKE_ENVIRONMENT", environmentPath)
                                 , ("FAKE_INPUT", inputPath)
+                                , ("FAKE_SYSTEM_PROMPT", systemPromptPath)
                                 , ("CLAUDECODE", "must-not-leak")
                                 , ("CLAUDE_CODE_ENTRYPOINT", "wrong")
                                 ]
@@ -83,8 +85,16 @@ spec = describe "ClaudeSDKClient subprocess transport" do
             queryResult <- query options "hello from Haskell" (const (pure ()))
             _ <- expectRight queryResult
 
-            lines <$> readFile argsPath
-                `shouldReturn` expectedArguments
+            arguments <- lines <$> readFile argsPath
+            withoutSystemPromptFile arguments
+                `shouldBe` expectedArguments
+            readFile systemPromptPath `shouldReturn` "system prompt"
+            -- The SDK removes the prompt file once the process has stopped.
+            case dropWhile (/= "--system-prompt-file") arguments of
+                _ : promptFile : _ ->
+                    doesFileExist promptFile `shouldReturn` False
+                _ ->
+                    expectationFailure "expected --system-prompt-file"
 
             canonicalDirectory <- canonicalizePath directory
             lines <$> readFile environmentPath
@@ -734,6 +744,7 @@ spec = describe "ClaudeSDKClient subprocess transport" do
                 { transportMode = TransportNew testSessionId
                 , transportModel = Just "custom-model"
                 , transportEffort = Just "medium"
+                , transportSystemPrompt = SystemPromptNone
                 }
             ]
         writes <- readIORef writesRef
@@ -831,11 +842,78 @@ spec = describe "ClaudeSDKClient subprocess transport" do
                 { transportMode = TransportNew testSessionId
                 , transportModel = Nothing
                 , transportEffort = Nothing
+                , transportSystemPrompt = SystemPromptNone
                 }
             , TransportRequest
                 { transportMode = TransportResume testSessionId
                 , transportModel = Nothing
                 , transportEffort = Nothing
+                , transportSystemPrompt = SystemPromptNone
+                }
+            ]
+
+    it "resumes in a new process when a turn's system prompt changes" do
+        requestsRef <- newIORef []
+        let options = testOptions "unused-by-custom-transport" "."
+            transportFactory request = do
+                modifyIORef' requestsRef (<> [request])
+                ready <- newIORef True
+                exited <- newIORef False
+                let stop = writeIORef ready False >> writeIORef exited True
+                pure Transport
+                    { transportConnect =
+                        pure (Right ())
+                    , transportWrite =
+                        \_ -> pure (Right ())
+                    , transportRead =
+                        pure (Right Nothing)
+                    , transportClose =
+                        stop
+                    , transportIsReady =
+                        readIORef ready
+                    , transportEndInput =
+                        stop
+                    , transportProcessExit = do
+                        hasExited <- readIORef exited
+                        pure (if hasExited then Just ExitSuccess else Nothing)
+                    , transportDiagnostic =
+                        pure ""
+                    }
+            turnWith client prompt =
+                withClaudeSDKTurnWithSystemPrompt
+                    client
+                    (pure True)
+                    Nothing
+                    Nothing
+                    Nothing
+                    prompt
+                    \turn ->
+                        pure (Right (turnIsNewSession turn, pure ()))
+
+        results <-
+            withClaudeSDKClientWithTransport
+                options
+                transportFactory
+                \client ->
+                    mapM (turnWith client)
+                        [ SystemPromptText "first"
+                        , SystemPromptText "first"
+                        , SystemPromptText "second"
+                        ]
+
+        results `shouldBe` [Right True, Right False, Right False]
+        readIORef requestsRef `shouldReturn`
+            [ TransportRequest
+                { transportMode = TransportNew testSessionId
+                , transportModel = Nothing
+                , transportEffort = Nothing
+                , transportSystemPrompt = SystemPromptText "first"
+                }
+            , TransportRequest
+                { transportMode = TransportResume testSessionId
+                , transportModel = Nothing
+                , transportEffort = Nothing
+                , transportSystemPrompt = SystemPromptText "second"
                 }
             ]
 
@@ -928,12 +1006,14 @@ spec = describe "ClaudeSDKClient subprocess transport" do
                     TransportResume "named conversation"
                 , transportModel = Nothing
                 , transportEffort = Nothing
+                , transportSystemPrompt = SystemPromptNone
                 }
             , TransportRequest
                 { transportMode =
                     TransportResume "named conversation"
                 , transportModel = Nothing
                 , transportEffort = Nothing
+                , transportSystemPrompt = SystemPromptNone
                 }
             ]
 
@@ -1011,12 +1091,14 @@ spec = describe "ClaudeSDKClient subprocess transport" do
                     TransportResume "explicit conversation"
                 , transportModel = Nothing
                 , transportEffort = Nothing
+                , transportSystemPrompt = SystemPromptNone
                 }
             , TransportRequest
                 { transportMode =
                     TransportResume "initial conversation"
                 , transportModel = Nothing
                 , transportEffort = Nothing
+                , transportSystemPrompt = SystemPromptNone
                 }
             ]
 
@@ -1331,6 +1413,16 @@ runTurn client messagesRef previous prompt =
 resultText :: ResultMessage -> Maybe Text
 resultText ResultMessage{result} = result
 
+-- | The prompt file's name is random; tests compare the arguments without it.
+withoutSystemPromptFile :: [String] -> [String]
+withoutSystemPromptFile = \case
+    "--system-prompt-file" : _ : rest ->
+        "--system-prompt-file" : "<file>" : withoutSystemPromptFile rest
+    argument : rest ->
+        argument : withoutSystemPromptFile rest
+    [] ->
+        []
+
 transportModeSessionId :: TransportMode -> Text
 transportModeSessionId = \case
     TransportNew sessionId -> sessionId
@@ -1345,8 +1437,8 @@ expectedArguments =
     , "--output-format"
     , "stream-json"
     , "--verbose"
-    , "--system-prompt"
-    , "system prompt"
+    , "--system-prompt-file"
+    , "<file>"
     , "--session-id"
     , Text.unpack testSessionId
     , "--tools"
@@ -1454,6 +1546,15 @@ transportProbeScript =
         Text.unlines
             [ "#!/bin/sh"
             , "printf '%s\\n' \"$@\" > \"$FAKE_ARGS\""
+            , "previous="
+            , "for argument in \"$@\"; do"
+            , "  if [ \"$previous\" = --system-prompt-file ] && [ -n \"${FAKE_SYSTEM_PROMPT-}\" ]; then"
+            -- Builtins only: the test environment has no PATH.
+            , "    IFS= read -r system_prompt < \"$argument\" || :"
+            , "    printf '%s' \"$system_prompt\" > \"$FAKE_SYSTEM_PROMPT\""
+            , "  fi"
+            , "  previous=$argument"
+            , "done"
             , "{"
             , "  printf 'CLAUDE_CODE_ENTRYPOINT=%s\\n' \"${CLAUDE_CODE_ENTRYPOINT-unset}\""
             , "  printf 'CLAUDE_AGENT_SDK_CLIENT_APP=%s\\n' \"${CLAUDE_AGENT_SDK_CLIENT_APP-unset}\""

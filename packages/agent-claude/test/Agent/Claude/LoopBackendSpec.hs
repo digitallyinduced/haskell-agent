@@ -374,9 +374,13 @@ spec = do
                 persistedOutputs `shouldBe` ["fake-tool"]
                 length history `shouldBe` 4
 
+                -- Harness instructions are Claude's system prompt, not part
+                -- of the user's message.
+                readFile fake.systemPromptLog
+                    `shouldReturn` "Use the outer harness instructions."
                 submitted <- readFile fake.promptLog
-                submitted `shouldContain`
-                    "Instructions supplied by the outer agent harness"
+                submitted `shouldNotContain`
+                    "Use the outer harness instructions."
                 submitted `shouldContain` "hello"
                 submitted `shouldContain` "\"type\":\"user\""
                 submitted `shouldContain` "\"role\":\"user\""
@@ -2063,6 +2067,7 @@ data FakeClaude = FakeClaude
     , promptLog :: !FilePath
     , startLog :: !FilePath
     , argumentLog :: !FilePath
+    , systemPromptLog :: !FilePath
     }
 
 withFakeClaude :: (FakeClaude -> IO a) -> IO a
@@ -2073,9 +2078,10 @@ withFakeClaude action =
             promptLog = root </> "prompt.log"
             startLog = root </> "start.log"
             argumentLog = root </> "arguments.log"
+            systemPromptLog = root </> "system-prompt.log"
         createDirectory workingDirectory
         writeFile executable
-            (fakeClaudeScript promptLog startLog argumentLog)
+            (fakeClaudeScript promptLog startLog argumentLog systemPromptLog)
         setFileMode executable $
             ownerReadMode
                 `unionFileModes` ownerWriteMode
@@ -2135,8 +2141,8 @@ withEnvironmentVariables variables action = do
         Nothing -> unsetEnv name
         Just value -> setEnv name value
 
-fakeClaudeScript :: FilePath -> FilePath -> FilePath -> String
-fakeClaudeScript promptLog startLog argumentLog =
+fakeClaudeScript :: FilePath -> FilePath -> FilePath -> FilePath -> String
+fakeClaudeScript promptLog startLog argumentLog systemPromptLog =
     unlines
         [ "#!/bin/sh"
         , "if [ \"$1\" = --version ]; then"
@@ -2190,6 +2196,10 @@ fakeClaudeScript promptLog startLog argumentLog =
         , "      start_mode='resume'"
         , "      session_id=${1#--resume=}"
         , "      shift"
+        , "      ;;"
+        , "    --system-prompt-file)"
+        , "      cat \"$2\" >> " <> shellQuote systemPromptLog
+        , "      shift 2"
         , "      ;;"
         , "    --model|--effort|--permission-mode|--disallowedTools|--tools|--input-format|--output-format|--setting-sources|--mcp-config)"
         , "      shift 2"
