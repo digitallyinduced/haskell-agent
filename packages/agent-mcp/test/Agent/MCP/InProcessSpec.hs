@@ -387,6 +387,30 @@ spec = describe "in-process MCP server" do
             hasPath ["result", "tools"]
         inProcessMcpToolNames server `shouldBe` ["echo"]
 
+    it "omits instructions from initialize when the server has none" do
+        server <- testServer (const (pure ToolApprovalGranted)) [echoTool]
+        response <- handleInProcessMcpMessage server $
+            request 1 "initialize" (object
+                [ "protocolVersion" .= ("2025-11-25" :: Text)
+                ])
+        response `shouldSatisfy` hasPath ["result", "serverInfo"]
+        response `shouldNotSatisfy` hasPath ["result", "instructions"]
+
+    it "answers initialize with typed server instructions" do
+        adapter <- testServer (const (pure ToolApprovalGranted)) [echoTool]
+        let base = inProcessMcpToolServer adapter
+            endpoint = base
+                { toolServerInitialize = do
+                    info <- base.toolServerInitialize
+                    pure info { serverInfoInstructions = Just "Use the echo tool." }
+                }
+        response <- handleToolServerMessage endpoint $
+            request 1 "initialize" (object
+                [ "protocolVersion" .= ("2025-11-25" :: Text)
+                ])
+        lookupPath ["result", "instructions"] response
+            `shouldBe` Just (String "Use the echo tool.")
+
     it "advertises fresh-approval metadata for statically sensitive tools" do
         let sensitive = jsonAppToolWithExecution
                 "sensitive"

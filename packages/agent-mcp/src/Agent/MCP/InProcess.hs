@@ -177,7 +177,9 @@ handleRequest server requestId method parameters =
     case method of
         "initialize" -> do
             info <- server.toolServerInitialize
-            pure . rpcSuccess requestId $ object
+            -- MCP allows a string or no @instructions@ field; Claude Code
+            -- rejects a server that answers @null@ and drops its tools.
+            pure . rpcSuccess requestId . object $
                 [ "protocolVersion" .= requestedProtocolVersion parameters
                 , "capabilities" .= object
                     [ "tools" .= object
@@ -189,8 +191,9 @@ handleRequest server requestId method parameters =
                     [ "name" .= info.serverInfoName
                     , "version" .= info.serverInfoVersion
                     ]
-                , "instructions" .= info.serverInfoInstructions
                 ]
+                <> maybe [] (\instructions -> ["instructions" .= instructions])
+                    info.serverInfoInstructions
         "ping" ->
             pure (rpcSuccess requestId (object []))
         "tools/list" -> server.toolServerListTools >>= pure . either
